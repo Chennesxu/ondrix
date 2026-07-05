@@ -9,8 +9,7 @@ firmware or static-library integration.
 Kernels are written in a Python-like ondrix language and lowered by a frontend
 into MLIR. The compiler then uses a layered IR stack to separate high-level
 kernel intent, target-independent DSP numeric semantics, and target-specific DSP
-operations. ondrix is not a GPU execution framework and does not use JIT
-compilation.
+operations.
 
 The target flow is:
 
