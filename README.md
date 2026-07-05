@@ -3,19 +3,24 @@
 ondrix is an MLIR-based AOT compiler framework for portable embedded DSP
 kernels.
 
-The project explores a layered IR stack for embedded DSP compilation. It borrows
-the idea of separating high-level kernel intent from progressively lower IR, but
-it is not a GPU execution framework and does not use JIT compilation. The target
-flow is:
+The project explores a layered IR stack for embedded DSP compilation. Kernels
+are intended to be written in an Ondrix kernel language and lowered by a
+frontend into the `ondrix` MLIR dialect. The project borrows the idea of
+separating high-level kernel intent from progressively lower IR, but it is not a
+GPU execution framework and does not use JIT compilation. The target flow is:
 
 ```text
-textual MLIR / frontend IR
+Ondrix kernel language
+  -> frontend
   -> ondrix
   -> ondsp
   -> generic LLVM path or ortumcore
   -> LLVM dialect / LLVM IR
   -> object file, static library, or firmware integration
 ```
+
+Textual MLIR remains the primary test and debugging format for the first-stage
+compiler implementation.
 
 ## Architecture
 
