@@ -13,7 +13,7 @@ if git ls-files | grep -E '\.(docx|xlsx|pdf)$' >/dev/null; then
   fail=1
 fi
 
-tracked_text_files=$(git grep -Il '')
+tracked_text_files=$(git grep -Il '' | grep -v '^scripts/check-public-hygiene.sh$' || true)
 if [ -n "${tracked_text_files}" ]; then
   if git grep -n -E '/home/[^[:space:]]+|/Users/[^[:space:]]+|[A-Za-z]:\\' -- ${tracked_text_files}; then
     echo "error: tracked files contain local absolute paths" >&2
