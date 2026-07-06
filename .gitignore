@@ -3,8 +3,6 @@
 /third_party_reference/
 *.docx
 *.xlsx
-*编码*.xlsx
-*_ISA*
 build/
 cmake-build-*/
 *.o

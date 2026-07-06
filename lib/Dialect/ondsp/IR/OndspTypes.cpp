@@ -1,7 +1,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 
-#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -20,9 +20,8 @@ void OndspDialect::registerTypes() {
       >();
 }
 
-LogicalResult AccType::verify(function_ref<InFlightDiagnostic()> emitError,
-                              Type storage, unsigned frac,
-                              Signedness signedness) {
+LogicalResult AccType::verify(function_ref<InFlightDiagnostic()> emitError, Type storage,
+                              unsigned frac, Signedness signedness) {
   (void)signedness;
   auto intType = storage.dyn_cast<IntegerType>();
   if (!intType)

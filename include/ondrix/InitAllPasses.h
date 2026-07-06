@@ -8,4 +8,3 @@ void registerAllOndrixPasses();
 } // namespace ondrix
 
 #endif // ONDRIX_INITALLPASSES_H
-

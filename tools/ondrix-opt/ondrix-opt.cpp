@@ -16,4 +16,3 @@ int main(int argc, char **argv) {
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "ondrix optimizer driver\n", registry));
 }
-

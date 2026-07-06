@@ -12,4 +12,3 @@ void registerAllOndrixDialects(mlir::DialectRegistry &registry);
 } // namespace ondrix
 
 #endif // ONDRIX_INITALLDIALECTS_H
-

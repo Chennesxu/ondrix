@@ -8,4 +8,3 @@ void registerAllOndrixTranslations();
 } // namespace ondrix
 
 #endif // ONDRIX_INITALLTRANSLATIONS_H
-

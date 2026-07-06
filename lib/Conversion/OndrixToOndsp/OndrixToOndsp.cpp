@@ -31,8 +31,8 @@ public:
     SmallVector<Operation *> worklist;
     module.walk([&](Operation *op) {
       StringRef name = op->getName().getStringRef();
-      if (name == "ondrix.fir" || name == "ondrix.dot" ||
-          name == "ondrix.butterfly" || name == "ondrix.quantize")
+      if (name == "ondrix.fir" || name == "ondrix.dot" || name == "ondrix.butterfly" ||
+          name == "ondrix.quantize")
         worklist.push_back(op);
     });
 
@@ -69,9 +69,7 @@ std::unique_ptr<Pass> ondrix::createConvertOndrixToOndspPass() {
   return std::make_unique<ConvertOndrixToOndspPass>();
 }
 
-void ondrix::registerConvertOndrixToOndspPass() {
-  PassRegistration<ConvertOndrixToOndspPass>();
-}
+void ondrix::registerConvertOndrixToOndspPass() { PassRegistration<ConvertOndrixToOndspPass>(); }
 
 void ondrix::registerConversionPasses() {
   registerConvertOndrixToOndspPass();

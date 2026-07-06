@@ -14,8 +14,7 @@ using namespace mlir;
 namespace {
 
 class ConvertOndspToOrtumCorePass
-    : public PassWrapper<ConvertOndspToOrtumCorePass,
-                         OperationPass<ModuleOp>> {
+    : public PassWrapper<ConvertOndspToOrtumCorePass, OperationPass<ModuleOp>> {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvertOndspToOrtumCorePass)
 
@@ -25,8 +24,7 @@ public:
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<ondrix::ondsp::OndspDialect,
-                    ondrix::ortumcore::OrtumCoreDialect>();
+    registry.insert<ondrix::ondsp::OndspDialect, ondrix::ortumcore::OrtumCoreDialect>();
   }
 
   void runOnOperation() override {
@@ -34,8 +32,7 @@ public:
     SmallVector<Operation *> worklist;
     module.walk([&](Operation *op) {
       StringRef name = op->getName().getStringRef();
-      if (name == "ondsp.mac" || name == "ondsp.reduce_mac" ||
-          name == "ondsp.cx_butterfly")
+      if (name == "ondsp.mac" || name == "ondsp.reduce_mac" || name == "ondsp.cx_butterfly")
         worklist.push_back(op);
     });
 
@@ -76,8 +73,7 @@ public:
 
 private:
   static FailureOr<StringRef> chooseMacTarget(Operation *op) {
-    auto fixed = dyn_cast_or_null<ondrix::ondsp::FixedAttr>(
-        op->getAttr("numeric"));
+    auto fixed = dyn_cast_or_null<ondrix::ondsp::FixedAttr>(op->getAttr("numeric"));
     if (!fixed)
       return failure();
 
@@ -106,8 +102,7 @@ private:
     Operation *init = builder.create(initState);
 
     OperationState macState(op->getLoc(), *target);
-    macState.addOperands({init->getResult(0), op->getOperand(0),
-                          op->getOperand(1)});
+    macState.addOperands({init->getResult(0), op->getOperand(0), op->getOperand(1)});
     macState.addTypes(accType);
     Operation *mac = builder.create(macState);
 
@@ -122,8 +117,7 @@ private:
   }
 
   static LogicalResult lowerButterfly(OpBuilder &builder, Operation *op) {
-    auto fixed = dyn_cast_or_null<ondrix::ondsp::FixedAttr>(
-        op->getAttr("numeric"));
+    auto fixed = dyn_cast_or_null<ondrix::ondsp::FixedAttr>(op->getAttr("numeric"));
     if (!fixed) {
       op->emitError("expected fixed numeric policy for ortumcore butterfly lowering");
       return failure();
@@ -135,8 +129,7 @@ private:
       return failure();
     }
 
-    auto layout = dyn_cast_or_null<ondrix::ondsp::CxLayoutAttr>(
-        op->getAttr("layout"));
+    auto layout = dyn_cast_or_null<ondrix::ondsp::CxLayoutAttr>(op->getAttr("layout"));
     if (!layout) {
       op->emitError("expected explicit complex layout for ortumcore butterfly lowering");
       return failure();
@@ -148,8 +141,7 @@ private:
       return failure();
     }
 
-    Type stateType =
-        ondrix::ortumcore::VecStateType::get(builder.getContext());
+    Type stateType = ondrix::ortumcore::VecStateType::get(builder.getContext());
 
     OperationState initState(op->getLoc(), "ortumcore.vec_state_init");
     initState.addTypes(stateType);
@@ -165,16 +157,13 @@ private:
     modeState.addTypes(stateType);
     Operation *mode = builder.create(modeState);
 
-    auto trivialTwiddle =
-        dyn_cast_or_null<BoolAttr>(op->getAttr("trivial_twiddle"));
+    auto trivialTwiddle = dyn_cast_or_null<BoolAttr>(op->getAttr("trivial_twiddle"));
     if (!trivialTwiddle || !trivialTwiddle.getValue())
       return lowerGeneralButterfly(builder, op, stateType, mode->getResult(0));
 
     OperationState fftState(op->getLoc(), "ortumcore.fft_primitive_7");
-    fftState.addOperands({mode->getResult(0), op->getOperand(0),
-                          op->getOperand(1)});
-    fftState.addTypes({stateType, op->getResult(0).getType(),
-                       op->getResult(1).getType()});
+    fftState.addOperands({mode->getResult(0), op->getOperand(0), op->getOperand(1)});
+    fftState.addTypes({stateType, op->getResult(0).getType(), op->getResult(1).getType()});
     Operation *fft = builder.create(fftState);
 
     op->getResult(0).replaceAllUsesWith(fft->getResult(1));
@@ -183,22 +172,20 @@ private:
     return success();
   }
 
-  static LogicalResult lowerGeneralButterfly(OpBuilder &builder, Operation *op,
-                                             Type stateType, Value state) {
+  static LogicalResult lowerGeneralButterfly(OpBuilder &builder, Operation *op, Type stateType,
+                                             Value state) {
     OperationState mulState(op->getLoc(), "ortumcore.cx_mul");
     mulState.addOperands({state, op->getOperand(1), op->getOperand(2)});
     mulState.addTypes({stateType, op->getOperand(1).getType()});
     Operation *mul = builder.create(mulState);
 
     OperationState addState(op->getLoc(), "ortumcore.cx_dual_add");
-    addState.addOperands({mul->getResult(0), op->getOperand(0),
-                          mul->getResult(1)});
+    addState.addOperands({mul->getResult(0), op->getOperand(0), mul->getResult(1)});
     addState.addTypes({stateType, op->getResult(0).getType()});
     Operation *add = builder.create(addState);
 
     OperationState subState(op->getLoc(), "ortumcore.cx_dual_sub");
-    subState.addOperands({add->getResult(0), op->getOperand(0),
-                          mul->getResult(1)});
+    subState.addOperands({add->getResult(0), op->getOperand(0), mul->getResult(1)});
     subState.addTypes({stateType, op->getResult(1).getType()});
     Operation *sub = builder.create(subState);
 

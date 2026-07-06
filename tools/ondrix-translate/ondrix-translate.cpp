@@ -8,7 +8,5 @@ int main(int argc, char **argv) {
   mlir::registerAllTranslations();
   ondrix::registerAllOndrixTranslations();
 
-  return failed(
-      mlir::mlirTranslateMain(argc, argv, "ondrix translation driver\n"));
+  return failed(mlir::mlirTranslateMain(argc, argv, "ondrix translation driver\n"));
 }
-
