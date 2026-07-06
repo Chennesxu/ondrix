@@ -18,7 +18,7 @@ ondrix language
   -> frontend
   -> ondrix dialect
   -> ondsp dialect
-  -> generic LLVM path or ortumcore
+  -> generic scalar, generic vector, or ortumcore AOT-stub path
   -> LLVM dialect / LLVM IR
   -> object file, static library, or firmware integration
 ```
@@ -36,6 +36,11 @@ rounding, saturation, shifting, MAC operations, and block-friendly DSP structure
 `ortumcore` is the first target-specific DSP semantic dialect. It models
 hardware-aware DSP operations at the IR level and lowers to LLVM dialect call
 stubs and AOT support stubs in this public repository.
+
+The generic scalar path is intended for correctness testing and fallback
+compilation. The generic vector path is intended for portable CPU code
+generation through LLVM. The ortumcore path provides an abstract target semantic
+layer without exposing private backend details.
 
 ## LLVM/MLIR Baseline
 
