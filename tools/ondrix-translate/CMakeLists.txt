@@ -19,4 +19,3 @@ target_link_libraries(ondrix-translate
   OndrixSupport
   )
 mlir_check_all_link_libraries(ondrix-translate)
-

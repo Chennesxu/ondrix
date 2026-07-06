@@ -22,4 +22,3 @@ set_target_properties(check-ondrix PROPERTIES FOLDER "Tests")
 add_lit_testsuites(ONDRIX ${CMAKE_CURRENT_SOURCE_DIR}
   DEPENDS ${ONDRIX_TEST_DEPENDS}
 )
-
