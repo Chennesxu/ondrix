@@ -1,0 +1,139 @@
+#ifndef ONDRIX_DIALECT_ONDSP_IR_ONDSPOPS_TD
+#define ONDRIX_DIALECT_ONDSP_IR_ONDSPOPS_TD
+
+include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
+include "ondrix/Dialect/ondsp/IR/OndspAttrs.td"
+include "ondrix/Dialect/ondsp/IR/OndspTypes.td"
+
+def Ondsp_AssumeNumericOp : Ondsp_Op<"assume_numeric", [Pure]> {
+  let summary = "Attach an explicit numeric interpretation to a storage value";
+  let arguments = (ins AnyType:$input, AnyAttr:$numeric);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_ConvertOp : Ondsp_Op<"convert", [Pure]> {
+  let summary = "Convert a value between explicit ondsp numeric policies";
+  let arguments = (ins AnyType:$input, AnyAttr:$src, AnyAttr:$dst);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_RoundShiftOp : Ondsp_Op<"round_shift", [Pure]> {
+  let summary = "Apply an explicit rounding and shift policy";
+  let arguments = (ins AnyType:$input, Ondsp_ScaleAttr:$scale);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_SatCastOp : Ondsp_Op<"sat_cast", [Pure]> {
+  let summary = "Saturating cast under an explicit numeric policy";
+  let arguments = (ins AnyType:$input, AnyAttr:$numeric);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+class Ondsp_BinaryShiftOp<string mnemonic, string opSummary>
+    : Ondsp_Op<mnemonic, [Pure]> {
+  let summary = opSummary;
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_ScaleAttr:$scale);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_SatAddShiftOp
+    : Ondsp_BinaryShiftOp<"sat_add_shift", "Saturating add plus scaling">;
+def Ondsp_SatSubShiftOp
+    : Ondsp_BinaryShiftOp<"sat_sub_shift", "Saturating subtract plus scaling">;
+
+def Ondsp_AccInitOp : Ondsp_Op<"acc_init", [Pure]> {
+  let summary = "Create an accumulator state from an initial value";
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyType:$acc);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+class Ondsp_MacLikeOp<string mnemonic, string opSummary>
+    : Ondsp_Op<mnemonic, [Pure]> {
+  let summary = opSummary;
+  let arguments = (ins AnyType:$acc, AnyType:$lhs, AnyType:$rhs, AnyAttr:$numeric);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_MacOp : Ondsp_MacLikeOp<"mac", "Multiply-accumulate">;
+def Ondsp_MacSubOp : Ondsp_MacLikeOp<"mac_sub", "Multiply-subtract accumulate">;
+
+def Ondsp_AccExtractOp : Ondsp_Op<"acc_extract", [Pure]> {
+  let summary = "Extract a storage value from an accumulator";
+  let arguments = (ins AnyType:$acc, OptionalAttr<Ondsp_ScaleAttr>:$scale);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_ReduceMacOp : Ondsp_Op<"reduce_mac", [Pure]> {
+  let summary = "Block-friendly dot/reduce MAC semantic operation";
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs, AnyAttr:$numeric);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_Pack2Op : Ondsp_Op<"pack2", [Pure]> {
+  let arguments = (ins AnyType:$lo, AnyType:$hi);
+  let results = (outs AnyType:$packed);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_Unpack2Op : Ondsp_Op<"unpack2", [Pure]> {
+  let arguments = (ins AnyType:$packed);
+  let results = (outs AnyType:$lo, AnyType:$hi);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_CxPackOp : Ondsp_Op<"cx_pack", [Pure]> {
+  let arguments = (ins AnyType:$real, AnyType:$imag, Ondsp_CxLayoutAttr:$layout);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_CxUnpackOp : Ondsp_Op<"cx_unpack", [Pure]> {
+  let arguments = (ins AnyType:$input, Ondsp_CxLayoutAttr:$layout);
+  let results = (outs AnyType:$real, AnyType:$imag);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_CxMulOp : Ondsp_Op<"cx_mul", [Pure]> {
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_CxLayoutAttr:$layout,
+                   AnyAttr:$numeric);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
+  let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
+                   Ondsp_CxLayoutAttr:$layout, AnyAttr:$numeric);
+  let results = (outs AnyType:$out0, AnyType:$out1);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_FftStageOp : Ondsp_Op<"fft_stage", [Pure]> {
+  let arguments = (ins Variadic<AnyType>:$inputs, I64Attr:$stage,
+                   Ondsp_CxLayoutAttr:$layout, AnyAttr:$numeric);
+  let results = (outs Variadic<AnyType>:$outputs);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_BitrevIndexOp : Ondsp_Op<"bitrev_index", [Pure]> {
+  let arguments = (ins Index:$input, I64Attr:$width);
+  let results = (outs Index:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_BitrevAddOp : Ondsp_Op<"bitrev_add", [Pure]> {
+  let arguments = (ins Index:$base, Index:$step, I64Attr:$width);
+  let results = (outs Index:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+#endif

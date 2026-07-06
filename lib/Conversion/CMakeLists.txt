@@ -1,0 +1,2 @@
+add_subdirectory(OndrixToOndsp)
+add_subdirectory(OndspToOrtumCore)
