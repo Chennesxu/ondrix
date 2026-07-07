@@ -10,3 +10,10 @@ func.func @mr_ops(%a: i16, %b: i16) -> i32 {
   %x = ortumcore.acc_extract %mr1 : (!ortumcore.acc) -> i32
   return %x : i32
 }
+
+// CHECK-LABEL: func.func @pair_types
+func.func @pair_types(%acc_pair: !ortumcore.acc_pair, %fp: !ortumcore.fp, %fp_pair: !ortumcore.fp_pair) {
+  // CHECK: !ortumcore.acc_pair
+  // CHECK: !ortumcore.fp_pair
+  return
+}

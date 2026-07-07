@@ -7,6 +7,7 @@
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
 
 using namespace mlir;
@@ -57,7 +58,11 @@ public:
 
       FailureOr<StringRef> target = chooseMacTarget(op);
       if (failed(target)) {
-        op->emitError("unsupported ondsp numeric policy for ortumcore MAC lowering");
+        op->emitError("only signed q15 and signed q31 MAC are supported by ortumcore lowering");
+        signalPassFailure();
+        return;
+      }
+      if (failed(verifyDirectMacShape(op))) {
         signalPassFailure();
         return;
       }
@@ -72,18 +77,58 @@ public:
   }
 
 private:
+  static bool hasStorageType(Type type, Type storage) {
+    if (type == storage)
+      return true;
+
+    if (auto shaped = type.dyn_cast<ShapedType>())
+      return shaped.getElementType() == storage;
+
+    return false;
+  }
+
+  static bool isI32(Type type) {
+    auto intType = type.dyn_cast<IntegerType>();
+    return intType && intType.getWidth() == 32;
+  }
+
+  static LogicalResult verifyStorageOperands(Operation *op, ondrix::ondsp::FixedAttr fixed,
+                                             ArrayRef<unsigned> operandIndices) {
+    for (unsigned index : operandIndices) {
+      if (!hasStorageType(op->getOperand(index).getType(), fixed.getStorage()))
+        return op->emitError("operand type does not match fixed numeric storage type");
+    }
+    return success();
+  }
+
+  static LogicalResult verifyDirectMacShape(Operation *op) {
+    auto fixed = cast<ondrix::ondsp::FixedAttr>(op->getAttr("numeric"));
+    if (failed(verifyStorageOperands(op, fixed, {1, 2})))
+      return failure();
+
+    if (!isa<ondrix::ortumcore::AccumType>(op->getOperand(0).getType()) ||
+        !isa<ondrix::ortumcore::AccumType>(op->getResult(0).getType()))
+      return op->emitError(
+          "standalone ondsp.mac lowering requires !ortumcore.acc accumulator operands/results");
+
+    return success();
+  }
+
   static FailureOr<StringRef> chooseMacTarget(Operation *op) {
     auto fixed = dyn_cast_or_null<ondrix::ondsp::FixedAttr>(op->getAttr("numeric"));
     if (!fixed)
+      return failure();
+
+    if (fixed.getSignedness() != ondrix::ondsp::Signedness::Signed)
       return failure();
 
     auto intType = fixed.getStorage().dyn_cast<IntegerType>();
     if (!intType)
       return failure();
 
-    if (intType.getWidth() == 16)
+    if (intType.getWidth() == 16 && fixed.getFrac() == 15)
       return StringRef("ortumcore.dual_mac");
-    if (intType.getWidth() == 32)
+    if (intType.getWidth() == 32 && fixed.getFrac() == 31)
       return StringRef("ortumcore.qmac_add");
     return failure();
   }
@@ -91,9 +136,13 @@ private:
   static LogicalResult lowerReduceMac(OpBuilder &builder, Operation *op) {
     FailureOr<StringRef> target = chooseMacTarget(op);
     if (failed(target)) {
-      op->emitError("unsupported ondsp numeric policy for ortumcore reduce_mac lowering");
+      op->emitError(
+          "only signed q15 and signed q31 reduce_mac are supported by ortumcore lowering");
       return failure();
     }
+    auto fixed = cast<ondrix::ondsp::FixedAttr>(op->getAttr("numeric"));
+    if (failed(verifyStorageOperands(op, fixed, {0, 1})))
+      return failure();
 
     Type accType = ondrix::ortumcore::AccumType::get(builder.getContext());
 
@@ -124,8 +173,9 @@ private:
     }
 
     auto intType = fixed.getStorage().dyn_cast<IntegerType>();
-    if (!intType || intType.getWidth() != 16) {
-      op->emitError("only packed q15 butterfly lowering is supported");
+    if (fixed.getSignedness() != ondrix::ondsp::Signedness::Signed || !intType ||
+        intType.getWidth() != 16 || fixed.getFrac() != 15) {
+      op->emitError("only signed packed q15 butterfly lowering is supported");
       return failure();
     }
 
@@ -139,6 +189,15 @@ private:
         layoutValue != ondrix::ondsp::ComplexLayout::PackedI16RealHiImagLo) {
       op->emitError("only packed i16 complex layouts are supported");
       return failure();
+    }
+
+    for (Value operand : op->getOperands()) {
+      if (!isI32(operand.getType()))
+        return op->emitError("packed q15 butterfly operands must use i32 storage");
+    }
+    for (Value result : op->getResults()) {
+      if (!isI32(result.getType()))
+        return op->emitError("packed q15 butterfly results must use i32 storage");
     }
 
     Type stateType = ondrix::ortumcore::VecStateType::get(builder.getContext());
@@ -161,8 +220,9 @@ private:
     if (!trivialTwiddle || !trivialTwiddle.getValue())
       return lowerGeneralButterfly(builder, op, stateType, mode->getResult(0));
 
-    OperationState fftState(op->getLoc(), "ortumcore.fft_primitive_7");
+    OperationState fftState(op->getLoc(), "ortumcore.fft_trivial_stage");
     fftState.addOperands({mode->getResult(0), op->getOperand(0), op->getOperand(1)});
+    fftState.addAttribute("variant", builder.getI64IntegerAttr(7));
     fftState.addTypes({stateType, op->getResult(0).getType(), op->getResult(1).getType()});
     Operation *fft = builder.create(fftState);
 

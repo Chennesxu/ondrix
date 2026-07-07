@@ -41,12 +41,15 @@ def Ondsp_CxLayoutAttr : Ondsp_Attr<"CxLayout", "cx_layout"> {
 def Ondsp_ScaleAttr : Ondsp_Attr<"Scale", "scale"> {
   let summary = "Explicit fixed-point scaling policy";
   let parameters = (ins
-    "unsigned":$shiftRight,
-    "unsigned":$shiftLeft,
-    "ScaleOrder":$order
+    "unsigned":$preShiftLeft,
+    "unsigned":$postShiftRight,
+    "RoundingMode":$rounding,
+    "OverflowMode":$overflow,
+    "mlir::Type":$saturateTo
   );
+  let genVerifyDecl = 1;
   let assemblyFormat =
-      "`<` `shift_right` `=` $shiftRight `,` `shift_left` `=` $shiftLeft `,` `order` `=` $order `>`";
+      "`<` `pre_shift_left` `=` $preShiftLeft `,` `post_shift_right` `=` $postShiftRight `,` `rounding` `=` $rounding `,` `overflow` `=` $overflow `,` `saturate_to` `=` $saturateTo `>`";
 }
 
 #endif

@@ -7,7 +7,7 @@ func.func @ondsp_ops(%a: i16, %b: i16, %p0: i32, %p1: i32, %tw: i32,
 
   // CHECK: ondsp.mac
   %mac = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (!ondsp.acc<storage = i40, frac = 30, signed>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed>
-  %out = ondsp.acc_extract %mac {scale = #ondsp.scale<shift_right = 15, shift_left = 0, order = shift_round_saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed>) -> i32
+  %out = ondsp.acc_extract %mac {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = trunc, overflow = saturate, saturate_to = i32>} : (!ondsp.acc<storage = i40, frac = 30, signed>) -> i32
 
   // CHECK: ondsp.reduce_mac
   %red = ondsp.reduce_mac %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i16, i16) -> i32

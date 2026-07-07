@@ -78,7 +78,7 @@ class OrtumCore_VcuBinaryOp<string mnemonic, string opSummary>
 class OrtumCore_VcfftOp<string mnemonic, string opSummary>
     : OrtumCore_Op<mnemonic, [Pure]> {
   let summary = opSummary;
-  let arguments = (ins AnyType:$state, Variadic<AnyType>:$inputs);
+  let arguments = (ins AnyType:$state, Variadic<AnyType>:$inputs, I64Attr:$variant);
   let results = (outs AnyType:$nextState, Variadic<AnyType>:$outputs);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
@@ -88,16 +88,10 @@ def OrtumCore_CxAddOp : OrtumCore_VcuBinaryOp<"cx_add", "Packed complex add sema
 def OrtumCore_CxSubOp : OrtumCore_VcuBinaryOp<"cx_sub", "Packed complex subtract semantic op">;
 def OrtumCore_CxDualAddOp : OrtumCore_VcuBinaryOp<"cx_dual_add", "Packed dual add semantic op">;
 def OrtumCore_CxDualSubOp : OrtumCore_VcuBinaryOp<"cx_dual_sub", "Packed dual subtract semantic op">;
-def OrtumCore_FftPrimitive1Op : OrtumCore_VcfftOp<"fft_primitive_1", "FFT primitive semantic op">;
-def OrtumCore_FftPrimitive2Op : OrtumCore_VcfftOp<"fft_primitive_2", "FFT primitive semantic op">;
-def OrtumCore_FftPrimitive3Op : OrtumCore_VcfftOp<"fft_primitive_3", "FFT primitive semantic op">;
-def OrtumCore_FftPrimitive4Op : OrtumCore_VcfftOp<"fft_primitive_4", "FFT primitive semantic op">;
-def OrtumCore_FftPrimitive5Op : OrtumCore_VcfftOp<"fft_primitive_5", "FFT primitive semantic op">;
-def OrtumCore_FftPrimitive6Op : OrtumCore_VcfftOp<"fft_primitive_6", "FFT primitive semantic op">;
-def OrtumCore_FftPrimitive7Op : OrtumCore_VcfftOp<"fft_primitive_7", "FFT primitive semantic op">;
-def OrtumCore_FftPrimitive8Op : OrtumCore_VcfftOp<"fft_primitive_8", "FFT primitive semantic op">;
-def OrtumCore_FftPrimitive9Op : OrtumCore_VcfftOp<"fft_primitive_9", "FFT primitive semantic op">;
-def OrtumCore_FftPrimitive10Op : OrtumCore_VcfftOp<"fft_primitive_10", "FFT primitive semantic op">;
+def OrtumCore_FftTrivialStageOp
+    : OrtumCore_VcfftOp<"fft_trivial_stage", "Trivial-twiddle FFT stage semantic op"> {
+  let hasVerifier = 1;
+}
 
 def OrtumCore_BitrevAddOp : OrtumCore_BinaryOp<"bitrev_add", "Bit-reversed add addressing semantic op">;
 def OrtumCore_BitrevSubOp : OrtumCore_BinaryOp<"bitrev_sub", "Bit-reversed subtract addressing semantic op">;

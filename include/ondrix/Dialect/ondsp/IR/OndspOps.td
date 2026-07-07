@@ -79,30 +79,6 @@ def Ondsp_ReduceMacOp : Ondsp_Op<"reduce_mac", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-def Ondsp_Pack2Op : Ondsp_Op<"pack2", [Pure]> {
-  let arguments = (ins AnyType:$lo, AnyType:$hi);
-  let results = (outs AnyType:$packed);
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
-def Ondsp_Unpack2Op : Ondsp_Op<"unpack2", [Pure]> {
-  let arguments = (ins AnyType:$packed);
-  let results = (outs AnyType:$lo, AnyType:$hi);
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
-def Ondsp_CxPackOp : Ondsp_Op<"cx_pack", [Pure]> {
-  let arguments = (ins AnyType:$real, AnyType:$imag, Ondsp_CxLayoutAttr:$layout);
-  let results = (outs AnyType:$result);
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
-def Ondsp_CxUnpackOp : Ondsp_Op<"cx_unpack", [Pure]> {
-  let arguments = (ins AnyType:$input, Ondsp_CxLayoutAttr:$layout);
-  let results = (outs AnyType:$real, AnyType:$imag);
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
 def Ondsp_CxMulOp : Ondsp_Op<"cx_mul", [Pure]> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_CxLayoutAttr:$layout,
                    AnyAttr:$numeric);

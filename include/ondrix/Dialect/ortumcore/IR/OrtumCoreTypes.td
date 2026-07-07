@@ -14,7 +14,23 @@ def OrtumCore_AccumType : OrtumCore_Type<"Accum", "acc"> {
 }
 
 def OrtumCore_AccumPairType : OrtumCore_Type<"AccumPair", "acc_pair"> {
-  let summary = "Pair of target accumulator semantic values";
+  let summary = "Target accumulator pair semantic value";
+  let description = [{
+    Models a target semantic value carried by paired target storage. Physical
+    register allocation and pair constraints remain backend-private.
+  }];
+}
+
+def OrtumCore_FpType : OrtumCore_Type<"Fp", "fp"> {
+  let summary = "Target floating-point semantic value";
+}
+
+def OrtumCore_FpPairType : OrtumCore_Type<"FpPair", "fp_pair"> {
+  let summary = "Target floating-point pair semantic value";
+  let description = [{
+    Models a target floating-point semantic value carried by paired target
+    storage. Physical register constraints are handled by the backend.
+  }];
 }
 
 def OrtumCore_VecType : OrtumCore_Type<"Vec", "vec"> {
@@ -27,6 +43,10 @@ def OrtumCore_VecPairType : OrtumCore_Type<"VecPair", "vec_pair"> {
 
 def OrtumCore_VecStateType : OrtumCore_Type<"VecState", "vec.state"> {
   let summary = "Explicit packed-vector mode/state token";
+  let description = [{
+    Ordering token for packed-vector mode changes and dependent packed-vector
+    operations. It is target semantic state, not a public physical register.
+  }];
 }
 
 #endif

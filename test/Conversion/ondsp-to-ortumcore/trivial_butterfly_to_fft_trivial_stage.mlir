@@ -6,5 +6,6 @@ func.func @trivial_butterfly(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
 }
 
 // CHECK-LABEL: func.func @trivial_butterfly
-// CHECK: ortumcore.fft_primitive_7
+// CHECK: ortumcore.fft_trivial_stage
+// CHECK-SAME: variant = 7
 // CHECK-NOT: ondsp.cx_butterfly

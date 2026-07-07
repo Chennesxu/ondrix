@@ -38,3 +38,22 @@ LogicalResult FixedAttr::verify(function_ref<InFlightDiagnostic()> emitError, Si
 
   return success();
 }
+
+LogicalResult ScaleAttr::verify(function_ref<InFlightDiagnostic()> emitError, unsigned preShiftLeft,
+                                unsigned postShiftRight, RoundingMode rounding,
+                                OverflowMode overflow, Type saturateTo) {
+  (void)rounding;
+  (void)overflow;
+
+  if (!saturateTo.isIntOrIndexOrFloat())
+    return emitError() << "scale saturate_to must be an integer, index, or float type";
+
+  constexpr unsigned kMaxStaticShift = 63;
+  if (preShiftLeft > kMaxStaticShift)
+    return emitError() << "scale pre_shift_left must be at most " << kMaxStaticShift;
+
+  if (postShiftRight > kMaxStaticShift)
+    return emitError() << "scale post_shift_right must be at most " << kMaxStaticShift;
+
+  return success();
+}

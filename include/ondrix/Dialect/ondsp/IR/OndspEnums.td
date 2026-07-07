@@ -28,18 +28,6 @@ def Ondsp_OverflowMode : I32EnumAttr<"OverflowMode", "overflow mode",
   let cppNamespace = "::ondrix::ondsp";
 }
 
-def Ondsp_ShiftRoundSaturate
-    : I32EnumAttrCase<"ShiftRoundSaturate", 0, "shift_round_saturate">;
-def Ondsp_ShiftSaturate
-    : I32EnumAttrCase<"ShiftSaturate", 1, "shift_saturate">;
-def Ondsp_RoundShiftSaturate
-    : I32EnumAttrCase<"RoundShiftSaturate", 2, "round_shift_saturate">;
-def Ondsp_ScaleOrder : I32EnumAttr<"ScaleOrder", "scale operation order",
-    [Ondsp_ShiftRoundSaturate, Ondsp_ShiftSaturate,
-     Ondsp_RoundShiftSaturate]> {
-  let cppNamespace = "::ondrix::ondsp";
-}
-
 def Ondsp_FpContractOff : I32EnumAttrCase<"Off", 0, "off">;
 def Ondsp_FpContractFma : I32EnumAttrCase<"Fma", 1, "fma">;
 def Ondsp_FpContractFast : I32EnumAttrCase<"Fast", 2, "fast">;
