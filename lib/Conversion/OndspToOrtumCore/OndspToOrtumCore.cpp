@@ -2,6 +2,7 @@
 
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
+#include "ondrix/Dialect/ortumcore/IR/OrtumCoreAttrs.h"
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreDialect.h"
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreTypes.h"
 
@@ -222,7 +223,9 @@ private:
 
     OperationState fftState(op->getLoc(), "ortumcore.fft_trivial_stage");
     fftState.addOperands({mode->getResult(0), op->getOperand(0), op->getOperand(1)});
-    fftState.addAttribute("variant", builder.getI64IntegerAttr(7));
+    fftState.addAttribute("stage_kind",
+                          ondrix::ortumcore::FftStageKindAttr::get(
+                              builder.getContext(), ondrix::ortumcore::FftStageKind::Radix2));
     fftState.addTypes({stateType, op->getResult(0).getType(), op->getResult(1).getType()});
     Operation *fft = builder.create(fftState);
 

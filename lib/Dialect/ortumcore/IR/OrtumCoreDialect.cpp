@@ -13,5 +13,6 @@ void OrtumCoreDialect::initialize() {
 #define GET_OP_LIST
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreOps.cpp.inc"
       >();
+  registerAttributes();
   registerTypes();
 }

@@ -8,8 +8,11 @@ def OrtumCore_Dialect : Dialect {
   let summary = "Target-specific DSP hardware semantic dialect";
   let cppNamespace = "::ondrix::ortumcore";
 
+  let useDefaultAttributePrinterParser = 1;
   let useDefaultTypePrinterParser = 1;
+
   let extraClassDeclaration = [{
+    void registerAttributes();
     void registerTypes();
   }];
 }

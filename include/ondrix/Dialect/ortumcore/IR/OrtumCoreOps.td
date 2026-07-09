@@ -3,6 +3,7 @@
 
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "ondrix/Dialect/ortumcore/IR/OrtumCoreAttrs.td"
 include "ondrix/Dialect/ortumcore/IR/OrtumCoreTypes.td"
 
 def OrtumCore_AccInitOp : OrtumCore_Op<"acc_init", [Pure]> {
@@ -78,7 +79,8 @@ class OrtumCore_VecBinaryOp<string mnemonic, string opSummary>
 class OrtumCore_PackedFftOp<string mnemonic, string opSummary>
     : OrtumCore_Op<mnemonic, [Pure]> {
   let summary = opSummary;
-  let arguments = (ins AnyType:$state, Variadic<AnyType>:$inputs, I64Attr:$variant);
+  let arguments = (ins AnyType:$state, Variadic<AnyType>:$inputs,
+                   OrtumCore_FftStageKindAttr:$stage_kind);
   let results = (outs AnyType:$nextState, Variadic<AnyType>:$outputs);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
@@ -89,9 +91,7 @@ def OrtumCore_CxSubOp : OrtumCore_VecBinaryOp<"cx_sub", "Packed complex subtract
 def OrtumCore_CxDualAddOp : OrtumCore_VecBinaryOp<"cx_dual_add", "Packed dual add semantic op">;
 def OrtumCore_CxDualSubOp : OrtumCore_VecBinaryOp<"cx_dual_sub", "Packed dual subtract semantic op">;
 def OrtumCore_FftTrivialStageOp
-    : OrtumCore_PackedFftOp<"fft_trivial_stage", "Trivial-twiddle FFT stage semantic op"> {
-  let hasVerifier = 1;
-}
+    : OrtumCore_PackedFftOp<"fft_trivial_stage", "Trivial-twiddle FFT stage semantic op">;
 
 def OrtumCore_BitrevAddOp : OrtumCore_BinaryOp<"bitrev_add", "Bit-reversed add addressing semantic op">;
 def OrtumCore_BitrevSubOp : OrtumCore_BinaryOp<"bitrev_sub", "Bit-reversed subtract addressing semantic op">;
