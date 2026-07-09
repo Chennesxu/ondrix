@@ -4,7 +4,7 @@
 func.func @vcu_ops(%a: i32, %b: i32) -> (i32, i32) {
   // CHECK: !ortumcore.vec.state
   %s0 = ortumcore.vec_state_init : !ortumcore.vec.state
-  %s1 = ortumcore.vec_set_mode %s0 {sat = true, rnd = false, cpack = true, shiftr = 15 : i64, shiftl = 0 : i64} : (!ortumcore.vec.state) -> !ortumcore.vec.state
+  %s1 = ortumcore.vec_set_mode %s0 {sat = true, rnd = false, pack = true, shiftr = 15 : i64, shiftl = 0 : i64} : (!ortumcore.vec.state) -> !ortumcore.vec.state
 
   // CHECK: ortumcore.fft_trivial_stage
   // CHECK-SAME: variant = 7

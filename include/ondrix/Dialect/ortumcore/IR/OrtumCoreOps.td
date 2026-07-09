@@ -59,7 +59,7 @@ def OrtumCore_VecSetModeOp : OrtumCore_Op<"vec_set_mode", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-class OrtumCore_VcuUnaryOp<string mnemonic, string opSummary>
+class OrtumCore_VecUnaryOp<string mnemonic, string opSummary>
     : OrtumCore_Op<mnemonic, [Pure]> {
   let summary = opSummary;
   let arguments = (ins AnyType:$state, AnyType:$input);
@@ -67,7 +67,7 @@ class OrtumCore_VcuUnaryOp<string mnemonic, string opSummary>
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-class OrtumCore_VcuBinaryOp<string mnemonic, string opSummary>
+class OrtumCore_VecBinaryOp<string mnemonic, string opSummary>
     : OrtumCore_Op<mnemonic, [Pure]> {
   let summary = opSummary;
   let arguments = (ins AnyType:$state, AnyType:$lhs, AnyType:$rhs);
@@ -75,7 +75,7 @@ class OrtumCore_VcuBinaryOp<string mnemonic, string opSummary>
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-class OrtumCore_VcfftOp<string mnemonic, string opSummary>
+class OrtumCore_PackedFftOp<string mnemonic, string opSummary>
     : OrtumCore_Op<mnemonic, [Pure]> {
   let summary = opSummary;
   let arguments = (ins AnyType:$state, Variadic<AnyType>:$inputs, I64Attr:$variant);
@@ -83,13 +83,13 @@ class OrtumCore_VcfftOp<string mnemonic, string opSummary>
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-def OrtumCore_CxMulOp : OrtumCore_VcuBinaryOp<"cx_mul", "Packed complex multiply semantic op">;
-def OrtumCore_CxAddOp : OrtumCore_VcuBinaryOp<"cx_add", "Packed complex add semantic op">;
-def OrtumCore_CxSubOp : OrtumCore_VcuBinaryOp<"cx_sub", "Packed complex subtract semantic op">;
-def OrtumCore_CxDualAddOp : OrtumCore_VcuBinaryOp<"cx_dual_add", "Packed dual add semantic op">;
-def OrtumCore_CxDualSubOp : OrtumCore_VcuBinaryOp<"cx_dual_sub", "Packed dual subtract semantic op">;
+def OrtumCore_CxMulOp : OrtumCore_VecBinaryOp<"cx_mul", "Packed complex multiply semantic op">;
+def OrtumCore_CxAddOp : OrtumCore_VecBinaryOp<"cx_add", "Packed complex add semantic op">;
+def OrtumCore_CxSubOp : OrtumCore_VecBinaryOp<"cx_sub", "Packed complex subtract semantic op">;
+def OrtumCore_CxDualAddOp : OrtumCore_VecBinaryOp<"cx_dual_add", "Packed dual add semantic op">;
+def OrtumCore_CxDualSubOp : OrtumCore_VecBinaryOp<"cx_dual_sub", "Packed dual subtract semantic op">;
 def OrtumCore_FftTrivialStageOp
-    : OrtumCore_VcfftOp<"fft_trivial_stage", "Trivial-twiddle FFT stage semantic op"> {
+    : OrtumCore_PackedFftOp<"fft_trivial_stage", "Trivial-twiddle FFT stage semantic op"> {
   let hasVerifier = 1;
 }
 

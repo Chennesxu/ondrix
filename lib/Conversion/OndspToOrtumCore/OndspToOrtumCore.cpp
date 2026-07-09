@@ -210,7 +210,7 @@ private:
     modeState.addOperands(init->getResult(0));
     modeState.addAttribute("sat", builder.getBoolAttr(true));
     modeState.addAttribute("rnd", builder.getBoolAttr(false));
-    modeState.addAttribute("cpack", builder.getBoolAttr(true));
+    modeState.addAttribute("pack", builder.getBoolAttr(true));
     modeState.addAttribute("shiftr", builder.getI64IntegerAttr(15));
     modeState.addAttribute("shiftl", builder.getI64IntegerAttr(0));
     modeState.addTypes(stateType);
