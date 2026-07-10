@@ -22,6 +22,12 @@ def Ondsp_FixedAttr : Ondsp_Attr<"Fixed", "fixed"> {
   let genVerifyDecl = 1;
 }
 
+def Ondsp_ProductAttr : Ondsp_Attr<"Product", "product"> {
+  let summary = "Target-independent fixed-point product selection: full product or high half";
+  let parameters = (ins "ProductSelection":$selection);
+  let assemblyFormat = "`<` $selection `>`";
+}
+
 def Ondsp_FpAttr : Ondsp_Attr<"Fp", "fp"> {
   let summary = "Floating-point numeric interpretation";
   let parameters = (ins

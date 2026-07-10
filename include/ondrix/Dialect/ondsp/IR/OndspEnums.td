@@ -10,6 +10,15 @@ def Ondsp_Signedness : I32EnumAttr<"Signedness", "fixed-point signedness",
   let cppNamespace = "::ondrix::ondsp";
 }
 
+def Ondsp_ProductFull : I32EnumAttrCase<"Full", 0, "full">;
+def Ondsp_ProductHigh : I32EnumAttrCase<"High", 1, "high">;
+def Ondsp_ProductSelection
+    : I32EnumAttr<"ProductSelection",
+                  "fixed-point product result selection (full product or high half)",
+                  [Ondsp_ProductFull, Ondsp_ProductHigh]> {
+  let cppNamespace = "::ondrix::ondsp";
+}
+
 def Ondsp_RoundTrunc : I32EnumAttrCase<"Trunc", 0, "trunc">;
 def Ondsp_RoundNearest : I32EnumAttrCase<"Nearest", 1, "nearest">;
 def Ondsp_RoundNearestEven : I32EnumAttrCase<"NearestEven", 2, "nearest_even">;
