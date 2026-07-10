@@ -40,7 +40,10 @@ def Ondsp_OverflowMode : I32EnumAttr<"OverflowMode", "overflow mode",
 def Ondsp_FpContractOff : I32EnumAttrCase<"Off", 0, "off">;
 def Ondsp_FpContractFma : I32EnumAttrCase<"Fma", 1, "fma">;
 def Ondsp_FpContractFast : I32EnumAttrCase<"Fast", 2, "fast">;
-def Ondsp_FpContractMode : I32EnumAttr<"FpContractMode", "FP contract mode",
+def Ondsp_FpContractMode : I32EnumAttr<
+    "FpContractMode",
+    "FP evaluation policy: off preserves separate operations, fma requires a "
+    "fused multiply-add, and fast permits full fast-math transformations",
     [Ondsp_FpContractOff, Ondsp_FpContractFma, Ondsp_FpContractFast]> {
   let cppNamespace = "::ondrix::ondsp";
 }

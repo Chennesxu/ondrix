@@ -1,4 +1,5 @@
 // RUN: ondrix-opt %s --convert-ondsp-to-ortumcore | FileCheck %s
+// RUN: ondrix-opt %s --convert-ondsp-to-ortumcore | FileCheck %s --check-prefix=NO-SOURCE
 
 func.func @branch_accumulator(%seed: i32, %a: i16, %b: i16) -> i32 {
   %0 = ondsp.acc_init %seed : (i32) -> !ondsp.acc<storage = i40, frac = 30, signed>
@@ -16,3 +17,4 @@ func.func @branch_accumulator(%seed: i32, %a: i16, %b: i16) -> i32 {
 // CHECK: %[[MAC:.*]] = ortumcore.mac_add %[[ACC]], {{.*}} : (!ortumcore.acc, i16, i16) -> !ortumcore.acc
 // CHECK: %[[EXTRACTED:.*]] = ortumcore.acc_extract %[[MAC]] : (!ortumcore.acc) -> i32
 // CHECK: return %[[EXTRACTED]] : i32
+// NO-SOURCE-NOT: !ondsp.acc

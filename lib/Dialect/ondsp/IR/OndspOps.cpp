@@ -184,8 +184,20 @@ LogicalResult CxButterflyOp::verify() {
   if (failed(verifyButterflyPolicies(*this, getNumeric(), getProduct(), getScale())))
     return failure();
 
-  if (!isPackedI16Layout(getLayout()))
+  if (!isPackedI16Layout(getLayout())) {
+    for (auto [index, type] : llvm::enumerate(getOperandTypes())) {
+      if (failed(verifyValueNumericType(*this, type, getNumeric(),
+                                        index == 0   ? "a"
+                                        : index == 1 ? "b"
+                                                     : "twiddle")))
+        return failure();
+    }
+    for (auto [index, type] : llvm::enumerate(getResultTypes())) {
+      if (failed(verifyValueNumericType(*this, type, getNumeric(), index == 0 ? "out0" : "out1")))
+        return failure();
+    }
     return success();
+  }
 
   auto fixed = dyn_cast<FixedAttr>(getNumeric());
   auto storage = fixed ? fixed.getStorage().dyn_cast<IntegerType>() : IntegerType();

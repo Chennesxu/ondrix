@@ -32,8 +32,14 @@ class OndspToOrtumCoreTypeConverter final : public TypeConverter {
 public:
   explicit OndspToOrtumCoreTypeConverter(MLIRContext *context) {
     addConversion([](Type type) { return type; });
-    addConversion([context](ondrix::ondsp::AccType) -> Type {
-      return ondrix::ortumcore::AccumType::get(context);
+    addConversion([context](ondrix::ondsp::AccType type,
+                            SmallVectorImpl<Type> &results) -> std::optional<LogicalResult> {
+      auto storage = type.getStorage().dyn_cast<IntegerType>();
+      if (!storage || storage.getWidth() != 40 ||
+          type.getSignedness() != ondrix::ondsp::Signedness::Signed)
+        return failure();
+      results.push_back(ondrix::ortumcore::AccumType::get(context));
+      return success();
     });
   }
 };
@@ -61,6 +67,16 @@ static LogicalResult verifyTargetAccumulator(Operation *op, ondrix::ondsp::AccTy
       accumulator.getSignedness() != ondrix::ondsp::Signedness::Signed)
     return op->emitOpError("ortumcore lowering requires a signed 40-bit ondsp accumulator");
   return success();
+}
+
+static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) {
+  if (!typeConverter.isLegal(op))
+    return false;
+  for (Region &region : op->getRegions()) {
+    if (!typeConverter.isLegal(&region))
+      return false;
+  }
+  return true;
 }
 
 static LogicalResult verifyStorageOperand(Operation *op, ondrix::ondsp::FixedAttr fixed,
@@ -394,7 +410,8 @@ public:
 
     ConversionTarget target(getContext());
     target.addLegalDialect<BuiltinDialect, ondrix::ortumcore::OrtumCoreDialect>();
-    target.addLegalOp<UnrealizedConversionCastOp>();
+    target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
+        [&](UnrealizedConversionCastOp op) { return typeConverter.isLegal(op); });
     target.addIllegalDialect<ondrix::ondsp::OndspDialect>();
     target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
       return typeConverter.isSignatureLegal(op.getFunctionType()) &&
@@ -405,9 +422,11 @@ public:
     target.addDynamicallyLegalOp<func::ReturnOp>(
         [&](func::ReturnOp op) { return typeConverter.isLegal(op.getOperandTypes()); });
     target.markUnknownOpDynamicallyLegal([&](Operation *op) {
-      return isNotBranchOpInterfaceOrReturnLikeOp(op) ||
-             isLegalForBranchOpInterfaceTypeConversionPattern(op, typeConverter) ||
-             isLegalForReturnOpTypeConversionPattern(op, typeConverter);
+      bool hasLegalControlFlow =
+          isNotBranchOpInterfaceOrReturnLikeOp(op) ||
+          isLegalForBranchOpInterfaceTypeConversionPattern(op, typeConverter) ||
+          isLegalForReturnOpTypeConversionPattern(op, typeConverter);
+      return hasLegalControlFlow && hasLegalConvertedTypes(op, typeConverter);
     });
 
     if (failed(applyFullConversion(getOperation(), target, std::move(patterns))))

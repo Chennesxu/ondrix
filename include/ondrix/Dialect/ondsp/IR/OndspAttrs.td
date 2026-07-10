@@ -29,7 +29,7 @@ def Ondsp_ProductAttr : Ondsp_Attr<"Product", "product"> {
 }
 
 def Ondsp_FpAttr : Ondsp_Attr<"Fp", "fp"> {
-  let summary = "Floating-point numeric interpretation";
+  let summary = "Floating-point numeric interpretation and evaluation policy";
   let parameters = (ins
     "mlir::Type":$format,
     "FpContractMode":$contract

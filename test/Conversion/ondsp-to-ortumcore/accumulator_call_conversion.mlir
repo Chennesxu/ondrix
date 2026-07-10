@@ -1,4 +1,5 @@
 // RUN: ondrix-opt %s --convert-ondsp-to-ortumcore | FileCheck %s
+// RUN: ondrix-opt %s --convert-ondsp-to-ortumcore | FileCheck %s --check-prefix=NO-SOURCE
 
 func.func @accumulate(%acc: !ondsp.acc<storage = i40, frac = 30, signed>, %a: i16,
                       %b: i16) -> !ondsp.acc<storage = i40, frac = 30, signed> {
@@ -23,3 +24,4 @@ func.func @call_accumulate(%seed: i32, %a: i16, %b: i16) -> i32 {
 // CHECK: %[[CALLED:.*]] = call @accumulate(%[[IMPORTED]], %[[CALL_A]], %[[CALL_B]]) : (!ortumcore.acc, i16, i16) -> !ortumcore.acc
 // CHECK: %[[EXTRACTED:.*]] = ortumcore.acc_extract %[[CALLED]] : (!ortumcore.acc) -> i32
 // CHECK: return %[[EXTRACTED]] : i32
+// NO-SOURCE-NOT: !ondsp.acc
