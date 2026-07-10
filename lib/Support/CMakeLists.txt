@@ -13,6 +13,7 @@ add_ondrix_library(OndrixSupport
   OndrixIR
   OndspIR
   OndrixToOndsp
+  OndspToScalar
   OndspToOrtumCore
   OrtumCoreIR
   )

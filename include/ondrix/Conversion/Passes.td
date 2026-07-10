@@ -29,4 +29,21 @@ def ConvertOndspToOrtumCore
   ];
 }
 
+def ConvertOndspToScalar
+    : Pass<"convert-ondsp-to-scalar", "::mlir::ModuleOp"> {
+  let summary = "Lower supported ondsp semantic ops to generic scalar MLIR";
+  let description = [{
+    Lower supported ondsp semantic ops to generic scalar MLIR operations.
+  }];
+  let constructor = "ondrix::createConvertOndspToScalarPass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::math::MathDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+  ];
+}
+
 #endif // ONDRIX_CONVERSION_PASSES

@@ -9,6 +9,7 @@ namespace ondrix {
 
 std::unique_ptr<mlir::Pass> createConvertOndrixToOndspPass();
 std::unique_ptr<mlir::Pass> createConvertOndspToOrtumCorePass();
+std::unique_ptr<mlir::Pass> createConvertOndspToScalarPass();
 
 #define GEN_PASS_DECL
 #include "ondrix/Conversion/Passes.h.inc"
