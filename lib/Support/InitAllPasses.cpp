@@ -1,5 +1,5 @@
 #include "ondrix/InitAllPasses.h"
 
-#include "ondrix/Conversion/OndrixToOndsp/OndrixToOndsp.h"
+#include "ondrix/Conversion/Passes.h"
 
-void ondrix::registerAllOndrixPasses() { registerConversionPasses(); }
+void ondrix::registerAllOndrixPasses() { registerOndrixPasses(); }

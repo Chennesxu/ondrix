@@ -12,6 +12,11 @@
 
 #include <optional>
 
+namespace ondrix {
+#define GEN_PASS_DEF_CONVERTONDRIXTOONDSP
+#include "ondrix/Conversion/Passes.h.inc"
+} // namespace ondrix
+
 using namespace mlir;
 
 namespace {
@@ -81,19 +86,10 @@ public:
   }
 };
 
-class ConvertOndrixToOndspPass
-    : public PassWrapper<ConvertOndrixToOndspPass, OperationPass<ModuleOp>> {
+class ConvertOndrixToOndspPass final
+    : public ondrix::impl::ConvertOndrixToOndspBase<ConvertOndrixToOndspPass> {
 public:
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvertOndrixToOndspPass)
-
-  StringRef getArgument() const final { return "convert-ondrix-to-ondsp"; }
-  StringRef getDescription() const final {
-    return "Lower ondrix algorithm intent ops to ondsp semantic ops";
-  }
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<ondrix::ir::OndrixDialect, ondrix::ondsp::OndspDialect>();
-  }
+  using ondrix::impl::ConvertOndrixToOndspBase<ConvertOndrixToOndspPass>::ConvertOndrixToOndspBase;
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
@@ -114,11 +110,4 @@ public:
 
 std::unique_ptr<Pass> ondrix::createConvertOndrixToOndspPass() {
   return std::make_unique<ConvertOndrixToOndspPass>();
-}
-
-void ondrix::registerConvertOndrixToOndspPass() { PassRegistration<ConvertOndrixToOndspPass>(); }
-
-void ondrix::registerConversionPasses() {
-  registerConvertOndrixToOndspPass();
-  registerConvertOndspToOrtumCorePass();
 }

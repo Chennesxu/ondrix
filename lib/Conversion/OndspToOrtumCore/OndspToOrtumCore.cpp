@@ -19,6 +19,11 @@
 
 #include <optional>
 
+namespace ondrix {
+#define GEN_PASS_DEF_CONVERTONDSPTOORTUMCORE
+#include "ondrix/Conversion/Passes.h.inc"
+} // namespace ondrix
+
 using namespace mlir;
 
 namespace {
@@ -371,20 +376,11 @@ public:
   }
 };
 
-class ConvertOndspToOrtumCorePass
-    : public PassWrapper<ConvertOndspToOrtumCorePass, OperationPass<ModuleOp>> {
+class ConvertOndspToOrtumCorePass final
+    : public ondrix::impl::ConvertOndspToOrtumCoreBase<ConvertOndspToOrtumCorePass> {
 public:
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvertOndspToOrtumCorePass)
-
-  StringRef getArgument() const final { return "convert-ondsp-to-ortumcore"; }
-  StringRef getDescription() const final {
-    return "Lower ondsp semantic ops to ortumcore target semantic ops";
-  }
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<ondrix::ondsp::OndspDialect, ondrix::ortumcore::OrtumCoreDialect,
-                    func::FuncDialect>();
-  }
+  using ondrix::impl::ConvertOndspToOrtumCoreBase<
+      ConvertOndspToOrtumCorePass>::ConvertOndspToOrtumCoreBase;
 
   void runOnOperation() override {
     OndspToOrtumCoreTypeConverter typeConverter(&getContext());
@@ -423,8 +419,4 @@ public:
 
 std::unique_ptr<Pass> ondrix::createConvertOndspToOrtumCorePass() {
   return std::make_unique<ConvertOndspToOrtumCorePass>();
-}
-
-void ondrix::registerConvertOndspToOrtumCorePass() {
-  PassRegistration<ConvertOndspToOrtumCorePass>();
 }

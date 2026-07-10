@@ -3,6 +3,9 @@ add_ondrix_library(OndrixSupport
   InitAllPasses.cpp
   InitAllTranslations.cpp
 
+  DEPENDS
+  MLIROndrixPassesIncGen
+
   LINK_LIBS PUBLIC
   MLIRIR
   MLIRPass
