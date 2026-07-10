@@ -17,6 +17,8 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include <optional>
+
 using namespace mlir;
 
 namespace {
@@ -31,10 +33,7 @@ public:
   }
 };
 
-enum class MacTarget {
-  DualMac,
-  QMacAdd,
-};
+enum class MacTarget { Mac, QMac };
 
 static bool hasStorageType(Type type, Type storage) {
   if (type == storage)
@@ -58,20 +57,33 @@ static LogicalResult verifyStorageOperand(Operation *op, ondrix::ondsp::FixedAtt
   return success();
 }
 
-static FailureOr<MacTarget> chooseMacTarget(Attribute numeric) {
-  auto fixed = dyn_cast_or_null<ondrix::ondsp::FixedAttr>(numeric);
-  if (!fixed || fixed.getSignedness() != ondrix::ondsp::Signedness::Signed)
-    return failure();
+static LogicalResult chooseMacTarget(Operation *op, ondrix::ondsp::FixedAttr fixed,
+                                     std::optional<ondrix::ondsp::ProductAttr> product,
+                                     MacTarget &target) {
+  if (!product)
+    return op->emitOpError("lowering requires an explicit fixed-point product policy");
 
   auto intType = fixed.getStorage().dyn_cast<IntegerType>();
-  if (!intType)
-    return failure();
+  if (fixed.getSignedness() != ondrix::ondsp::Signedness::Signed || !intType)
+    return op->emitOpError(
+        "only signed q15/product=full and signed q31/product=high MAC policies are supported");
 
-  if (intType.getWidth() == 16 && fixed.getFrac() == 15)
-    return MacTarget::DualMac;
-  if (intType.getWidth() == 32 && fixed.getFrac() == 31)
-    return MacTarget::QMacAdd;
-  return failure();
+  if (intType.getWidth() == 16 && fixed.getFrac() == 15) {
+    if (product->getSelection() != ondrix::ondsp::ProductSelection::Full)
+      return op->emitOpError("signed q15 MAC lowering requires product = #ondsp.product<full>");
+    target = MacTarget::Mac;
+    return success();
+  }
+
+  if (intType.getWidth() == 32 && fixed.getFrac() == 31) {
+    if (product->getSelection() != ondrix::ondsp::ProductSelection::High)
+      return op->emitOpError("signed q31 MAC lowering requires product = #ondsp.product<high>");
+    target = MacTarget::QMac;
+    return success();
+  }
+
+  return op->emitOpError(
+      "only signed q15/product=full and signed q31/product=high MAC policies are supported");
 }
 
 class AccInitOpLowering final : public OpConversionPattern<ondrix::ondsp::AccInitOp> {
@@ -112,13 +124,11 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::MacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    FailureOr<MacTarget> target = chooseMacTarget(op.getNumeric());
-    if (failed(target)) {
-      op.emitError("only signed q15 and signed q31 MAC are supported by ortumcore lowering");
+    MacTarget target;
+    if (failed(chooseMacTarget(op, op.getNumeric(), op.getProduct(), target)))
       return failure();
-    }
 
-    auto fixed = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    auto fixed = op.getNumeric();
     if (failed(verifyStorageOperand(op, fixed, op.getLhs().getType())) ||
         failed(verifyStorageOperand(op, fixed, op.getRhs().getType())))
       return failure();
@@ -131,13 +141,50 @@ public:
       return failure();
     }
 
-    switch (*target) {
-    case MacTarget::DualMac:
-      rewriter.replaceOpWithNewOp<ondrix::ortumcore::DualMacOp>(op, resultType, adaptor.getAcc(),
+    switch (target) {
+    case MacTarget::Mac:
+      rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacAddOp>(op, resultType, adaptor.getAcc(),
+                                                               adaptor.getLhs(), adaptor.getRhs());
+      return success();
+    case MacTarget::QMac:
+      rewriter.replaceOpWithNewOp<ondrix::ortumcore::QMacAddOp>(op, resultType, adaptor.getAcc(),
                                                                 adaptor.getLhs(), adaptor.getRhs());
       return success();
-    case MacTarget::QMacAdd:
-      rewriter.replaceOpWithNewOp<ondrix::ortumcore::QMacAddOp>(op, resultType, adaptor.getAcc(),
+    }
+    llvm_unreachable("unhandled MAC target");
+  }
+};
+
+class MacSubOpLowering final : public OpConversionPattern<ondrix::ondsp::MacSubOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::MacSubOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::MacSubOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    MacTarget target;
+    if (failed(chooseMacTarget(op, op.getNumeric(), op.getProduct(), target)))
+      return failure();
+
+    auto fixed = op.getNumeric();
+    if (failed(verifyStorageOperand(op, fixed, op.getLhs().getType())) ||
+        failed(verifyStorageOperand(op, fixed, op.getRhs().getType())))
+      return failure();
+
+    Type resultType = getTypeConverter()->convertType(op.getResult().getType());
+    if (!isa<ondrix::ortumcore::AccumType>(adaptor.getAcc().getType()) ||
+        !isa<ondrix::ortumcore::AccumType>(resultType)) {
+      op.emitError(
+          "standalone ondsp.mac_sub lowering requires !ortumcore.acc accumulator operands/results");
+      return failure();
+    }
+
+    switch (target) {
+    case MacTarget::Mac:
+      rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacSubOp>(op, resultType, adaptor.getAcc(),
+                                                               adaptor.getLhs(), adaptor.getRhs());
+      return success();
+    case MacTarget::QMac:
+      rewriter.replaceOpWithNewOp<ondrix::ortumcore::QMacSubOp>(op, resultType, adaptor.getAcc(),
                                                                 adaptor.getLhs(), adaptor.getRhs());
       return success();
     }
@@ -151,13 +198,16 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    FailureOr<MacTarget> target = chooseMacTarget(op.getNumeric());
-    if (failed(target)) {
-      op.emitError("only signed q15 and signed q31 reduce_mac are supported by ortumcore lowering");
+    auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    if (!fixed) {
+      op.emitOpError("only fixed-point reduce_mac policies are supported by ortumcore lowering");
       return failure();
     }
 
-    auto fixed = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    MacTarget target;
+    if (failed(chooseMacTarget(op, fixed, op.getProduct(), target)))
+      return failure();
+
     if (failed(verifyStorageOperand(op, fixed, op.getLhs().getType())) ||
         failed(verifyStorageOperand(op, fixed, op.getRhs().getType())))
       return failure();
@@ -167,15 +217,14 @@ public:
     Type resultType = getTypeConverter()->convertType(op.getResult().getType());
 
     Value accumulated;
-    switch (*target) {
-    case MacTarget::DualMac:
-      accumulated =
-          rewriter
-              .create<ondrix::ortumcore::DualMacOp>(op.getLoc(), accType, init.getResult(),
-                                                    adaptor.getLhs(), adaptor.getRhs())
-              .getResult();
+    switch (target) {
+    case MacTarget::Mac:
+      accumulated = rewriter
+                        .create<ondrix::ortumcore::MacAddOp>(op.getLoc(), accType, init.getResult(),
+                                                             adaptor.getLhs(), adaptor.getRhs())
+                        .getResult();
       break;
-    case MacTarget::QMacAdd:
+    case MacTarget::QMac:
       accumulated =
           rewriter
               .create<ondrix::ortumcore::QMacAddOp>(op.getLoc(), accType, init.getResult(),
@@ -247,8 +296,13 @@ public:
     mode->setAttr("shiftr", rewriter.getI64IntegerAttr(15));
     mode->setAttr("shiftl", rewriter.getI64IntegerAttr(0));
 
-    auto trivialTwiddle = op->getAttrOfType<BoolAttr>("trivial_twiddle");
-    if (trivialTwiddle && trivialTwiddle.getValue()) {
+    auto product = op.getProduct();
+    if (!product || product->getSelection() != ondrix::ondsp::ProductSelection::Full) {
+      op.emitOpError("packed q15 butterfly lowering requires product = #ondsp.product<full>");
+      return failure();
+    }
+
+    if (op.getTrivialTwiddle()) {
       auto fft = rewriter.create<ondrix::ortumcore::FftTrivialStageOp>(
           op.getLoc(), stateType, TypeRange{out0Type, out1Type}, mode.getResult(),
           ValueRange{adaptor.getA(), adaptor.getB()},
@@ -288,8 +342,8 @@ public:
   void runOnOperation() override {
     OndspToOrtumCoreTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
-    patterns.add<AccInitOpLowering, AccExtractOpLowering, MacOpLowering, ReduceMacOpLowering,
-                 CxButterflyOpLowering>(typeConverter, &getContext());
+    patterns.add<AccInitOpLowering, AccExtractOpLowering, MacOpLowering, MacSubOpLowering,
+                 ReduceMacOpLowering, CxButterflyOpLowering>(typeConverter, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateReturnOpTypeConversionPattern(patterns, typeConverter);

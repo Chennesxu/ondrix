@@ -39,6 +39,14 @@ LogicalResult FixedAttr::verify(function_ref<InFlightDiagnostic()> emitError, Si
   return success();
 }
 
+LogicalResult FpAttr::verify(function_ref<InFlightDiagnostic()> emitError, Type format,
+                             FpContractMode contract) {
+  (void)contract;
+  if (!format.isa<FloatType>())
+    return emitError() << "floating-point numeric format must be a floating-point type";
+  return success();
+}
+
 LogicalResult ScaleAttr::verify(function_ref<InFlightDiagnostic()> emitError, unsigned preShiftLeft,
                                 unsigned postShiftRight, RoundingMode rounding,
                                 OverflowMode overflow, Type saturateTo) {

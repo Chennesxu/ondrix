@@ -8,4 +8,5 @@ add_ondrix_library(OndrixIR
   LINK_LIBS PUBLIC
   MLIRIR
   MLIRSupport
+  OndspIR
 )

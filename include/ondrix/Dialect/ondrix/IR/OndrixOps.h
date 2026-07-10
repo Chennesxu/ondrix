@@ -7,6 +7,8 @@
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
+#include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
+
 #define GET_OP_CLASSES
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h.inc"
 

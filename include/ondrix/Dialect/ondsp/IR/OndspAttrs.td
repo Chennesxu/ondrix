@@ -23,7 +23,7 @@ def Ondsp_FixedAttr : Ondsp_Attr<"Fixed", "fixed"> {
 }
 
 def Ondsp_ProductAttr : Ondsp_Attr<"Product", "product"> {
-  let summary = "Target-independent fixed-point product selection: full product or high half";
+  let summary = "Select the full product or the storage-width high half";
   let parameters = (ins "ProductSelection":$selection);
   let assemblyFormat = "`<` $selection `>`";
 }
@@ -36,6 +36,16 @@ def Ondsp_FpAttr : Ondsp_Attr<"Fp", "fp"> {
   );
   let assemblyFormat =
       "`<` `format` `=` $format `,` `contract` `=` $contract `>`";
+  let genVerifyDecl = 1;
+}
+
+def Ondsp_NumericAttr : Attr<
+    CPred<"::llvm::isa<::ondrix::ondsp::FixedAttr, ::ondrix::ondsp::FpAttr>($_self)">,
+    "ondsp fixed-point or floating-point numeric attribute"> {
+  let storageType = "::mlir::Attribute";
+  let returnType = "::mlir::Attribute";
+  let convertFromStorage = "$_self";
+  let constBuilderCall = "$0";
 }
 
 def Ondsp_CxLayoutAttr : Ondsp_Attr<"CxLayout", "cx_layout"> {

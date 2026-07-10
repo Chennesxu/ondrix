@@ -22,4 +22,8 @@ def Ondsp_AccType : Ondsp_Type<"Acc", "acc"> {
   let genVerifyDecl = 1;
 }
 
+def Ondsp_Acc : Type<
+    CPred<"::llvm::isa<::ondrix::ondsp::AccType>($_self)">,
+    "ondsp accumulator type", "::ondrix::ondsp::AccType">;
+
 #endif

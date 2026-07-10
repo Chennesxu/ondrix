@@ -6,17 +6,20 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 include "ondrix/Dialect/ondsp/IR/OndspAttrs.td"
 include "ondrix/Dialect/ondsp/IR/OndspTypes.td"
 
-def Ondsp_AssumeNumericOp : Ondsp_Op<"assume_numeric", [Pure]> {
+def Ondsp_AssumeNumericOp
+    : Ondsp_Op<"assume_numeric", [Pure, AllTypesMatch<["input", "result"]>]> {
   let summary = "Attach an explicit numeric interpretation to a storage value";
-  let arguments = (ins AnyType:$input, AnyAttr:$numeric);
+  let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$numeric);
   let results = (outs AnyType:$result);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
 def Ondsp_ConvertOp : Ondsp_Op<"convert", [Pure]> {
   let summary = "Convert a value between explicit ondsp numeric policies";
-  let arguments = (ins AnyType:$input, AnyAttr:$src, AnyAttr:$dst);
+  let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$src, Ondsp_NumericAttr:$dst);
   let results = (outs AnyType:$result);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
@@ -50,15 +53,17 @@ def Ondsp_SatSubShiftOp
 def Ondsp_AccInitOp : Ondsp_Op<"acc_init", [Pure]> {
   let summary = "Create an accumulator state from an initial value";
   let arguments = (ins AnyType:$input);
-  let results = (outs AnyType:$acc);
+  let results = (outs Ondsp_Acc:$acc);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
 class Ondsp_MacLikeOp<string mnemonic, string opSummary>
-    : Ondsp_Op<mnemonic, [Pure]> {
+    : Ondsp_Op<mnemonic, [Pure, AllTypesMatch<["acc", "result"]>]> {
   let summary = opSummary;
-  let arguments = (ins AnyType:$acc, AnyType:$lhs, AnyType:$rhs, AnyAttr:$numeric);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ondsp_Acc:$acc, AnyInteger:$lhs, AnyInteger:$rhs,
+                   Ondsp_FixedAttr:$numeric, Ondsp_ProductAttr:$product);
+  let results = (outs Ondsp_Acc:$result);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
@@ -67,15 +72,17 @@ def Ondsp_MacSubOp : Ondsp_MacLikeOp<"mac_sub", "Multiply-subtract accumulate">;
 
 def Ondsp_AccExtractOp : Ondsp_Op<"acc_extract", [Pure]> {
   let summary = "Extract a storage value from an accumulator";
-  let arguments = (ins AnyType:$acc, OptionalAttr<Ondsp_ScaleAttr>:$scale);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ondsp_Acc:$acc, OptionalAttr<Ondsp_ScaleAttr>:$scale);
+  let results = (outs AnyInteger:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
 def Ondsp_ReduceMacOp : Ondsp_Op<"reduce_mac", [Pure]> {
   let summary = "Block-friendly dot/reduce MAC semantic operation";
-  let arguments = (ins AnyType:$lhs, AnyType:$rhs, AnyAttr:$numeric);
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_NumericAttr:$numeric,
+                   OptionalAttr<Ondsp_ProductAttr>:$product);
   let results = (outs AnyType:$result);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
@@ -88,8 +95,11 @@ def Ondsp_CxMulOp : Ondsp_Op<"cx_mul", [Pure]> {
 
 def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
-                   Ondsp_CxLayoutAttr:$layout, AnyAttr:$numeric);
+                   Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric,
+                   OptionalAttr<Ondsp_ProductAttr>:$product,
+                   DefaultValuedAttr<BoolAttr, "false">:$trivial_twiddle);
   let results = (outs AnyType:$out0, AnyType:$out1);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 

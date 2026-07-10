@@ -10,6 +10,8 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include <optional>
+
 using namespace mlir;
 
 namespace {
@@ -22,7 +24,7 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     auto replacement = rewriter.create<ondrix::ondsp::ReduceMacOp>(
         op.getLoc(), op.getResult().getType(), adaptor.getInput(), adaptor.getCoeffs(),
-        op.getNumeric());
+        op.getNumeric(), op.getProduct().value_or(ondrix::ondsp::ProductAttr()));
     replacement->setAttrs(op->getAttrs());
     rewriter.replaceOp(op, replacement);
     return success();
@@ -36,7 +38,8 @@ public:
   LogicalResult matchAndRewrite(ondrix::ir::DotOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto replacement = rewriter.create<ondrix::ondsp::ReduceMacOp>(
-        op.getLoc(), op.getResult().getType(), adaptor.getLhs(), adaptor.getRhs(), op.getNumeric());
+        op.getLoc(), op.getResult().getType(), adaptor.getLhs(), adaptor.getRhs(), op.getNumeric(),
+        op.getProduct().value_or(ondrix::ondsp::ProductAttr()));
     replacement->setAttrs(op->getAttrs());
     rewriter.replaceOp(op, replacement);
     return success();
@@ -55,7 +58,8 @@ public:
 
     auto replacement = rewriter.create<ondrix::ondsp::CxButterflyOp>(
         op.getLoc(), op.getOut0().getType(), op.getOut1().getType(), adaptor.getA(), adaptor.getB(),
-        adaptor.getTwiddle(), layout, op.getNumeric());
+        adaptor.getTwiddle(), layout, op.getNumeric(),
+        op.getProduct().value_or(ondrix::ondsp::ProductAttr()), op.getTrivialTwiddle());
     replacement->setAttrs(op->getAttrs());
     rewriter.replaceOp(op, replacement);
     return success();
