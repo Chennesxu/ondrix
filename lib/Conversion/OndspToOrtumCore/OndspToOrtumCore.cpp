@@ -69,12 +69,25 @@ static LogicalResult verifyTargetAccumulator(Operation *op, ondrix::ondsp::AccTy
   return success();
 }
 
+static bool containsOndspAccumulator(Type type) {
+  return type.walk([](ondrix::ondsp::AccType) { return WalkResult::interrupt(); }).wasInterrupted();
+}
+
+static bool containsOndspAccumulator(TypeRange types) {
+  return llvm::any_of(types, [](Type type) { return containsOndspAccumulator(type); });
+}
+
 static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) {
-  if (!typeConverter.isLegal(op))
+  if (!typeConverter.isLegal(op) || containsOndspAccumulator(op->getOperandTypes()) ||
+      containsOndspAccumulator(op->getResultTypes()))
     return false;
   for (Region &region : op->getRegions()) {
     if (!typeConverter.isLegal(&region))
       return false;
+    for (Block &block : region) {
+      if (containsOndspAccumulator(block.getArgumentTypes()))
+        return false;
+    }
   }
   return true;
 }
@@ -415,12 +428,13 @@ public:
     target.addIllegalDialect<ondrix::ondsp::OndspDialect>();
     target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
       return typeConverter.isSignatureLegal(op.getFunctionType()) &&
-             typeConverter.isLegal(&op.getBody());
+             !containsOndspAccumulator(op.getFunctionType()) &&
+             typeConverter.isLegal(&op.getBody()) && hasLegalConvertedTypes(op, typeConverter);
     });
     target.addDynamicallyLegalOp<func::CallOp>(
-        [&](func::CallOp op) { return typeConverter.isLegal(op); });
+        [&](func::CallOp op) { return hasLegalConvertedTypes(op, typeConverter); });
     target.addDynamicallyLegalOp<func::ReturnOp>(
-        [&](func::ReturnOp op) { return typeConverter.isLegal(op.getOperandTypes()); });
+        [&](func::ReturnOp op) { return hasLegalConvertedTypes(op, typeConverter); });
     target.markUnknownOpDynamicallyLegal([&](Operation *op) {
       bool hasLegalControlFlow =
           isNotBranchOpInterfaceOrReturnLikeOp(op) ||
