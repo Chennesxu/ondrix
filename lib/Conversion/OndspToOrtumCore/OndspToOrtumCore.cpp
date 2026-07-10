@@ -50,6 +50,14 @@ static bool isI32(Type type) {
   return intType && intType.getWidth() == 32;
 }
 
+static LogicalResult verifyTargetAccumulator(Operation *op, ondrix::ondsp::AccType accumulator) {
+  auto storage = accumulator.getStorage().dyn_cast<IntegerType>();
+  if (!storage || storage.getWidth() != 40 ||
+      accumulator.getSignedness() != ondrix::ondsp::Signedness::Signed)
+    return op->emitOpError("ortumcore lowering requires a signed 40-bit ondsp accumulator");
+  return success();
+}
+
 static LogicalResult verifyStorageOperand(Operation *op, ondrix::ondsp::FixedAttr fixed,
                                           Type type) {
   if (!hasStorageType(type, fixed.getStorage()))
@@ -92,6 +100,8 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::AccInitOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    if (failed(verifyTargetAccumulator(op, op.getAcc().getType())))
+      return failure();
     Type resultType = getTypeConverter()->convertType(op.getAcc().getType());
     if (!isa<ondrix::ortumcore::AccumType>(resultType))
       return op.emitError("ondsp.acc_init lowering requires an accumulator result");
@@ -107,6 +117,8 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::AccExtractOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    if (failed(verifyTargetAccumulator(op, op.getAcc().getType())))
+      return failure();
     if (op.getScale())
       return op.emitError("scaled ondsp.acc_extract is not supported by ortumcore lowering");
     if (!isa<ondrix::ortumcore::AccumType>(adaptor.getAcc().getType()))
@@ -126,6 +138,8 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     MacTarget target;
     if (failed(chooseMacTarget(op, op.getNumeric(), op.getProduct(), target)))
+      return failure();
+    if (failed(verifyTargetAccumulator(op, op.getAcc().getType())))
       return failure();
 
     auto fixed = op.getNumeric();
@@ -163,6 +177,8 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     MacTarget target;
     if (failed(chooseMacTarget(op, op.getNumeric(), op.getProduct(), target)))
+      return failure();
+    if (failed(verifyTargetAccumulator(op, op.getAcc().getType())))
       return failure();
 
     auto fixed = op.getNumeric();
@@ -265,9 +281,8 @@ public:
       return failure();
     }
     auto layoutValue = layout.getLayout();
-    if (layoutValue != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo &&
-        layoutValue != ondrix::ondsp::ComplexLayout::PackedI16RealHiImagLo) {
-      op.emitError("only packed i16 complex layouts are supported");
+    if (layoutValue != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo) {
+      op.emitError("ortumcore lowering supports only packed_i16_imag_hi_real_lo layout");
       return failure();
     }
 
@@ -284,17 +299,49 @@ public:
       }
     }
 
+    auto scale = op.getScale();
+    if (!scale)
+      return op.emitOpError("packed q15 butterfly lowering requires an explicit scale policy");
+    if (scale->getPreShiftLeft() != 0 || scale->getPostShiftRight() != 15 ||
+        !scale->getSaturateTo().isInteger(16))
+      return op.emitOpError("packed q15 butterfly lowering requires pre_shift_left=0, "
+                            "post_shift_right=15, and saturate_to=i16");
+
+    bool rounding;
+    switch (scale->getRounding()) {
+    case ondrix::ondsp::RoundingMode::Trunc:
+      rounding = false;
+      break;
+    case ondrix::ondsp::RoundingMode::Nearest:
+      rounding = true;
+      break;
+    default:
+      return op.emitOpError("ortumcore butterfly lowering supports trunc or nearest rounding");
+    }
+
+    bool saturation;
+    switch (scale->getOverflow()) {
+    case ondrix::ondsp::OverflowMode::Wrap:
+      saturation = false;
+      break;
+    case ondrix::ondsp::OverflowMode::Saturate:
+      saturation = true;
+      break;
+    default:
+      return op.emitOpError("ortumcore butterfly lowering supports wrap or saturate overflow");
+    }
+
     Type out0Type = getTypeConverter()->convertType(op.getOut0().getType());
     Type out1Type = getTypeConverter()->convertType(op.getOut1().getType());
     Type stateType = ondrix::ortumcore::VecStateType::get(rewriter.getContext());
     auto init = rewriter.create<ondrix::ortumcore::VecStateInitOp>(op.getLoc(), stateType);
     auto mode =
         rewriter.create<ondrix::ortumcore::VecSetModeOp>(op.getLoc(), stateType, init.getState());
-    mode->setAttr("sat", rewriter.getBoolAttr(true));
-    mode->setAttr("rnd", rewriter.getBoolAttr(false));
+    mode->setAttr("sat", rewriter.getBoolAttr(saturation));
+    mode->setAttr("rnd", rewriter.getBoolAttr(rounding));
     mode->setAttr("pack", rewriter.getBoolAttr(true));
-    mode->setAttr("shiftr", rewriter.getI64IntegerAttr(15));
-    mode->setAttr("shiftl", rewriter.getI64IntegerAttr(0));
+    mode->setAttr("shiftr", rewriter.getI64IntegerAttr(scale->getPostShiftRight()));
+    mode->setAttr("shiftl", rewriter.getI64IntegerAttr(scale->getPreShiftLeft()));
 
     auto product = op.getProduct();
     if (!product || product->getSelection() != ondrix::ondsp::ProductSelection::Full) {
@@ -346,18 +393,26 @@ public:
                  ReduceMacOpLowering, CxButterflyOpLowering>(typeConverter, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
+    populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);
     populateReturnOpTypeConversionPattern(patterns, typeConverter);
 
     ConversionTarget target(getContext());
     target.addLegalDialect<BuiltinDialect, ondrix::ortumcore::OrtumCoreDialect>();
     target.addLegalOp<UnrealizedConversionCastOp>();
     target.addIllegalDialect<ondrix::ondsp::OndspDialect>();
-    target.addDynamicallyLegalOp<func::FuncOp>(
-        [&](func::FuncOp op) { return typeConverter.isSignatureLegal(op.getFunctionType()); });
+    target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
+      return typeConverter.isSignatureLegal(op.getFunctionType()) &&
+             typeConverter.isLegal(&op.getBody());
+    });
     target.addDynamicallyLegalOp<func::CallOp>(
-        [&](func::CallOp op) { return typeConverter.isSignatureLegal(op.getCalleeType()); });
+        [&](func::CallOp op) { return typeConverter.isLegal(op); });
     target.addDynamicallyLegalOp<func::ReturnOp>(
         [&](func::ReturnOp op) { return typeConverter.isLegal(op.getOperandTypes()); });
+    target.markUnknownOpDynamicallyLegal([&](Operation *op) {
+      return isNotBranchOpInterfaceOrReturnLikeOp(op) ||
+             isLegalForBranchOpInterfaceTypeConversionPattern(op, typeConverter) ||
+             isLegalForReturnOpTypeConversionPattern(op, typeConverter);
+    });
 
     if (failed(applyFullConversion(getOperation(), target, std::move(patterns))))
       signalPassFailure();

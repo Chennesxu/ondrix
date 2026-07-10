@@ -13,7 +13,8 @@ func.func @ondsp_ops(%a: i16, %b: i16, %p0: i32, %p1: i32, %tw: i32,
   %red = ondsp.reduce_mac %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> i32
 
   // CHECK: ondsp.cx_butterfly
-  %o0, %o1 = ondsp.cx_butterfly %p0, %p1, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i32, i32, i32) -> (i32, i32)
+  // CHECK: scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = trunc, overflow = saturate, saturate_to = i16>
+  %o0, %o1 = ondsp.cx_butterfly %p0, %p1, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = trunc, overflow = saturate, saturate_to = i16>} : (i32, i32, i32) -> (i32, i32)
 
   // CHECK: ondsp.bitrev_add
   %j = ondsp.bitrev_add %i, %s {width = 10 : i64} : (index, index) -> index

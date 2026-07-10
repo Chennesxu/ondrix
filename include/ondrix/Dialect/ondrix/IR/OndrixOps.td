@@ -29,6 +29,7 @@ def Ondrix_ButterflyOp : Ondrix_Op<"butterfly", [Pure]> {
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
                    AnyAttr:$layout, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product,
+                   OptionalAttr<Ondsp_ScaleAttr>:$scale,
                    DefaultValuedAttr<BoolAttr, "false">:$trivial_twiddle);
   let results = (outs AnyType:$out0, AnyType:$out1);
   let hasVerifier = 1;

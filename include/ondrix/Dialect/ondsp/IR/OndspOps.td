@@ -74,6 +74,7 @@ def Ondsp_AccExtractOp : Ondsp_Op<"acc_extract", [Pure]> {
   let summary = "Extract a storage value from an accumulator";
   let arguments = (ins Ondsp_Acc:$acc, OptionalAttr<Ondsp_ScaleAttr>:$scale);
   let results = (outs AnyInteger:$result);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
@@ -97,6 +98,7 @@ def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
                    Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product,
+                   OptionalAttr<Ondsp_ScaleAttr>:$scale,
                    DefaultValuedAttr<BoolAttr, "false">:$trivial_twiddle);
   let results = (outs AnyType:$out0, AnyType:$out1);
   let hasVerifier = 1;

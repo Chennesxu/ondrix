@@ -26,6 +26,23 @@ verifyOptionalProductPolicy(Operation *op, Attribute numeric,
   return success();
 }
 
+static LogicalResult verifyButterflyPolicies(Operation *op, Attribute numeric,
+                                             std::optional<ondrix::ondsp::ProductAttr> product,
+                                             std::optional<ondrix::ondsp::ScaleAttr> scale) {
+  if (failed(verifyOptionalProductPolicy(op, numeric, product)))
+    return failure();
+
+  if (isa<ondrix::ondsp::FixedAttr>(numeric)) {
+    if (!scale)
+      return op->emitOpError("fixed numeric butterfly requires a scale attribute");
+    return success();
+  }
+
+  if (scale)
+    return op->emitOpError("floating-point numeric butterfly must not specify a scale attribute");
+  return success();
+}
+
 } // namespace
 
 LogicalResult FirOp::verify() {
@@ -37,5 +54,5 @@ LogicalResult DotOp::verify() {
 }
 
 LogicalResult ButterflyOp::verify() {
-  return verifyOptionalProductPolicy(*this, getNumeric(), getProduct());
+  return verifyButterflyPolicies(*this, getNumeric(), getProduct(), getScale());
 }

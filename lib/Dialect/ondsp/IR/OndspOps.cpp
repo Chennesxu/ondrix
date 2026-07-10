@@ -75,6 +75,9 @@ static LogicalResult verifyMacLike(Operation *op, Value acc, Value lhs, Value rh
     return failure();
 
   auto accumulator = acc.getType().cast<AccType>();
+  if (accumulator.getSignedness() != numeric.getSignedness())
+    return op->emitOpError("accumulator signedness must match the fixed numeric policy");
+
   FailureOr<unsigned> expectedFrac = getProductFrac(op, numeric, product);
   if (failed(expectedFrac))
     return failure();
@@ -99,6 +102,38 @@ static LogicalResult verifyOptionalProductPolicy(Operation *op, Attribute numeri
   return success();
 }
 
+static LogicalResult verifyButterflyPolicies(Operation *op, Attribute numeric,
+                                             std::optional<ProductAttr> product,
+                                             std::optional<ScaleAttr> scale) {
+  if (failed(verifyOptionalProductPolicy(op, numeric, product)))
+    return failure();
+
+  if (isa<FixedAttr>(numeric)) {
+    if (!scale)
+      return op->emitOpError("fixed numeric butterfly requires a scale attribute");
+    return success();
+  }
+
+  if (scale)
+    return op->emitOpError("floating-point numeric butterfly must not specify a scale attribute");
+  return success();
+}
+
+static bool isPackedI16Layout(CxLayoutAttr layout) {
+  return layout.getLayout() == ComplexLayout::PackedI16ImagHiRealLo ||
+         layout.getLayout() == ComplexLayout::PackedI16RealHiImagLo;
+}
+
+static bool hasI32Container(Type type) {
+  if (auto integer = type.dyn_cast<IntegerType>())
+    return integer.getWidth() == 32;
+  if (auto shaped = type.dyn_cast<ShapedType>()) {
+    auto element = shaped.getElementType().dyn_cast<IntegerType>();
+    return element && element.getWidth() == 32;
+  }
+  return false;
+}
+
 } // namespace
 
 LogicalResult AssumeNumericOp::verify() {
@@ -119,12 +154,26 @@ LogicalResult MacSubOp::verify() {
   return verifyMacLike(*this, getAcc(), getLhs(), getRhs(), getNumeric(), getProduct());
 }
 
+LogicalResult AccExtractOp::verify() {
+  if (auto scale = getScale()) {
+    if (scale->getSaturateTo() != getResult().getType())
+      return emitOpError("scale saturate_to type must match the result type");
+  }
+  return success();
+}
+
 LogicalResult ReduceMacOp::verify() {
   if (failed(verifyOptionalProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
 
-  if (auto fixed = dyn_cast<FixedAttr>(getNumeric()))
-    return verifyFixedStorageOperands(*this, fixed, getLhs(), getRhs());
+  if (auto fixed = dyn_cast<FixedAttr>(getNumeric())) {
+    if (failed(verifyFixedStorageOperands(*this, fixed, getLhs(), getRhs())))
+      return failure();
+    auto resultType = getResult().getType().dyn_cast<IntegerType>();
+    if (!resultType || resultType.getWidth() < 32)
+      return emitOpError("fixed reduce_mac result must be an integer type of at least 32 bits");
+    return success();
+  }
   if (failed(verifyValueNumericType(*this, getLhs().getType(), getNumeric(), "lhs")) ||
       failed(verifyValueNumericType(*this, getRhs().getType(), getNumeric(), "rhs")))
     return failure();
@@ -132,5 +181,24 @@ LogicalResult ReduceMacOp::verify() {
 }
 
 LogicalResult CxButterflyOp::verify() {
-  return verifyOptionalProductPolicy(*this, getNumeric(), getProduct());
+  if (failed(verifyButterflyPolicies(*this, getNumeric(), getProduct(), getScale())))
+    return failure();
+
+  if (!isPackedI16Layout(getLayout()))
+    return success();
+
+  auto fixed = dyn_cast<FixedAttr>(getNumeric());
+  auto storage = fixed ? fixed.getStorage().dyn_cast<IntegerType>() : IntegerType();
+  if (!storage || storage.getWidth() != 16)
+    return emitOpError("packed i16 complex layout requires an i16 fixed numeric policy");
+
+  for (Type type : getOperandTypes()) {
+    if (!hasI32Container(type))
+      return emitOpError("packed i16 butterfly operands must use i32 container storage");
+  }
+  for (Type type : getResultTypes()) {
+    if (!hasI32Container(type))
+      return emitOpError("packed i16 butterfly results must use i32 container storage");
+  }
+  return success();
 }

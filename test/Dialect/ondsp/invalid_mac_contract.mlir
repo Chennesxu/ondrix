@@ -33,3 +33,38 @@ func.func @negative_high_product_frac(
   %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 7>, product = #ondsp.product<high>} : (!ondsp.acc<storage = i40, frac = 0, signed>, i16, i16) -> !ondsp.acc<storage = i40, frac = 0, signed>
   return %0 : !ondsp.acc<storage = i40, frac = 0, signed>
 }
+
+// -----
+
+func.func @accumulator_signedness_mismatch(
+    %acc: !ondsp.acc<storage = i40, frac = 30, unsigned>, %a: i16, %b: i16)
+    -> !ondsp.acc<storage = i40, frac = 30, unsigned> {
+  // expected-error@+1 {{accumulator signedness must match the fixed numeric policy}}
+  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, unsigned>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, unsigned>
+  return %0 : !ondsp.acc<storage = i40, frac = 30, unsigned>
+}
+
+// -----
+
+func.func @fixed_reduce_noninteger_result(%a: i16, %b: i16) -> f32 {
+  // expected-error@+1 {{fixed reduce_mac result must be an integer type of at least 32 bits}}
+  %0 = ondsp.reduce_mac %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> f32
+  return %0 : f32
+}
+
+// -----
+
+func.func @fixed_reduce_narrow_result(%a: i16, %b: i16) -> i16 {
+  // expected-error@+1 {{fixed reduce_mac result must be an integer type of at least 32 bits}}
+  %0 = ondsp.reduce_mac %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> i16
+  return %0 : i16
+}
+
+// -----
+
+func.func @acc_extract_scale_result_mismatch(
+    %acc: !ondsp.acc<storage = i40, frac = 30, signed>) -> i16 {
+  // expected-error@+1 {{scale saturate_to type must match the result type}}
+  %0 = ondsp.acc_extract %acc {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = trunc, overflow = saturate, saturate_to = i32>} : (!ondsp.acc<storage = i40, frac = 30, signed>) -> i16
+  return %0 : i16
+}
