@@ -2,15 +2,79 @@
 
 #include "ondrix/Conversion/OndspToOrtumCore/OndspToOrtumCore.h"
 #include "ondrix/Dialect/ondrix/IR/OndrixDialect.h"
+#include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
+#include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 
-#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 using namespace mlir;
 
 namespace {
+
+class FirOpLowering final : public OpConversionPattern<ondrix::ir::FirOp> {
+public:
+  using OpConversionPattern<ondrix::ir::FirOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::FirOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto replacement = rewriter.create<ondrix::ondsp::ReduceMacOp>(
+        op.getLoc(), op.getResult().getType(), adaptor.getInput(), adaptor.getCoeffs(),
+        op.getNumeric());
+    replacement->setAttrs(op->getAttrs());
+    rewriter.replaceOp(op, replacement);
+    return success();
+  }
+};
+
+class DotOpLowering final : public OpConversionPattern<ondrix::ir::DotOp> {
+public:
+  using OpConversionPattern<ondrix::ir::DotOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::DotOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto replacement = rewriter.create<ondrix::ondsp::ReduceMacOp>(
+        op.getLoc(), op.getResult().getType(), adaptor.getLhs(), adaptor.getRhs(), op.getNumeric());
+    replacement->setAttrs(op->getAttrs());
+    rewriter.replaceOp(op, replacement);
+    return success();
+  }
+};
+
+class ButterflyOpLowering final : public OpConversionPattern<ondrix::ir::ButterflyOp> {
+public:
+  using OpConversionPattern<ondrix::ir::ButterflyOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::ButterflyOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto layout = dyn_cast<ondrix::ondsp::CxLayoutAttr>(op.getLayout());
+    if (!layout)
+      return rewriter.notifyMatchFailure(op, "requires an ondsp.cx_layout layout attribute");
+
+    auto replacement = rewriter.create<ondrix::ondsp::CxButterflyOp>(
+        op.getLoc(), op.getOut0().getType(), op.getOut1().getType(), adaptor.getA(), adaptor.getB(),
+        adaptor.getTwiddle(), layout, op.getNumeric());
+    replacement->setAttrs(op->getAttrs());
+    rewriter.replaceOp(op, replacement);
+    return success();
+  }
+};
+
+class QuantizeOpLowering final : public OpConversionPattern<ondrix::ir::QuantizeOp> {
+public:
+  using OpConversionPattern<ondrix::ir::QuantizeOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::QuantizeOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto replacement = rewriter.create<ondrix::ondsp::ConvertOp>(
+        op.getLoc(), op.getResult().getType(), adaptor.getInput(), op.getSrc(), op.getDst());
+    replacement->setAttrs(op->getAttrs());
+    rewriter.replaceOp(op, replacement);
+    return success();
+  }
+};
 
 class ConvertOndrixToOndspPass
     : public PassWrapper<ConvertOndrixToOndspPass, OperationPass<ModuleOp>> {
@@ -28,38 +92,16 @@ public:
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
-    SmallVector<Operation *> worklist;
-    module.walk([&](Operation *op) {
-      StringRef name = op->getName().getStringRef();
-      if (name == "ondrix.fir" || name == "ondrix.dot" || name == "ondrix.butterfly" ||
-          name == "ondrix.quantize")
-        worklist.push_back(op);
-    });
+    RewritePatternSet patterns(&getContext());
+    patterns.add<FirOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering>(
+        &getContext());
 
-    OpBuilder builder(module.getContext());
-    for (Operation *op : worklist) {
-      builder.setInsertionPoint(op);
-      OperationState state(op->getLoc(), getTargetName(op));
-      state.addOperands(op->getOperands());
-      state.addTypes(op->getResultTypes());
+    ConversionTarget target(getContext());
+    target.addLegalDialect<ondrix::ondsp::OndspDialect>();
+    target.addIllegalDialect<ondrix::ir::OndrixDialect>();
 
-      for (NamedAttribute attr : op->getAttrs())
-        state.addAttribute(attr.getName(), attr.getValue());
-
-      Operation *replacement = builder.create(state);
-      op->replaceAllUsesWith(replacement);
-      op->erase();
-    }
-  }
-
-private:
-  static StringRef getTargetName(Operation *op) {
-    StringRef name = op->getName().getStringRef();
-    if (name == "ondrix.fir" || name == "ondrix.dot")
-      return "ondsp.reduce_mac";
-    if (name == "ondrix.butterfly")
-      return "ondsp.cx_butterfly";
-    return "ondsp.convert";
+    if (failed(applyPartialConversion(module, target, std::move(patterns))))
+      signalPassFailure();
   }
 };
 
