@@ -39,6 +39,7 @@ def ConvertOndspToScalar
   let dependentDialects = [
     "ondrix::ondsp::OndspDialect",
     "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
     "mlir::func::FuncDialect",
     "mlir::math::MathDialect",
     "mlir::memref::MemRefDialect",

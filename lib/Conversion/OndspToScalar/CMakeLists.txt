@@ -6,6 +6,7 @@ add_ondrix_library(OndspToScalar
 
   LINK_LIBS PUBLIC
   MLIRArithDialect
+  MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRIR
   MLIRMathDialect
