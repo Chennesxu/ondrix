@@ -248,6 +248,12 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    if (isa<ShapedType>(op.getLhs().getType()) || isa<ShapedType>(op.getRhs().getType())) {
+      op.emitOpError("shaped operands are not supported by ortumcore lowering; lower the "
+                     "reduction to an explicit loop of scalar MAC operations first");
+      return failure();
+    }
+
     auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     if (!fixed) {
       op.emitOpError("only fixed-point reduce_mac policies are supported by ortumcore lowering");
