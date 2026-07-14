@@ -87,8 +87,9 @@ static LogicalResult verifyFirWindow(FirOp op) {
   if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric())) {
     if (elementType != fixed.getStorage())
       return op.emitOpError("window element type must match fixed numeric storage type");
-    if (!isa<IntegerType>(op.getResult().getType()))
-      return op.emitOpError("fixed FIR requires an integer result");
+    auto resultType = dyn_cast<IntegerType>(op.getResult().getType());
+    if (!resultType || resultType.getWidth() < 32)
+      return op.emitOpError("fixed FIR result must be an integer type of at least 32 bits");
     return success();
   }
 

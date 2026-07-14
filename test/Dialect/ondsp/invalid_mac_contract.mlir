@@ -86,3 +86,12 @@ func.func @reduce_mac_rejects_unranked(
   %0 = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fma>} : (memref<*xf32>, memref<*xf32>) -> f32
   return %0 : f32
 }
+
+// -----
+
+func.func @floating_reduce_mac_requires_scalar_result(
+    %lhs: vector<8xf32>, %rhs: vector<8xf32>) -> vector<8xf32> {
+  // expected-error@+1 {{floating-point reduce_mac result must be scalar and match numeric format}}
+  %0 = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fma>} : (vector<8xf32>, vector<8xf32>) -> vector<8xf32>
+  return %0 : vector<8xf32>
+}

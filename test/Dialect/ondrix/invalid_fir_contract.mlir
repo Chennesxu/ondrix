@@ -45,6 +45,15 @@ func.func @fir_requires_numeric_storage(
 
 // -----
 
+func.func @fixed_fir_requires_wide_result(
+    %input: memref<8xi16>, %coeffs: memref<8xi16>) -> i16 {
+  // expected-error@+1 {{fixed FIR result must be an integer type of at least 32 bits}}
+  %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (memref<8xi16>, memref<8xi16>) -> i16
+  return %0 : i16
+}
+
+// -----
+
 func.func @fir_requires_fp_result_format(
     %input: memref<8xf32>, %coeffs: memref<8xf32>) -> f64 {
   // expected-error@+1 {{floating-point FIR window and result types must match numeric format}}

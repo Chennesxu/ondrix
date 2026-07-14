@@ -210,8 +210,6 @@ LogicalResult SatAddShiftOp::verify() { return verifyValueOnlyTypes(*this); }
 
 LogicalResult SatSubShiftOp::verify() { return verifyValueOnlyTypes(*this); }
 
-LogicalResult AccInitOp::verify() { return verifyValueOnlyTypes(*this); }
-
 LogicalResult AccImportOp::verify() {
   FixedAttr source = getSrc();
   AccType accumulator = getAcc().getType();
@@ -277,7 +275,10 @@ LogicalResult ReduceMacOp::verify() {
   if (failed(verifyValueNumericType(*this, getLhs().getType(), getNumeric(), "lhs")) ||
       failed(verifyValueNumericType(*this, getRhs().getType(), getNumeric(), "rhs")))
     return failure();
-  return verifyValueNumericType(*this, getResult().getType(), getNumeric(), "result");
+  auto fp = cast<FpAttr>(getNumeric());
+  if (getResult().getType() != fp.getFormat())
+    return emitOpError("floating-point reduce_mac result must be scalar and match numeric format");
+  return success();
 }
 
 LogicalResult CxMulOp::verify() { return verifyValueOnlyTypes(*this); }

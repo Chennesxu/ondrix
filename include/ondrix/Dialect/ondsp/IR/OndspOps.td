@@ -55,9 +55,8 @@ def Ondsp_SatSubShiftOp
 
 def Ondsp_AccInitOp : Ondsp_Op<"acc_init", [Pure]> {
   let summary = "Experimental accumulator import with legacy implicit semantics";
-  let arguments = (ins AnyType:$input);
+  let arguments = (ins AnyInteger:$input);
   let results = (outs Ondsp_Acc:$acc);
-  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
@@ -103,6 +102,13 @@ def Ondsp_AccExtractOp : Ondsp_Op<"acc_extract", [Pure]> {
 
 def Ondsp_AccExportOp : Ondsp_Op<"acc_export", [Pure]> {
   let summary = "Export an accumulator under an explicit destination policy";
+  let description = [{
+    Converts the accumulator to the destination fixed-point policy. The raw
+    accumulator is divided by `2^(acc.frac - dst.frac)` using the selected
+    rounding mode, destination-range overflow handling is applied next, and
+    the resulting integer is then materialized in the destination storage
+    type.
+  }];
   let arguments = (ins Ondsp_Acc:$acc, Ondsp_FixedAttr:$dst,
                    Ondsp_RoundingModeAttr:$rounding,
                    Ondsp_OverflowModeAttr:$overflow);
