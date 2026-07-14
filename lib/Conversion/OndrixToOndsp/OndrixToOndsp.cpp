@@ -1,6 +1,5 @@
 #include "ondrix/Conversion/OndrixToOndsp/OndrixToOndsp.h"
 
-#include "ondrix/Conversion/OndspToOrtumCore/OndspToOrtumCore.h"
 #include "ondrix/Dialect/ondrix/IR/OndrixDialect.h"
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
@@ -30,7 +29,6 @@ public:
     auto replacement = rewriter.create<ondrix::ondsp::ReduceMacOp>(
         op.getLoc(), op.getResult().getType(), adaptor.getInput(), adaptor.getCoeffs(),
         op.getNumeric(), op.getProduct().value_or(ondrix::ondsp::ProductAttr()));
-    replacement->setAttrs(op->getAttrs());
     rewriter.replaceOp(op, replacement);
     return success();
   }
@@ -45,7 +43,6 @@ public:
     auto replacement = rewriter.create<ondrix::ondsp::ReduceMacOp>(
         op.getLoc(), op.getResult().getType(), adaptor.getLhs(), adaptor.getRhs(), op.getNumeric(),
         op.getProduct().value_or(ondrix::ondsp::ProductAttr()));
-    replacement->setAttrs(op->getAttrs());
     rewriter.replaceOp(op, replacement);
     return success();
   }
@@ -66,7 +63,6 @@ public:
         adaptor.getTwiddle(), layout, op.getNumeric(),
         op.getProduct().value_or(ondrix::ondsp::ProductAttr()),
         op.getScale().value_or(ondrix::ondsp::ScaleAttr()), op.getTrivialTwiddle());
-    replacement->setAttrs(op->getAttrs());
     rewriter.replaceOp(op, replacement);
     return success();
   }
@@ -80,7 +76,6 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     auto replacement = rewriter.create<ondrix::ondsp::ConvertOp>(
         op.getLoc(), op.getResult().getType(), adaptor.getInput(), op.getSrc(), op.getDst());
-    replacement->setAttrs(op->getAttrs());
     rewriter.replaceOp(op, replacement);
     return success();
   }

@@ -8,5 +8,6 @@ func.func @dot_quantize(%lhs: i16, %rhs: i16) -> i16 {
 
 // CHECK-LABEL: func.func @dot_quantize
 // CHECK-NOT: ondrix.
-// CHECK: ondsp.reduce_mac %arg0, %arg1 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, tag = "dot"} : (i16, i16) -> i32
-// CHECK: ondsp.convert {{.*}}{dst = #ondsp.fixed<signed, storage = i16, frac = 15>, src = #ondsp.fixed<signed, storage = i32, frac = 30>, tag = "quantize"} : (i32) -> i16
+// CHECK-NOT: tag =
+// CHECK: ondsp.reduce_mac %arg0, %arg1 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> i32
+// CHECK: ondsp.convert {{.*}}{dst = #ondsp.fixed<signed, storage = i16, frac = 15>, src = #ondsp.fixed<signed, storage = i32, frac = 30>} : (i32) -> i16
