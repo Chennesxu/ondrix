@@ -351,13 +351,13 @@ public:
       return op.emitOpError("packed q15 butterfly lowering requires pre_shift_left=0, "
                             "post_shift_right=15, and saturate_to=i16");
 
-    bool rounding;
+    bool roundToNearest;
     switch (scale->getRounding()) {
     case ondrix::ondsp::RoundingMode::Trunc:
-      rounding = false;
+      roundToNearest = false;
       break;
     case ondrix::ondsp::RoundingMode::Nearest:
-      rounding = true;
+      roundToNearest = true;
       break;
     default:
       return op.emitOpError("ortumcore butterfly lowering supports trunc or nearest rounding");
@@ -388,13 +388,11 @@ public:
     Type out1Type = getTypeConverter()->convertType(op.getOut1().getType());
     Type stateType = ondrix::ortumcore::VecStateType::get(rewriter.getContext());
     auto init = rewriter.create<ondrix::ortumcore::VecStateInitOp>(op.getLoc(), stateType);
-    auto mode =
-        rewriter.create<ondrix::ortumcore::VecSetModeOp>(op.getLoc(), stateType, init.getState());
-    mode->setAttr("sat", rewriter.getBoolAttr(saturation));
-    mode->setAttr("rnd", rewriter.getBoolAttr(rounding));
-    mode->setAttr("pack", rewriter.getBoolAttr(true));
-    mode->setAttr("shiftr", rewriter.getI64IntegerAttr(scale->getPostShiftRight()));
-    mode->setAttr("shiftl", rewriter.getI64IntegerAttr(scale->getPreShiftLeft()));
+    auto mode = rewriter.create<ondrix::ortumcore::VecSetModeOp>(
+        op.getLoc(), stateType, init.getState(), rewriter.getBoolAttr(saturation),
+        rewriter.getBoolAttr(roundToNearest), rewriter.getBoolAttr(true),
+        rewriter.getI64IntegerAttr(scale->getPostShiftRight()),
+        rewriter.getI64IntegerAttr(scale->getPreShiftLeft()));
 
     auto mul = rewriter.create<ondrix::ortumcore::CxMulOp>(
         op.getLoc(), stateType, adaptor.getB().getType(), mode.getResult(), adaptor.getB(),

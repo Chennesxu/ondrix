@@ -50,13 +50,18 @@ def OrtumCore_SatAddOp : OrtumCore_BinaryOp<"sat_add", "Saturating add semantic 
 def OrtumCore_SatSubOp : OrtumCore_BinaryOp<"sat_sub", "Saturating subtract semantic op">;
 
 def OrtumCore_VecStateInitOp : OrtumCore_Op<"vec_state_init", [Pure]> {
-  let results = (outs AnyType:$state);
+  let results = (outs OrtumCore_VecStateType:$state);
   let assemblyFormat = "attr-dict `:` type($state)";
 }
 
 def OrtumCore_VecSetModeOp : OrtumCore_Op<"vec_set_mode", [Pure]> {
-  let arguments = (ins AnyType:$state);
-  let results = (outs AnyType:$result);
+  let arguments = (ins OrtumCore_VecStateType:$state,
+                       BoolAttr:$saturation,
+                       BoolAttr:$round_to_nearest,
+                       BoolAttr:$packed_complex,
+                       I64Attr:$shift_right,
+                       I64Attr:$shift_left);
+  let results = (outs OrtumCore_VecStateType:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 

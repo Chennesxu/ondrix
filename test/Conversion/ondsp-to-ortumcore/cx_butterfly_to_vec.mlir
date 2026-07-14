@@ -9,6 +9,11 @@ func.func @cx_butterfly(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
 // CHECK-SAME: %[[A:.*]]: i32, %[[B:.*]]: i32, %[[TW:.*]]: i32)
 // CHECK: ortumcore.vec_state_init
 // CHECK: ortumcore.vec_set_mode
+// CHECK-SAME: packed_complex = true
+// CHECK-SAME: round_to_nearest = false
+// CHECK-SAME: saturation = true
+// CHECK-SAME: shift_left = 0 : i64
+// CHECK-SAME: shift_right = 15 : i64
 // CHECK: ortumcore.cx_mul {{.*}}, %[[B]], %[[TW]]
 // CHECK: ortumcore.cx_dual_add
 // CHECK: ortumcore.cx_dual_sub
