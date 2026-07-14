@@ -371,6 +371,15 @@ public:
       return op.emitOpError("ortumcore butterfly lowering supports wrap or saturate overflow");
     }
 
+    auto product = op.getProduct();
+    if (!product || product->getSelection() != ondrix::ondsp::ProductSelection::Full)
+      return op.emitOpError(
+          "packed q15 butterfly lowering requires product = #ondsp.product<full>");
+
+    if (op.getTrivialTwiddle())
+      return op.emitOpError("trivial-twiddle target selection is disabled until the twiddle "
+                            "value, stage role, layout, permutation, and scale are proven");
+
     Type out0Type = getTypeConverter()->convertType(op.getOut0().getType());
     Type out1Type = getTypeConverter()->convertType(op.getOut1().getType());
     Type stateType = ondrix::ortumcore::VecStateType::get(rewriter.getContext());
@@ -382,22 +391,6 @@ public:
     mode->setAttr("pack", rewriter.getBoolAttr(true));
     mode->setAttr("shiftr", rewriter.getI64IntegerAttr(scale->getPostShiftRight()));
     mode->setAttr("shiftl", rewriter.getI64IntegerAttr(scale->getPreShiftLeft()));
-
-    auto product = op.getProduct();
-    if (!product || product->getSelection() != ondrix::ondsp::ProductSelection::Full) {
-      op.emitOpError("packed q15 butterfly lowering requires product = #ondsp.product<full>");
-      return failure();
-    }
-
-    if (op.getTrivialTwiddle()) {
-      auto fft = rewriter.create<ondrix::ortumcore::FftTrivialStageOp>(
-          op.getLoc(), stateType, TypeRange{out0Type, out1Type}, mode.getResult(),
-          ValueRange{adaptor.getA(), adaptor.getB()},
-          ondrix::ortumcore::FftStageKindAttr::get(rewriter.getContext(),
-                                                   ondrix::ortumcore::FftStageKind::Radix2));
-      rewriter.replaceOp(op, fft.getOutputs());
-      return success();
-    }
 
     auto mul = rewriter.create<ondrix::ortumcore::CxMulOp>(
         op.getLoc(), stateType, adaptor.getB().getType(), mode.getResult(), adaptor.getB(),

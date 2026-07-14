@@ -5,10 +5,11 @@ func.func @cx_butterfly(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
   return %0, %1 : i32, i32
 }
 
-// CHECK-LABEL: func.func @cx_butterfly
+// CHECK-LABEL: func.func @cx_butterfly(
+// CHECK-SAME: %[[A:.*]]: i32, %[[B:.*]]: i32, %[[TW:.*]]: i32)
 // CHECK: ortumcore.vec_state_init
 // CHECK: ortumcore.vec_set_mode
-// CHECK: ortumcore.cx_mul
+// CHECK: ortumcore.cx_mul {{.*}}, %[[B]], %[[TW]]
 // CHECK: ortumcore.cx_dual_add
 // CHECK: ortumcore.cx_dual_sub
 // CHECK-NOT: ondsp.cx_butterfly
