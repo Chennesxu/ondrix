@@ -33,7 +33,7 @@ def Ondsp_RoundShiftOp : Ondsp_Op<"round_shift", [Pure]> {
 
 def Ondsp_SatCastOp : Ondsp_Op<"sat_cast", [Pure]> {
   let summary = "Saturating cast under an explicit numeric policy";
-  let arguments = (ins AnyType:$input, AnyAttr:$numeric);
+  let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$numeric);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
@@ -95,7 +95,7 @@ def Ondsp_ReduceMacOp
 
 def Ondsp_CxMulOp : Ondsp_Op<"cx_mul", [Pure]> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_CxLayoutAttr:$layout,
-                   AnyAttr:$numeric);
+                   Ondsp_NumericAttr:$numeric);
   let results = (outs AnyType:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
@@ -113,7 +113,7 @@ def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
 
 def Ondsp_FftStageOp : Ondsp_Op<"fft_stage", [Pure]> {
   let arguments = (ins Variadic<AnyType>:$inputs, I64Attr:$stage,
-                   Ondsp_CxLayoutAttr:$layout, AnyAttr:$numeric);
+                   Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric);
   let results = (outs Variadic<AnyType>:$outputs);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }

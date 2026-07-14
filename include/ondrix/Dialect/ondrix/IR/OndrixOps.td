@@ -31,7 +31,7 @@ def Ondrix_DotOp
 def Ondrix_ButterflyOp : Ondrix_Op<"butterfly", [Pure]> {
   let summary = "High-level complex radix-2 butterfly intent";
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
-                   AnyAttr:$layout, Ondsp_NumericAttr:$numeric,
+                   Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product,
                    OptionalAttr<Ondsp_ScaleAttr>:$scale,
                    DefaultValuedAttr<BoolAttr, "false">:$trivial_twiddle);
@@ -42,7 +42,8 @@ def Ondrix_ButterflyOp : Ondrix_Op<"butterfly", [Pure]> {
 
 def Ondrix_QuantizeOp : Ondrix_Op<"quantize", [Pure]> {
   let summary = "High-level numeric conversion intent";
-  let arguments = (ins AnyType:$input, AnyAttr:$src, AnyAttr:$dst);
+  let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$src,
+                   Ondsp_NumericAttr:$dst);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
