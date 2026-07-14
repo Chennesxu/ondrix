@@ -19,21 +19,22 @@ def Ondsp_ProductSelection
   let cppNamespace = "::ondrix::ondsp";
 }
 
-def Ondsp_RoundTrunc : I32EnumAttrCase<"Trunc", 0, "trunc">;
-def Ondsp_RoundNearest : I32EnumAttrCase<"Nearest", 1, "nearest">;
+def Ondsp_RoundTowardNegative
+    : I32EnumAttrCase<"TowardNegative", 0, "toward_negative">;
 def Ondsp_RoundNearestEven : I32EnumAttrCase<"NearestEven", 2, "nearest_even">;
 def Ondsp_RoundTowardZero : I32EnumAttrCase<"TowardZero", 3, "toward_zero">;
-def Ondsp_RoundingMode : I32EnumAttr<"RoundingMode", "rounding mode",
-    [Ondsp_RoundTrunc, Ondsp_RoundNearest, Ondsp_RoundNearestEven,
+def Ondsp_RoundingMode : I32EnumAttr<
+    "RoundingMode",
+    "explicit signed right-shift rounding direction or tie rule",
+    [Ondsp_RoundTowardNegative, Ondsp_RoundNearestEven,
      Ondsp_RoundTowardZero]> {
   let cppNamespace = "::ondrix::ondsp";
 }
 
 def Ondsp_OverflowWrap : I32EnumAttrCase<"Wrap", 0, "wrap">;
 def Ondsp_OverflowSaturate : I32EnumAttrCase<"Saturate", 1, "saturate">;
-def Ondsp_OverflowUndefined : I32EnumAttrCase<"Undefined", 2, "undefined">;
 def Ondsp_OverflowMode : I32EnumAttr<"OverflowMode", "overflow mode",
-    [Ondsp_OverflowWrap, Ondsp_OverflowSaturate, Ondsp_OverflowUndefined]> {
+    [Ondsp_OverflowWrap, Ondsp_OverflowSaturate]> {
   let cppNamespace = "::ondrix::ondsp";
 }
 

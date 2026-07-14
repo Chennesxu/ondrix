@@ -353,14 +353,11 @@ public:
 
     bool roundToNearest;
     switch (scale->getRounding()) {
-    case ondrix::ondsp::RoundingMode::Trunc:
+    case ondrix::ondsp::RoundingMode::TowardNegative:
       roundToNearest = false;
       break;
-    case ondrix::ondsp::RoundingMode::Nearest:
-      roundToNearest = true;
-      break;
     default:
-      return op.emitOpError("ortumcore butterfly lowering supports trunc or nearest rounding");
+      return op.emitOpError("ortumcore butterfly lowering supports toward_negative rounding");
     }
 
     bool saturation;

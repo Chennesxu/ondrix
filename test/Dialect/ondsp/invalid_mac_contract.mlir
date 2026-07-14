@@ -65,6 +65,6 @@ func.func @fixed_reduce_narrow_result(%a: i16, %b: i16) -> i16 {
 func.func @acc_extract_scale_result_mismatch(
     %acc: !ondsp.acc<storage = i40, frac = 30, signed>) -> i16 {
   // expected-error@+1 {{scale saturate_to type must match the result type}}
-  %0 = ondsp.acc_extract %acc {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = trunc, overflow = saturate, saturate_to = i32>} : (!ondsp.acc<storage = i40, frac = 30, signed>) -> i16
+  %0 = ondsp.acc_extract %acc {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i32>} : (!ondsp.acc<storage = i40, frac = 30, signed>) -> i16
   return %0 : i16
 }

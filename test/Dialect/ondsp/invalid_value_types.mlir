@@ -21,7 +21,7 @@ func.func @convert_rejects_unranked_memref(
 func.func @round_shift_rejects_memref_result(
     %input: i16) -> memref<1xi16> {
   // expected-error@+1 {{value-only operation does not produce memref results}}
-  %0 = ondsp.round_shift %input {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = trunc, overflow = wrap, saturate_to = i16>} : (i16) -> memref<1xi16>
+  %0 = ondsp.round_shift %input {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = wrap, saturate_to = i16>} : (i16) -> memref<1xi16>
   return %0 : memref<1xi16>
 }
 
@@ -39,7 +39,7 @@ func.func @sat_cast_rejects_unranked_memref_result(
 func.func @sat_add_shift_rejects_memref_operand(
     %lhs: memref<1xi16>, %rhs: i16) -> i16 {
   // expected-error@+1 {{value-only operation does not accept memref operands}}
-  %0 = ondsp.sat_add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = trunc, overflow = saturate, saturate_to = i16>} : (memref<1xi16>, i16) -> i16
+  %0 = ondsp.sat_add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (memref<1xi16>, i16) -> i16
   return %0 : i16
 }
 
@@ -48,7 +48,7 @@ func.func @sat_add_shift_rejects_memref_operand(
 func.func @sat_sub_shift_rejects_memref_result(
     %lhs: i16, %rhs: i16) -> memref<1xi16> {
   // expected-error@+1 {{value-only operation does not produce memref results}}
-  %0 = ondsp.sat_sub_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = trunc, overflow = saturate, saturate_to = i16>} : (i16, i16) -> memref<1xi16>
+  %0 = ondsp.sat_sub_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (i16, i16) -> memref<1xi16>
   return %0 : memref<1xi16>
 }
 
@@ -86,10 +86,10 @@ func.func @numeric_value_ops_accept_shaped_values(
 func.func @elementwise_value_ops_accept_shaped_values(
     %tensor: tensor<2xi16>, %vector: vector<2xi16>)
     -> (vector<2xi16>, tensor<2xi16>, vector<2xi16>, tensor<2xi16>) {
-  %0 = ondsp.round_shift %vector {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = trunc, overflow = wrap, saturate_to = i16>} : (vector<2xi16>) -> vector<2xi16>
+  %0 = ondsp.round_shift %vector {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = wrap, saturate_to = i16>} : (vector<2xi16>) -> vector<2xi16>
   %1 = ondsp.sat_cast %tensor {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tensor<2xi16>) -> tensor<2xi16>
-  %2 = ondsp.sat_add_shift %vector, %vector {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = trunc, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<2xi16>) -> vector<2xi16>
-  %3 = ondsp.sat_sub_shift %tensor, %tensor {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = trunc, overflow = saturate, saturate_to = i16>} : (tensor<2xi16>, tensor<2xi16>) -> tensor<2xi16>
+  %2 = ondsp.sat_add_shift %vector, %vector {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<2xi16>) -> vector<2xi16>
+  %3 = ondsp.sat_sub_shift %tensor, %tensor {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tensor<2xi16>, tensor<2xi16>) -> tensor<2xi16>
   return %0, %1, %2, %3 : vector<2xi16>, tensor<2xi16>, vector<2xi16>, tensor<2xi16>
 }
 
@@ -107,7 +107,7 @@ func.func @cx_mul_rejects_memref_operand(
 func.func @cx_butterfly_rejects_unranked_memref_operand(
     %a: memref<*xi32>, %b: i32, %twiddle: i32) -> (i32, i32) {
   // expected-error@+1 {{value-only operation does not accept memref operands}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %twiddle {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = trunc, overflow = saturate, saturate_to = i16>} : (memref<*xi32>, i32, i32) -> (i32, i32)
+  %0, %1 = ondsp.cx_butterfly %a, %b, %twiddle {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (memref<*xi32>, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
 }
 
@@ -125,7 +125,7 @@ func.func @complex_value_ops_accept_shaped_values(
     %vector: vector<2xi16>, %tensor: tensor<2xi16>)
     -> (vector<2xi16>, tensor<2xi16>, tensor<2xi16>, vector<2xi16>) {
   %0 = ondsp.cx_mul %vector, %vector {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (vector<2xi16>, vector<2xi16>) -> vector<2xi16>
-  %1, %2 = ondsp.cx_butterfly %tensor, %tensor, %tensor {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = trunc, overflow = saturate, saturate_to = i16>} : (tensor<2xi16>, tensor<2xi16>, tensor<2xi16>) -> (tensor<2xi16>, tensor<2xi16>)
+  %1, %2 = ondsp.cx_butterfly %tensor, %tensor, %tensor {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tensor<2xi16>, tensor<2xi16>, tensor<2xi16>) -> (tensor<2xi16>, tensor<2xi16>)
   %3 = ondsp.fft_stage %vector {stage = 0 : i64, layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (vector<2xi16>) -> vector<2xi16>
   return %0, %1, %2, %3 : vector<2xi16>, tensor<2xi16>, tensor<2xi16>, vector<2xi16>
 }
