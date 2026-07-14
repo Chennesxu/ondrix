@@ -223,7 +223,11 @@ LogicalResult ReduceMacOp::verify() {
   return verifyValueNumericType(*this, getResult().getType(), getNumeric(), "result");
 }
 
+LogicalResult CxMulOp::verify() { return verifyValueOnlyTypes(*this); }
+
 LogicalResult CxButterflyOp::verify() {
+  if (failed(verifyValueOnlyTypes(*this)))
+    return failure();
   if (failed(verifyButterflyPolicies(*this, getNumeric(), getProduct(), getScale())))
     return failure();
 
@@ -257,3 +261,5 @@ LogicalResult CxButterflyOp::verify() {
   }
   return success();
 }
+
+LogicalResult FftStageOp::verify() { return verifyValueOnlyTypes(*this); }

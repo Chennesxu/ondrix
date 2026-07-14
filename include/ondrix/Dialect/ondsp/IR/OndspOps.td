@@ -97,6 +97,7 @@ def Ondsp_CxMulOp : Ondsp_Op<"cx_mul", [Pure]> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_CxLayoutAttr:$layout,
                    Ondsp_NumericAttr:$numeric);
   let results = (outs AnyType:$result);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
@@ -115,6 +116,7 @@ def Ondsp_FftStageOp : Ondsp_Op<"fft_stage", [Pure]> {
   let arguments = (ins Variadic<AnyType>:$inputs, I64Attr:$stage,
                    Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric);
   let results = (outs Variadic<AnyType>:$outputs);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
