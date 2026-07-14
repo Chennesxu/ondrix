@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --convert-ondsp-to-scalar | FileCheck %s
+// RUN: ondrix-opt %s --lower-ondsp-f32-reduce-to-scalar | FileCheck %s
 
 func.func @reduce_mac_fma(%lhs: memref<8xf32>, %rhs: memref<8xf32>, %seed: f32) -> f32 {
   %keep = ondsp.assume_numeric %seed {numeric = #ondsp.fp<format = f32, contract = off>} : (f32) -> f32

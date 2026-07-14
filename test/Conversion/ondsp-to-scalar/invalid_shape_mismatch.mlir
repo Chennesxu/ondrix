@@ -1,4 +1,4 @@
-// RUN: not ondrix-opt %s --convert-ondsp-to-scalar 2>&1 | FileCheck %s
+// RUN: not ondrix-opt %s --lower-ondsp-f32-reduce-to-scalar 2>&1 | FileCheck %s
 
 func.func @shape_mismatch(%lhs: memref<8xf32>, %rhs: memref<4xf32>) -> f32 {
   // CHECK: scalar lowering requires lhs and rhs to have equal static lengths

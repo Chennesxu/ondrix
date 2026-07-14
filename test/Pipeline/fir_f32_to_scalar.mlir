@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-to-scalar | FileCheck %s
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --lower-ondsp-f32-reduce-to-scalar | FileCheck %s
 
 func.func @fir_f32(%x: memref<8xf32>, %h: memref<8xf32>) -> f32 {
   %0 = ondrix.fir %x, %h {numeric = #ondsp.fp<format = f32, contract = fma>} : (memref<8xf32>, memref<8xf32>) -> f32

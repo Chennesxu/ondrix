@@ -1,4 +1,4 @@
-// RUN: not ondrix-opt %s --convert-ondsp-to-scalar 2>&1 | FileCheck %s
+// RUN: not ondrix-opt %s --lower-ondsp-f32-reduce-to-scalar 2>&1 | FileCheck %s
 
 func.func @f64(%lhs: memref<8xf64>, %rhs: memref<8xf64>) -> f64 {
   // CHECK: scalar lowering requires numeric = #ondsp.fp<format = f32, ...>

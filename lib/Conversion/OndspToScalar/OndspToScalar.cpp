@@ -16,7 +16,7 @@
 #include "mlir/Transforms/DialectConversion.h"
 
 namespace ondrix {
-#define GEN_PASS_DEF_CONVERTONDSPTOSCALAR
+#define GEN_PASS_DEF_LOWERONDSPF32REDUCETOSCALAR
 #include "ondrix/Conversion/Passes.h.inc"
 } // namespace ondrix
 
@@ -119,10 +119,11 @@ public:
   }
 };
 
-class ConvertOndspToScalarPass final
-    : public ondrix::impl::ConvertOndspToScalarBase<ConvertOndspToScalarPass> {
+class LowerOndspF32ReduceToScalarPass final
+    : public ondrix::impl::LowerOndspF32ReduceToScalarBase<LowerOndspF32ReduceToScalarPass> {
 public:
-  using ondrix::impl::ConvertOndspToScalarBase<ConvertOndspToScalarPass>::ConvertOndspToScalarBase;
+  using ondrix::impl::LowerOndspF32ReduceToScalarBase<
+      LowerOndspF32ReduceToScalarPass>::LowerOndspF32ReduceToScalarBase;
 
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
@@ -141,6 +142,6 @@ public:
 
 } // namespace
 
-std::unique_ptr<Pass> ondrix::createConvertOndspToScalarPass() {
-  return std::make_unique<ConvertOndspToScalarPass>();
+std::unique_ptr<Pass> ondrix::createLowerOndspF32ReduceToScalarPass() {
+  return std::make_unique<LowerOndspF32ReduceToScalarPass>();
 }
