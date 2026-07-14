@@ -44,6 +44,7 @@ def Ondrix_QuantizeOp : Ondrix_Op<"quantize", [Pure]> {
   let summary = "High-level numeric conversion intent";
   let arguments = (ins AnyType:$input, AnyAttr:$src, AnyAttr:$dst);
   let results = (outs AnyType:$result);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 

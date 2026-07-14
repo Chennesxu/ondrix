@@ -22,6 +22,15 @@ static void addMemRefReadEffect(Value value,
   effects.emplace_back(MemoryEffects::Read::get(), value, SideEffects::DefaultResource::get());
 }
 
+static LogicalResult verifyValueOnlyTypes(Operation *op) {
+  auto isMemRef = [](Type type) { return isa<BaseMemRefType>(type); };
+  if (llvm::any_of(op->getOperandTypes(), isMemRef))
+    return op->emitOpError("value-only operation does not accept memref operands");
+  if (llvm::any_of(op->getResultTypes(), isMemRef))
+    return op->emitOpError("value-only operation does not produce memref results");
+  return success();
+}
+
 static LogicalResult
 verifyOptionalProductPolicy(Operation *op, Attribute numeric,
                             std::optional<ondrix::ondsp::ProductAttr> product) {
@@ -86,5 +95,9 @@ LogicalResult DotOp::verify() {
 }
 
 LogicalResult ButterflyOp::verify() {
+  if (failed(verifyValueOnlyTypes(*this)))
+    return failure();
   return verifyButterflyPolicies(*this, getNumeric(), getProduct(), getScale());
 }
+
+LogicalResult QuantizeOp::verify() { return verifyValueOnlyTypes(*this); }
