@@ -141,6 +141,47 @@ public:
   }
 };
 
+class AccZeroOpLowering final : public OpConversionPattern<ondrix::ondsp::AccZeroOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::AccZeroOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::AccZeroOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    (void)adaptor;
+    if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())))
+      return failure();
+    Type resultType = getTypeConverter()->convertType(op.getAcc().getType());
+    if (!isa<ondrix::ortumcore::AccumType>(resultType))
+      return op.emitError("ondsp.acc_zero lowering requires an accumulator result");
+
+    rewriter.replaceOpWithNewOp<ondrix::ortumcore::AccInitOp>(op, resultType);
+    return success();
+  }
+};
+
+class AccImportOpLowering final : public OpConversionPattern<ondrix::ondsp::AccImportOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::AccImportOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::AccImportOp op, OpAdaptor,
+                                ConversionPatternRewriter &) const override {
+    return op.emitOpError("exact accumulator import is unsupported by ortumcore lowering until "
+                          "target import semantics are proven equivalent");
+  }
+};
+
+class AccExportOpLowering final : public OpConversionPattern<ondrix::ondsp::AccExportOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::AccExportOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::AccExportOp op, OpAdaptor,
+                                ConversionPatternRewriter &) const override {
+    return op.emitOpError(
+        "policy-bearing accumulator export is unsupported by ortumcore lowering until target "
+        "export semantics are proven equivalent");
+  }
+};
+
 class AccExtractOpLowering final : public OpConversionPattern<ondrix::ondsp::AccExtractOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::AccExtractOp>::OpConversionPattern;
@@ -374,8 +415,9 @@ public:
   void runOnOperation() override {
     OndspToOrtumCoreTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
-    patterns.add<AccInitOpLowering, AccExtractOpLowering, MacOpLowering, MacSubOpLowering,
-                 ReduceMacOpLowering, CxButterflyOpLowering>(typeConverter, &getContext());
+    patterns.add<AccInitOpLowering, AccZeroOpLowering, AccImportOpLowering, AccExtractOpLowering,
+                 AccExportOpLowering, MacOpLowering, MacSubOpLowering, ReduceMacOpLowering,
+                 CxButterflyOpLowering>(typeConverter, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);

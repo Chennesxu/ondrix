@@ -7,7 +7,12 @@ include "ondrix/Dialect/ortumcore/IR/OrtumCoreAttrs.td"
 include "ondrix/Dialect/ortumcore/IR/OrtumCoreTypes.td"
 
 def OrtumCore_AccInitOp : OrtumCore_Op<"acc_init", [Pure]> {
-  let summary = "Initialize a target accumulator semantic value";
+  let summary = "Create a zero-initialized target accumulator semantic value";
+  let description = [{
+    Produces the numeric zero of the abstract target accumulator domain. A
+    target adapter may materialize that value using any equivalent target
+    sequence.
+  }];
   let results = (outs OrtumCore_AccumType:$result);
   let assemblyFormat = "attr-dict `:` type($result)";
 }
