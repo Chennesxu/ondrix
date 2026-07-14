@@ -6,10 +6,9 @@ in a simple Python-like language instead of hand-writing and maintaining large
 assembly kernel libraries, while still producing AOT code suitable for embedded
 firmware or static-library integration.
 
-Kernels are written in a Python-like ondrix language and lowered by a frontend
-into MLIR. The compiler then uses a layered IR stack to separate high-level
-kernel intent, target-independent DSP numeric semantics, and target-specific DSP
-operations.
+The planned source language is Python-like and lowers into MLIR. The compiler
+uses a layered IR stack to separate high-level kernel intent,
+target-independent DSP numeric semantics, and target-specific DSP operations.
 
 The target flow is:
 
@@ -34,13 +33,29 @@ fixed-point policy, floating-point policy, accumulator state, complex packing,
 rounding, saturation, shifting, MAC operations, and block-friendly DSP structure.
 
 `ortumcore` is the first target-specific DSP semantic dialect. It models
-hardware-aware DSP operations at the IR level and lowers to LLVM dialect call
-stubs and AOT support stubs in this public repository.
+hardware-aware DSP operations at the IR level. Public emulation and LLVM call
+stub lowering are planned consumers of this dialect.
 
 The generic scalar path is intended for correctness testing and fallback
 compilation. The generic vector path is intended for portable CPU code
 generation through LLVM. The ortumcore path provides an abstract target semantic
 layer without exposing private backend details.
+
+## Current Status
+
+| Capability | Status |
+| --- | --- |
+| `ondrix`, `ondsp`, and `ortumcore` dialects | Implemented, contracts still experimental |
+| Typed conversion patterns and accumulator type conversion | Implemented |
+| Generic scalar lowering | Partial: rank-1 f32 reduction only |
+| Generic Vector CPU lowering | Planned |
+| Public OrtumCore emulation / LLVM stubs | Planned |
+| Python-like `.ox` frontend | Planned |
+| Object generation and C ABI execution tests | Planned |
+
+Textual MLIR is currently the supported development and testing entry point.
+Operations without a complete public consumer remain experimental and may
+change while the numeric contracts are being stabilized.
 
 ## LLVM/MLIR Baseline
 
