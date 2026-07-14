@@ -27,6 +27,9 @@ LogicalResult AccType::verify(function_ref<InFlightDiagnostic()> emitError, Type
   if (!intType)
     return emitError() << "accumulator storage must be an integer type";
 
+  if (!intType.isSignless())
+    return emitError() << "accumulator storage must use a signless integer type";
+
   unsigned width = intType.getWidth();
   if (width < 32)
     return emitError() << "accumulator storage must be at least 32 bits";

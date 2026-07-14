@@ -72,6 +72,15 @@ func.func @quantize_rejects_unranked_memref_result(
 
 // -----
 
+func.func @butterfly_rejects_nested_memref(
+    %a: tuple<memref<1xi32>>, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{value-only operation does not accept memref operands}}
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = trunc, overflow = saturate, saturate_to = i16>} : (tuple<memref<1xi32>>, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
+}
+
+// -----
+
 func.func @butterfly_accepts_vector_values(
     %a: vector<2xi16>, %b: vector<2xi16>, %tw: vector<2xi16>)
     -> (vector<2xi16>, vector<2xi16>) {

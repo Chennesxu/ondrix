@@ -63,6 +63,16 @@ func.func @acc_init_rejects_unranked_memref(
 
 // -----
 
+func.func @cx_mul_rejects_nested_memref(
+    %lhs: tuple<memref<1xi32>>, %rhs: tuple<memref<1xi32>>)
+    -> tuple<memref<1xi32>> {
+  // expected-error@+1 {{value-only operation does not accept memref operands}}
+  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tuple<memref<1xi32>>, tuple<memref<1xi32>>) -> tuple<memref<1xi32>>
+  return %0 : tuple<memref<1xi32>>
+}
+
+// -----
+
 func.func @numeric_value_ops_accept_shaped_values(
     %tensor: tensor<2xi16>, %vector: vector<2xi16>)
     -> (tensor<2xi16>, vector<2xi8>) {

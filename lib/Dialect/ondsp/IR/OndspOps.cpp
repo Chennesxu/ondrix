@@ -21,10 +21,12 @@ static void addMemRefReadEffect(Value value,
 }
 
 static LogicalResult verifyValueOnlyTypes(Operation *op) {
-  auto isMemRef = [](Type type) { return isa<BaseMemRefType>(type); };
-  if (llvm::any_of(op->getOperandTypes(), isMemRef))
+  auto containsMemRef = [](Type type) {
+    return type.walk([](BaseMemRefType) { return WalkResult::interrupt(); }).wasInterrupted();
+  };
+  if (llvm::any_of(op->getOperandTypes(), containsMemRef))
     return op->emitOpError("value-only operation does not accept memref operands");
-  if (llvm::any_of(op->getResultTypes(), isMemRef))
+  if (llvm::any_of(op->getResultTypes(), containsMemRef))
     return op->emitOpError("value-only operation does not produce memref results");
   return success();
 }

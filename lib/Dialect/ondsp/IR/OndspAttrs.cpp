@@ -29,6 +29,9 @@ LogicalResult FixedAttr::verify(function_ref<InFlightDiagnostic()> emitError, Si
   if (!intType)
     return emitError() << "fixed numeric storage must be an integer type";
 
+  if (!intType.isSignless())
+    return emitError() << "fixed numeric storage must use a signless integer type";
+
   unsigned width = intType.getWidth();
   if (width == 0)
     return emitError() << "fixed numeric storage must have non-zero width";
