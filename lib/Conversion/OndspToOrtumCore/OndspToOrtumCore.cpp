@@ -34,6 +34,8 @@ public:
     addConversion([](Type type) { return type; });
     addConversion([context](ondrix::ondsp::AccType type,
                             SmallVectorImpl<Type> &results) -> std::optional<LogicalResult> {
+      // Failing the specific conversion prevents the identity rule from
+      // allowing an unsupported source accumulator to escape legalization.
       auto storage = type.getStorage().dyn_cast<IntegerType>();
       if (!storage || storage.getWidth() != 40 ||
           type.getSignedness() != ondrix::ondsp::Signedness::Signed)
@@ -44,7 +46,7 @@ public:
   }
 };
 
-enum class MacTarget { Mac, QMac };
+enum class MacLoweringKind { Mac, QMac };
 
 static bool hasStorageType(Type type, Type storage) {
   if (type == storage)
@@ -61,7 +63,7 @@ static bool isI32(Type type) {
   return intType && intType.getWidth() == 32;
 }
 
-static LogicalResult verifyTargetAccumulator(Operation *op, ondrix::ondsp::AccType accumulator) {
+static LogicalResult verifyOrtumCoreAccumulator(Operation *op, ondrix::ondsp::AccType accumulator) {
   auto storage = accumulator.getStorage().dyn_cast<IntegerType>();
   if (!storage || storage.getWidth() != 40 ||
       accumulator.getSignedness() != ondrix::ondsp::Signedness::Signed)
@@ -70,6 +72,8 @@ static LogicalResult verifyTargetAccumulator(Operation *op, ondrix::ondsp::AccTy
 }
 
 static bool containsOndspAccumulator(Type type) {
+  // TypeConverter legality is shallow for aggregate types; reject source
+  // accumulators recursively so tuples and other wrappers cannot leak through.
   return type.walk([](ondrix::ondsp::AccType) { return WalkResult::interrupt(); }).wasInterrupted();
 }
 
@@ -99,9 +103,9 @@ static LogicalResult verifyStorageOperand(Operation *op, ondrix::ondsp::FixedAtt
   return success();
 }
 
-static LogicalResult chooseMacTarget(Operation *op, ondrix::ondsp::FixedAttr fixed,
-                                     std::optional<ondrix::ondsp::ProductAttr> product,
-                                     MacTarget &target) {
+static LogicalResult selectMacLoweringKind(Operation *op, ondrix::ondsp::FixedAttr fixed,
+                                           std::optional<ondrix::ondsp::ProductAttr> product,
+                                           MacLoweringKind &kind) {
   if (!product)
     return op->emitOpError("lowering requires an explicit fixed-point product policy");
 
@@ -113,14 +117,14 @@ static LogicalResult chooseMacTarget(Operation *op, ondrix::ondsp::FixedAttr fix
   if (intType.getWidth() == 16 && fixed.getFrac() == 15) {
     if (product->getSelection() != ondrix::ondsp::ProductSelection::Full)
       return op->emitOpError("signed q15 MAC lowering requires product = #ondsp.product<full>");
-    target = MacTarget::Mac;
+    kind = MacLoweringKind::Mac;
     return success();
   }
 
   if (intType.getWidth() == 32 && fixed.getFrac() == 31) {
     if (product->getSelection() != ondrix::ondsp::ProductSelection::High)
       return op->emitOpError("signed q31 MAC lowering requires product = #ondsp.product<high>");
-    target = MacTarget::QMac;
+    kind = MacLoweringKind::QMac;
     return success();
   }
 
@@ -134,7 +138,7 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::AccInitOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    if (failed(verifyTargetAccumulator(op, op.getAcc().getType())))
+    if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())))
       return failure();
     Type resultType = getTypeConverter()->convertType(op.getAcc().getType());
     if (!isa<ondrix::ortumcore::AccumType>(resultType))
@@ -151,7 +155,7 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::AccExtractOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    if (failed(verifyTargetAccumulator(op, op.getAcc().getType())))
+    if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())))
       return failure();
     if (op.getScale())
       return op.emitError("scaled ondsp.acc_extract is not supported by ortumcore lowering");
@@ -170,10 +174,10 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::MacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    MacTarget target;
-    if (failed(chooseMacTarget(op, op.getNumeric(), op.getProduct(), target)))
+    MacLoweringKind kind;
+    if (failed(selectMacLoweringKind(op, op.getNumeric(), op.getProduct(), kind)))
       return failure();
-    if (failed(verifyTargetAccumulator(op, op.getAcc().getType())))
+    if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())))
       return failure();
 
     auto fixed = op.getNumeric();
@@ -189,17 +193,17 @@ public:
       return failure();
     }
 
-    switch (target) {
-    case MacTarget::Mac:
+    switch (kind) {
+    case MacLoweringKind::Mac:
       rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacAddOp>(op, resultType, adaptor.getAcc(),
                                                                adaptor.getLhs(), adaptor.getRhs());
       return success();
-    case MacTarget::QMac:
+    case MacLoweringKind::QMac:
       rewriter.replaceOpWithNewOp<ondrix::ortumcore::QMacAddOp>(op, resultType, adaptor.getAcc(),
                                                                 adaptor.getLhs(), adaptor.getRhs());
       return success();
     }
-    llvm_unreachable("unhandled MAC target");
+    llvm_unreachable("unhandled MAC lowering kind");
   }
 };
 
@@ -209,10 +213,10 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::MacSubOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    MacTarget target;
-    if (failed(chooseMacTarget(op, op.getNumeric(), op.getProduct(), target)))
+    MacLoweringKind kind;
+    if (failed(selectMacLoweringKind(op, op.getNumeric(), op.getProduct(), kind)))
       return failure();
-    if (failed(verifyTargetAccumulator(op, op.getAcc().getType())))
+    if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())))
       return failure();
 
     auto fixed = op.getNumeric();
@@ -228,17 +232,17 @@ public:
       return failure();
     }
 
-    switch (target) {
-    case MacTarget::Mac:
+    switch (kind) {
+    case MacLoweringKind::Mac:
       rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacSubOp>(op, resultType, adaptor.getAcc(),
                                                                adaptor.getLhs(), adaptor.getRhs());
       return success();
-    case MacTarget::QMac:
+    case MacLoweringKind::QMac:
       rewriter.replaceOpWithNewOp<ondrix::ortumcore::QMacSubOp>(op, resultType, adaptor.getAcc(),
                                                                 adaptor.getLhs(), adaptor.getRhs());
       return success();
     }
-    llvm_unreachable("unhandled MAC target");
+    llvm_unreachable("unhandled MAC lowering kind");
   }
 };
 
@@ -260,8 +264,8 @@ public:
       return failure();
     }
 
-    MacTarget target;
-    if (failed(chooseMacTarget(op, fixed, op.getProduct(), target)))
+    MacLoweringKind kind;
+    if (failed(selectMacLoweringKind(op, fixed, op.getProduct(), kind)))
       return failure();
 
     if (failed(verifyStorageOperand(op, fixed, op.getLhs().getType())) ||
@@ -273,14 +277,14 @@ public:
     Type resultType = getTypeConverter()->convertType(op.getResult().getType());
 
     Value accumulated;
-    switch (target) {
-    case MacTarget::Mac:
+    switch (kind) {
+    case MacLoweringKind::Mac:
       accumulated = rewriter
                         .create<ondrix::ortumcore::MacAddOp>(op.getLoc(), accType, init.getResult(),
                                                              adaptor.getLhs(), adaptor.getRhs())
                         .getResult();
       break;
-    case MacTarget::QMac:
+    case MacLoweringKind::QMac:
       accumulated =
           rewriter
               .create<ondrix::ortumcore::QMacAddOp>(op.getLoc(), accType, init.getResult(),
