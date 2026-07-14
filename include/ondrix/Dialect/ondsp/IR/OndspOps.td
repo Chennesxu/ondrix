@@ -54,11 +54,17 @@ def Ondsp_SatSubShiftOp
     : Ondsp_BinaryShiftOp<"sat_sub_shift", "Saturating subtract plus scaling">;
 
 def Ondsp_AccInitOp : Ondsp_Op<"acc_init", [Pure]> {
-  let summary = "Create an accumulator state from an initial value";
+  let summary = "Experimental accumulator import with legacy implicit semantics";
   let arguments = (ins AnyType:$input);
   let results = (outs Ondsp_Acc:$acc);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_AccZeroOp : Ondsp_Op<"acc_zero", [Pure]> {
+  let summary = "Create an all-zero accumulator state";
+  let results = (outs Ondsp_Acc:$acc);
+  let assemblyFormat = "attr-dict `:` type($acc)";
 }
 
 class Ondsp_MacLikeOp<string mnemonic, string opSummary>
@@ -75,8 +81,18 @@ def Ondsp_MacOp : Ondsp_MacLikeOp<"mac", "Multiply-accumulate">;
 def Ondsp_MacSubOp : Ondsp_MacLikeOp<"mac_sub", "Multiply-subtract accumulate">;
 
 def Ondsp_AccExtractOp : Ondsp_Op<"acc_extract", [Pure]> {
-  let summary = "Extract a storage value from an accumulator";
+  let summary = "Experimental accumulator extraction with a legacy scale policy";
   let arguments = (ins Ondsp_Acc:$acc, OptionalAttr<Ondsp_ScaleAttr>:$scale);
+  let results = (outs AnyInteger:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_AccExportOp : Ondsp_Op<"acc_export", [Pure]> {
+  let summary = "Export an accumulator under an explicit destination policy";
+  let arguments = (ins Ondsp_Acc:$acc, Ondsp_FixedAttr:$dst,
+                   Ondsp_RoundingModeAttr:$rounding,
+                   Ondsp_OverflowModeAttr:$overflow);
   let results = (outs AnyInteger:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

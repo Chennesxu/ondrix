@@ -10,6 +10,15 @@ class Ondsp_Attr<string name, string attrMnemonic>
   let mnemonic = attrMnemonic;
 }
 
+def Ondsp_RoundingModeAttr
+    : EnumAttr<Ondsp_Dialect, Ondsp_RoundingMode, "rounding"> {
+  let assemblyFormat = "`<` $value `>`";
+}
+def Ondsp_OverflowModeAttr
+    : EnumAttr<Ondsp_Dialect, Ondsp_OverflowMode, "overflow"> {
+  let assemblyFormat = "`<` $value `>`";
+}
+
 def Ondsp_FixedAttr : Ondsp_Attr<"Fixed", "fixed"> {
   let summary = "Fixed-point numeric interpretation for an integer storage type";
   let parameters = (ins

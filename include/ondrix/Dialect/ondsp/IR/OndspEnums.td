@@ -29,6 +29,7 @@ def Ondsp_RoundingMode : I32EnumAttr<
     [Ondsp_RoundTowardNegative, Ondsp_RoundNearestEven,
      Ondsp_RoundTowardZero]> {
   let cppNamespace = "::ondrix::ondsp";
+  let genSpecializedAttr = 0;
 }
 
 def Ondsp_OverflowWrap : I32EnumAttrCase<"Wrap", 0, "wrap">;
@@ -36,6 +37,7 @@ def Ondsp_OverflowSaturate : I32EnumAttrCase<"Saturate", 1, "saturate">;
 def Ondsp_OverflowMode : I32EnumAttr<"OverflowMode", "overflow mode",
     [Ondsp_OverflowWrap, Ondsp_OverflowSaturate]> {
   let cppNamespace = "::ondrix::ondsp";
+  let genSpecializedAttr = 0;
 }
 
 def Ondsp_FpContractOff : I32EnumAttrCase<"Off", 0, "off">;

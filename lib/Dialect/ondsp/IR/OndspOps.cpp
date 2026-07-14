@@ -207,6 +207,18 @@ LogicalResult AccExtractOp::verify() {
   return success();
 }
 
+LogicalResult AccExportOp::verify() {
+  AccType accumulator = getAcc().getType();
+  FixedAttr destination = getDst();
+  if (accumulator.getSignedness() != destination.getSignedness())
+    return emitOpError("accumulator and destination signedness must match");
+  if (accumulator.getFrac() < destination.getFrac())
+    return emitOpError("destination frac must not exceed accumulator frac");
+  if (getResult().getType() != destination.getStorage())
+    return emitOpError("result type must match destination storage type");
+  return success();
+}
+
 LogicalResult ReduceMacOp::verify() {
   if (failed(verifyOptionalProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
