@@ -33,9 +33,9 @@ def LowerOndspF32ReduceToScalar
     : Pass<"lower-ondsp-f32-reduce-to-scalar", "::mlir::ModuleOp"> {
   let summary = "Lower f32 ondsp reductions to generic scalar MLIR";
   let description = [{
-    Partially lower rank-1 f32 ondsp.reduce_mac operations to generic scalar
-    MLIR. Other ondsp operations remain legal; this is not a final scalar
-    legalization pass.
+    Partially lower rank-1 f32 memref ondsp.reduce_mac operations to generic
+    scalar MLIR. Other ondsp operations and non-memref reductions remain legal;
+    this is not a final scalar legalization pass.
   }];
   let constructor = "ondrix::createLowerOndspF32ReduceToScalarPass()";
   let dependentDialects = [

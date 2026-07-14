@@ -42,6 +42,15 @@ static Value getDimZeroSize(Location loc, Value value, MemRefType type, Value ze
   return rewriter.create<memref::DimOp>(loc, value, zeroIndex);
 }
 
+static bool isSupportedF32MemRefReduction(ondrix::ondsp::ReduceMacOp op) {
+  auto numeric = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  auto lhsType = dyn_cast<MemRefType>(op.getLhs().getType());
+  auto rhsType = dyn_cast<MemRefType>(op.getRhs().getType());
+  return numeric && numeric.getFormat().isF32() && lhsType && rhsType && lhsType.getRank() == 1 &&
+         rhsType.getRank() == 1 && lhsType.getElementType().isF32() &&
+         rhsType.getElementType().isF32() && op.getResult().getType().isF32();
+}
+
 class ReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::ReduceMacOp>::OpConversionPattern;
@@ -133,7 +142,8 @@ public:
     target.addLegalDialect<BuiltinDialect, arith::ArithDialect, cf::ControlFlowDialect,
                            func::FuncDialect, math::MathDialect, memref::MemRefDialect,
                            scf::SCFDialect, ondrix::ondsp::OndspDialect>();
-    target.addIllegalOp<ondrix::ondsp::ReduceMacOp>();
+    target.addDynamicallyLegalOp<ondrix::ondsp::ReduceMacOp>(
+        [](ondrix::ondsp::ReduceMacOp op) { return !isSupportedF32MemRefReduction(op); });
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       signalPassFailure();
