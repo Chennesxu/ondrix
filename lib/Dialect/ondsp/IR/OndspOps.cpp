@@ -154,6 +154,27 @@ static bool hasI32Container(Type type) {
   return false;
 }
 
+static LogicalResult verifyReduceDomain(ReduceMacOp op) {
+  auto lhs = dyn_cast<ShapedType>(op.getLhs().getType());
+  auto rhs = dyn_cast<ShapedType>(op.getRhs().getType());
+  if (static_cast<bool>(lhs) != static_cast<bool>(rhs))
+    return op.emitOpError("requires either two scalar operands or two rank-1 shaped operands");
+  if (!lhs)
+    return success();
+
+  if (!lhs.hasRank() || !rhs.hasRank() || lhs.getRank() != 1 || rhs.getRank() != 1)
+    return op.emitOpError("shaped operands must be rank-1");
+  if (lhs.getElementType() != rhs.getElementType())
+    return op.emitOpError("shaped operand element types must match");
+
+  int64_t lhsLength = lhs.getDimSize(0);
+  int64_t rhsLength = rhs.getDimSize(0);
+  if (!ShapedType::isDynamic(lhsLength) && !ShapedType::isDynamic(rhsLength) &&
+      lhsLength != rhsLength)
+    return op.emitOpError("shaped operands must have equal static lengths");
+  return success();
+}
+
 } // namespace
 
 void ReduceMacOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
@@ -220,6 +241,8 @@ LogicalResult AccExportOp::verify() {
 }
 
 LogicalResult ReduceMacOp::verify() {
+  if (failed(verifyReduceDomain(*this)))
+    return failure();
   if (failed(verifyOptionalProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
 

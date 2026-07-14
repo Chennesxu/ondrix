@@ -102,6 +102,12 @@ def Ondsp_ReduceMacOp
     : Ondsp_Op<"reduce_mac", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
                               DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
   let summary = "Block-friendly dot/reduce MAC semantic operation";
+  let description = [{
+    Scalar compatibility form accepts two scalar operands. The block form
+    accepts two equal-length rank-1 shaped operands and reduces them in
+    increasing index order. Dynamic lengths require a runtime proof in the
+    selected lowering pipeline.
+  }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);
   let results = (outs AnyType:$result);

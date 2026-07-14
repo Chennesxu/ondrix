@@ -68,3 +68,21 @@ func.func @acc_extract_scale_result_mismatch(
   %0 = ondsp.acc_extract %acc {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i32>} : (!ondsp.acc<storage = i40, frac = 30, signed>) -> i16
   return %0 : i16
 }
+
+// -----
+
+func.func @reduce_mac_rejects_mixed_domains(
+    %lhs: memref<8xf32>, %rhs: f32) -> f32 {
+  // expected-error@+1 {{requires either two scalar operands or two rank-1 shaped operands}}
+  %0 = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fma>} : (memref<8xf32>, f32) -> f32
+  return %0 : f32
+}
+
+// -----
+
+func.func @reduce_mac_rejects_unranked(
+    %lhs: memref<*xf32>, %rhs: memref<*xf32>) -> f32 {
+  // expected-error@+1 {{shaped operands must be rank-1}}
+  %0 = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fma>} : (memref<*xf32>, memref<*xf32>) -> f32
+  return %0 : f32
+}
