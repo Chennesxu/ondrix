@@ -1,5 +1,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+
 #include <limits>
 #include <optional>
 
@@ -10,6 +12,13 @@ using namespace ondrix::ondsp;
 #include "ondrix/Dialect/ondsp/IR/OndspOps.cpp.inc"
 
 namespace {
+
+static void addMemRefReadEffect(Value value,
+                                SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  if (!isa<BaseMemRefType>(value.getType()))
+    return;
+  effects.emplace_back(MemoryEffects::Read::get(), value, SideEffects::DefaultResource::get());
+}
 
 static bool hasStorageType(Type type, Type storage) {
   if (type == storage)
@@ -135,6 +144,17 @@ static bool hasI32Container(Type type) {
 }
 
 } // namespace
+
+void ReduceMacOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  addMemRefReadEffect(getLhs(), effects);
+  addMemRefReadEffect(getRhs(), effects);
+}
+
+Speculation::Speculatability ReduceMacOp::getSpeculatability() {
+  return (isa<BaseMemRefType>(getLhs().getType()) || isa<BaseMemRefType>(getRhs().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
 
 LogicalResult AssumeNumericOp::verify() {
   return verifyValueNumericType(*this, getInput().getType(), getNumeric(), "input");

@@ -2,6 +2,9 @@
 
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
 
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+
 #include <optional>
 
 using namespace mlir;
@@ -11,6 +14,13 @@ using namespace ondrix::ir;
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.cpp.inc"
 
 namespace {
+
+static void addMemRefReadEffect(Value value,
+                                SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  if (!isa<BaseMemRefType>(value.getType()))
+    return;
+  effects.emplace_back(MemoryEffects::Read::get(), value, SideEffects::DefaultResource::get());
+}
 
 static LogicalResult
 verifyOptionalProductPolicy(Operation *op, Attribute numeric,
@@ -44,6 +54,28 @@ static LogicalResult verifyButterflyPolicies(Operation *op, Attribute numeric,
 }
 
 } // namespace
+
+void FirOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  addMemRefReadEffect(getInput(), effects);
+  addMemRefReadEffect(getCoeffs(), effects);
+}
+
+Speculation::Speculatability FirOp::getSpeculatability() {
+  return (isa<BaseMemRefType>(getInput().getType()) || isa<BaseMemRefType>(getCoeffs().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
+
+void DotOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  addMemRefReadEffect(getLhs(), effects);
+  addMemRefReadEffect(getRhs(), effects);
+}
+
+Speculation::Speculatability DotOp::getSpeculatability() {
+  return (isa<BaseMemRefType>(getLhs().getType()) || isa<BaseMemRefType>(getRhs().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
 
 LogicalResult FirOp::verify() {
   return verifyOptionalProductPolicy(*this, getNumeric(), getProduct());

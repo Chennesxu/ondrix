@@ -78,7 +78,9 @@ def Ondsp_AccExtractOp : Ondsp_Op<"acc_extract", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-def Ondsp_ReduceMacOp : Ondsp_Op<"reduce_mac", [Pure]> {
+def Ondsp_ReduceMacOp
+    : Ondsp_Op<"reduce_mac", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+                              DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
   let summary = "Block-friendly dot/reduce MAC semantic operation";
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);

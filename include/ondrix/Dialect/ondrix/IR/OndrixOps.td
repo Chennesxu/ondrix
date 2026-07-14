@@ -6,7 +6,9 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 include "ondrix/Dialect/ondrix/IR/OndrixDialect.td"
 include "ondrix/Dialect/ondsp/IR/OndspAttrs.td"
 
-def Ondrix_FirOp : Ondrix_Op<"fir", [Pure]> {
+def Ondrix_FirOp
+    : Ondrix_Op<"fir", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+                        DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
   let summary = "High-level FIR kernel intent";
   let arguments = (ins AnyType:$input, AnyType:$coeffs, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);
@@ -15,7 +17,9 @@ def Ondrix_FirOp : Ondrix_Op<"fir", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-def Ondrix_DotOp : Ondrix_Op<"dot", [Pure]> {
+def Ondrix_DotOp
+    : Ondrix_Op<"dot", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+                        DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
   let summary = "High-level dot/reduce kernel intent";
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);
