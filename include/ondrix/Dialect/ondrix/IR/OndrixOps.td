@@ -9,7 +9,13 @@ include "ondrix/Dialect/ondsp/IR/OndspAttrs.td"
 def Ondrix_FirOp
     : Ondrix_Op<"fir", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
                         DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
-  let summary = "High-level FIR kernel intent";
+  let summary = "Compute one FIR sample from a pre-windowed input";
+  let description = [{
+    `ondrix.fir` computes one output sample by pairing `input[i]` with
+    `coeffs[i]` in increasing index order. Both operands are rank-1 windows
+    with equal runtime length. Window construction, signal boundaries, and
+    streaming state are outside this operation.
+  }];
   let arguments = (ins AnyType:$input, AnyType:$coeffs, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);
   let results = (outs AnyType:$result);

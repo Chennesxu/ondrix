@@ -64,6 +64,40 @@ static LogicalResult verifyButterflyPolicies(Operation *op, Attribute numeric,
   return success();
 }
 
+static LogicalResult verifyFirWindow(FirOp op) {
+  auto inputType = dyn_cast<ShapedType>(op.getInput().getType());
+  auto coeffType = dyn_cast<ShapedType>(op.getCoeffs().getType());
+  if (!inputType || !coeffType || !inputType.hasRank() || !coeffType.hasRank() ||
+      inputType.getRank() != 1 || coeffType.getRank() != 1)
+    return op.emitOpError("requires rank-1 input and coefficient windows");
+
+  if (inputType.getElementType() != coeffType.getElementType())
+    return op.emitOpError("input and coefficient element types must match");
+
+  int64_t inputLength = inputType.getDimSize(0);
+  int64_t coeffLength = coeffType.getDimSize(0);
+  if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(coeffLength) &&
+      inputLength != coeffLength)
+    return op.emitOpError("input and coefficient windows must have equal length");
+
+  if (!isa<IntegerType, FloatType>(op.getResult().getType()))
+    return op.emitOpError("requires a scalar integer or floating-point result");
+
+  Type elementType = inputType.getElementType();
+  if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric())) {
+    if (elementType != fixed.getStorage())
+      return op.emitOpError("window element type must match fixed numeric storage type");
+    if (!isa<IntegerType>(op.getResult().getType()))
+      return op.emitOpError("fixed FIR requires an integer result");
+    return success();
+  }
+
+  auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  if (elementType != fp.getFormat() || op.getResult().getType() != fp.getFormat())
+    return op.emitOpError("floating-point FIR window and result types must match numeric format");
+  return success();
+}
+
 } // namespace
 
 void FirOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
@@ -89,7 +123,9 @@ Speculation::Speculatability DotOp::getSpeculatability() {
 }
 
 LogicalResult FirOp::verify() {
-  return verifyOptionalProductPolicy(*this, getNumeric(), getProduct());
+  if (failed(verifyOptionalProductPolicy(*this, getNumeric(), getProduct())))
+    return failure();
+  return verifyFirWindow(*this);
 }
 
 LogicalResult DotOp::verify() {
