@@ -27,6 +27,7 @@ def Ondsp_RoundShiftOp : Ondsp_Op<"round_shift", [Pure]> {
   let summary = "Apply an explicit rounding and shift policy";
   let arguments = (ins AnyType:$input, Ondsp_ScaleAttr:$scale);
   let results = (outs AnyType:$result);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
@@ -34,6 +35,7 @@ def Ondsp_SatCastOp : Ondsp_Op<"sat_cast", [Pure]> {
   let summary = "Saturating cast under an explicit numeric policy";
   let arguments = (ins AnyType:$input, AnyAttr:$numeric);
   let results = (outs AnyType:$result);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
@@ -42,6 +44,7 @@ class Ondsp_BinaryShiftOp<string mnemonic, string opSummary>
   let summary = opSummary;
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_ScaleAttr:$scale);
   let results = (outs AnyType:$result);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
@@ -54,6 +57,7 @@ def Ondsp_AccInitOp : Ondsp_Op<"acc_init", [Pure]> {
   let summary = "Create an accumulator state from an initial value";
   let arguments = (ins AnyType:$input);
   let results = (outs Ondsp_Acc:$acc);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
