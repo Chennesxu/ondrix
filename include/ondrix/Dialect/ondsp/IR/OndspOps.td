@@ -67,6 +67,19 @@ def Ondsp_AccZeroOp : Ondsp_Op<"acc_zero", [Pure]> {
   let assemblyFormat = "attr-dict `:` type($acc)";
 }
 
+def Ondsp_AccImportOp : Ondsp_Op<"acc_import", [Pure]> {
+  let summary = "Import a fixed-point value into an accumulator exactly";
+  let description = [{
+    Interprets the input using the source fixed-point policy and preserves its
+    numeric value in the accumulator domain. The verifier rejects imports that
+    would discard fractional bits or cannot represent every source value.
+  }];
+  let arguments = (ins AnyInteger:$input, Ondsp_FixedAttr:$src);
+  let results = (outs Ondsp_Acc:$acc);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 class Ondsp_MacLikeOp<string mnemonic, string opSummary>
     : Ondsp_Op<mnemonic, [Pure, AllTypesMatch<["acc", "result"]>]> {
   let summary = opSummary;

@@ -5,6 +5,8 @@ func.func @ondsp_ops(%a: i16, %b: i16, %p0: i32, %p1: i32, %tw: i32,
                      %i: index, %s: index) -> (i32, i32, i32, index) {
   // CHECK: ondsp.acc_zero
   %zero = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed>
+  // CHECK: ondsp.acc_import
+  %imported = ondsp.acc_import %a {src = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i16) -> !ondsp.acc<storage = i40, frac = 30, signed>
   %acc = ondsp.acc_init %a : (i16) -> !ondsp.acc<storage = i40, frac = 30, signed>
 
   // CHECK: ondsp.mac

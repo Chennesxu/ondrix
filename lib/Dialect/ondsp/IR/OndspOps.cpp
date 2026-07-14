@@ -212,6 +212,26 @@ LogicalResult SatSubShiftOp::verify() { return verifyValueOnlyTypes(*this); }
 
 LogicalResult AccInitOp::verify() { return verifyValueOnlyTypes(*this); }
 
+LogicalResult AccImportOp::verify() {
+  FixedAttr source = getSrc();
+  AccType accumulator = getAcc().getType();
+  if (getInput().getType() != source.getStorage())
+    return emitOpError("input type must match source storage type");
+  if (accumulator.getSignedness() != source.getSignedness())
+    return emitOpError("source and accumulator signedness must match");
+  if (accumulator.getFrac() < source.getFrac())
+    return emitOpError("exact import requires accumulator frac to be at least source frac");
+
+  unsigned sourceWidth = source.getStorage().cast<IntegerType>().getWidth();
+  unsigned accumulatorWidth = accumulator.getStorage().cast<IntegerType>().getWidth();
+  uint64_t requiredWidth =
+      static_cast<uint64_t>(sourceWidth) + accumulator.getFrac() - source.getFrac();
+  if (requiredWidth > accumulatorWidth)
+    return emitOpError() << "exact import requires at least " << requiredWidth
+                         << " accumulator storage bits";
+  return success();
+}
+
 LogicalResult MacOp::verify() {
   return verifyMacLike(*this, getAcc(), getLhs(), getRhs(), getNumeric(), getProduct());
 }
