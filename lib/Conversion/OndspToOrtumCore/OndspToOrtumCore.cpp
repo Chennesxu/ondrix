@@ -424,8 +424,9 @@ public:
 
     ConversionTarget target(getContext());
     target.addLegalDialect<BuiltinDialect, ondrix::ortumcore::OrtumCoreDialect>();
-    target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
-        [&](UnrealizedConversionCastOp op) { return typeConverter.isLegal(op); });
+    target.addDynamicallyLegalOp<UnrealizedConversionCastOp>([&](UnrealizedConversionCastOp op) {
+      return hasLegalConvertedTypes(op.getOperation(), typeConverter);
+    });
     target.addIllegalDialect<ondrix::ondsp::OndspDialect>();
     target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
       return typeConverter.isSignatureLegal(op.getFunctionType()) &&
