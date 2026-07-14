@@ -8,15 +8,15 @@ include "ondrix/Dialect/ortumcore/IR/OrtumCoreTypes.td"
 
 def OrtumCore_AccInitOp : OrtumCore_Op<"acc_init", [Pure]> {
   let summary = "Initialize a target accumulator semantic value";
-  let results = (outs AnyType:$result);
+  let results = (outs OrtumCore_AccumType:$result);
   let assemblyFormat = "attr-dict `:` type($result)";
 }
 
 class OrtumCore_MacOp<string mnemonic, string opSummary>
-    : OrtumCore_Op<mnemonic, [Pure]> {
+    : OrtumCore_Op<mnemonic, [Pure, AllTypesMatch<["acc", "result"]>]> {
   let summary = opSummary;
-  let arguments = (ins AnyType:$acc, AnyType:$lhs, AnyType:$rhs);
-  let results = (outs AnyType:$result);
+  let arguments = (ins OrtumCore_AccumType:$acc, AnyInteger:$lhs, AnyInteger:$rhs);
+  let results = (outs OrtumCore_AccumType:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
@@ -27,14 +27,14 @@ def OrtumCore_QMacAddOp : OrtumCore_MacOp<"qmac_add", "Q-format multiply-add sem
 def OrtumCore_QMacSubOp : OrtumCore_MacOp<"qmac_sub", "Q-format multiply-subtract semantic op">;
 
 def OrtumCore_AccExtractOp : OrtumCore_Op<"acc_extract", [Pure]> {
-  let arguments = (ins AnyType:$acc);
-  let results = (outs AnyType:$result);
+  let arguments = (ins OrtumCore_AccumType:$acc);
+  let results = (outs AnyInteger:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
 def OrtumCore_AccImportOp : OrtumCore_Op<"acc_import", [Pure]> {
-  let arguments = (ins AnyType:$input);
-  let results = (outs AnyType:$result);
+  let arguments = (ins AnyInteger:$input);
+  let results = (outs OrtumCore_AccumType:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
