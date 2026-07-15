@@ -28,9 +28,25 @@ class OrtumCore_MacOp<string mnemonic, string opSummary, TypeConstraint payloadT
 def OrtumCore_DualMacOp
     : OrtumCore_MacOp<"dual_mac", "Experimental dual-lane i16 MAC semantic op", I16>;
 def OrtumCore_MacAddOp
-    : OrtumCore_MacOp<"mac_add", "i16 multiply-add semantic op", I16>;
+    : OrtumCore_MacOp<"mac_add", "Saturating signed Q15 multiply-add", I16> {
+  let description = [{
+    Interprets `lhs` and `rhs` as signed i16 raw values with 15 fractional
+    bits, computes their exact signed 16-by-16 full product, and adds that
+    product to the signed accumulator. The mathematical update is then
+    saturated to the signed 40-bit accumulator range. Export or
+    requantization behavior is not part of this operation.
+  }];
+}
 def OrtumCore_MacSubOp
-    : OrtumCore_MacOp<"mac_sub", "i16 multiply-subtract semantic op", I16>;
+    : OrtumCore_MacOp<"mac_sub", "Saturating signed Q15 multiply-subtract", I16> {
+  let description = [{
+    Interprets `lhs` and `rhs` as signed i16 raw values with 15 fractional
+    bits, computes their exact signed 16-by-16 full product, and subtracts that
+    product from the signed accumulator. The mathematical update is then
+    saturated to the signed 40-bit accumulator range. Export or
+    requantization behavior is not part of this operation.
+  }];
+}
 def OrtumCore_QMacAddOp
     : OrtumCore_MacOp<"qmac_add", "Experimental i32 Q-format multiply-add semantic op", I32>;
 def OrtumCore_QMacSubOp

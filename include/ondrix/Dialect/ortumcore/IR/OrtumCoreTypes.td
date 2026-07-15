@@ -10,7 +10,13 @@ class OrtumCore_Type<string name, string typeMnemonic>
 }
 
 def OrtumCore_AccumType : OrtumCore_Type<"Accum", "acc"> {
-  let summary = "Target accumulator semantic value";
+  let summary = "Saturating Q15 accumulator semantic value";
+  let description = [{
+    Represents signed 40-bit two's-complement raw accumulator state with 30
+    fractional bits. Operations that update this value must preserve this
+    domain. The type models an abstract target capability and does not expose
+    physical storage or register-allocation constraints.
+  }];
 }
 
 def OrtumCore_AccumPairType : OrtumCore_Type<"AccumPair", "acc_pair"> {
@@ -42,10 +48,11 @@ def OrtumCore_VecPairType : OrtumCore_Type<"VecPair", "vec_pair"> {
 }
 
 def OrtumCore_VecStateType : OrtumCore_Type<"VecState", "vec.state"> {
-  let summary = "Experimental packed-vector mode/state token";
+  let summary = "Packed-vector mode/state token";
   let description = [{
-    Ordering token for packed-vector mode changes and dependent packed-vector
-    operations. It is target semantic state, not a public physical register.
+    Experimental contract. Ordering token for packed-vector mode changes and
+    dependent packed-vector operations. It is target semantic state, not a
+    public physical register.
   }];
 }
 
