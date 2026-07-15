@@ -9,7 +9,7 @@ func.func @missing_vec_mode_attributes(%state: !ortumcore.vec.state) {
 // -----
 
 func.func @invalid_vec_mode_operand(%state: i32) {
-  // CHECK: operand #0 must be Explicit packed-vector mode/state token, but got 'i32'
+// CHECK: operand #0 must be Experimental packed-vector mode/state token, but got 'i32'
   %next = ortumcore.vec_set_mode %state {saturation = true, round_to_nearest = false, packed_complex = true, shift_right = 15 : i64, shift_left = 0 : i64} : (i32) -> !ortumcore.vec.state
   return
 }
@@ -17,7 +17,7 @@ func.func @invalid_vec_mode_operand(%state: i32) {
 // -----
 
 func.func @invalid_vec_mode_result(%state: !ortumcore.vec.state) {
-  // CHECK: result #0 must be Explicit packed-vector mode/state token, but got 'i32'
+// CHECK: result #0 must be Experimental packed-vector mode/state token, but got 'i32'
   %next = ortumcore.vec_set_mode %state {saturation = true, round_to_nearest = false, packed_complex = true, shift_right = 15 : i64, shift_left = 0 : i64} : (!ortumcore.vec.state) -> i32
   return
 }

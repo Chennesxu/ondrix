@@ -26,7 +26,7 @@ class OrtumCore_MacOp<string mnemonic, string opSummary, TypeConstraint payloadT
 }
 
 def OrtumCore_DualMacOp
-    : OrtumCore_MacOp<"dual_mac", "Dual-lane i16 MAC semantic op", I16>;
+    : OrtumCore_MacOp<"dual_mac", "Experimental dual-lane i16 MAC semantic op", I16>;
 def OrtumCore_MacAddOp
     : OrtumCore_MacOp<"mac_add", "i16 multiply-add semantic op", I16>;
 def OrtumCore_MacSubOp
@@ -62,11 +62,13 @@ def OrtumCore_SatAddOp : OrtumCore_BinaryOp<"sat_add", "Saturating add semantic 
 def OrtumCore_SatSubOp : OrtumCore_BinaryOp<"sat_sub", "Saturating subtract semantic op">;
 
 def OrtumCore_VecStateInitOp : OrtumCore_Op<"vec_state_init", [Pure]> {
+  let summary = "Experimental packed-vector mode state initialization";
   let results = (outs OrtumCore_VecStateType:$state);
   let assemblyFormat = "attr-dict `:` type($state)";
 }
 
 def OrtumCore_VecSetModeOp : OrtumCore_Op<"vec_set_mode", [Pure]> {
+  let summary = "Experimental packed-vector mode state transition";
   let arguments = (ins OrtumCore_VecStateType:$state,
                        BoolAttr:$saturation,
                        BoolAttr:$round_to_nearest,

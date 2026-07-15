@@ -2,7 +2,7 @@
 
 func.func @packed_op_requires_vector_state(
     %state: i32, %lhs: i32, %rhs: i32) -> (i32, i32) {
-  // expected-error@+1 {{operand #0 must be Explicit packed-vector mode/state token}}
+  // expected-error@+1 {{operand #0 must be Experimental packed-vector mode/state token}}
   %next, %0 = ortumcore.cx_mul %state, %lhs, %rhs : (i32, i32, i32) -> (i32, i32)
   return %next, %0 : i32, i32
 }
@@ -31,7 +31,7 @@ func.func @packed_fft_requires_i32_payload(
 
 func.func @packed_op_requires_vector_state_result(
     %state: !ortumcore.vec.state, %lhs: i32, %rhs: i32) -> (i32, i32) {
-  // expected-error@+1 {{result #0 must be Explicit packed-vector mode/state token}}
+  // expected-error@+1 {{result #0 must be Experimental packed-vector mode/state token}}
   %next, %0 = ortumcore.cx_mul %state, %lhs, %rhs : (!ortumcore.vec.state, i32, i32) -> (i32, i32)
   return %next, %0 : i32, i32
 }

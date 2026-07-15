@@ -42,7 +42,7 @@ def OrtumCore_VecPairType : OrtumCore_Type<"VecPair", "vec_pair"> {
 }
 
 def OrtumCore_VecStateType : OrtumCore_Type<"VecState", "vec.state"> {
-  let summary = "Explicit packed-vector mode/state token";
+  let summary = "Experimental packed-vector mode/state token";
   let description = [{
     Ordering token for packed-vector mode changes and dependent packed-vector
     operations. It is target semantic state, not a public physical register.
