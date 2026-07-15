@@ -89,8 +89,24 @@ class Ondsp_MacLikeOp<string mnemonic, string opSummary>
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-def Ondsp_MacOp : Ondsp_MacLikeOp<"mac", "Multiply-accumulate">;
-def Ondsp_MacSubOp : Ondsp_MacLikeOp<"mac_sub", "Multiply-subtract accumulate">;
+def Ondsp_MacOp : Ondsp_MacLikeOp<"mac", "Multiply-accumulate"> {
+  let description = [{
+    Computes the exact fixed-point product selected by `product`, adds it to
+    the mathematical accumulator value, and applies `acc.update_overflow` when
+    the result is written back to the accumulator storage width. Rounding and
+    destination overflow are not part of this operation.
+  }];
+}
+
+def Ondsp_MacSubOp : Ondsp_MacLikeOp<"mac_sub", "Multiply-subtract accumulate"> {
+  let description = [{
+    Computes the exact fixed-point product selected by `product`, subtracts it
+    from the mathematical accumulator value, and applies
+    `acc.update_overflow` when the result is written back to the accumulator
+    storage width. Rounding and destination overflow are not part of this
+    operation.
+  }];
+}
 
 def Ondsp_AccExtractOp : Ondsp_Op<"acc_extract", [Pure]> {
   let summary = "Experimental accumulator extraction with a legacy scale policy";
@@ -118,16 +134,24 @@ def Ondsp_AccExportOp : Ondsp_Op<"acc_export", [Pure]> {
 }
 
 def Ondsp_ReduceMacOp
-    : Ondsp_Op<"reduce_mac", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+    : Ondsp_Op<"reduce_mac", [AllTypesMatch<["initial", "result"]>,
+                              DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
                               DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
-  let summary = "Block-friendly dot/reduce MAC semantic operation";
+  let summary = "Ordered rank-1 dot/reduce MAC semantic operation";
   let description = [{
-    Scalar compatibility form accepts two scalar operands. The block form
-    accepts two equal-length rank-1 shaped operands and reduces them in
-    increasing index order. Dynamic lengths require a runtime proof in the
-    selected lowering pipeline.
+    Accepts two equal-length rank-1 shaped operands and folds their pairwise
+    products into `initial` in increasing index order. Fixed-point reductions
+    use an `!ondsp.acc` initial/result type, so accumulator width, fractional
+    position, signedness, and per-update overflow remain explicit. Floating-
+    point reductions use the numeric format as their initial/result type.
+    Dynamic lengths require a runtime proof in the selected lowering pipeline.
+
+    This ordered left-fold contract is the portable correctness baseline.
+    Consumers may reassociate or vectorize it only when the numeric policy and
+    range analysis prove that the transformed order is equivalent.
   }];
-  let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_NumericAttr:$numeric,
+  let arguments = (ins AnyType:$initial, AnyType:$lhs, AnyType:$rhs,
+                   Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;

@@ -16,8 +16,9 @@ func.func @convert_destination_mismatch(%x: i16) -> i32 {
 
 // -----
 
-func.func @reduce_fp_storage_mismatch(%a: f64, %b: f64) -> f32 {
+func.func @reduce_fp_storage_mismatch(%a: memref<8xf64>, %b: memref<8xf64>) -> f32 {
+  %zero = arith.constant 0.0 : f32
   // expected-error@+1 {{lhs type does not match numeric storage type}}
-  %0 = ondsp.reduce_mac %a, %b {numeric = #ondsp.fp<format = f32, contract = fma>} : (f64, f64) -> f32
+  %0 = ondsp.reduce_mac %zero, %a, %b {numeric = #ondsp.fp<format = f32, contract = fma>} : (f32, memref<8xf64>, memref<8xf64>) -> f32
   return %0 : f32
 }

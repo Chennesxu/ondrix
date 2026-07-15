@@ -43,10 +43,10 @@ func.func @dot_reads_memory(%lhs: memref<8xf32>, %rhs: memref<8xf32>, %value: f3
 // CHECK: %[[AFTER:.*]] = ondrix.dot
 // CHECK: return %[[BEFORE]], %[[AFTER]]
 
-func.func @scalar_dot_is_memory_effect_free(%lhs: i16, %rhs: i16) -> (i32, i32) {
-  %first = ondrix.dot %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> i32
-  %second = ondrix.dot %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> i32
-  return %first, %second : i32, i32
+func.func @scalar_dot_is_memory_effect_free(%lhs: i16, %rhs: i16) -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) {
+  %first = ondrix.dot %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %second = ondrix.dot %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  return %first, %second : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 }
 
 // CHECK-LABEL: func.func @scalar_dot_is_memory_effect_free
@@ -54,16 +54,15 @@ func.func @scalar_dot_is_memory_effect_free(%lhs: i16, %rhs: i16) -> (i32, i32) 
 // CHECK-NOT: ondrix.dot
 // CHECK: return %[[DOT]], %[[DOT]]
 
-func.func @scalar_dot_is_speculatable(%lhs: i16, %rhs: i16, %upper: index) -> i32 {
+func.func @scalar_dot_is_speculatable(%lhs: i16, %rhs: i16, %upper: index) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
-  %init = arith.constant 0 : i32
-  %result = scf.for %i = %c0 to %upper step %c1 iter_args(%acc = %init) -> (i32) {
-    %dot = ondrix.dot %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> i32
-    %next = arith.addi %acc, %dot : i32
-    scf.yield %next : i32
+  %init = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %result = scf.for %i = %c0 to %upper step %c1 iter_args(%acc = %init) -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) {
+    %dot = ondrix.dot %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    scf.yield %dot : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
   }
-  return %result : i32
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 }
 
 // LICM-LABEL: func.func @scalar_dot_is_speculatable

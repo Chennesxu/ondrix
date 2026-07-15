@@ -1,7 +1,8 @@
 // RUN: ondrix-opt %s --lower-ondsp-f32-reduce-to-scalar | FileCheck %s
 
 func.func @reduce_mac_dynamic(%lhs: memref<?xf32>, %rhs: memref<?xf32>) -> f32 {
-  %0 = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fma>} : (memref<?xf32>, memref<?xf32>) -> f32
+  %zero = arith.constant 0.0 : f32
+  %0 = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fma>} : (f32, memref<?xf32>, memref<?xf32>) -> f32
   return %0 : f32
 }
 

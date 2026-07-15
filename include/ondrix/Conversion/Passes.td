@@ -12,6 +12,7 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
   let dependentDialects = [
     "ondrix::ir::OndrixDialect",
     "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
   ];
 }
 

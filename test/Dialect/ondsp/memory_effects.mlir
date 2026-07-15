@@ -3,9 +3,10 @@
 
 func.func @reduce_mac_reads_memory(%lhs: memref<8xf32>, %rhs: memref<8xf32>, %value: f32) -> (f32, f32) {
   %c0 = arith.constant 0 : index
-  %before = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (memref<8xf32>, memref<8xf32>) -> f32
+  %zero = arith.constant 0.0 : f32
+  %before = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, memref<8xf32>, memref<8xf32>) -> f32
   memref.store %value, %lhs[%c0] : memref<8xf32>
-  %after = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (memref<8xf32>, memref<8xf32>) -> f32
+  %after = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, memref<8xf32>, memref<8xf32>) -> f32
   return %before, %after : f32, f32
 }
 
@@ -15,30 +16,30 @@ func.func @reduce_mac_reads_memory(%lhs: memref<8xf32>, %rhs: memref<8xf32>, %va
 // CHECK: %[[AFTER:.*]] = ondsp.reduce_mac
 // CHECK: return %[[BEFORE]], %[[AFTER]]
 
-func.func @scalar_reduce_mac_is_memory_effect_free(%lhs: i16, %rhs: i16) -> (i32, i32) {
-  %first = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> i32
-  %second = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> i32
-  return %first, %second : i32, i32
+func.func @value_reduce_mac_is_memory_effect_free(%lhs: vector<8xi16>, %rhs: vector<8xi16>) -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) {
+  %zero = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %first = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, vector<8xi16>, vector<8xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %second = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, vector<8xi16>, vector<8xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  return %first, %second : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 }
 
-// CHECK-LABEL: func.func @scalar_reduce_mac_is_memory_effect_free
+// CHECK-LABEL: func.func @value_reduce_mac_is_memory_effect_free
 // CHECK: %[[REDUCE:.*]] = ondsp.reduce_mac
 // CHECK-NOT: ondsp.reduce_mac
 // CHECK: return %[[REDUCE]], %[[REDUCE]]
 
-func.func @scalar_reduce_mac_is_speculatable(%lhs: i16, %rhs: i16, %upper: index) -> i32 {
+func.func @value_reduce_mac_is_speculatable(%lhs: vector<8xi16>, %rhs: vector<8xi16>, %upper: index) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
-  %init = arith.constant 0 : i32
-  %result = scf.for %i = %c0 to %upper step %c1 iter_args(%acc = %init) -> (i32) {
-    %reduce = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> i32
-    %next = arith.addi %acc, %reduce : i32
-    scf.yield %next : i32
+  %init = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %result = scf.for %i = %c0 to %upper step %c1 iter_args(%acc = %init) -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) {
+    %reduce = ondsp.reduce_mac %init, %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, vector<8xi16>, vector<8xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    scf.yield %reduce : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
   }
-  return %result : i32
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 }
 
-// LICM-LABEL: func.func @scalar_reduce_mac_is_speculatable
+// LICM-LABEL: func.func @value_reduce_mac_is_speculatable
 // LICM: %[[REDUCE:.*]] = ondsp.reduce_mac
 // LICM: scf.for
 // LICM-NOT: ondsp.reduce_mac
@@ -49,7 +50,7 @@ func.func @static_vector_reduce_mac_is_speculatable(
   %c1 = arith.constant 1 : index
   %init = arith.constant 0.0 : f32
   %result = scf.for %i = %c0 to %upper step %c1 iter_args(%acc = %init) -> (f32) {
-    %reduce = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (vector<8xf32>, vector<8xf32>) -> f32
+    %reduce = ondsp.reduce_mac %init, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, vector<8xf32>, vector<8xf32>) -> f32
     %next = arith.addf %acc, %reduce : f32
     scf.yield %next : f32
   }
@@ -67,7 +68,7 @@ func.func @dynamic_tensor_reduce_mac_remains_in_loop(
   %c1 = arith.constant 1 : index
   %init = arith.constant 0.0 : f32
   %result = scf.for %i = %c0 to %upper step %c1 iter_args(%acc = %init) -> (f32) {
-    %reduce = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (tensor<?xf32>, tensor<?xf32>) -> f32
+    %reduce = ondsp.reduce_mac %init, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, tensor<?xf32>, tensor<?xf32>) -> f32
     %next = arith.addf %acc, %reduce : f32
     scf.yield %next : f32
   }

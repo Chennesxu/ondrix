@@ -5,6 +5,7 @@ include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "ondrix/Dialect/ondrix/IR/OndrixDialect.td"
 include "ondrix/Dialect/ondsp/IR/OndspAttrs.td"
+include "ondrix/Dialect/ondsp/IR/OndspTypes.td"
 
 def Ondrix_FirOp
     : Ondrix_Op<"fir", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
@@ -14,7 +15,9 @@ def Ondrix_FirOp
     `ondrix.fir` computes one output sample by pairing `input[i]` with
     `coeffs[i]` in increasing index order. Both operands are rank-1 windows
     with equal runtime length. Window construction, signal boundaries, and
-    streaming state are outside this operation.
+    streaming state are outside this operation. A fixed-point FIR produces an
+    explicit `!ondsp.acc` result; destination rounding and overflow are modeled
+    by a subsequent `ondsp.acc_export`.
   }];
   let arguments = (ins AnyType:$input, AnyType:$coeffs, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);
@@ -30,7 +33,9 @@ def Ondrix_DotOp
   let description = [{
     Accepts either two scalar operands or two equal-length rank-1 shaped
     operands. Shaped operands are paired in increasing index order. Dynamic
-    lengths require a runtime proof in the selected lowering pipeline.
+    lengths require a runtime proof in the selected lowering pipeline. A
+    fixed-point dot produces an explicit `!ondsp.acc` result; destination
+    rounding and overflow are modeled by a subsequent `ondsp.acc_export`.
   }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);

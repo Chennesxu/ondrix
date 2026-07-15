@@ -1,11 +1,13 @@
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
+#include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 #include "ondrix/Support/DSPTypeUtils.h"
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
+#include <limits>
 #include <optional>
 
 using namespace mlir;
@@ -79,6 +81,38 @@ static Type getNumericStorage(Attribute numeric) {
   if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric))
     return fixed.getStorage();
   return cast<ondrix::ondsp::FpAttr>(numeric).getFormat();
+}
+
+static FailureOr<unsigned> getFixedProductFrac(Operation *op, ondrix::ondsp::FixedAttr numeric,
+                                               ondrix::ondsp::ProductAttr product) {
+  uint64_t frac = numeric.getFrac();
+  uint64_t doubledFrac = frac * 2;
+  auto storage = cast<IntegerType>(numeric.getStorage());
+  if (product.getSelection() == ondrix::ondsp::ProductSelection::High) {
+    if (doubledFrac < storage.getWidth())
+      return op->emitOpError("high product fractional position would be negative");
+    doubledFrac -= storage.getWidth();
+  }
+  if (doubledFrac > std::numeric_limits<unsigned>::max())
+    return op->emitOpError("product fractional position is unrepresentable");
+  return static_cast<unsigned>(doubledFrac);
+}
+
+static LogicalResult verifyFixedReductionResult(Operation *op, Type resultType,
+                                                ondrix::ondsp::FixedAttr numeric,
+                                                ondrix::ondsp::ProductAttr product) {
+  auto accumulator = dyn_cast<ondrix::ondsp::AccType>(resultType);
+  if (!accumulator)
+    return op->emitOpError("fixed reduction result must use !ondsp.acc");
+  if (accumulator.getSignedness() != numeric.getSignedness())
+    return op->emitOpError("accumulator signedness must match fixed numeric policy");
+  FailureOr<unsigned> expectedFrac = getFixedProductFrac(op, numeric, product);
+  if (failed(expectedFrac))
+    return failure();
+  if (accumulator.getFrac() != *expectedFrac)
+    return op->emitOpError() << "accumulator frac " << accumulator.getFrac()
+                             << " does not match product frac " << *expectedFrac;
+  return success();
 }
 
 static bool isPackedI16Layout(ondrix::ondsp::CxLayoutAttr layout) {
@@ -155,17 +189,11 @@ static LogicalResult verifyFirWindow(FirOp op) {
       inputLength != coeffLength)
     return op.emitOpError("input and coefficient windows must have equal length");
 
-  if (!isa<IntegerType, FloatType>(op.getResult().getType()))
-    return op.emitOpError("requires a scalar integer or floating-point result");
-
   Type elementType = inputType.getElementType();
   if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric())) {
     if (elementType != fixed.getStorage())
       return op.emitOpError("window element type must match fixed numeric storage type");
-    auto resultType = dyn_cast<IntegerType>(op.getResult().getType());
-    if (!resultType || !resultType.isSignless() || resultType.getWidth() < 32)
-      return op.emitOpError("fixed FIR result must be a signless integer type of at least 32 bits");
-    return success();
+    return verifyFixedReductionResult(op, op.getResult().getType(), fixed, *op.getProduct());
   }
 
   auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
@@ -205,10 +233,7 @@ static LogicalResult verifyDotDomain(DotOp op) {
   if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric())) {
     if (lhsElement != fixed.getStorage())
       return op.emitOpError("operand element type must match fixed numeric storage type");
-    auto result = dyn_cast<IntegerType>(op.getResult().getType());
-    if (!result || !result.isSignless() || result.getWidth() < 32)
-      return op.emitOpError("fixed dot result must be a signless integer type of at least 32 bits");
-    return success();
+    return verifyFixedReductionResult(op, op.getResult().getType(), fixed, *op.getProduct());
   }
 
   auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());

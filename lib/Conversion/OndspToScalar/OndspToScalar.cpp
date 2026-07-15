@@ -48,7 +48,8 @@ static bool isSupportedF32MemRefReduction(ondrix::ondsp::ReduceMacOp op) {
   auto rhsType = dyn_cast<MemRefType>(op.getRhs().getType());
   return numeric && numeric.getFormat().isF32() && lhsType && rhsType && lhsType.getRank() == 1 &&
          rhsType.getRank() == 1 && lhsType.getElementType().isF32() &&
-         rhsType.getElementType().isF32() && op.getResult().getType().isF32();
+         rhsType.getElementType().isF32() && op.getInitial().getType().isF32() &&
+         op.getResult().getType().isF32();
 }
 
 class ReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
@@ -66,8 +67,8 @@ public:
       op.emitOpError("scalar floating-point reduce_mac lowering requires no product attribute");
       return failure();
     }
-    if (!op.getResult().getType().isF32()) {
-      op.emitOpError("scalar lowering requires an f32 result");
+    if (!op.getInitial().getType().isF32() || !op.getResult().getType().isF32()) {
+      op.emitOpError("scalar lowering requires an f32 initial value and result");
       return failure();
     }
 
@@ -85,7 +86,6 @@ public:
     }
 
     Location loc = op.getLoc();
-    Value zero = rewriter.create<arith::ConstantOp>(loc, rewriter.getF32FloatAttr(0.0));
     Value lowerBound = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value upperBound = getDimZeroSize(loc, adaptor.getLhs(), *lhsMemRefType, lowerBound, rewriter);
     if (lhsMemRefType->isDynamicDim(0) || rhsMemRefType->isDynamicDim(0)) {
@@ -101,7 +101,7 @@ public:
     Value step = rewriter.create<arith::ConstantIndexOp>(loc, 1);
 
     auto loop = rewriter.create<scf::ForOp>(
-        loc, lowerBound, upperBound, step, ValueRange{zero},
+        loc, lowerBound, upperBound, step, ValueRange{adaptor.getInitial()},
         [&](OpBuilder &builder, Location bodyLoc, Value iv, ValueRange iterArgs) {
           Value lhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), iv);
           Value rhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), iv);

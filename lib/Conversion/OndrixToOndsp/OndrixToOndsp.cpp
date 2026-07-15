@@ -5,6 +5,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -20,14 +21,22 @@ using namespace mlir;
 
 namespace {
 
+static Value createReductionZero(Location loc, Type resultType,
+                                 ConversionPatternRewriter &rewriter) {
+  if (isa<ondrix::ondsp::AccType>(resultType))
+    return rewriter.create<ondrix::ondsp::AccZeroOp>(loc, resultType);
+  return rewriter.create<arith::ConstantOp>(loc, resultType, rewriter.getZeroAttr(resultType));
+}
+
 class FirOpLowering final : public OpConversionPattern<ondrix::ir::FirOp> {
 public:
   using OpConversionPattern<ondrix::ir::FirOp>::OpConversionPattern;
 
   LogicalResult matchAndRewrite(ondrix::ir::FirOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    Value initial = createReductionZero(op.getLoc(), op.getResult().getType(), rewriter);
     auto replacement = rewriter.create<ondrix::ondsp::ReduceMacOp>(
-        op.getLoc(), op.getResult().getType(), adaptor.getInput(), adaptor.getCoeffs(),
+        op.getLoc(), op.getResult().getType(), initial, adaptor.getInput(), adaptor.getCoeffs(),
         op.getNumeric(), op.getProduct().value_or(ondrix::ondsp::ProductAttr()));
     rewriter.replaceOp(op, replacement);
     return success();
@@ -40,9 +49,22 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ir::DotOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    if (!isa<ShapedType>(op.getLhs().getType())) {
+      if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric())) {
+        Value initial = createReductionZero(op.getLoc(), op.getResult().getType(), rewriter);
+        rewriter.replaceOpWithNewOp<ondrix::ondsp::MacOp>(op, op.getResult().getType(), initial,
+                                                          adaptor.getLhs(), adaptor.getRhs(), fixed,
+                                                          *op.getProduct());
+        return success();
+      }
+      rewriter.replaceOpWithNewOp<arith::MulFOp>(op, adaptor.getLhs(), adaptor.getRhs());
+      return success();
+    }
+
+    Value initial = createReductionZero(op.getLoc(), op.getResult().getType(), rewriter);
     auto replacement = rewriter.create<ondrix::ondsp::ReduceMacOp>(
-        op.getLoc(), op.getResult().getType(), adaptor.getLhs(), adaptor.getRhs(), op.getNumeric(),
-        op.getProduct().value_or(ondrix::ondsp::ProductAttr()));
+        op.getLoc(), op.getResult().getType(), initial, adaptor.getLhs(), adaptor.getRhs(),
+        op.getNumeric(), op.getProduct().value_or(ondrix::ondsp::ProductAttr()));
     rewriter.replaceOp(op, replacement);
     return success();
   }
@@ -93,7 +115,7 @@ public:
         &getContext());
 
     ConversionTarget target(getContext());
-    target.addLegalDialect<ondrix::ondsp::OndspDialect>();
+    target.addLegalDialect<arith::ArithDialect, ondrix::ondsp::OndspDialect>();
     target.addIllegalDialect<ondrix::ir::OndrixDialect>();
 
     if (failed(applyPartialConversion(module, target, std::move(patterns))))

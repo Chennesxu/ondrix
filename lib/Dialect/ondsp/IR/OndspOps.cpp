@@ -186,12 +186,7 @@ static bool hasI32Container(Type type) {
 static LogicalResult verifyReduceDomain(ReduceMacOp op) {
   auto lhs = dyn_cast<ShapedType>(op.getLhs().getType());
   auto rhs = dyn_cast<ShapedType>(op.getRhs().getType());
-  if (static_cast<bool>(lhs) != static_cast<bool>(rhs))
-    return op.emitOpError("requires either two scalar operands or two rank-1 shaped operands");
-  if (!lhs)
-    return success();
-
-  if (!lhs.hasRank() || !rhs.hasRank() || lhs.getRank() != 1 || rhs.getRank() != 1)
+  if (!lhs || !rhs || !lhs.hasRank() || !rhs.hasRank() || lhs.getRank() != 1 || rhs.getRank() != 1)
     return op.emitOpError("shaped operands must be rank-1");
   if (ondrix::isScalableVectorType(op.getLhs().getType()) ||
       ondrix::isScalableVectorType(op.getRhs().getType()))
@@ -330,20 +325,17 @@ LogicalResult ReduceMacOp::verify() {
     return failure();
 
   if (auto fixed = dyn_cast<FixedAttr>(getNumeric())) {
-    if (failed(verifyFixedStorageOperands(*this, fixed, getLhs(), getRhs())))
-      return failure();
-    auto resultType = getResult().getType().dyn_cast<IntegerType>();
-    if (!resultType || !resultType.isSignless() || resultType.getWidth() < 32)
-      return emitOpError(
-          "fixed reduce_mac result must be a signless integer type of at least 32 bits");
-    return success();
+    auto accumulator = dyn_cast<AccType>(getInitial().getType());
+    if (!accumulator)
+      return emitOpError("fixed reduce_mac initial and result must use !ondsp.acc");
+    return verifyMacLike(*this, getInitial(), getLhs(), getRhs(), fixed, *getProduct());
   }
   if (failed(verifyValueNumericType(*this, getLhs().getType(), getNumeric(), "lhs")) ||
       failed(verifyValueNumericType(*this, getRhs().getType(), getNumeric(), "rhs")))
     return failure();
   auto fp = cast<FpAttr>(getNumeric());
-  if (getResult().getType() != fp.getFormat())
-    return emitOpError("floating-point reduce_mac result must be scalar and match numeric format");
+  if (getInitial().getType() != fp.getFormat())
+    return emitOpError("floating-point reduce_mac initial and result must match numeric format");
   return success();
 }
 

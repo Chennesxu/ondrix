@@ -43,8 +43,8 @@ func.func @fixed_dot_requires_numeric_storage(%lhs: i32, %rhs: i32) -> i32 {
 
 // -----
 
-func.func @fixed_dot_requires_wide_result(%lhs: i16, %rhs: i16) -> i16 {
-  // expected-error@+1 {{fixed dot result must be a signless integer type of at least 32 bits}}
+func.func @fixed_dot_requires_accumulator_result(%lhs: i16, %rhs: i16) -> i16 {
+  // expected-error@+1 {{fixed reduction result must use !ondsp.acc}}
   %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> i16
   return %0 : i16
 }
@@ -68,8 +68,8 @@ func.func @dot_rejects_scalable_vectors(
 
 // -----
 
-func.func @fixed_dot_requires_signless_result(%lhs: i16, %rhs: i16) -> ui32 {
-  // expected-error@+1 {{fixed dot result must be a signless integer type of at least 32 bits}}
+func.func @fixed_dot_rejects_builtin_integer_result(%lhs: i16, %rhs: i16) -> ui32 {
+  // expected-error@+1 {{fixed reduction result must use !ondsp.acc}}
   %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> ui32
   return %0 : ui32
 }

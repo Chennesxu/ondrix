@@ -5,6 +5,7 @@ add_ondrix_library(OndrixToOndsp
   MLIROndrixPassesIncGen
 
   LINK_LIBS PUBLIC
+  MLIRArithDialect
   MLIRIR
   MLIRPass
   MLIRSupport

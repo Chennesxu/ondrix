@@ -29,7 +29,7 @@ func.func @fir_requires_matching_elements(
 
 func.func @fir_requires_scalar_result(
     %input: memref<8xi16>, %coeffs: memref<8xi16>) -> tensor<1xi32> {
-  // expected-error@+1 {{requires a scalar integer or floating-point result}}
+  // expected-error@+1 {{fixed reduction result must use !ondsp.acc}}
   %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (memref<8xi16>, memref<8xi16>) -> tensor<1xi32>
   return %0 : tensor<1xi32>
 }
@@ -45,9 +45,9 @@ func.func @fir_requires_numeric_storage(
 
 // -----
 
-func.func @fixed_fir_requires_wide_result(
+func.func @fixed_fir_requires_accumulator_result(
     %input: memref<8xi16>, %coeffs: memref<8xi16>) -> i16 {
-  // expected-error@+1 {{fixed FIR result must be a signless integer type of at least 32 bits}}
+  // expected-error@+1 {{fixed reduction result must use !ondsp.acc}}
   %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (memref<8xi16>, memref<8xi16>) -> i16
   return %0 : i16
 }
@@ -80,9 +80,9 @@ func.func @fir_rejects_scalable_vectors(
 
 // -----
 
-func.func @fixed_fir_requires_signless_result(
+func.func @fixed_fir_rejects_builtin_integer_result(
     %input: memref<8xi16>, %coeffs: memref<8xi16>) -> si32 {
-  // expected-error@+1 {{fixed FIR result must be a signless integer type of at least 32 bits}}
+  // expected-error@+1 {{fixed reduction result must use !ondsp.acc}}
   %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (memref<8xi16>, memref<8xi16>) -> si32
   return %0 : si32
 }
