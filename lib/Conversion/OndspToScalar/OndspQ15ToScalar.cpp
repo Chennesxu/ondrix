@@ -307,8 +307,18 @@ public:
     Type resultType = getTypeConverter()->convertType(op.getType());
     if (!resultType)
       return failure();
-    rewriter.replaceOpWithNewOp<arith::SelectOp>(op, resultType, adaptor.getCondition(),
-                                                 adaptor.getTrueValue(), adaptor.getFalseValue());
+    if (llvm::any_of(op->getAttrs(), [](NamedAttribute namedAttribute) {
+          return containsOndspAccumulator(namedAttribute.getValue());
+        }))
+      return op.emitOpError("cannot convert attributes containing source accumulator types");
+
+    auto replacement =
+        rewriter.create<arith::SelectOp>(op.getLoc(), resultType, adaptor.getCondition(),
+                                         adaptor.getTrueValue(), adaptor.getFalseValue());
+    // This is a structural type conversion of the same operation, so preserve
+    // its verified semantic and discardable attributes.
+    replacement->setAttrs(op->getAttrs());
+    rewriter.replaceOp(op, replacement);
     return success();
   }
 };

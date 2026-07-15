@@ -29,8 +29,8 @@ func.func @select_accumulator(
     %lhs: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
     %rhs: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>)
     -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
-  %selected = arith.select %condition, %lhs, %rhs
-      : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %selected = "arith.select"(%condition, %lhs, %rhs) {test.tag = "keep"}
+      : (i1, !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
   return %selected : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 }
 
@@ -52,6 +52,6 @@ func.func @select_accumulator(
 
 // CHECK-LABEL: func.func @select_accumulator(
 // CHECK-SAME: %[[COND:.*]]: i1, %[[LHS:.*]]: i40, %[[RHS:.*]]: i40) -> i40
-// CHECK: %[[SELECTED:.*]] = arith.select %[[COND]], %[[LHS]], %[[RHS]] : i40
+// CHECK: %[[SELECTED:.*]] = arith.select %[[COND]], %[[LHS]], %[[RHS]] {test.tag = "keep"} : i40
 // CHECK: return %[[SELECTED]] : i40
 // CHECK-NOT: !ondsp.acc
