@@ -1,6 +1,7 @@
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
+#include "ondrix/Support/DSPTypeUtils.h"
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -30,6 +31,10 @@ static LogicalResult verifyValueOnlyTypes(Operation *op) {
     return op->emitOpError("value-only operation does not accept memref operands");
   if (llvm::any_of(op->getResultTypes(), containsMemRef))
     return op->emitOpError("value-only operation does not produce memref results");
+  if (llvm::any_of(op->getOperandTypes(), ondrix::containsScalableVectorType))
+    return op->emitOpError("value-only operation does not accept scalable vector operands");
+  if (llvm::any_of(op->getResultTypes(), ondrix::containsScalableVectorType))
+    return op->emitOpError("value-only operation does not produce scalable vector results");
   return success();
 }
 
@@ -70,6 +75,9 @@ static LogicalResult verifyFirWindow(FirOp op) {
   if (!inputType || !coeffType || !inputType.hasRank() || !coeffType.hasRank() ||
       inputType.getRank() != 1 || coeffType.getRank() != 1)
     return op.emitOpError("requires rank-1 input and coefficient windows");
+  if (ondrix::isScalableVectorType(op.getInput().getType()) ||
+      ondrix::isScalableVectorType(op.getCoeffs().getType()))
+    return op.emitOpError("scalable vector windows are not supported");
 
   if (inputType.getElementType() != coeffType.getElementType())
     return op.emitOpError("input and coefficient element types must match");
@@ -99,6 +107,49 @@ static LogicalResult verifyFirWindow(FirOp op) {
   return success();
 }
 
+static LogicalResult verifyDotDomain(DotOp op) {
+  auto lhsShaped = dyn_cast<ShapedType>(op.getLhs().getType());
+  auto rhsShaped = dyn_cast<ShapedType>(op.getRhs().getType());
+  if (static_cast<bool>(lhsShaped) != static_cast<bool>(rhsShaped))
+    return op.emitOpError("requires either two scalar operands or two rank-1 shaped operands");
+
+  Type lhsElement = op.getLhs().getType();
+  Type rhsElement = op.getRhs().getType();
+  if (lhsShaped) {
+    if (!lhsShaped.hasRank() || !rhsShaped.hasRank() || lhsShaped.getRank() != 1 ||
+        rhsShaped.getRank() != 1)
+      return op.emitOpError("shaped operands must be rank-1");
+    if (ondrix::isScalableVectorType(op.getLhs().getType()) ||
+        ondrix::isScalableVectorType(op.getRhs().getType()))
+      return op.emitOpError("scalable vector operands are not supported");
+    lhsElement = lhsShaped.getElementType();
+    rhsElement = rhsShaped.getElementType();
+
+    int64_t lhsLength = lhsShaped.getDimSize(0);
+    int64_t rhsLength = rhsShaped.getDimSize(0);
+    if (!ShapedType::isDynamic(lhsLength) && !ShapedType::isDynamic(rhsLength) &&
+        lhsLength != rhsLength)
+      return op.emitOpError("shaped operands must have equal static lengths");
+  }
+
+  if (lhsElement != rhsElement)
+    return op.emitOpError("operand element types must match");
+
+  if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric())) {
+    if (lhsElement != fixed.getStorage())
+      return op.emitOpError("operand element type must match fixed numeric storage type");
+    auto result = dyn_cast<IntegerType>(op.getResult().getType());
+    if (!result || result.getWidth() < 32)
+      return op.emitOpError("fixed dot result must be an integer type of at least 32 bits");
+    return success();
+  }
+
+  auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  if (lhsElement != fp.getFormat() || op.getResult().getType() != fp.getFormat())
+    return op.emitOpError("floating-point dot operands and result must match numeric format");
+  return success();
+}
+
 } // namespace
 
 void FirOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
@@ -107,7 +158,8 @@ void FirOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) 
 }
 
 Speculation::Speculatability FirOp::getSpeculatability() {
-  return (isa<BaseMemRefType>(getInput().getType()) || isa<BaseMemRefType>(getCoeffs().getType()))
+  return (ondrix::requiresConservativeDSPSpeculation(getInput().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getCoeffs().getType()))
              ? Speculation::NotSpeculatable
              : Speculation::Speculatable;
 }
@@ -118,7 +170,8 @@ void DotOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) 
 }
 
 Speculation::Speculatability DotOp::getSpeculatability() {
-  return (isa<BaseMemRefType>(getLhs().getType()) || isa<BaseMemRefType>(getRhs().getType()))
+  return (ondrix::requiresConservativeDSPSpeculation(getLhs().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getRhs().getType()))
              ? Speculation::NotSpeculatable
              : Speculation::Speculatable;
 }
@@ -130,7 +183,9 @@ LogicalResult FirOp::verify() {
 }
 
 LogicalResult DotOp::verify() {
-  return verifyOptionalProductPolicy(*this, getNumeric(), getProduct());
+  if (failed(verifyOptionalProductPolicy(*this, getNumeric(), getProduct())))
+    return failure();
+  return verifyDotDomain(*this);
 }
 
 LogicalResult ButterflyOp::verify() {

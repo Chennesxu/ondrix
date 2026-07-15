@@ -95,3 +95,12 @@ func.func @floating_reduce_mac_requires_scalar_result(
   %0 = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fma>} : (vector<8xf32>, vector<8xf32>) -> vector<8xf32>
   return %0 : vector<8xf32>
 }
+
+// -----
+
+func.func @reduce_mac_rejects_scalable_vectors(
+    %lhs: vector<8xf32>, %rhs: vector<[8]xf32>) -> f32 {
+  // expected-error@+1 {{scalable vector operands are not supported}}
+  %0 = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fma>} : (vector<8xf32>, vector<[8]xf32>) -> f32
+  return %0 : f32
+}

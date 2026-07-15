@@ -138,3 +138,21 @@ func.func @complex_value_ops_accept_shaped_values(
   %3 = ondsp.fft_stage %vector {stage = 0 : i64, layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (vector<2xi16>) -> vector<2xi16>
   return %0, %1, %2, %3 : vector<2xi16>, tensor<2xi16>, tensor<2xi16>, vector<2xi16>
 }
+
+// -----
+
+func.func @cx_mul_rejects_nested_scalable_vector_operand(
+    %lhs: tuple<vector<[2]xi16>>, %rhs: tuple<vector<[2]xi16>>) -> i32 {
+  // expected-error@+1 {{value-only operation does not accept scalable vector operands}}
+  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tuple<vector<[2]xi16>>, tuple<vector<[2]xi16>>) -> i32
+  return %0 : i32
+}
+
+// -----
+
+func.func @cx_mul_rejects_nested_scalable_vector_result(
+    %lhs: i16, %rhs: i16) -> tuple<vector<[2]xi16>> {
+  // expected-error@+1 {{value-only operation does not produce scalable vector results}}
+  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i16, i16) -> tuple<vector<[2]xi16>>
+  return %0 : tuple<vector<[2]xi16>>
+}

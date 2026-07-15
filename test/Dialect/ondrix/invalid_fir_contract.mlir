@@ -68,3 +68,12 @@ func.func @fir_accepts_dynamic_windows(
   %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fp<format = f32, contract = fma>} : (memref<?xf32>, memref<?xf32>) -> f32
   return %0 : f32
 }
+
+// -----
+
+func.func @fir_rejects_scalable_vectors(
+    %input: vector<[8]xf32>, %coeffs: vector<[8]xf32>) -> f32 {
+  // expected-error@+1 {{scalable vector windows are not supported}}
+  %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fp<format = f32, contract = fma>} : (vector<[8]xf32>, vector<[8]xf32>) -> f32
+  return %0 : f32
+}

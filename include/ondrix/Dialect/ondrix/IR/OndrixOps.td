@@ -27,6 +27,11 @@ def Ondrix_DotOp
     : Ondrix_Op<"dot", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
                         DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
   let summary = "High-level dot/reduce kernel intent";
+  let description = [{
+    Accepts either two scalar operands or two equal-length rank-1 shaped
+    operands. Shaped operands are paired in increasing index order. Dynamic
+    lengths require a runtime proof in the selected lowering pipeline.
+  }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);
   let results = (outs AnyType:$result);

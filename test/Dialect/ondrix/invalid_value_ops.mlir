@@ -90,6 +90,34 @@ func.func @butterfly_accepts_vector_values(
 
 // -----
 
+func.func @butterfly_rejects_scalable_vectors(
+    %a: vector<[2]xi16>, %b: vector<[2]xi16>, %tw: vector<[2]xi16>)
+    -> (vector<[2]xi16>, vector<[2]xi16>) {
+  // expected-error@+1 {{value-only operation does not accept scalable vector operands}}
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<[2]xi16>, vector<[2]xi16>, vector<[2]xi16>) -> (vector<[2]xi16>, vector<[2]xi16>)
+  return %0, %1 : vector<[2]xi16>, vector<[2]xi16>
+}
+
+// -----
+
+func.func @quantize_rejects_nested_scalable_vector_operand(
+    %input: tuple<vector<[2]xi32>>) -> i16 {
+  // expected-error@+1 {{value-only operation does not accept scalable vector operands}}
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tuple<vector<[2]xi32>>) -> i16
+  return %0 : i16
+}
+
+// -----
+
+func.func @quantize_rejects_nested_scalable_vector_result(
+    %input: i32) -> tuple<vector<[2]xi16>> {
+  // expected-error@+1 {{value-only operation does not produce scalable vector results}}
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i32) -> tuple<vector<[2]xi16>>
+  return %0 : tuple<vector<[2]xi16>>
+}
+
+// -----
+
 func.func @quantize_accepts_tensor_values(
     %input: tensor<2xi32>) -> tensor<2xi16> {
   %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tensor<2xi32>) -> tensor<2xi16>

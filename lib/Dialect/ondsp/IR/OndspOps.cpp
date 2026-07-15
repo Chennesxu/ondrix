@@ -1,4 +1,5 @@
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
+#include "ondrix/Support/DSPTypeUtils.h"
 
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
@@ -28,6 +29,10 @@ static LogicalResult verifyValueOnlyTypes(Operation *op) {
     return op->emitOpError("value-only operation does not accept memref operands");
   if (llvm::any_of(op->getResultTypes(), containsMemRef))
     return op->emitOpError("value-only operation does not produce memref results");
+  if (llvm::any_of(op->getOperandTypes(), ondrix::containsScalableVectorType))
+    return op->emitOpError("value-only operation does not accept scalable vector operands");
+  if (llvm::any_of(op->getResultTypes(), ondrix::containsScalableVectorType))
+    return op->emitOpError("value-only operation does not produce scalable vector results");
   return success();
 }
 
@@ -164,6 +169,9 @@ static LogicalResult verifyReduceDomain(ReduceMacOp op) {
 
   if (!lhs.hasRank() || !rhs.hasRank() || lhs.getRank() != 1 || rhs.getRank() != 1)
     return op.emitOpError("shaped operands must be rank-1");
+  if (ondrix::isScalableVectorType(op.getLhs().getType()) ||
+      ondrix::isScalableVectorType(op.getRhs().getType()))
+    return op.emitOpError("scalable vector operands are not supported");
   if (lhs.getElementType() != rhs.getElementType())
     return op.emitOpError("shaped operand element types must match");
 
@@ -183,7 +191,8 @@ void ReduceMacOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &eff
 }
 
 Speculation::Speculatability ReduceMacOp::getSpeculatability() {
-  return (isa<BaseMemRefType>(getLhs().getType()) || isa<BaseMemRefType>(getRhs().getType()))
+  return (ondrix::requiresConservativeDSPSpeculation(getLhs().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getRhs().getType()))
              ? Speculation::NotSpeculatable
              : Speculation::Speculatable;
 }
