@@ -63,7 +63,6 @@ jobs:
             -DLLVM_ENABLE_LIBXML2=OFF
 
       - name: Build LLVM and MLIR tools
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: |
           cmake --build llvm-build --target \
             mlir-opt mlir-translate FileCheck count llc not
