@@ -15,6 +15,7 @@ add_ondrix_library(OndspToScalar
   MLIRMemRefDialect
   MLIRPass
   MLIRSCFDialect
+  MLIRSCFTransforms
   MLIRSupport
   MLIRTransformUtils
   OndrixFixedPointSemantics

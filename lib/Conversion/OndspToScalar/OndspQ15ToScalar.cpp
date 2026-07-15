@@ -9,6 +9,7 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
+#include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
@@ -341,6 +342,7 @@ public:
 
     ConversionTarget target(getContext());
     target.addIllegalDialect<ondrix::ondsp::OndspDialect>();
+    scf::populateSCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);
     target.addDynamicallyLegalOp<UnrealizedConversionCastOp>([&](UnrealizedConversionCastOp op) {
       return hasLegalConvertedTypes(op.getOperation(), typeConverter);
     });
