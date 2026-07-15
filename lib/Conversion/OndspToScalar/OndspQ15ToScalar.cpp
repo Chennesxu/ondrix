@@ -10,7 +10,6 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/IR/AttrTypeSubElements.h"
-#include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -299,6 +298,21 @@ public:
   }
 };
 
+class SelectOpTypeConversion final : public OpConversionPattern<arith::SelectOp> {
+public:
+  using OpConversionPattern<arith::SelectOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(arith::SelectOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type resultType = getTypeConverter()->convertType(op.getType());
+    if (!resultType)
+      return failure();
+    rewriter.replaceOpWithNewOp<arith::SelectOp>(op, resultType, adaptor.getCondition(),
+                                                 adaptor.getTrueValue(), adaptor.getFalseValue());
+    return success();
+  }
+};
+
 class ConvertOndspQ15ToScalarPass final
     : public ondrix::impl::ConvertOndspQ15ToScalarBase<ConvertOndspQ15ToScalarPass> {
 public:
@@ -309,14 +323,13 @@ public:
     OndspQ15ToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering, MacOpLowering,
-                 MacSubOpLowering>(typeConverter, &getContext());
+                 MacSubOpLowering, SelectOpTypeConversion>(typeConverter, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);
     populateReturnOpTypeConversionPattern(patterns, typeConverter);
 
     ConversionTarget target(getContext());
-    target.addLegalDialect<BuiltinDialect, arith::ArithDialect, cf::ControlFlowDialect>();
     target.addIllegalDialect<ondrix::ondsp::OndspDialect>();
     target.addDynamicallyLegalOp<UnrealizedConversionCastOp>([&](UnrealizedConversionCastOp op) {
       return hasLegalConvertedTypes(op.getOperation(), typeConverter);
