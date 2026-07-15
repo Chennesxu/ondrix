@@ -1,4 +1,5 @@
 add_ondrix_library(OndrixSupport
+  FixedPointSemantics.cpp
   InitAllDialects.cpp
   InitAllPasses.cpp
   InitAllTranslations.cpp
