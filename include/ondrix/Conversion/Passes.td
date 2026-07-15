@@ -65,6 +65,7 @@ def ConvertOndspQ15ToScalar
     "mlir::arith::ArithDialect",
     "mlir::cf::ControlFlowDialect",
     "mlir::func::FuncDialect",
+    "mlir::memref::MemRefDialect",
     "mlir::scf::SCFDialect",
   ];
 }

@@ -9,6 +9,7 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -129,43 +130,43 @@ public:
 static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value product,
                                     ondrix::ondsp::OverflowMode overflowMode,
                                     ondrix::fixedpoint::AccumulatorUpdateOperation operation,
-                                    ConversionPatternRewriter &rewriter) {
+                                    OpBuilder &builder) {
   auto accumulatorType = cast<IntegerType>(accumulator.getType());
   auto productType = cast<IntegerType>(product.getType());
   unsigned intermediateWidth = ondrix::fixedpoint::getAccumulatorUpdateIntermediateWidth(
       accumulatorType.getWidth(), productType.getWidth());
-  IntegerType intermediateType = rewriter.getIntegerType(intermediateWidth);
-  Value extendedAccumulator = rewriter.create<arith::ExtSIOp>(loc, intermediateType, accumulator);
-  Value extendedProduct = rewriter.create<arith::ExtSIOp>(loc, intermediateType, product);
+  IntegerType intermediateType = builder.getIntegerType(intermediateWidth);
+  Value extendedAccumulator = builder.create<arith::ExtSIOp>(loc, intermediateType, accumulator);
+  Value extendedProduct = builder.create<arith::ExtSIOp>(loc, intermediateType, product);
   Value updated;
   switch (operation) {
   case ondrix::fixedpoint::AccumulatorUpdateOperation::Add:
-    updated = rewriter.create<arith::AddIOp>(loc, extendedAccumulator, extendedProduct);
+    updated = builder.create<arith::AddIOp>(loc, extendedAccumulator, extendedProduct);
     break;
   case ondrix::fixedpoint::AccumulatorUpdateOperation::Subtract:
-    updated = rewriter.create<arith::SubIOp>(loc, extendedAccumulator, extendedProduct);
+    updated = builder.create<arith::SubIOp>(loc, extendedAccumulator, extendedProduct);
     break;
   }
 
   if (overflowMode == ondrix::ondsp::OverflowMode::Wrap)
-    return rewriter.create<arith::TruncIOp>(loc, accumulatorType, updated);
+    return builder.create<arith::TruncIOp>(loc, accumulatorType, updated);
 
   // Clamp in the exact update width before narrowing to the accumulator.
   llvm::APInt minimum =
       llvm::APInt::getSignedMinValue(accumulatorType.getWidth()).sext(intermediateWidth);
   llvm::APInt maximum =
       llvm::APInt::getSignedMaxValue(accumulatorType.getWidth()).sext(intermediateWidth);
-  Value minimumValue = rewriter.create<arith::ConstantOp>(
-      loc, intermediateType, rewriter.getIntegerAttr(intermediateType, minimum));
-  Value maximumValue = rewriter.create<arith::ConstantOp>(
-      loc, intermediateType, rewriter.getIntegerAttr(intermediateType, maximum));
+  Value minimumValue = builder.create<arith::ConstantOp>(
+      loc, intermediateType, builder.getIntegerAttr(intermediateType, minimum));
+  Value maximumValue = builder.create<arith::ConstantOp>(
+      loc, intermediateType, builder.getIntegerAttr(intermediateType, maximum));
   Value belowMinimum =
-      rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, updated, minimumValue);
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, updated, minimumValue);
   Value aboveMaximum =
-      rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, updated, maximumValue);
-  Value lowerClamped = rewriter.create<arith::SelectOp>(loc, belowMinimum, minimumValue, updated);
-  Value clamped = rewriter.create<arith::SelectOp>(loc, aboveMaximum, maximumValue, lowerClamped);
-  return rewriter.create<arith::TruncIOp>(loc, accumulatorType, clamped);
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, updated, maximumValue);
+  Value lowerClamped = builder.create<arith::SelectOp>(loc, belowMinimum, minimumValue, updated);
+  Value clamped = builder.create<arith::SelectOp>(loc, aboveMaximum, maximumValue, lowerClamped);
+  return builder.create<arith::TruncIOp>(loc, accumulatorType, clamped);
 }
 
 static Value createIntegerConstant(Location loc, IntegerType type, int64_t value,
@@ -276,6 +277,76 @@ using MacSubOpLowering =
     MacLikeOpLowering<ondrix::ondsp::MacSubOp,
                       ondrix::fixedpoint::AccumulatorUpdateOperation::Subtract>;
 
+static FailureOr<MemRefType> getRankOneQ15MemRefType(Operation *op, Value value,
+                                                     StringRef operandName) {
+  auto type = dyn_cast<MemRefType>(value.getType());
+  if (!type || type.getRank() != 1 || !type.getElementType().isSignlessInteger(16))
+    return op->emitOpError() << operandName
+                             << " must be a rank-1 memref<Nxi16> for Q15 scalar lowering";
+  return type;
+}
+
+static Value getDimZeroSize(Location loc, Value value, MemRefType type, Value zeroIndex,
+                            ConversionPatternRewriter &rewriter) {
+  if (!type.isDynamicDim(0))
+    return rewriter.create<arith::ConstantIndexOp>(loc, type.getDimSize(0));
+  return rewriter.create<memref::DimOp>(loc, value, zeroIndex);
+}
+
+class ReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::ReduceMacOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto accumulator = dyn_cast<ondrix::ondsp::AccType>(op.getInitial().getType());
+    auto numeric = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    if (!accumulator || !numeric || !op.getProduct() || !isSupportedQ15Accumulator(accumulator) ||
+        !isSignedQ15(numeric) || !isFullProduct(*op.getProduct()))
+      return op.emitOpError(
+          "Q15 scalar reduction requires signed i16 frac=15 full product and signed i40 "
+          "frac=30 accumulator");
+
+    FailureOr<MemRefType> lhsType = getRankOneQ15MemRefType(op, op.getLhs(), "lhs");
+    if (failed(lhsType))
+      return failure();
+    FailureOr<MemRefType> rhsType = getRankOneQ15MemRefType(op, op.getRhs(), "rhs");
+    if (failed(rhsType))
+      return failure();
+
+    Location loc = op.getLoc();
+    Value lowerBound = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value upperBound = getDimZeroSize(loc, adaptor.getLhs(), *lhsType, lowerBound, rewriter);
+    if (lhsType->isDynamicDim(0) || rhsType->isDynamicDim(0)) {
+      Value rhsSize = getDimZeroSize(loc, adaptor.getRhs(), *rhsType, lowerBound, rewriter);
+      Value lengthsMatch =
+          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, upperBound, rhsSize);
+      rewriter.create<cf::AssertOp>(
+          loc, lengthsMatch,
+          rewriter.getStringAttr("ondsp.reduce_mac requires equal operand lengths"));
+    }
+    Value step = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+
+    auto loop = rewriter.create<scf::ForOp>(
+        loc, lowerBound, upperBound, step, ValueRange{adaptor.getInitial()},
+        [&](OpBuilder &builder, Location bodyLoc, Value iv, ValueRange iterArgs) {
+          Value lhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), iv);
+          Value rhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), iv);
+          IntegerType productType = builder.getI32Type();
+          Value lhsExtended = builder.create<arith::ExtSIOp>(bodyLoc, productType, lhs);
+          Value rhsExtended = builder.create<arith::ExtSIOp>(bodyLoc, productType, rhs);
+          Value product = builder.create<arith::MulIOp>(bodyLoc, lhsExtended, rhsExtended);
+          Value next = lowerAccumulatorUpdate(
+              bodyLoc, iterArgs.front(), product, accumulator.getUpdateOverflow(),
+              ondrix::fixedpoint::AccumulatorUpdateOperation::Add, builder);
+          builder.create<scf::YieldOp>(bodyLoc, next);
+        });
+
+    rewriter.replaceOp(op, loop.getResult(0));
+    return success();
+  }
+};
+
 class AccExportOpLowering final : public OpConversionPattern<ondrix::ondsp::AccExportOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::AccExportOp>::OpConversionPattern;
@@ -334,7 +405,8 @@ public:
     OndspQ15ToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering, MacOpLowering,
-                 MacSubOpLowering, SelectOpTypeConversion>(typeConverter, &getContext());
+                 MacSubOpLowering, ReduceMacOpLowering, SelectOpTypeConversion>(typeConverter,
+                                                                                &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);
