@@ -71,6 +71,37 @@ static bool containsOndspAccumulator(Attribute attribute) {
       .wasInterrupted();
 }
 
+static bool isNestedAccumulatorContainer(Type type) {
+  return !isa<ondrix::ondsp::AccType>(type) && containsOndspAccumulator(type);
+}
+
+static LogicalResult verifyNoNestedAccumulatorContainers(Operation *root) {
+  WalkResult result = root->walk([](Operation *op) {
+    auto containsNested = [](TypeRange types) {
+      return llvm::any_of(types, isNestedAccumulatorContainer);
+    };
+    if (containsNested(op->getOperandTypes()) || containsNested(op->getResultTypes())) {
+      op->emitOpError("nested accumulator containers are unsupported");
+      return WalkResult::interrupt();
+    }
+    if (auto function = dyn_cast<func::FuncOp>(op)) {
+      FunctionType type = function.getFunctionType();
+      if (containsNested(type.getInputs()) || containsNested(type.getResults())) {
+        op->emitOpError("nested accumulator containers are unsupported");
+        return WalkResult::interrupt();
+      }
+    }
+    for (Region &region : op->getRegions())
+      for (Block &block : region)
+        if (containsNested(block.getArgumentTypes())) {
+          op->emitOpError("nested accumulator containers are unsupported");
+          return WalkResult::interrupt();
+        }
+    return WalkResult::advance();
+  });
+  return failure(result.wasInterrupted());
+}
+
 static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) {
   if (!typeConverter.isLegal(op) || containsOndspAccumulator(op->getOperandTypes()) ||
       containsOndspAccumulator(op->getResultTypes()))
@@ -402,6 +433,11 @@ public:
       ConvertOndspQ15ToScalarPass>::ConvertOndspQ15ToScalarBase;
 
   void runOnOperation() override {
+    if (failed(verifyNoNestedAccumulatorContainers(getOperation()))) {
+      signalPassFailure();
+      return;
+    }
+
     OndspQ15ToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering, MacOpLowering,
