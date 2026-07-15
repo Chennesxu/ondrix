@@ -141,3 +141,39 @@ func.func @quantize_rejects_nested_unranked_tensor_result(
   %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i32) -> tuple<tensor<*xi16>>
   return %0 : tuple<tensor<*xi16>>
 }
+
+// -----
+
+func.func @quantize_rejects_mismatched_static_shapes(
+    %input: tensor<2xi32>) -> tensor<3xi16> {
+  // expected-error@+1 {{input and result must use the same scalar or static shaped domain}}
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tensor<2xi32>) -> tensor<3xi16>
+  return %0 : tensor<3xi16>
+}
+
+// -----
+
+func.func @quantize_rejects_wrong_source_storage(%input: i16) -> i16 {
+  // expected-error@+1 {{input element type must match source numeric storage type}}
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i16) -> i16
+  return %0 : i16
+}
+
+// -----
+
+func.func @butterfly_rejects_mismatched_shapes(
+    %a: vector<2xi16>, %b: vector<4xi16>, %tw: vector<2xi16>)
+    -> (vector<2xi16>, vector<2xi16>) {
+  // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<4xi16>, vector<2xi16>) -> (vector<2xi16>, vector<2xi16>)
+  return %0, %1 : vector<2xi16>, vector<2xi16>
+}
+
+// -----
+
+func.func @butterfly_rejects_signed_packed_container(
+    %a: si32, %b: si32, %tw: si32) -> (si32, si32) {
+  // expected-error@+1 {{packed i16 operands and results require signless i32 containers}}
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (si32, si32, si32) -> (si32, si32)
+  return %0, %1 : si32, si32
+}

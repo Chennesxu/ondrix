@@ -75,6 +75,67 @@ static LogicalResult verifyButterflyPolicies(Operation *op, Attribute numeric,
   return success();
 }
 
+static Type getNumericStorage(Attribute numeric) {
+  if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric))
+    return fixed.getStorage();
+  return cast<ondrix::ondsp::FpAttr>(numeric).getFormat();
+}
+
+static bool isPackedI16Layout(ondrix::ondsp::CxLayoutAttr layout) {
+  return layout.getLayout() == ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo ||
+         layout.getLayout() == ondrix::ondsp::ComplexLayout::PackedI16RealHiImagLo;
+}
+
+static bool hasSignlessI32Element(Type type) {
+  auto element = dyn_cast<IntegerType>(ondrix::getElementTypeOrSelf(type));
+  return element && element.isSignless() && element.getWidth() == 32;
+}
+
+static LogicalResult verifySameElementwiseShape(Operation *op, TypeRange types) {
+  if (types.empty())
+    return success();
+  Type reference = types.front();
+  if (llvm::all_of(types.drop_front(),
+                   [&](Type type) { return ondrix::haveSameElementwiseShape(reference, type); }))
+    return success();
+  return op->emitOpError("operands and results must use the same scalar or static shaped domain");
+}
+
+static LogicalResult verifyButterflyValueDomain(ButterflyOp op) {
+  SmallVector<Type> types(op.getOperandTypes());
+  llvm::append_range(types, op.getResultTypes());
+  if (failed(verifySameElementwiseShape(op, types)))
+    return failure();
+
+  if (!isPackedI16Layout(op.getLayout())) {
+    Type storage = getNumericStorage(op.getNumeric());
+    if (!llvm::all_of(types,
+                      [&](Type type) { return ondrix::getElementTypeOrSelf(type) == storage; }))
+      return op.emitOpError("operand and result element types must match numeric storage type");
+    return success();
+  }
+
+  auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+  auto storage = fixed ? dyn_cast<IntegerType>(fixed.getStorage()) : IntegerType();
+  if (!storage || storage.getWidth() != 16)
+    return op.emitOpError("packed i16 layout requires an i16 fixed numeric policy");
+  if (!llvm::all_of(types, hasSignlessI32Element))
+    return op.emitOpError("packed i16 operands and results require signless i32 containers");
+  if (op.getScale()->getSaturateTo() != fixed.getStorage())
+    return op.emitOpError("packed i16 saturate_to must match fixed numeric storage type");
+  return success();
+}
+
+static LogicalResult verifyQuantizeDomain(QuantizeOp op) {
+  if (!ondrix::haveSameElementwiseShape(op.getInput().getType(), op.getResult().getType()))
+    return op.emitOpError("input and result must use the same scalar or static shaped domain");
+  if (ondrix::getElementTypeOrSelf(op.getInput().getType()) != getNumericStorage(op.getSrc()))
+    return op.emitOpError("input element type must match source numeric storage type");
+  if (ondrix::getElementTypeOrSelf(op.getResult().getType()) != getNumericStorage(op.getDst()))
+    return op.emitOpError("result element type must match destination numeric storage type");
+  return success();
+}
+
 static LogicalResult verifyFirWindow(FirOp op) {
   auto inputType = dyn_cast<ShapedType>(op.getInput().getType());
   auto coeffType = dyn_cast<ShapedType>(op.getCoeffs().getType());
@@ -197,7 +258,13 @@ LogicalResult DotOp::verify() {
 LogicalResult ButterflyOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();
-  return verifyButterflyPolicies(*this, getNumeric(), getProduct(), getScale());
+  if (failed(verifyButterflyPolicies(*this, getNumeric(), getProduct(), getScale())))
+    return failure();
+  return verifyButterflyValueDomain(*this);
 }
 
-LogicalResult QuantizeOp::verify() { return verifyValueOnlyTypes(*this); }
+LogicalResult QuantizeOp::verify() {
+  if (failed(verifyValueOnlyTypes(*this)))
+    return failure();
+  return verifyQuantizeDomain(*this);
+}

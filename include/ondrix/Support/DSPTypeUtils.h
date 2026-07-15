@@ -34,6 +34,29 @@ inline bool containsDynamicOrUnrankedShapedType(mlir::Type type) {
       .wasInterrupted();
 }
 
+inline mlir::Type getElementTypeOrSelf(mlir::Type type) {
+  if (auto shaped = mlir::dyn_cast<mlir::ShapedType>(type))
+    return shaped.getElementType();
+  return type;
+}
+
+// Elementwise values must remain in the same scalar/vector/tensor container
+// and preserve every static dimension. Element types may differ for numeric
+// conversions.
+inline bool haveSameElementwiseShape(mlir::Type lhs, mlir::Type rhs) {
+  auto lhsShaped = mlir::dyn_cast<mlir::ShapedType>(lhs);
+  auto rhsShaped = mlir::dyn_cast<mlir::ShapedType>(rhs);
+  if (static_cast<bool>(lhsShaped) != static_cast<bool>(rhsShaped))
+    return false;
+  if (!lhsShaped)
+    return true;
+  if (mlir::isa<mlir::VectorType>(lhs) != mlir::isa<mlir::VectorType>(rhs) ||
+      mlir::isa<mlir::TensorType>(lhs) != mlir::isa<mlir::TensorType>(rhs) ||
+      mlir::isa<mlir::BaseMemRefType>(lhs) != mlir::isa<mlir::BaseMemRefType>(rhs))
+    return false;
+  return lhsShaped.getShape() == rhsShaped.getShape();
+}
+
 // Buffer reads and runtime-shaped values may gain observable checks during
 // lowering, so operations using them require conservative speculation.
 inline bool requiresConservativeDSPSpeculation(mlir::Type type) {
