@@ -42,3 +42,20 @@ func.func @dot_q15_saturate(%lhs: memref<?xi16>, %rhs: memref<?xi16>) -> i16 {
   } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
   return %result : i16
 }
+
+func.func @reduce_q15_seeded_saturate(
+    %seed: i16, %lhs: memref<?xi16>, %rhs: memref<?xi16>) -> i16 {
+  %initial = ondsp.acc_import %seed {
+    src = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : (i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %acc = ondsp.reduce_mac %initial, %lhs, %rhs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<?xi16>, memref<?xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<toward_negative>,
+    overflow = #ondsp.overflow<wrap>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %result : i16
+}
