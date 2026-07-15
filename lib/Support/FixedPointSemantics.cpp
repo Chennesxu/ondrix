@@ -64,13 +64,18 @@ llvm::APInt exportSignedAccumulator(const llvm::APInt &accumulator,
                                     AccumulatorOverflowMode overflowMode) {
   unsigned accumulatorWidth = accumulator.getBitWidth();
   assert(destinationWidth != 0 && "destination width must be nonzero");
-  assert(fractionalBitsToDiscard < accumulatorWidth &&
-         "fractional shift must be smaller than accumulator width");
+  assert(fractionalBitsToDiscard <= accumulatorWidth &&
+         "fractional shift must not exceed accumulator width");
 
   llvm::APInt rounded = accumulator;
   if (fractionalBitsToDiscard != 0) {
-    rounded = accumulator.ashr(fractionalBitsToDiscard);
-    llvm::APInt remainder = accumulator.trunc(fractionalBitsToDiscard).zext(accumulatorWidth);
+    rounded = fractionalBitsToDiscard == accumulatorWidth
+                  ? (accumulator.isNegative() ? llvm::APInt::getAllOnes(accumulatorWidth)
+                                              : llvm::APInt(accumulatorWidth, 0))
+                  : accumulator.ashr(fractionalBitsToDiscard);
+    llvm::APInt remainder = fractionalBitsToDiscard == accumulatorWidth
+                                ? accumulator
+                                : accumulator.trunc(fractionalBitsToDiscard).zext(accumulatorWidth);
     llvm::APInt one(accumulatorWidth, 1);
     switch (roundingMode) {
     case RoundingMode::TowardNegative:

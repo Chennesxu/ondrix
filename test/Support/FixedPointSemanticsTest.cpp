@@ -269,7 +269,7 @@ bool testSmallWidthExportExhaustive() {
   constexpr int64_t destinationMaximum = 3;
 
   for (int64_t value = -16; value <= 15; ++value) {
-    for (unsigned shift : {1U, 2U}) {
+    for (unsigned shift : {1U, 2U, accumulatorWidth}) {
       for (RoundingMode rounding :
            {RoundingMode::TowardNegative, RoundingMode::NearestEven, RoundingMode::TowardZero}) {
         int64_t rounded = roundReference(value, shift, rounding);
