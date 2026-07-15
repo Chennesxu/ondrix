@@ -168,6 +168,83 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
   return rewriter.create<arith::TruncIOp>(loc, accumulatorType, clamped);
 }
 
+static Value createIntegerConstant(Location loc, IntegerType type, int64_t value,
+                                   ConversionPatternRewriter &rewriter) {
+  return rewriter.create<arith::ConstantOp>(loc, type, rewriter.getIntegerAttr(type, value));
+}
+
+static Value roundSignedRightShift(Location loc, Value input, unsigned shift,
+                                   ondrix::ondsp::RoundingMode roundingMode,
+                                   ConversionPatternRewriter &rewriter) {
+  auto type = cast<IntegerType>(input.getType());
+  if (shift == 0)
+    return input;
+
+  Value shiftValue = createIntegerConstant(loc, type, shift, rewriter);
+  Value quotient = rewriter.create<arith::ShRSIOp>(loc, input, shiftValue);
+  if (roundingMode == ondrix::ondsp::RoundingMode::TowardNegative)
+    return quotient;
+
+  IntegerType remainderBitsType = rewriter.getIntegerType(shift);
+  Value remainderBits = rewriter.create<arith::TruncIOp>(loc, remainderBitsType, input);
+  Value remainder = rewriter.create<arith::ExtUIOp>(loc, type, remainderBits);
+  Value zero = createIntegerConstant(loc, type, 0, rewriter);
+  Value one = createIntegerConstant(loc, type, 1, rewriter);
+  Value incrementCondition;
+
+  switch (roundingMode) {
+  case ondrix::ondsp::RoundingMode::TowardNegative:
+    llvm_unreachable("toward-negative rounding returned above");
+  case ondrix::ondsp::RoundingMode::TowardZero: {
+    Value isNegative = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, input, zero);
+    Value hasRemainder =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, remainder, zero);
+    incrementCondition = rewriter.create<arith::AndIOp>(loc, isNegative, hasRemainder);
+    break;
+  }
+  case ondrix::ondsp::RoundingMode::NearestEven: {
+    Value half = createIntegerConstant(loc, type, int64_t{1} << (shift - 1), rewriter);
+    Value aboveHalf =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, remainder, half);
+    Value exactlyHalf =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, remainder, half);
+    Value quotientLowBit = rewriter.create<arith::AndIOp>(loc, quotient, one);
+    Value quotientIsOdd =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, quotientLowBit, zero);
+    Value halfAndOdd = rewriter.create<arith::AndIOp>(loc, exactlyHalf, quotientIsOdd);
+    incrementCondition = rewriter.create<arith::OrIOp>(loc, aboveHalf, halfAndOdd);
+    break;
+  }
+  }
+
+  Value increment = rewriter.create<arith::SelectOp>(loc, incrementCondition, one, zero);
+  return rewriter.create<arith::AddIOp>(loc, quotient, increment);
+}
+
+static Value narrowSignedValue(Location loc, Value input, IntegerType destinationType,
+                               ondrix::ondsp::OverflowMode overflowMode,
+                               ConversionPatternRewriter &rewriter) {
+  auto inputType = cast<IntegerType>(input.getType());
+  if (overflowMode == ondrix::ondsp::OverflowMode::Wrap)
+    return rewriter.create<arith::TruncIOp>(loc, destinationType, input);
+
+  llvm::APInt minimum =
+      llvm::APInt::getSignedMinValue(destinationType.getWidth()).sext(inputType.getWidth());
+  llvm::APInt maximum =
+      llvm::APInt::getSignedMaxValue(destinationType.getWidth()).sext(inputType.getWidth());
+  Value minimumValue = rewriter.create<arith::ConstantOp>(
+      loc, inputType, rewriter.getIntegerAttr(inputType, minimum));
+  Value maximumValue = rewriter.create<arith::ConstantOp>(
+      loc, inputType, rewriter.getIntegerAttr(inputType, maximum));
+  Value belowMinimum =
+      rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, input, minimumValue);
+  Value aboveMaximum =
+      rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, input, maximumValue);
+  Value lowerClamped = rewriter.create<arith::SelectOp>(loc, belowMinimum, minimumValue, input);
+  Value clamped = rewriter.create<arith::SelectOp>(loc, aboveMaximum, maximumValue, lowerClamped);
+  return rewriter.create<arith::TruncIOp>(loc, destinationType, clamped);
+}
+
 template <typename OpTy, ondrix::fixedpoint::AccumulatorUpdateOperation operation>
 class MacLikeOpLowering final : public OpConversionPattern<OpTy> {
 public:
@@ -199,6 +276,29 @@ using MacSubOpLowering =
     MacLikeOpLowering<ondrix::ondsp::MacSubOp,
                       ondrix::fixedpoint::AccumulatorUpdateOperation::Subtract>;
 
+class AccExportOpLowering final : public OpConversionPattern<ondrix::ondsp::AccExportOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::AccExportOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::AccExportOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
+    if (!isSupportedQ15Accumulator(accumulator) || !isSignedQ15(op.getDst()) ||
+        !op.getResult().getType().isSignlessInteger(16))
+      return op.emitOpError(
+          "Q15 scalar lowering requires signed i40 frac=30 accumulator and signed i16 "
+          "frac=15 destination");
+
+    unsigned shift = accumulator.getFrac() - op.getDst().getFrac();
+    Value rounded =
+        roundSignedRightShift(op.getLoc(), adaptor.getAcc(), shift, op.getRounding(), rewriter);
+    Value result =
+        narrowSignedValue(op.getLoc(), rounded, rewriter.getI16Type(), op.getOverflow(), rewriter);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 class ConvertOndspQ15ToScalarPass final
     : public ondrix::impl::ConvertOndspQ15ToScalarBase<ConvertOndspQ15ToScalarPass> {
 public:
@@ -208,8 +308,8 @@ public:
   void runOnOperation() override {
     OndspQ15ToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
-    patterns.add<AccImportOpLowering, AccZeroOpLowering, MacOpLowering, MacSubOpLowering>(
-        typeConverter, &getContext());
+    patterns.add<AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering, MacOpLowering,
+                 MacSubOpLowering>(typeConverter, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);
