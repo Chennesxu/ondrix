@@ -177,3 +177,12 @@ func.func @butterfly_rejects_signed_packed_container(
   %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (si32, si32, si32) -> (si32, si32)
   return %0, %1 : si32, si32
 }
+
+// -----
+
+func.func @quantize_rejects_tuple_as_scalar(
+    %input: tuple<i32>) -> i16 {
+  // expected-error@+1 {{input and result must use the same scalar or static shaped domain}}
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tuple<i32>) -> i16
+  return %0 : i16
+}

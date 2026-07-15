@@ -228,3 +228,21 @@ func.func @cx_butterfly_rejects_scalar_to_vector_domain(
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (i32, i32, i32) -> (vector<2xi32>, vector<2xi32>)
   return %0, %1 : vector<2xi32>, vector<2xi32>
 }
+
+// -----
+
+func.func @round_shift_rejects_tuple_as_scalar(
+    %input: tuple<i32>) -> i16 {
+  // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
+  %0 = ondsp.round_shift %input {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tuple<i32>) -> i16
+  return %0 : i16
+}
+
+// -----
+
+func.func @sat_add_shift_rejects_tuple_operands(
+    %lhs: tuple<i32>, %rhs: tuple<i32>) -> i16 {
+  // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
+  %0 = ondsp.sat_add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tuple<i32>, tuple<i32>) -> i16
+  return %0 : i16
+}

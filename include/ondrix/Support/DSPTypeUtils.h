@@ -40,6 +40,10 @@ inline mlir::Type getElementTypeOrSelf(mlir::Type type) {
   return type;
 }
 
+inline bool isDSPScalarValueType(mlir::Type type) {
+  return mlir::isa<mlir::IntegerType, mlir::FloatType>(type);
+}
+
 // Elementwise values must remain in the same scalar/vector/tensor container
 // and preserve every static dimension. Element types may differ for numeric
 // conversions.
@@ -49,7 +53,7 @@ inline bool haveSameElementwiseShape(mlir::Type lhs, mlir::Type rhs) {
   if (static_cast<bool>(lhsShaped) != static_cast<bool>(rhsShaped))
     return false;
   if (!lhsShaped)
-    return true;
+    return isDSPScalarValueType(lhs) && isDSPScalarValueType(rhs);
   if (mlir::isa<mlir::VectorType>(lhs) != mlir::isa<mlir::VectorType>(rhs) ||
       mlir::isa<mlir::TensorType>(lhs) != mlir::isa<mlir::TensorType>(rhs) ||
       mlir::isa<mlir::BaseMemRefType>(lhs) != mlir::isa<mlir::BaseMemRefType>(rhs))
