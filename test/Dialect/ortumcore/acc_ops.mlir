@@ -1,14 +1,15 @@
 // RUN: ondrix-opt %s | FileCheck %s
 
-// CHECK-LABEL: func.func @mr_ops
-func.func @mr_ops(%a: i16, %b: i16) -> i32 {
+// CHECK-LABEL: func.func @acc_ops
+func.func @acc_ops(%a: i16, %b: i16) -> !ortumcore.acc {
   // CHECK: !ortumcore.acc
-  %mr0 = ortumcore.acc_init : !ortumcore.acc
+  %acc0 = ortumcore.acc_init : !ortumcore.acc
 
-  // CHECK: ortumcore.dual_mac
-  %mr1 = ortumcore.dual_mac %mr0, %a, %b : (!ortumcore.acc, i16, i16) -> !ortumcore.acc
-  %x = ortumcore.acc_extract %mr1 : (!ortumcore.acc) -> i32
-  return %x : i32
+  // CHECK: ortumcore.mac_add
+  %acc1 = ortumcore.mac_add %acc0, %a, %b : (!ortumcore.acc, i16, i16) -> !ortumcore.acc
+  // CHECK: ortumcore.mac_sub
+  %acc2 = ortumcore.mac_sub %acc1, %a, %b : (!ortumcore.acc, i16, i16) -> !ortumcore.acc
+  return %acc2 : !ortumcore.acc
 }
 
 // CHECK-LABEL: func.func @pair_types

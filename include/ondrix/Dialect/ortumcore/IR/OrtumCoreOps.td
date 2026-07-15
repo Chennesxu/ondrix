@@ -25,8 +25,6 @@ class OrtumCore_MacOp<string mnemonic, string opSummary, TypeConstraint payloadT
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-def OrtumCore_DualMacOp
-    : OrtumCore_MacOp<"dual_mac", "Experimental dual-lane i16 MAC semantic op", I16>;
 def OrtumCore_MacAddOp
     : OrtumCore_MacOp<"mac_add", "Saturating signed Q15 multiply-add", I16> {
   let description = [{
@@ -47,25 +45,6 @@ def OrtumCore_MacSubOp
     requantization behavior is not part of this operation.
   }];
 }
-def OrtumCore_QMacAddOp
-    : OrtumCore_MacOp<"qmac_add", "Experimental i32 Q-format multiply-add semantic op", I32>;
-def OrtumCore_QMacSubOp
-    : OrtumCore_MacOp<"qmac_sub", "Experimental i32 Q-format multiply-subtract semantic op", I32>;
-
-def OrtumCore_AccExtractOp : OrtumCore_Op<"acc_extract", [Pure]> {
-  let summary = "Experimental policy-free target accumulator extraction";
-  let arguments = (ins OrtumCore_AccumType:$acc);
-  let results = (outs I32:$result);
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
-def OrtumCore_AccImportOp : OrtumCore_Op<"acc_import", [Pure]> {
-  let summary = "Experimental policy-free target accumulator import";
-  let arguments = (ins I32:$input);
-  let results = (outs OrtumCore_AccumType:$result);
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
 class OrtumCore_BinaryOp<string mnemonic, string opSummary>
     : OrtumCore_Op<mnemonic, [Pure]> {
   let summary = opSummary;
