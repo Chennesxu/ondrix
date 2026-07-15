@@ -52,19 +52,37 @@ static bool hasStorageType(Type type, Type storage) {
   return false;
 }
 
+static Type getNumericStorage(Attribute numeric) {
+  if (auto fixed = dyn_cast<FixedAttr>(numeric))
+    return fixed.getStorage();
+  return cast<FpAttr>(numeric).getFormat();
+}
+
 static LogicalResult verifyValueNumericType(Operation *op, Type type, Attribute numeric,
                                             StringRef valueName) {
-  Type storage;
-  if (auto fixed = dyn_cast<FixedAttr>(numeric))
-    storage = fixed.getStorage();
-  else if (auto fp = dyn_cast<FpAttr>(numeric))
-    storage = fp.getFormat();
-  else
+  if (!isa<FixedAttr, FpAttr>(numeric))
     return op->emitOpError("requires a fixed-point or floating-point numeric attribute");
 
+  Type storage = getNumericStorage(numeric);
   if (!hasStorageType(type, storage))
     return op->emitOpError() << valueName << " type does not match numeric storage type";
   return success();
+}
+
+static LogicalResult verifySameElementwiseShape(Operation *op, TypeRange types) {
+  if (types.empty())
+    return success();
+  Type reference = types.front();
+  if (llvm::all_of(types.drop_front(),
+                   [&](Type type) { return ondrix::haveSameElementwiseShape(reference, type); }))
+    return success();
+  return op->emitOpError("operands and results must use the same scalar or static shaped domain");
+}
+
+static LogicalResult verifyResultElementType(Operation *op, Type result, Type expected) {
+  if (ondrix::getElementTypeOrSelf(result) == expected)
+    return success();
+  return op->emitOpError("result element type does not match the destination storage type");
 }
 
 static LogicalResult verifyFixedStorageOperands(Operation *op, FixedAttr numeric, Value lhs,
@@ -212,18 +230,50 @@ LogicalResult AssumeNumericOp::verify() {
 LogicalResult ConvertOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();
+  if (failed(verifySameElementwiseShape(*this, {getInput().getType(), getResult().getType()})))
+    return failure();
   if (failed(verifyValueNumericType(*this, getInput().getType(), getSrc(), "input")))
     return failure();
   return verifyValueNumericType(*this, getResult().getType(), getDst(), "result");
 }
 
-LogicalResult RoundShiftOp::verify() { return verifyValueOnlyTypes(*this); }
+LogicalResult RoundShiftOp::verify() {
+  if (failed(verifyValueOnlyTypes(*this)))
+    return failure();
+  if (failed(verifySameElementwiseShape(*this, {getInput().getType(), getResult().getType()})))
+    return failure();
+  return verifyResultElementType(*this, getResult().getType(), getScale().getSaturateTo());
+}
 
-LogicalResult SatCastOp::verify() { return verifyValueOnlyTypes(*this); }
+LogicalResult SatCastOp::verify() {
+  if (failed(verifyValueOnlyTypes(*this)))
+    return failure();
+  if (failed(verifySameElementwiseShape(*this, {getInput().getType(), getResult().getType()})))
+    return failure();
+  Type destination = getNumericStorage(getNumeric());
+  return verifyResultElementType(*this, getResult().getType(), destination);
+}
 
-LogicalResult SatAddShiftOp::verify() { return verifyValueOnlyTypes(*this); }
+static LogicalResult verifyBinaryShiftValueDomain(Operation *op, Value lhs, Value rhs, Value result,
+                                                  ScaleAttr scale) {
+  if (failed(verifySameElementwiseShape(op, {lhs.getType(), rhs.getType(), result.getType()})))
+    return failure();
+  if (ondrix::getElementTypeOrSelf(lhs.getType()) != ondrix::getElementTypeOrSelf(rhs.getType()))
+    return op->emitOpError("lhs and rhs element types must match");
+  return verifyResultElementType(op, result.getType(), scale.getSaturateTo());
+}
 
-LogicalResult SatSubShiftOp::verify() { return verifyValueOnlyTypes(*this); }
+LogicalResult SatAddShiftOp::verify() {
+  if (failed(verifyValueOnlyTypes(*this)))
+    return failure();
+  return verifyBinaryShiftValueDomain(*this, getLhs(), getRhs(), getResult(), getScale());
+}
+
+LogicalResult SatSubShiftOp::verify() {
+  if (failed(verifyValueOnlyTypes(*this)))
+    return failure();
+  return verifyBinaryShiftValueDomain(*this, getLhs(), getRhs(), getResult(), getScale());
+}
 
 LogicalResult AccImportOp::verify() {
   FixedAttr source = getSrc();
@@ -297,12 +347,43 @@ LogicalResult ReduceMacOp::verify() {
   return success();
 }
 
-LogicalResult CxMulOp::verify() { return verifyValueOnlyTypes(*this); }
+static LogicalResult verifyComplexValueDomain(Operation *op, TypeRange types, CxLayoutAttr layout,
+                                              Attribute numeric) {
+  if (failed(verifySameElementwiseShape(op, types)))
+    return failure();
+  if (!isPackedI16Layout(layout)) {
+    for (Type type : types)
+      if (failed(verifyValueNumericType(op, type, numeric, "complex value")))
+        return failure();
+    return success();
+  }
+
+  auto fixed = dyn_cast<FixedAttr>(numeric);
+  auto storage = fixed ? dyn_cast<IntegerType>(fixed.getStorage()) : IntegerType();
+  if (!storage || storage.getWidth() != 16)
+    return op->emitOpError("packed i16 complex layout requires an i16 fixed numeric policy");
+  if (!llvm::all_of(types, hasI32Container))
+    return op->emitOpError("packed i16 complex values require signless i32 container storage");
+  return success();
+}
+
+LogicalResult CxMulOp::verify() {
+  if (failed(verifyValueOnlyTypes(*this)))
+    return failure();
+  return verifyComplexValueDomain(*this,
+                                  {getLhs().getType(), getRhs().getType(), getResult().getType()},
+                                  getLayout(), getNumeric());
+}
 
 LogicalResult CxButterflyOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();
   if (failed(verifyButterflyPolicies(*this, getNumeric(), getProduct(), getScale())))
+    return failure();
+
+  SmallVector<Type> valueTypes(getOperandTypes());
+  valueTypes.append(getResultTypes().begin(), getResultTypes().end());
+  if (failed(verifySameElementwiseShape(*this, valueTypes)))
     return failure();
 
   if (!isPackedI16Layout(getLayout())) {

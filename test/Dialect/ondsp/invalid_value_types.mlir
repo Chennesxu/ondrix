@@ -174,3 +174,57 @@ func.func @cx_mul_rejects_unranked_tensor_result(
   %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i16, i16) -> tensor<*xi16>
   return %0 : tensor<*xi16>
 }
+
+// -----
+
+func.func @convert_rejects_mismatched_static_shapes(
+    %input: tensor<2xi16>) -> tensor<3xi8> {
+  // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
+  %0 = ondsp.convert %input {src = #ondsp.fixed<signed, storage = i16, frac = 15>, dst = #ondsp.fixed<signed, storage = i8, frac = 7>} : (tensor<2xi16>) -> tensor<3xi8>
+  return %0 : tensor<3xi8>
+}
+
+// -----
+
+func.func @round_shift_rejects_wrong_result_element(
+    %input: vector<2xi32>) -> vector<2xi32> {
+  // expected-error@+1 {{result element type does not match the destination storage type}}
+  %0 = ondsp.round_shift %input {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi32>) -> vector<2xi32>
+  return %0 : vector<2xi32>
+}
+
+// -----
+
+func.func @sat_add_shift_rejects_mismatched_shapes(
+    %lhs: vector<2xi16>, %rhs: vector<4xi16>) -> vector<2xi16> {
+  // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
+  %0 = ondsp.sat_add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<4xi16>) -> vector<2xi16>
+  return %0 : vector<2xi16>
+}
+
+// -----
+
+func.func @cx_mul_rejects_mismatched_shapes(
+    %lhs: tensor<2xi16>, %rhs: tensor<3xi16>) -> tensor<2xi16> {
+  // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
+  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tensor<2xi16>, tensor<3xi16>) -> tensor<2xi16>
+  return %0 : tensor<2xi16>
+}
+
+// -----
+
+func.func @cx_mul_rejects_wrong_numeric_storage(
+    %lhs: vector<2xi32>, %rhs: vector<2xi32>) -> vector<2xi32> {
+  // expected-error@+1 {{complex value type does not match numeric storage type}}
+  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (vector<2xi32>, vector<2xi32>) -> vector<2xi32>
+  return %0 : vector<2xi32>
+}
+
+// -----
+
+func.func @cx_butterfly_rejects_scalar_to_vector_domain(
+    %a: i32, %b: i32, %tw: i32) -> (vector<2xi32>, vector<2xi32>) {
+  // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (i32, i32, i32) -> (vector<2xi32>, vector<2xi32>)
+  return %0, %1 : vector<2xi32>, vector<2xi32>
+}
