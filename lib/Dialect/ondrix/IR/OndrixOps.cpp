@@ -1,13 +1,13 @@
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
+#include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 #include "ondrix/Support/DSPTypeUtils.h"
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
-#include <limits>
 #include <optional>
 
 using namespace mlir;
@@ -46,24 +46,10 @@ static LogicalResult verifyValueOnlyTypes(Operation *op) {
   return success();
 }
 
-static LogicalResult
-verifyOptionalProductPolicy(Operation *op, Attribute numeric,
-                            std::optional<ondrix::ondsp::ProductAttr> product) {
-  if (isa<ondrix::ondsp::FixedAttr>(numeric)) {
-    if (!product)
-      return op->emitOpError("fixed numeric policy requires a product attribute");
-    return success();
-  }
-
-  if (product)
-    return op->emitOpError("floating-point numeric policy must not specify a product attribute");
-  return success();
-}
-
 static LogicalResult verifyButterflyPolicies(Operation *op, Attribute numeric,
                                              std::optional<ondrix::ondsp::ProductAttr> product,
                                              std::optional<ondrix::ondsp::ScaleAttr> scale) {
-  if (failed(verifyOptionalProductPolicy(op, numeric, product)))
+  if (failed(ondrix::ondsp::verifyProductPolicy(op, numeric, product)))
     return failure();
 
   if (isa<ondrix::ondsp::FixedAttr>(numeric)) {
@@ -83,21 +69,6 @@ static Type getNumericStorage(Attribute numeric) {
   return cast<ondrix::ondsp::FpAttr>(numeric).getFormat();
 }
 
-static FailureOr<unsigned> getFixedProductFrac(Operation *op, ondrix::ondsp::FixedAttr numeric,
-                                               ondrix::ondsp::ProductAttr product) {
-  uint64_t frac = numeric.getFrac();
-  uint64_t doubledFrac = frac * 2;
-  auto storage = cast<IntegerType>(numeric.getStorage());
-  if (product.getSelection() == ondrix::ondsp::ProductSelection::High) {
-    if (doubledFrac < storage.getWidth())
-      return op->emitOpError("high product fractional position would be negative");
-    doubledFrac -= storage.getWidth();
-  }
-  if (doubledFrac > std::numeric_limits<unsigned>::max())
-    return op->emitOpError("product fractional position is unrepresentable");
-  return static_cast<unsigned>(doubledFrac);
-}
-
 static LogicalResult verifyFixedReductionResult(Operation *op, Type resultType,
                                                 ondrix::ondsp::FixedAttr numeric,
                                                 ondrix::ondsp::ProductAttr product) {
@@ -106,7 +77,8 @@ static LogicalResult verifyFixedReductionResult(Operation *op, Type resultType,
     return op->emitOpError("fixed reduction result must use !ondsp.acc");
   if (accumulator.getSignedness() != numeric.getSignedness())
     return op->emitOpError("accumulator signedness must match fixed numeric policy");
-  FailureOr<unsigned> expectedFrac = getFixedProductFrac(op, numeric, product);
+  FailureOr<unsigned> expectedFrac =
+      ondrix::ondsp::inferProductFractionalBits(op, numeric, product);
   if (failed(expectedFrac))
     return failure();
   if (accumulator.getFrac() != *expectedFrac)
@@ -269,13 +241,13 @@ Speculation::Speculatability DotOp::getSpeculatability() {
 }
 
 LogicalResult FirOp::verify() {
-  if (failed(verifyOptionalProductPolicy(*this, getNumeric(), getProduct())))
+  if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
   return verifyFirWindow(*this);
 }
 
 LogicalResult DotOp::verify() {
-  if (failed(verifyOptionalProductPolicy(*this, getNumeric(), getProduct())))
+  if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
   return verifyDotDomain(*this);
 }

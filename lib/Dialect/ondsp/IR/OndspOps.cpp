@@ -1,9 +1,9 @@
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
+#include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Support/DSPTypeUtils.h"
 
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
-#include <limits>
 #include <optional>
 
 using namespace mlir;
@@ -102,26 +102,6 @@ static LogicalResult verifyFixedStorageOperands(Operation *op, FixedAttr numeric
   return success();
 }
 
-static FailureOr<unsigned> getProductFrac(Operation *op, FixedAttr numeric, ProductAttr product) {
-  auto storage = numeric.getStorage().cast<IntegerType>();
-  uint64_t frac = numeric.getFrac();
-  uint64_t width = storage.getWidth();
-  uint64_t doubledFrac = frac * 2;
-
-  if (frac > std::numeric_limits<unsigned>::max() / 2)
-    return op->emitOpError("product fractional position is unrepresentable");
-
-  if (product.getSelection() == ProductSelection::High) {
-    if (doubledFrac < width)
-      return op->emitOpError("high product fractional position would be negative");
-    doubledFrac -= width;
-  }
-
-  if (doubledFrac > std::numeric_limits<unsigned>::max())
-    return op->emitOpError("product fractional position is unrepresentable");
-  return static_cast<unsigned>(doubledFrac);
-}
-
 static StringRef getProductName(ProductAttr product) {
   return product.getSelection() == ProductSelection::Full ? "full" : "high";
 }
@@ -135,7 +115,7 @@ static LogicalResult verifyMacLike(Operation *op, Value acc, Value lhs, Value rh
   if (accumulator.getSignedness() != numeric.getSignedness())
     return op->emitOpError("accumulator signedness must match the fixed numeric policy");
 
-  FailureOr<unsigned> expectedFrac = getProductFrac(op, numeric, product);
+  FailureOr<unsigned> expectedFrac = inferProductFractionalBits(op, numeric, product);
   if (failed(expectedFrac))
     return failure();
 
@@ -146,23 +126,10 @@ static LogicalResult verifyMacLike(Operation *op, Value acc, Value lhs, Value rh
   return success();
 }
 
-static LogicalResult verifyOptionalProductPolicy(Operation *op, Attribute numeric,
-                                                 std::optional<ProductAttr> product) {
-  if (isa<FixedAttr>(numeric)) {
-    if (!product)
-      return op->emitOpError("fixed numeric policy requires a product attribute");
-    return success();
-  }
-
-  if (product)
-    return op->emitOpError("floating-point numeric policy must not specify a product attribute");
-  return success();
-}
-
 static LogicalResult verifyButterflyPolicies(Operation *op, Attribute numeric,
                                              std::optional<ProductAttr> product,
                                              std::optional<ScaleAttr> scale) {
-  if (failed(verifyOptionalProductPolicy(op, numeric, product)))
+  if (failed(verifyProductPolicy(op, numeric, product)))
     return failure();
 
   if (isa<FixedAttr>(numeric)) {
@@ -326,7 +293,7 @@ LogicalResult AccExportOp::verify() {
 LogicalResult ReduceMacOp::verify() {
   if (failed(verifyReduceDomain(*this)))
     return failure();
-  if (failed(verifyOptionalProductPolicy(*this, getNumeric(), getProduct())))
+  if (failed(verifyProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
 
   if (auto fixed = dyn_cast<FixedAttr>(getNumeric())) {
