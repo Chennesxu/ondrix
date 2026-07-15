@@ -64,8 +64,7 @@ static LogicalResult verifyOrtumCoreAccumulator(Operation *op, ondrix::ondsp::Ac
   return success();
 }
 
-static LogicalResult verifySupportedMacPolicy(Operation *op,
-                                              ondrix::ondsp::FixedAttr numeric,
+static LogicalResult verifySupportedMacPolicy(Operation *op, ondrix::ondsp::FixedAttr numeric,
                                               ondrix::ondsp::ProductAttr product) {
   auto storage = dyn_cast<IntegerType>(numeric.getStorage());
   if (numeric.getSignedness() == ondrix::ondsp::Signedness::Signed && storage &&
@@ -250,8 +249,8 @@ public:
         !isa<ondrix::ortumcore::AccumType>(resultType))
       return op.emitOpError("MAC lowering requires converted target accumulator types");
 
-    rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacAddOp>(
-        op, resultType, adaptor.getAcc(), adaptor.getLhs(), adaptor.getRhs());
+    rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacAddOp>(op, resultType, adaptor.getAcc(),
+                                                             adaptor.getLhs(), adaptor.getRhs());
     return success();
   }
 };
@@ -271,8 +270,8 @@ public:
         !isa<ondrix::ortumcore::AccumType>(resultType))
       return op.emitOpError("MAC-sub lowering requires converted target accumulator types");
 
-    rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacSubOp>(
-        op, resultType, adaptor.getAcc(), adaptor.getLhs(), adaptor.getRhs());
+    rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacSubOp>(op, resultType, adaptor.getAcc(),
+                                                             adaptor.getLhs(), adaptor.getRhs());
     return success();
   }
 };

@@ -11,13 +11,11 @@ llvm::APInt computeSignedFullProduct(const llvm::APInt &lhs, const llvm::APInt &
   return lhs.sext(productWidth) * rhs.sext(productWidth);
 }
 
-llvm::APInt updateSignedAccumulator(const llvm::APInt &accumulator,
-                                    const llvm::APInt &product,
+llvm::APInt updateSignedAccumulator(const llvm::APInt &accumulator, const llvm::APInt &product,
                                     AccumulatorUpdateOperation operation,
                                     AccumulatorOverflowMode overflowMode) {
   unsigned accumulatorWidth = accumulator.getBitWidth();
-  unsigned intermediateWidth =
-      std::max(accumulatorWidth, product.getBitWidth()) + 1;
+  unsigned intermediateWidth = std::max(accumulatorWidth, product.getBitWidth()) + 1;
   llvm::APInt extendedAccumulator = accumulator.sext(intermediateWidth);
   llvm::APInt extendedProduct = product.sext(intermediateWidth);
 
@@ -47,12 +45,11 @@ llvm::APInt updateSignedAccumulator(const llvm::APInt &accumulator,
   llvm_unreachable("unknown accumulator overflow mode");
 }
 
-llvm::APInt multiplyAccumulateSigned(const llvm::APInt &accumulator,
-                                     const llvm::APInt &lhs, const llvm::APInt &rhs,
-                                     AccumulatorUpdateOperation operation,
+llvm::APInt multiplyAccumulateSigned(const llvm::APInt &accumulator, const llvm::APInt &lhs,
+                                     const llvm::APInt &rhs, AccumulatorUpdateOperation operation,
                                      AccumulatorOverflowMode overflowMode) {
-  return updateSignedAccumulator(accumulator, computeSignedFullProduct(lhs, rhs),
-                                 operation, overflowMode);
+  return updateSignedAccumulator(accumulator, computeSignedFullProduct(lhs, rhs), operation,
+                                 overflowMode);
 }
 
 } // namespace ondrix::fixedpoint

@@ -12,15 +12,13 @@ enum class AccumulatorOverflowMode { Wrap, Saturate };
 llvm::APInt computeSignedFullProduct(const llvm::APInt &lhs, const llvm::APInt &rhs);
 
 /// Applies one signed accumulator update and returns accumulator-width raw bits.
-llvm::APInt updateSignedAccumulator(const llvm::APInt &accumulator,
-                                    const llvm::APInt &product,
+llvm::APInt updateSignedAccumulator(const llvm::APInt &accumulator, const llvm::APInt &product,
                                     AccumulatorUpdateOperation operation,
                                     AccumulatorOverflowMode overflowMode);
 
 /// Computes an exact signed full product and applies one accumulator update.
-llvm::APInt multiplyAccumulateSigned(const llvm::APInt &accumulator,
-                                     const llvm::APInt &lhs, const llvm::APInt &rhs,
-                                     AccumulatorUpdateOperation operation,
+llvm::APInt multiplyAccumulateSigned(const llvm::APInt &accumulator, const llvm::APInt &lhs,
+                                     const llvm::APInt &rhs, AccumulatorUpdateOperation operation,
                                      AccumulatorOverflowMode overflowMode);
 
 } // namespace ondrix::fixedpoint

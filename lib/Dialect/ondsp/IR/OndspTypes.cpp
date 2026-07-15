@@ -21,8 +21,7 @@ void OndspDialect::registerTypes() {
 }
 
 LogicalResult AccType::verify(function_ref<InFlightDiagnostic()> emitError, Type storage,
-                              unsigned frac, Signedness signedness,
-                              OverflowMode updateOverflow) {
+                              unsigned frac, Signedness signedness, OverflowMode updateOverflow) {
   (void)signedness;
   (void)updateOverflow;
   auto intType = storage.dyn_cast<IntegerType>();
