@@ -17,28 +17,35 @@ def OrtumCore_AccInitOp : OrtumCore_Op<"acc_init", [Pure]> {
   let assemblyFormat = "attr-dict `:` type($result)";
 }
 
-class OrtumCore_MacOp<string mnemonic, string opSummary>
+class OrtumCore_MacOp<string mnemonic, string opSummary, TypeConstraint payloadType>
     : OrtumCore_Op<mnemonic, [Pure, AllTypesMatch<["acc", "result"]>]> {
   let summary = opSummary;
-  let arguments = (ins OrtumCore_AccumType:$acc, AnyInteger:$lhs, AnyInteger:$rhs);
+  let arguments = (ins OrtumCore_AccumType:$acc, payloadType:$lhs, payloadType:$rhs);
   let results = (outs OrtumCore_AccumType:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-def OrtumCore_DualMacOp : OrtumCore_MacOp<"dual_mac", "Dual-lane MAC semantic op">;
-def OrtumCore_MacAddOp : OrtumCore_MacOp<"mac_add", "Multiply-add semantic op">;
-def OrtumCore_MacSubOp : OrtumCore_MacOp<"mac_sub", "Multiply-subtract semantic op">;
-def OrtumCore_QMacAddOp : OrtumCore_MacOp<"qmac_add", "Q-format multiply-add semantic op">;
-def OrtumCore_QMacSubOp : OrtumCore_MacOp<"qmac_sub", "Q-format multiply-subtract semantic op">;
+def OrtumCore_DualMacOp
+    : OrtumCore_MacOp<"dual_mac", "Dual-lane i16 MAC semantic op", I16>;
+def OrtumCore_MacAddOp
+    : OrtumCore_MacOp<"mac_add", "i16 multiply-add semantic op", I16>;
+def OrtumCore_MacSubOp
+    : OrtumCore_MacOp<"mac_sub", "i16 multiply-subtract semantic op", I16>;
+def OrtumCore_QMacAddOp
+    : OrtumCore_MacOp<"qmac_add", "Experimental i32 Q-format multiply-add semantic op", I32>;
+def OrtumCore_QMacSubOp
+    : OrtumCore_MacOp<"qmac_sub", "Experimental i32 Q-format multiply-subtract semantic op", I32>;
 
 def OrtumCore_AccExtractOp : OrtumCore_Op<"acc_extract", [Pure]> {
+  let summary = "Experimental policy-free target accumulator extraction";
   let arguments = (ins OrtumCore_AccumType:$acc);
-  let results = (outs AnyInteger:$result);
+  let results = (outs I32:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
 def OrtumCore_AccImportOp : OrtumCore_Op<"acc_import", [Pure]> {
-  let arguments = (ins AnyInteger:$input);
+  let summary = "Experimental policy-free target accumulator import";
+  let arguments = (ins I32:$input);
   let results = (outs OrtumCore_AccumType:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
@@ -73,35 +80,41 @@ def OrtumCore_VecSetModeOp : OrtumCore_Op<"vec_set_mode", [Pure]> {
 class OrtumCore_VecUnaryOp<string mnemonic, string opSummary>
     : OrtumCore_Op<mnemonic, [Pure]> {
   let summary = opSummary;
-  let arguments = (ins AnyType:$state, AnyType:$input);
-  let results = (outs AnyType:$nextState, AnyType:$result);
+  let arguments = (ins OrtumCore_VecStateType:$state, I32:$input);
+  let results = (outs OrtumCore_VecStateType:$nextState, I32:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
 class OrtumCore_VecBinaryOp<string mnemonic, string opSummary>
     : OrtumCore_Op<mnemonic, [Pure]> {
   let summary = opSummary;
-  let arguments = (ins AnyType:$state, AnyType:$lhs, AnyType:$rhs);
-  let results = (outs AnyType:$nextState, AnyType:$result);
+  let arguments = (ins OrtumCore_VecStateType:$state, I32:$lhs, I32:$rhs);
+  let results = (outs OrtumCore_VecStateType:$nextState, I32:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
 class OrtumCore_PackedFftOp<string mnemonic, string opSummary>
     : OrtumCore_Op<mnemonic, [Pure]> {
   let summary = opSummary;
-  let arguments = (ins AnyType:$state, Variadic<AnyType>:$inputs,
+  let arguments = (ins OrtumCore_VecStateType:$state, Variadic<I32>:$inputs,
                    OrtumCore_FftStageKindAttr:$stage_kind);
-  let results = (outs AnyType:$nextState, Variadic<AnyType>:$outputs);
+  let results = (outs OrtumCore_VecStateType:$nextState, Variadic<I32>:$outputs);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-def OrtumCore_CxMulOp : OrtumCore_VecBinaryOp<"cx_mul", "Packed complex multiply semantic op">;
-def OrtumCore_CxAddOp : OrtumCore_VecBinaryOp<"cx_add", "Packed complex add semantic op">;
-def OrtumCore_CxSubOp : OrtumCore_VecBinaryOp<"cx_sub", "Packed complex subtract semantic op">;
-def OrtumCore_CxDualAddOp : OrtumCore_VecBinaryOp<"cx_dual_add", "Packed dual add semantic op">;
-def OrtumCore_CxDualSubOp : OrtumCore_VecBinaryOp<"cx_dual_sub", "Packed dual subtract semantic op">;
+def OrtumCore_CxMulOp
+    : OrtumCore_VecBinaryOp<"cx_mul", "Experimental packed complex multiply semantic op">;
+def OrtumCore_CxAddOp
+    : OrtumCore_VecBinaryOp<"cx_add", "Experimental packed complex add semantic op">;
+def OrtumCore_CxSubOp
+    : OrtumCore_VecBinaryOp<"cx_sub", "Experimental packed complex subtract semantic op">;
+def OrtumCore_CxDualAddOp
+    : OrtumCore_VecBinaryOp<"cx_dual_add", "Experimental packed dual add semantic op">;
+def OrtumCore_CxDualSubOp
+    : OrtumCore_VecBinaryOp<"cx_dual_sub", "Experimental packed dual subtract semantic op">;
 def OrtumCore_FftTrivialStageOp
-    : OrtumCore_PackedFftOp<"fft_trivial_stage", "Trivial-twiddle FFT stage semantic op">;
+    : OrtumCore_PackedFftOp<"fft_trivial_stage",
+                            "Experimental trivial-twiddle FFT stage semantic op">;
 
 def OrtumCore_BitrevAddOp : OrtumCore_BinaryOp<"bitrev_add", "Bit-reversed add addressing semantic op">;
 def OrtumCore_BitrevSubOp : OrtumCore_BinaryOp<"bitrev_sub", "Bit-reversed subtract addressing semantic op">;

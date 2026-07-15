@@ -48,6 +48,7 @@ layer without exposing private backend details.
 | `ondrix`, `ondsp`, and `ortumcore` dialects | Implemented, contracts still experimental |
 | Typed conversion patterns and accumulator type conversion | Implemented |
 | Generic scalar lowering | Partial: rank-1 f32 reduction only |
+| Packed Q15 butterfly lowering | Experimental instruction selection only; no public emulator or ABI correctness claim |
 | Generic Vector CPU lowering | Planned |
 | Public OrtumCore emulation / LLVM stubs | Planned |
 | Python-like `.ox` frontend | Planned |

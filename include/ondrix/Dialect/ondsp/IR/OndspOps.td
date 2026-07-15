@@ -135,6 +135,7 @@ def Ondsp_ReduceMacOp
 }
 
 def Ondsp_CxMulOp : Ondsp_Op<"cx_mul", [Pure]> {
+  let summary = "Experimental complex multiply semantic operation";
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_CxLayoutAttr:$layout,
                    Ondsp_NumericAttr:$numeric);
   let results = (outs AnyType:$result);
@@ -143,6 +144,7 @@ def Ondsp_CxMulOp : Ondsp_Op<"cx_mul", [Pure]> {
 }
 
 def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
+  let summary = "Experimental complex radix-2 butterfly semantic operation";
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
                    Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product,
@@ -154,6 +156,7 @@ def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
 }
 
 def Ondsp_FftStageOp : Ondsp_Op<"fft_stage", [Pure]> {
+  let summary = "Experimental FFT stage intent operation";
   let arguments = (ins Variadic<AnyType>:$inputs, I64Attr:$stage,
                    Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric);
   let results = (outs Variadic<AnyType>:$outputs);
