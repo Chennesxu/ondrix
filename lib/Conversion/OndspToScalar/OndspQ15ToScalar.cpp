@@ -3,6 +3,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
+#include "ondrix/Support/FixedPointSemantics.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -30,6 +31,16 @@ static bool isSupportedQ15Accumulator(ondrix::ondsp::AccType accumulator) {
   return storage && storage.isSignless() && storage.getWidth() == 40 &&
          accumulator.getFrac() == 30 &&
          accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed;
+}
+
+static bool isSignedQ15(ondrix::ondsp::FixedAttr numeric) {
+  auto storage = dyn_cast<IntegerType>(numeric.getStorage());
+  return storage && storage.isSignless() && storage.getWidth() == 16 && numeric.getFrac() == 15 &&
+         numeric.getSignedness() == ondrix::ondsp::Signedness::Signed;
+}
+
+static bool isFullProduct(ondrix::ondsp::ProductAttr product) {
+  return product.getSelection() == ondrix::ondsp::ProductSelection::Full;
 }
 
 class OndspQ15ToScalarTypeConverter final : public TypeConverter {
@@ -93,6 +104,101 @@ public:
   }
 };
 
+class AccImportOpLowering final : public OpConversionPattern<ondrix::ondsp::AccImportOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::AccImportOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::AccImportOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
+    if (!isSupportedQ15Accumulator(accumulator) || !isSignedQ15(op.getSrc()))
+      return op.emitOpError(
+          "Q15 scalar lowering requires signed i16 frac=15 input and signed i40 frac=30 "
+          "accumulator");
+
+    auto accumulatorStorage = cast<IntegerType>(accumulator.getStorage());
+    Value extended =
+        rewriter.create<arith::ExtSIOp>(op.getLoc(), accumulatorStorage, adaptor.getInput());
+    Value shift = rewriter.create<arith::ConstantIntOp>(
+        op.getLoc(), accumulator.getFrac() - op.getSrc().getFrac(), accumulatorStorage.getWidth());
+    rewriter.replaceOpWithNewOp<arith::ShLIOp>(op, extended, shift);
+    return success();
+  }
+};
+
+static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value product,
+                                    ondrix::ondsp::OverflowMode overflowMode,
+                                    ondrix::fixedpoint::AccumulatorUpdateOperation operation,
+                                    ConversionPatternRewriter &rewriter) {
+  auto accumulatorType = cast<IntegerType>(accumulator.getType());
+  auto productType = cast<IntegerType>(product.getType());
+  unsigned intermediateWidth = ondrix::fixedpoint::getAccumulatorUpdateIntermediateWidth(
+      accumulatorType.getWidth(), productType.getWidth());
+  IntegerType intermediateType = rewriter.getIntegerType(intermediateWidth);
+  Value extendedAccumulator = rewriter.create<arith::ExtSIOp>(loc, intermediateType, accumulator);
+  Value extendedProduct = rewriter.create<arith::ExtSIOp>(loc, intermediateType, product);
+  Value updated;
+  switch (operation) {
+  case ondrix::fixedpoint::AccumulatorUpdateOperation::Add:
+    updated = rewriter.create<arith::AddIOp>(loc, extendedAccumulator, extendedProduct);
+    break;
+  case ondrix::fixedpoint::AccumulatorUpdateOperation::Subtract:
+    updated = rewriter.create<arith::SubIOp>(loc, extendedAccumulator, extendedProduct);
+    break;
+  }
+
+  if (overflowMode == ondrix::ondsp::OverflowMode::Wrap)
+    return rewriter.create<arith::TruncIOp>(loc, accumulatorType, updated);
+
+  // Clamp in the exact update width before narrowing to the accumulator.
+  llvm::APInt minimum =
+      llvm::APInt::getSignedMinValue(accumulatorType.getWidth()).sext(intermediateWidth);
+  llvm::APInt maximum =
+      llvm::APInt::getSignedMaxValue(accumulatorType.getWidth()).sext(intermediateWidth);
+  Value minimumValue = rewriter.create<arith::ConstantOp>(
+      loc, intermediateType, rewriter.getIntegerAttr(intermediateType, minimum));
+  Value maximumValue = rewriter.create<arith::ConstantOp>(
+      loc, intermediateType, rewriter.getIntegerAttr(intermediateType, maximum));
+  Value belowMinimum =
+      rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, updated, minimumValue);
+  Value aboveMaximum =
+      rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, updated, maximumValue);
+  Value lowerClamped = rewriter.create<arith::SelectOp>(loc, belowMinimum, minimumValue, updated);
+  Value clamped = rewriter.create<arith::SelectOp>(loc, aboveMaximum, maximumValue, lowerClamped);
+  return rewriter.create<arith::TruncIOp>(loc, accumulatorType, clamped);
+}
+
+template <typename OpTy, ondrix::fixedpoint::AccumulatorUpdateOperation operation>
+class MacLikeOpLowering final : public OpConversionPattern<OpTy> {
+public:
+  using OpConversionPattern<OpTy>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
+    if (!isSupportedQ15Accumulator(accumulator) || !isSignedQ15(op.getNumeric()) ||
+        !isFullProduct(op.getProduct()))
+      return op.emitOpError(
+          "Q15 scalar lowering requires signed i16 frac=15 full product and signed i40 "
+          "frac=30 accumulator");
+
+    IntegerType productType = rewriter.getI32Type();
+    Value lhs = rewriter.create<arith::ExtSIOp>(op.getLoc(), productType, adaptor.getLhs());
+    Value rhs = rewriter.create<arith::ExtSIOp>(op.getLoc(), productType, adaptor.getRhs());
+    Value product = rewriter.create<arith::MulIOp>(op.getLoc(), lhs, rhs);
+    Value updated = lowerAccumulatorUpdate(op.getLoc(), adaptor.getAcc(), product,
+                                           accumulator.getUpdateOverflow(), operation, rewriter);
+    rewriter.replaceOp(op, updated);
+    return success();
+  }
+};
+
+using MacOpLowering =
+    MacLikeOpLowering<ondrix::ondsp::MacOp, ondrix::fixedpoint::AccumulatorUpdateOperation::Add>;
+using MacSubOpLowering =
+    MacLikeOpLowering<ondrix::ondsp::MacSubOp,
+                      ondrix::fixedpoint::AccumulatorUpdateOperation::Subtract>;
+
 class ConvertOndspQ15ToScalarPass final
     : public ondrix::impl::ConvertOndspQ15ToScalarBase<ConvertOndspQ15ToScalarPass> {
 public:
@@ -102,7 +208,8 @@ public:
   void runOnOperation() override {
     OndspQ15ToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
-    patterns.add<AccZeroOpLowering>(typeConverter, &getContext());
+    patterns.add<AccImportOpLowering, AccZeroOpLowering, MacOpLowering, MacSubOpLowering>(
+        typeConverter, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);
