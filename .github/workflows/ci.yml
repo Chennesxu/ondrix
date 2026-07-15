@@ -66,7 +66,7 @@ jobs:
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: |
           cmake --build llvm-build --target \
-            mlir-opt mlir-translate FileCheck count not
+            mlir-opt mlir-translate FileCheck count llc not
 
       - name: Configure ondrix
         run: |

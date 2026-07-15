@@ -8,6 +8,7 @@ configure_lit_site_cfg(
 set(ONDRIX_TEST_DEPENDS
   FileCheck
   count
+  llc
   not
   ondrix-fixed-point-semantics-test
   ondrix-opt

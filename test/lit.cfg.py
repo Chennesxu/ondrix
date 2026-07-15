@@ -23,6 +23,7 @@ tools = [
     "ondrix-translate",
     "ondrix-fixed-point-semantics-test",
     "FileCheck",
+    "llc",
     "not",
 ]
 
