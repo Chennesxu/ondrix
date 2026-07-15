@@ -56,8 +56,9 @@ LogicalResult ScaleAttr::verify(function_ref<InFlightDiagnostic()> emitError, un
   (void)rounding;
   (void)overflow;
 
-  if (!saturateTo.isIntOrIndexOrFloat())
-    return emitError() << "scale saturate_to must be an integer, index, or float type";
+  auto destinationType = saturateTo.dyn_cast<IntegerType>();
+  if (!destinationType || !destinationType.isSignless())
+    return emitError() << "scale saturate_to must be a signless integer type";
 
   constexpr unsigned kMaxStaticShift = 63;
   if (preShiftLeft > kMaxStaticShift)

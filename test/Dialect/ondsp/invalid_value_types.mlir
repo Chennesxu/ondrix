@@ -228,3 +228,19 @@ func.func @sat_add_shift_rejects_tuple_operands(
   %0 = ondsp.sat_add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tuple<i32>, tuple<i32>) -> i16
   return %0 : i16
 }
+
+// -----
+
+func.func @round_shift_rejects_float_input(%input: f32) -> i16 {
+  // expected-error@+1 {{input must use a signless integer element type}}
+  %0 = ondsp.round_shift %input {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (f32) -> i16
+  return %0 : i16
+}
+
+// -----
+
+func.func @sat_add_shift_rejects_float_inputs(%lhs: f32, %rhs: f32) -> i16 {
+  // expected-error@+1 {{lhs must use a signless integer element type}}
+  %0 = ondsp.sat_add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (f32, f32) -> i16
+  return %0 : i16
+}

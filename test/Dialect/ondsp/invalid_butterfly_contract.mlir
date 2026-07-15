@@ -94,7 +94,7 @@ func.func @packed_butterfly_rejects_signed_shaped_container(
 
 func.func @packed_butterfly_rejects_signed_saturation_type(
     %a: i32, %b: i32, %tw: i32) -> (i32, i32) {
-  // expected-error@+1 {{packed i16 butterfly saturate_to must match fixed numeric storage type}}
+  // expected-error@+1 {{scale saturate_to must be a signless integer type}}
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = si16>} : (i32, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
 }

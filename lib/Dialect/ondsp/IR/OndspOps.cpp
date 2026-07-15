@@ -85,6 +85,14 @@ static LogicalResult verifyResultElementType(Operation *op, Type result, Type ex
   return op->emitOpError("result element type does not match the destination storage type");
 }
 
+static LogicalResult verifySignlessIntegerElementType(Operation *op, Type type,
+                                                      StringRef valueName) {
+  auto elementType = dyn_cast<IntegerType>(ondrix::getElementTypeOrSelf(type));
+  if (!elementType || !elementType.isSignless())
+    return op->emitOpError() << valueName << " must use a signless integer element type";
+  return success();
+}
+
 static LogicalResult verifyFixedStorageOperands(Operation *op, FixedAttr numeric, Value lhs,
                                                 Value rhs) {
   if (!hasStorageType(lhs.getType(), numeric.getStorage()))
@@ -237,6 +245,8 @@ LogicalResult RoundShiftOp::verify() {
     return failure();
   if (failed(verifySameElementwiseShape(*this, {getInput().getType(), getResult().getType()})))
     return failure();
+  if (failed(verifySignlessIntegerElementType(*this, getInput().getType(), "input")))
+    return failure();
   return verifyResultElementType(*this, getResult().getType(), getScale().getSaturateTo());
 }
 
@@ -252,6 +262,9 @@ LogicalResult SatCastOp::verify() {
 static LogicalResult verifyBinaryShiftValueDomain(Operation *op, Value lhs, Value rhs, Value result,
                                                   ScaleAttr scale) {
   if (failed(verifySameElementwiseShape(op, {lhs.getType(), rhs.getType(), result.getType()})))
+    return failure();
+  if (failed(verifySignlessIntegerElementType(op, lhs.getType(), "lhs")) ||
+      failed(verifySignlessIntegerElementType(op, rhs.getType(), "rhs")))
     return failure();
   if (ondrix::getElementTypeOrSelf(lhs.getType()) != ondrix::getElementTypeOrSelf(rhs.getType()))
     return op->emitOpError("lhs and rhs element types must match");
