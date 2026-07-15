@@ -1,8 +1,18 @@
-add_ondrix_library(OndrixSupport
+add_ondrix_library(OndrixFixedPointSemantics
   FixedPointSemantics.cpp
+
+  PARTIAL_SOURCES_INTENDED
+
+  LINK_LIBS PUBLIC
+  LLVMSupport
+  )
+
+add_ondrix_library(OndrixSupport
   InitAllDialects.cpp
   InitAllPasses.cpp
   InitAllTranslations.cpp
+
+  PARTIAL_SOURCES_INTENDED
 
   DEPENDS
   MLIROndrixPassesIncGen
@@ -11,6 +21,7 @@ add_ondrix_library(OndrixSupport
   MLIRIR
   MLIRPass
   MLIRSupport
+  OndrixFixedPointSemantics
   OndrixIR
   OndspIR
   OndrixToOndsp

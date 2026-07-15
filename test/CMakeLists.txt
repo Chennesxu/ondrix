@@ -18,7 +18,7 @@ add_llvm_executable(ondrix-fixed-point-semantics-test EXCLUDE_FROM_ALL
   Support/FixedPointSemanticsTest.cpp
 )
 llvm_update_compile_flags(ondrix-fixed-point-semantics-test)
-target_link_libraries(ondrix-fixed-point-semantics-test PRIVATE OndrixSupport)
+target_link_libraries(ondrix-fixed-point-semantics-test PRIVATE OndrixFixedPointSemantics)
 
 add_lit_testsuite(check-ondrix "Running the ondrix regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
