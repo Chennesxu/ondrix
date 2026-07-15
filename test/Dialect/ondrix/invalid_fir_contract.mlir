@@ -47,7 +47,7 @@ func.func @fir_requires_numeric_storage(
 
 func.func @fixed_fir_requires_wide_result(
     %input: memref<8xi16>, %coeffs: memref<8xi16>) -> i16 {
-  // expected-error@+1 {{fixed FIR result must be an integer type of at least 32 bits}}
+  // expected-error@+1 {{fixed FIR result must be a signless integer type of at least 32 bits}}
   %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (memref<8xi16>, memref<8xi16>) -> i16
   return %0 : i16
 }
@@ -76,4 +76,13 @@ func.func @fir_rejects_scalable_vectors(
   // expected-error@+1 {{scalable vector windows are not supported}}
   %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fp<format = f32, contract = fma>} : (vector<[8]xf32>, vector<[8]xf32>) -> f32
   return %0 : f32
+}
+
+// -----
+
+func.func @fixed_fir_requires_signless_result(
+    %input: memref<8xi16>, %coeffs: memref<8xi16>) -> si32 {
+  // expected-error@+1 {{fixed FIR result must be a signless integer type of at least 32 bits}}
+  %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (memref<8xi16>, memref<8xi16>) -> si32
+  return %0 : si32
 }

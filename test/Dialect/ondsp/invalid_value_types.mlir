@@ -156,3 +156,21 @@ func.func @cx_mul_rejects_nested_scalable_vector_result(
   %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i16, i16) -> tuple<vector<[2]xi16>>
   return %0 : tuple<vector<[2]xi16>>
 }
+
+// -----
+
+func.func @cx_mul_rejects_nested_dynamic_tensor_operand(
+    %lhs: tuple<tensor<?xi16>>, %rhs: tuple<tensor<?xi16>>) -> i16 {
+  // expected-error@+1 {{value-only operation does not accept dynamic or unranked shaped operands}}
+  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tuple<tensor<?xi16>>, tuple<tensor<?xi16>>) -> i16
+  return %0 : i16
+}
+
+// -----
+
+func.func @cx_mul_rejects_unranked_tensor_result(
+    %lhs: i16, %rhs: i16) -> tensor<*xi16> {
+  // expected-error@+1 {{value-only operation does not produce dynamic or unranked shaped results}}
+  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i16, i16) -> tensor<*xi16>
+  return %0 : tensor<*xi16>
+}

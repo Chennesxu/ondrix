@@ -33,6 +33,12 @@ static LogicalResult verifyValueOnlyTypes(Operation *op) {
     return op->emitOpError("value-only operation does not accept scalable vector operands");
   if (llvm::any_of(op->getResultTypes(), ondrix::containsScalableVectorType))
     return op->emitOpError("value-only operation does not produce scalable vector results");
+  if (llvm::any_of(op->getOperandTypes(), ondrix::containsDynamicOrUnrankedShapedType))
+    return op->emitOpError(
+        "value-only operation does not accept dynamic or unranked shaped operands");
+  if (llvm::any_of(op->getResultTypes(), ondrix::containsDynamicOrUnrankedShapedType))
+    return op->emitOpError(
+        "value-only operation does not produce dynamic or unranked shaped results");
   return success();
 }
 
@@ -151,10 +157,10 @@ static bool isPackedI16Layout(CxLayoutAttr layout) {
 
 static bool hasI32Container(Type type) {
   if (auto integer = type.dyn_cast<IntegerType>())
-    return integer.getWidth() == 32;
+    return integer.isSignless() && integer.getWidth() == 32;
   if (auto shaped = type.dyn_cast<ShapedType>()) {
     auto element = shaped.getElementType().dyn_cast<IntegerType>();
-    return element && element.getWidth() == 32;
+    return element && element.isSignless() && element.getWidth() == 32;
   }
   return false;
 }
@@ -277,8 +283,9 @@ LogicalResult ReduceMacOp::verify() {
     if (failed(verifyFixedStorageOperands(*this, fixed, getLhs(), getRhs())))
       return failure();
     auto resultType = getResult().getType().dyn_cast<IntegerType>();
-    if (!resultType || resultType.getWidth() < 32)
-      return emitOpError("fixed reduce_mac result must be an integer type of at least 32 bits");
+    if (!resultType || !resultType.isSignless() || resultType.getWidth() < 32)
+      return emitOpError(
+          "fixed reduce_mac result must be a signless integer type of at least 32 bits");
     return success();
   }
   if (failed(verifyValueNumericType(*this, getLhs().getType(), getNumeric(), "lhs")) ||
@@ -320,12 +327,14 @@ LogicalResult CxButterflyOp::verify() {
 
   for (Type type : getOperandTypes()) {
     if (!hasI32Container(type))
-      return emitOpError("packed i16 butterfly operands must use i32 container storage");
+      return emitOpError("packed i16 butterfly operands must use signless i32 container storage");
   }
   for (Type type : getResultTypes()) {
     if (!hasI32Container(type))
-      return emitOpError("packed i16 butterfly results must use i32 container storage");
+      return emitOpError("packed i16 butterfly results must use signless i32 container storage");
   }
+  if (getScale()->getSaturateTo() != fixed.getStorage())
+    return emitOpError("packed i16 butterfly saturate_to must match fixed numeric storage type");
   return success();
 }
 

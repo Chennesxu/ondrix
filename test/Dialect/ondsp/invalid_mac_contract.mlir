@@ -47,7 +47,7 @@ func.func @accumulator_signedness_mismatch(
 // -----
 
 func.func @fixed_reduce_noninteger_result(%a: i16, %b: i16) -> f32 {
-  // expected-error@+1 {{fixed reduce_mac result must be an integer type of at least 32 bits}}
+  // expected-error@+1 {{fixed reduce_mac result must be a signless integer type of at least 32 bits}}
   %0 = ondsp.reduce_mac %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> f32
   return %0 : f32
 }
@@ -55,7 +55,7 @@ func.func @fixed_reduce_noninteger_result(%a: i16, %b: i16) -> f32 {
 // -----
 
 func.func @fixed_reduce_narrow_result(%a: i16, %b: i16) -> i16 {
-  // expected-error@+1 {{fixed reduce_mac result must be an integer type of at least 32 bits}}
+  // expected-error@+1 {{fixed reduce_mac result must be a signless integer type of at least 32 bits}}
   %0 = ondsp.reduce_mac %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> i16
   return %0 : i16
 }
@@ -103,4 +103,12 @@ func.func @reduce_mac_rejects_scalable_vectors(
   // expected-error@+1 {{scalable vector operands are not supported}}
   %0 = ondsp.reduce_mac %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fma>} : (vector<8xf32>, vector<[8]xf32>) -> f32
   return %0 : f32
+}
+
+// -----
+
+func.func @fixed_reduce_requires_signless_result(%a: i16, %b: i16) -> si32 {
+  // expected-error@+1 {{fixed reduce_mac result must be a signless integer type of at least 32 bits}}
+  %0 = ondsp.reduce_mac %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> si32
+  return %0 : si32
 }

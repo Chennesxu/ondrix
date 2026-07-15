@@ -35,6 +35,12 @@ static LogicalResult verifyValueOnlyTypes(Operation *op) {
     return op->emitOpError("value-only operation does not accept scalable vector operands");
   if (llvm::any_of(op->getResultTypes(), ondrix::containsScalableVectorType))
     return op->emitOpError("value-only operation does not produce scalable vector results");
+  if (llvm::any_of(op->getOperandTypes(), ondrix::containsDynamicOrUnrankedShapedType))
+    return op->emitOpError(
+        "value-only operation does not accept dynamic or unranked shaped operands");
+  if (llvm::any_of(op->getResultTypes(), ondrix::containsDynamicOrUnrankedShapedType))
+    return op->emitOpError(
+        "value-only operation does not produce dynamic or unranked shaped results");
   return success();
 }
 
@@ -96,8 +102,8 @@ static LogicalResult verifyFirWindow(FirOp op) {
     if (elementType != fixed.getStorage())
       return op.emitOpError("window element type must match fixed numeric storage type");
     auto resultType = dyn_cast<IntegerType>(op.getResult().getType());
-    if (!resultType || resultType.getWidth() < 32)
-      return op.emitOpError("fixed FIR result must be an integer type of at least 32 bits");
+    if (!resultType || !resultType.isSignless() || resultType.getWidth() < 32)
+      return op.emitOpError("fixed FIR result must be a signless integer type of at least 32 bits");
     return success();
   }
 
@@ -139,8 +145,8 @@ static LogicalResult verifyDotDomain(DotOp op) {
     if (lhsElement != fixed.getStorage())
       return op.emitOpError("operand element type must match fixed numeric storage type");
     auto result = dyn_cast<IntegerType>(op.getResult().getType());
-    if (!result || result.getWidth() < 32)
-      return op.emitOpError("fixed dot result must be an integer type of at least 32 bits");
+    if (!result || !result.isSignless() || result.getWidth() < 32)
+      return op.emitOpError("fixed dot result must be a signless integer type of at least 32 bits");
     return success();
   }
 

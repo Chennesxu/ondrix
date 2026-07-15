@@ -44,7 +44,7 @@ func.func @fixed_dot_requires_numeric_storage(%lhs: i32, %rhs: i32) -> i32 {
 // -----
 
 func.func @fixed_dot_requires_wide_result(%lhs: i16, %rhs: i16) -> i16 {
-  // expected-error@+1 {{fixed dot result must be an integer type of at least 32 bits}}
+  // expected-error@+1 {{fixed dot result must be a signless integer type of at least 32 bits}}
   %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> i16
   return %0 : i16
 }
@@ -64,4 +64,12 @@ func.func @dot_rejects_scalable_vectors(
   // expected-error@+1 {{scalable vector operands are not supported}}
   %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (vector<8xf32>, vector<[8]xf32>) -> f32
   return %0 : f32
+}
+
+// -----
+
+func.func @fixed_dot_requires_signless_result(%lhs: i16, %rhs: i16) -> ui32 {
+  // expected-error@+1 {{fixed dot result must be a signless integer type of at least 32 bits}}
+  %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> ui32
+  return %0 : ui32
 }

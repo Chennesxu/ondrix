@@ -19,14 +19,27 @@ inline bool containsScalableVectorType(mlir::Type type) {
       .wasInterrupted();
 }
 
+inline bool isDynamicOrUnrankedShapedType(mlir::Type type) {
+  if (auto shaped = mlir::dyn_cast<mlir::ShapedType>(type))
+    return !shaped.hasRank() || !shaped.hasStaticShape();
+  return false;
+}
+
+inline bool containsDynamicOrUnrankedShapedType(mlir::Type type) {
+  return type
+      .walk([](mlir::Type nested) {
+        return isDynamicOrUnrankedShapedType(nested) ? mlir::WalkResult::interrupt()
+                                                     : mlir::WalkResult::advance();
+      })
+      .wasInterrupted();
+}
+
 // Buffer reads and runtime-shaped values may gain observable checks during
 // lowering, so operations using them require conservative speculation.
 inline bool requiresConservativeDSPSpeculation(mlir::Type type) {
   if (mlir::isa<mlir::BaseMemRefType>(type) || isScalableVectorType(type))
     return true;
-  if (auto shaped = mlir::dyn_cast<mlir::ShapedType>(type))
-    return !shaped.hasRank() || !shaped.hasStaticShape();
-  return false;
+  return isDynamicOrUnrankedShapedType(type);
 }
 
 } // namespace ondrix

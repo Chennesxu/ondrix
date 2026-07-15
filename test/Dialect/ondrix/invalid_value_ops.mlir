@@ -123,3 +123,21 @@ func.func @quantize_accepts_tensor_values(
   %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tensor<2xi32>) -> tensor<2xi16>
   return %0 : tensor<2xi16>
 }
+
+// -----
+
+func.func @quantize_rejects_dynamic_tensor_operand(
+    %input: tensor<?xi32>) -> tensor<2xi16> {
+  // expected-error@+1 {{value-only operation does not accept dynamic or unranked shaped operands}}
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tensor<?xi32>) -> tensor<2xi16>
+  return %0 : tensor<2xi16>
+}
+
+// -----
+
+func.func @quantize_rejects_nested_unranked_tensor_result(
+    %input: i32) -> tuple<tensor<*xi16>> {
+  // expected-error@+1 {{value-only operation does not produce dynamic or unranked shaped results}}
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i32) -> tuple<tensor<*xi16>>
+  return %0 : tuple<tensor<*xi16>>
+}
