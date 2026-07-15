@@ -9,8 +9,10 @@
 using ondrix::fixedpoint::AccumulatorOverflowMode;
 using ondrix::fixedpoint::AccumulatorUpdateOperation;
 using ondrix::fixedpoint::computeSignedFullProduct;
+using ondrix::fixedpoint::exportSignedAccumulator;
 using ondrix::fixedpoint::getAccumulatorUpdateIntermediateWidth;
 using ondrix::fixedpoint::multiplyAccumulateSigned;
+using ondrix::fixedpoint::RoundingMode;
 
 namespace {
 
@@ -128,6 +130,73 @@ bool testAccumulatorChains() {
   return passed;
 }
 
+bool testAccumulatorExportRounding() {
+  bool passed = true;
+  passed &=
+      expectEqual("floor positive",
+                  exportSignedAccumulator(signedValue(8, 5), 2, 8, RoundingMode::TowardNegative,
+                                          AccumulatorOverflowMode::Wrap),
+                  signedValue(8, 1));
+  passed &=
+      expectEqual("floor negative",
+                  exportSignedAccumulator(signedValue(8, -5), 2, 8, RoundingMode::TowardNegative,
+                                          AccumulatorOverflowMode::Wrap),
+                  signedValue(8, -2));
+  passed &= expectEqual("zero negative",
+                        exportSignedAccumulator(signedValue(8, -5), 2, 8, RoundingMode::TowardZero,
+                                                AccumulatorOverflowMode::Wrap),
+                        signedValue(8, -1));
+  passed &= expectEqual("nearest odd tie",
+                        exportSignedAccumulator(signedValue(8, 6), 2, 8, RoundingMode::NearestEven,
+                                                AccumulatorOverflowMode::Wrap),
+                        signedValue(8, 2));
+  passed &= expectEqual("nearest even tie",
+                        exportSignedAccumulator(signedValue(8, 10), 2, 8, RoundingMode::NearestEven,
+                                                AccumulatorOverflowMode::Wrap),
+                        signedValue(8, 2));
+  passed &= expectEqual("nearest negative odd tie",
+                        exportSignedAccumulator(signedValue(8, -6), 2, 8, RoundingMode::NearestEven,
+                                                AccumulatorOverflowMode::Wrap),
+                        signedValue(8, -2));
+  passed &=
+      expectEqual("nearest negative even tie",
+                  exportSignedAccumulator(signedValue(8, -10), 2, 8, RoundingMode::NearestEven,
+                                          AccumulatorOverflowMode::Wrap),
+                  signedValue(8, -2));
+  return passed;
+}
+
+bool testAccumulatorExportOverflow() {
+  constexpr unsigned accumulatorWidth = 40;
+  constexpr unsigned shift = 15;
+  llvm::APInt positiveOverflow = signedValue(accumulatorWidth, int64_t{32768} << shift);
+  llvm::APInt negativeOverflow =
+      signedValue(accumulatorWidth, int64_t{-32769} * (int64_t{1} << shift));
+
+  bool passed = true;
+  passed &=
+      expectEqual("export positive saturation",
+                  exportSignedAccumulator(positiveOverflow, shift, 16, RoundingMode::TowardNegative,
+                                          AccumulatorOverflowMode::Saturate),
+                  signedValue(16, 32767));
+  passed &=
+      expectEqual("export negative saturation",
+                  exportSignedAccumulator(negativeOverflow, shift, 16, RoundingMode::TowardNegative,
+                                          AccumulatorOverflowMode::Saturate),
+                  signedValue(16, -32768));
+  passed &=
+      expectEqual("export positive wrap",
+                  exportSignedAccumulator(positiveOverflow, shift, 16, RoundingMode::TowardNegative,
+                                          AccumulatorOverflowMode::Wrap),
+                  signedValue(16, -32768));
+  passed &=
+      expectEqual("export negative wrap",
+                  exportSignedAccumulator(negativeOverflow, shift, 16, RoundingMode::TowardNegative,
+                                          AccumulatorOverflowMode::Wrap),
+                  signedValue(16, 32767));
+  return passed;
+}
+
 int64_t wrapSigned(int64_t value, unsigned width) {
   int64_t modulus = int64_t{1} << width;
   int64_t bits = value & (modulus - 1);
@@ -169,6 +238,58 @@ bool testSmallWidthExhaustive() {
   return true;
 }
 
+int64_t floorDivideByPowerOfTwo(int64_t value, unsigned shift) {
+  int64_t divisor = int64_t{1} << shift;
+  int64_t quotient = value / divisor;
+  if (value < 0 && value % divisor != 0)
+    --quotient;
+  return quotient;
+}
+
+int64_t roundReference(int64_t value, unsigned shift, RoundingMode mode) {
+  int64_t quotient = floorDivideByPowerOfTwo(value, shift);
+  int64_t divisor = int64_t{1} << shift;
+  int64_t remainder = value - quotient * divisor;
+  switch (mode) {
+  case RoundingMode::TowardNegative:
+    return quotient;
+  case RoundingMode::TowardZero:
+    return value < 0 && remainder != 0 ? quotient + 1 : quotient;
+  case RoundingMode::NearestEven:
+    return remainder > divisor / 2 || (remainder == divisor / 2 && quotient % 2 != 0) ? quotient + 1
+                                                                                      : quotient;
+  }
+  return quotient;
+}
+
+bool testSmallWidthExportExhaustive() {
+  constexpr unsigned accumulatorWidth = 5;
+  constexpr unsigned destinationWidth = 3;
+  constexpr int64_t destinationMinimum = -4;
+  constexpr int64_t destinationMaximum = 3;
+
+  for (int64_t value = -16; value <= 15; ++value) {
+    for (unsigned shift : {1U, 2U}) {
+      for (RoundingMode rounding :
+           {RoundingMode::TowardNegative, RoundingMode::NearestEven, RoundingMode::TowardZero}) {
+        int64_t rounded = roundReference(value, shift, rounding);
+        for (AccumulatorOverflowMode overflowMode :
+             {AccumulatorOverflowMode::Wrap, AccumulatorOverflowMode::Saturate}) {
+          int64_t expected = overflowMode == AccumulatorOverflowMode::Wrap
+                                 ? wrapSigned(rounded, destinationWidth)
+                                 : std::clamp(rounded, destinationMinimum, destinationMaximum);
+          llvm::APInt actual = exportSignedAccumulator(signedValue(accumulatorWidth, value), shift,
+                                                       destinationWidth, rounding, overflowMode);
+          if (!expectEqual("small-width exhaustive export", actual,
+                           signedValue(destinationWidth, expected)))
+            return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -176,7 +297,10 @@ int main() {
   passed &= testAccumulatorIntermediateWidth();
   passed &= testAccumulatorBoundaries();
   passed &= testAccumulatorChains();
+  passed &= testAccumulatorExportRounding();
+  passed &= testAccumulatorExportOverflow();
   passed &= testSmallWidthExhaustive();
+  passed &= testSmallWidthExportExhaustive();
   if (!passed)
     return 1;
   llvm::outs() << "fixed-point accumulator semantics: PASS\n";

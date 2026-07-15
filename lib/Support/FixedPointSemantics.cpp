@@ -3,6 +3,7 @@
 #include "llvm/Support/ErrorHandling.h"
 
 #include <algorithm>
+#include <cassert>
 
 namespace ondrix::fixedpoint {
 
@@ -55,6 +56,50 @@ llvm::APInt multiplyAccumulateSigned(const llvm::APInt &accumulator, const llvm:
                                      AccumulatorOverflowMode overflowMode) {
   return updateSignedAccumulator(accumulator, computeSignedFullProduct(lhs, rhs), operation,
                                  overflowMode);
+}
+
+llvm::APInt exportSignedAccumulator(const llvm::APInt &accumulator,
+                                    unsigned fractionalBitsToDiscard, unsigned destinationWidth,
+                                    RoundingMode roundingMode,
+                                    AccumulatorOverflowMode overflowMode) {
+  unsigned accumulatorWidth = accumulator.getBitWidth();
+  assert(destinationWidth != 0 && "destination width must be nonzero");
+  assert(fractionalBitsToDiscard < accumulatorWidth &&
+         "fractional shift must be smaller than accumulator width");
+
+  llvm::APInt rounded = accumulator;
+  if (fractionalBitsToDiscard != 0) {
+    rounded = accumulator.ashr(fractionalBitsToDiscard);
+    llvm::APInt remainder = accumulator.trunc(fractionalBitsToDiscard).zext(accumulatorWidth);
+    llvm::APInt one(accumulatorWidth, 1);
+    switch (roundingMode) {
+    case RoundingMode::TowardNegative:
+      break;
+    case RoundingMode::TowardZero:
+      if (accumulator.isNegative() && !remainder.isZero())
+        rounded += one;
+      break;
+    case RoundingMode::NearestEven: {
+      llvm::APInt half = one.shl(fractionalBitsToDiscard - 1);
+      if (remainder.ugt(half) || (remainder == half && rounded[0]))
+        rounded += one;
+      break;
+    }
+    }
+  }
+
+  if (overflowMode == AccumulatorOverflowMode::Wrap)
+    return rounded.sextOrTrunc(destinationWidth);
+
+  unsigned comparisonWidth = std::max(accumulatorWidth, destinationWidth) + 1;
+  llvm::APInt extended = rounded.sext(comparisonWidth);
+  llvm::APInt minimum = llvm::APInt::getSignedMinValue(destinationWidth);
+  llvm::APInt maximum = llvm::APInt::getSignedMaxValue(destinationWidth);
+  if (extended.slt(minimum.sext(comparisonWidth)))
+    return minimum;
+  if (extended.sgt(maximum.sext(comparisonWidth)))
+    return maximum;
+  return rounded.sextOrTrunc(destinationWidth);
 }
 
 } // namespace ondrix::fixedpoint

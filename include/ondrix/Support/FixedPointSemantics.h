@@ -7,6 +7,7 @@ namespace ondrix::fixedpoint {
 
 enum class AccumulatorUpdateOperation { Add, Subtract };
 enum class AccumulatorOverflowMode { Wrap, Saturate };
+enum class RoundingMode { TowardNegative, NearestEven, TowardZero };
 
 /// Returns the exact intermediate width required by an accumulator update.
 unsigned getAccumulatorUpdateIntermediateWidth(unsigned accumulatorWidth, unsigned productWidth);
@@ -23,6 +24,13 @@ llvm::APInt updateSignedAccumulator(const llvm::APInt &accumulator, const llvm::
 llvm::APInt multiplyAccumulateSigned(const llvm::APInt &accumulator, const llvm::APInt &lhs,
                                      const llvm::APInt &rhs, AccumulatorUpdateOperation operation,
                                      AccumulatorOverflowMode overflowMode);
+
+/// Discards fractional bits with explicit rounding, then applies destination
+/// signed overflow handling and returns destination-width raw bits.
+llvm::APInt exportSignedAccumulator(const llvm::APInt &accumulator,
+                                    unsigned fractionalBitsToDiscard, unsigned destinationWidth,
+                                    RoundingMode roundingMode,
+                                    AccumulatorOverflowMode overflowMode);
 
 } // namespace ondrix::fixedpoint
 
