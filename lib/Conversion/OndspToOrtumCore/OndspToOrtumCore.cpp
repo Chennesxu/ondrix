@@ -173,16 +173,6 @@ static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) 
   return true;
 }
 
-class AccInitOpLowering final : public OpConversionPattern<ondrix::ondsp::AccInitOp> {
-public:
-  using OpConversionPattern<ondrix::ondsp::AccInitOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(ondrix::ondsp::AccInitOp op, OpAdaptor,
-                                ConversionPatternRewriter &) const override {
-    return op.emitOpError("legacy accumulator import has no proven ortumcore equivalent");
-  }
-};
-
 class AccZeroOpLowering final : public OpConversionPattern<ondrix::ondsp::AccZeroOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::AccZeroOp>::OpConversionPattern;
@@ -221,16 +211,6 @@ public:
     return op.emitOpError(
         "policy-bearing accumulator export is unsupported by ortumcore lowering until target "
         "export semantics are proven equivalent");
-  }
-};
-
-class AccExtractOpLowering final : public OpConversionPattern<ondrix::ondsp::AccExtractOp> {
-public:
-  using OpConversionPattern<ondrix::ondsp::AccExtractOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(ondrix::ondsp::AccExtractOp op, OpAdaptor,
-                                ConversionPatternRewriter &) const override {
-    return op.emitOpError("legacy accumulator extraction has no proven ortumcore equivalent");
   }
 };
 
@@ -409,9 +389,9 @@ public:
 
     OndspToOrtumCoreTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
-    patterns.add<AccInitOpLowering, AccZeroOpLowering, AccImportOpLowering, AccExtractOpLowering,
-                 AccExportOpLowering, MacOpLowering, MacSubOpLowering, ReduceMacOpLowering,
-                 CxButterflyOpLowering>(typeConverter, &getContext());
+    patterns.add<AccZeroOpLowering, AccImportOpLowering, AccExportOpLowering, MacOpLowering,
+                 MacSubOpLowering, ReduceMacOpLowering, CxButterflyOpLowering>(typeConverter,
+                                                                              &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);

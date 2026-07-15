@@ -53,13 +53,6 @@ def Ondsp_SatAddShiftOp
 def Ondsp_SatSubShiftOp
     : Ondsp_BinaryShiftOp<"sat_sub_shift", "Saturating subtract plus scaling">;
 
-def Ondsp_AccInitOp : Ondsp_Op<"acc_init", [Pure]> {
-  let summary = "Experimental accumulator import with legacy implicit semantics";
-  let arguments = (ins AnyInteger:$input);
-  let results = (outs Ondsp_Acc:$acc);
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
 def Ondsp_AccZeroOp : Ondsp_Op<"acc_zero", [Pure]> {
   let summary = "Create an all-zero accumulator state";
   let results = (outs Ondsp_Acc:$acc);
@@ -106,14 +99,6 @@ def Ondsp_MacSubOp : Ondsp_MacLikeOp<"mac_sub", "Multiply-subtract accumulate"> 
     storage width. Rounding and destination overflow are not part of this
     operation.
   }];
-}
-
-def Ondsp_AccExtractOp : Ondsp_Op<"acc_extract", [Pure]> {
-  let summary = "Experimental accumulator extraction with a legacy scale policy";
-  let arguments = (ins Ondsp_Acc:$acc, OptionalAttr<Ondsp_ScaleAttr>:$scale);
-  let results = (outs AnyInteger:$result);
-  let hasVerifier = 1;
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
 def Ondsp_AccExportOp : Ondsp_Op<"acc_export", [Pure]> {

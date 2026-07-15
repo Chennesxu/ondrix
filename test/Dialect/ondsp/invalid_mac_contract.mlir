@@ -66,15 +66,6 @@ func.func @fixed_reduce_requires_product_frac(%a: memref<8xi16>, %b: memref<8xi1
 
 // -----
 
-func.func @acc_extract_scale_result_mismatch(
-    %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16 {
-  // expected-error@+1 {{scale saturate_to type must match the result type}}
-  %0 = ondsp.acc_extract %acc {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i32>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
-  return %0 : i16
-}
-
-// -----
-
 func.func @reduce_mac_rejects_mixed_domains(
     %lhs: memref<8xf32>, %rhs: f32) -> f32 {
   %zero = arith.constant 0.0 : f32

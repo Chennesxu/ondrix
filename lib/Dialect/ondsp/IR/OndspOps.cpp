@@ -298,14 +298,6 @@ LogicalResult MacSubOp::verify() {
   return verifyMacLike(*this, getAcc(), getLhs(), getRhs(), getNumeric(), getProduct());
 }
 
-LogicalResult AccExtractOp::verify() {
-  if (auto scale = getScale()) {
-    if (scale->getSaturateTo() != getResult().getType())
-      return emitOpError("scale saturate_to type must match the result type");
-  }
-  return success();
-}
-
 LogicalResult AccExportOp::verify() {
   AccType accumulator = getAcc().getType();
   FixedAttr destination = getDst();
