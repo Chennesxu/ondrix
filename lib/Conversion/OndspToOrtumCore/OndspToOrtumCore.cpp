@@ -28,6 +28,14 @@ using namespace mlir;
 
 namespace {
 
+// The parameterless target type admits only the proven Q15 full-product
+// accumulator domain until another capability is specified.
+static bool isSupportedOrtumCoreAccumulator(ondrix::ondsp::AccType accumulator) {
+  auto storage = dyn_cast<IntegerType>(accumulator.getStorage());
+  return storage && storage.getWidth() == 40 && accumulator.getFrac() == 30 &&
+         accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed;
+}
+
 class OndspToOrtumCoreTypeConverter final : public TypeConverter {
 public:
   explicit OndspToOrtumCoreTypeConverter(MLIRContext *context) {
@@ -36,9 +44,7 @@ public:
                             SmallVectorImpl<Type> &results) -> std::optional<LogicalResult> {
       // Failing the specific conversion prevents the identity rule from
       // allowing an unsupported source accumulator to escape legalization.
-      auto storage = type.getStorage().dyn_cast<IntegerType>();
-      if (!storage || storage.getWidth() != 40 ||
-          type.getSignedness() != ondrix::ondsp::Signedness::Signed)
+      if (!isSupportedOrtumCoreAccumulator(type))
         return failure();
       results.push_back(ondrix::ortumcore::AccumType::get(context));
       return success();
@@ -56,16 +62,15 @@ static bool hasStorageType(Type type, Type storage) {
   return false;
 }
 
-static bool isI32(Type type) {
+static bool isScalarI32(Type type) {
   auto intType = type.dyn_cast<IntegerType>();
   return intType && intType.getWidth() == 32;
 }
 
 static LogicalResult verifyOrtumCoreAccumulator(Operation *op, ondrix::ondsp::AccType accumulator) {
-  auto storage = accumulator.getStorage().dyn_cast<IntegerType>();
-  if (!storage || storage.getWidth() != 40 ||
-      accumulator.getSignedness() != ondrix::ondsp::Signedness::Signed)
-    return op->emitOpError("ortumcore lowering requires a signed 40-bit ondsp accumulator");
+  if (!isSupportedOrtumCoreAccumulator(accumulator))
+    return op->emitOpError(
+        "ortumcore lowering requires a signed 40-bit ondsp accumulator with frac=30");
   return success();
 }
 
@@ -77,6 +82,43 @@ static bool containsOndspAccumulator(Type type) {
 
 static bool containsOndspAccumulator(TypeRange types) {
   return llvm::any_of(types, [](Type type) { return containsOndspAccumulator(type); });
+}
+
+static ondrix::ondsp::AccType findUnsupportedAccumulator(Type type) {
+  ondrix::ondsp::AccType unsupported;
+  type.walk([&](ondrix::ondsp::AccType accumulator) {
+    if (isSupportedOrtumCoreAccumulator(accumulator))
+      return WalkResult::advance();
+    unsupported = accumulator;
+    return WalkResult::interrupt();
+  });
+  return unsupported;
+}
+
+static LogicalResult verifySupportedAccumulatorTypes(Operation *root) {
+  WalkResult result = root->walk([&](Operation *op) {
+    SmallVector<Type> types(op->getOperandTypes());
+    llvm::append_range(types, op->getResultTypes());
+    if (auto function = dyn_cast<func::FuncOp>(op)) {
+      llvm::append_range(types, function.getFunctionType().getInputs());
+      llvm::append_range(types, function.getFunctionType().getResults());
+    }
+    for (Region &region : op->getRegions())
+      for (Block &block : region)
+        llvm::append_range(types, block.getArgumentTypes());
+
+    for (Type type : types) {
+      ondrix::ondsp::AccType unsupported = findUnsupportedAccumulator(type);
+      if (!unsupported)
+        continue;
+      op->emitOpError() << "unsupported accumulator type " << unsupported
+                        << "; ortumcore lowering currently requires "
+                           "!ondsp.acc<storage = i40, frac = 30, signed>";
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return failure(result.wasInterrupted());
 }
 
 static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) {
@@ -128,16 +170,9 @@ class AccInitOpLowering final : public OpConversionPattern<ondrix::ondsp::AccIni
 public:
   using OpConversionPattern<ondrix::ondsp::AccInitOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(ondrix::ondsp::AccInitOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())))
-      return failure();
-    Type resultType = getTypeConverter()->convertType(op.getAcc().getType());
-    if (!isa<ondrix::ortumcore::AccumType>(resultType))
-      return op.emitError("ondsp.acc_init lowering requires an accumulator result");
-
-    rewriter.replaceOpWithNewOp<ondrix::ortumcore::AccImportOp>(op, resultType, adaptor.getInput());
-    return success();
+  LogicalResult matchAndRewrite(ondrix::ondsp::AccInitOp op, OpAdaptor,
+                                ConversionPatternRewriter &) const override {
+    return op.emitOpError("legacy accumulator import has no proven ortumcore equivalent");
   }
 };
 
@@ -186,18 +221,9 @@ class AccExtractOpLowering final : public OpConversionPattern<ondrix::ondsp::Acc
 public:
   using OpConversionPattern<ondrix::ondsp::AccExtractOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(ondrix::ondsp::AccExtractOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())))
-      return failure();
-    if (op.getScale())
-      return op.emitError("scaled ondsp.acc_extract is not supported by ortumcore lowering");
-    if (!isa<ondrix::ortumcore::AccumType>(adaptor.getAcc().getType()))
-      return op.emitError("ondsp.acc_extract lowering requires an accumulator operand");
-
-    Type resultType = getTypeConverter()->convertType(op.getResult().getType());
-    rewriter.replaceOpWithNewOp<ondrix::ortumcore::AccExtractOp>(op, resultType, adaptor.getAcc());
-    return success();
+  LogicalResult matchAndRewrite(ondrix::ondsp::AccExtractOp op, OpAdaptor,
+                                ConversionPatternRewriter &) const override {
+    return op.emitOpError("legacy accumulator extraction has no proven ortumcore equivalent");
   }
 };
 
@@ -265,41 +291,15 @@ class ReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::Redu
 public:
   using OpConversionPattern<ondrix::ondsp::ReduceMacOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    if (isa<ShapedType>(op.getLhs().getType()) || isa<ShapedType>(op.getRhs().getType())) {
-      op.emitOpError("shaped operands are not supported by ortumcore lowering; lower the "
-                     "reduction to an explicit loop of scalar MAC operations first");
-      return failure();
-    }
-
-    auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
-    if (!fixed) {
+  LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor,
+                                ConversionPatternRewriter &) const override {
+    if (!isa<ondrix::ondsp::FixedAttr>(op.getNumeric())) {
       op.emitOpError("only fixed-point reduce_mac policies are supported by ortumcore lowering");
       return failure();
     }
-
-    if (failed(verifySupportedMacPolicy(op, fixed, op.getProduct())))
-      return failure();
-
-    if (failed(verifyStorageOperand(op, fixed, op.getLhs().getType())) ||
-        failed(verifyStorageOperand(op, fixed, op.getRhs().getType())))
-      return failure();
-
-    Type accType = ondrix::ortumcore::AccumType::get(rewriter.getContext());
-    auto init = rewriter.create<ondrix::ortumcore::AccInitOp>(op.getLoc(), accType);
-    Type resultType = getTypeConverter()->convertType(op.getResult().getType());
-
-    Value accumulated =
-        rewriter
-            .create<ondrix::ortumcore::MacAddOp>(op.getLoc(), accType, init.getResult(),
-                                                 adaptor.getLhs(), adaptor.getRhs())
-            .getResult();
-
-    auto extract =
-        rewriter.create<ondrix::ortumcore::AccExtractOp>(op.getLoc(), resultType, accumulated);
-    rewriter.replaceOp(op, extract.getResult());
-    return success();
+    return op.emitOpError(
+        "fixed reduce_mac has no ortumcore lowering until explicit accumulator update and "
+        "export semantics are implemented");
   }
 };
 
@@ -334,14 +334,14 @@ public:
     }
 
     for (Value operand : op.getOperands()) {
-      if (!isI32(operand.getType())) {
-        op.emitError("packed q15 butterfly operands must use i32 storage");
+      if (!isScalarI32(operand.getType())) {
+        op.emitError("ortumcore butterfly lowering requires scalar packed i32 operands");
         return failure();
       }
     }
     for (Value result : op.getResults()) {
-      if (!isI32(result.getType())) {
-        op.emitError("packed q15 butterfly results must use i32 storage");
+      if (!isScalarI32(result.getType())) {
+        op.emitError("ortumcore butterfly lowering requires scalar packed i32 results");
         return failure();
       }
     }
@@ -413,6 +413,11 @@ public:
       ConvertOndspToOrtumCorePass>::ConvertOndspToOrtumCoreBase;
 
   void runOnOperation() override {
+    if (failed(verifySupportedAccumulatorTypes(getOperation()))) {
+      signalPassFailure();
+      return;
+    }
+
     OndspToOrtumCoreTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
     patterns.add<AccInitOpLowering, AccZeroOpLowering, AccImportOpLowering, AccExtractOpLowering,
