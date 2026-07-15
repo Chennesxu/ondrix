@@ -75,7 +75,7 @@ static bool isNestedAccumulatorContainer(Type type) {
   return !isa<ondrix::ondsp::AccType>(type) && containsOndspAccumulator(type);
 }
 
-static LogicalResult verifyNoNestedAccumulatorContainers(Operation *root) {
+static LogicalResult verifyAccumulatorUsage(Operation *root) {
   WalkResult result = root->walk([](Operation *op) {
     auto containsNested = [](TypeRange types) {
       return llvm::any_of(types, isNestedAccumulatorContainer);
@@ -97,6 +97,20 @@ static LogicalResult verifyNoNestedAccumulatorContainers(Operation *root) {
           op->emitOpError("nested accumulator containers are unsupported");
           return WalkResult::interrupt();
         }
+
+    auto function = dyn_cast<func::FuncOp>(op);
+    for (NamedAttribute namedAttribute : op->getAttrs()) {
+      // Function signature types are converted by the standard function
+      // conversion patterns and were checked structurally above.
+      if (function && namedAttribute.getName() == function.getFunctionTypeAttrName())
+        continue;
+      if (!containsOndspAccumulator(namedAttribute.getValue()))
+        continue;
+      op->emitOpError() << "attribute '" << namedAttribute.getName().getValue()
+                        << "' contains a source accumulator type; accumulator types in metadata "
+                           "attributes are unsupported";
+      return WalkResult::interrupt();
+    }
     return WalkResult::advance();
   });
   return failure(result.wasInterrupted());
@@ -410,10 +424,6 @@ public:
     Type resultType = getTypeConverter()->convertType(op.getType());
     if (!resultType)
       return failure();
-    if (llvm::any_of(op->getAttrs(), [](NamedAttribute namedAttribute) {
-          return containsOndspAccumulator(namedAttribute.getValue());
-        }))
-      return op.emitOpError("cannot convert attributes containing source accumulator types");
 
     auto replacement =
         rewriter.create<arith::SelectOp>(op.getLoc(), resultType, adaptor.getCondition(),
@@ -433,7 +443,7 @@ public:
       ConvertOndspQ15ToScalarPass>::ConvertOndspQ15ToScalarBase;
 
   void runOnOperation() override {
-    if (failed(verifyNoNestedAccumulatorContainers(getOperation()))) {
+    if (failed(verifyAccumulatorUsage(getOperation()))) {
       signalPassFailure();
       return;
     }
