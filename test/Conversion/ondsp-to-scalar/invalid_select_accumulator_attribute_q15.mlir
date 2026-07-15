@@ -7,7 +7,7 @@ func.func @select_metadata(
     -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
   // CHECK: 'arith.select' op cannot convert attributes containing source accumulator types
   %selected = "arith.select"(%condition, %lhs, %rhs) {
-    test.acc_type = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    test.acc_type = [{nested = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>}]
   } : (i1, !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
   return %selected : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 }
