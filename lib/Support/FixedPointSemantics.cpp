@@ -6,6 +6,10 @@
 
 namespace ondrix::fixedpoint {
 
+unsigned getAccumulatorUpdateIntermediateWidth(unsigned accumulatorWidth, unsigned productWidth) {
+  return std::max(accumulatorWidth, productWidth) + 1;
+}
+
 llvm::APInt computeSignedFullProduct(const llvm::APInt &lhs, const llvm::APInt &rhs) {
   unsigned productWidth = lhs.getBitWidth() + rhs.getBitWidth();
   return lhs.sext(productWidth) * rhs.sext(productWidth);
@@ -15,7 +19,8 @@ llvm::APInt updateSignedAccumulator(const llvm::APInt &accumulator, const llvm::
                                     AccumulatorUpdateOperation operation,
                                     AccumulatorOverflowMode overflowMode) {
   unsigned accumulatorWidth = accumulator.getBitWidth();
-  unsigned intermediateWidth = std::max(accumulatorWidth, product.getBitWidth()) + 1;
+  unsigned intermediateWidth =
+      getAccumulatorUpdateIntermediateWidth(accumulatorWidth, product.getBitWidth());
   llvm::APInt extendedAccumulator = accumulator.sext(intermediateWidth);
   llvm::APInt extendedProduct = product.sext(intermediateWidth);
 

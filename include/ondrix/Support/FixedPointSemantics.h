@@ -8,6 +8,9 @@ namespace ondrix::fixedpoint {
 enum class AccumulatorUpdateOperation { Add, Subtract };
 enum class AccumulatorOverflowMode { Wrap, Saturate };
 
+/// Returns the exact intermediate width required by an accumulator update.
+unsigned getAccumulatorUpdateIntermediateWidth(unsigned accumulatorWidth, unsigned productWidth);
+
 /// Computes the exact signed full product in lhs.width + rhs.width bits.
 llvm::APInt computeSignedFullProduct(const llvm::APInt &lhs, const llvm::APInt &rhs);
 

@@ -9,6 +9,7 @@
 using ondrix::fixedpoint::AccumulatorOverflowMode;
 using ondrix::fixedpoint::AccumulatorUpdateOperation;
 using ondrix::fixedpoint::computeSignedFullProduct;
+using ondrix::fixedpoint::getAccumulatorUpdateIntermediateWidth;
 using ondrix::fixedpoint::multiplyAccumulateSigned;
 
 namespace {
@@ -40,6 +41,11 @@ bool testQ15FullProducts() {
                         computeSignedFullProduct(signedValue(16, -32768), signedValue(16, 32767)),
                         signedValue(32, -1073709056));
   return passed;
+}
+
+bool testAccumulatorIntermediateWidth() {
+  return getAccumulatorUpdateIntermediateWidth(40, 32) == 41 &&
+         getAccumulatorUpdateIntermediateWidth(16, 32) == 33;
 }
 
 bool testAccumulatorBoundaries() {
@@ -167,6 +173,7 @@ bool testSmallWidthExhaustive() {
 
 int main() {
   bool passed = testQ15FullProducts();
+  passed &= testAccumulatorIntermediateWidth();
   passed &= testAccumulatorBoundaries();
   passed &= testAccumulatorChains();
   passed &= testSmallWidthExhaustive();
