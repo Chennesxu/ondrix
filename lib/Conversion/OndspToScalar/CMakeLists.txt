@@ -1,4 +1,5 @@
 add_ondrix_library(OndspToScalar
+  OndspQ15ToScalar.cpp
   OndspToScalar.cpp
 
   DEPENDS
@@ -8,6 +9,7 @@ add_ondrix_library(OndspToScalar
   MLIRArithDialect
   MLIRControlFlowDialect
   MLIRFuncDialect
+  MLIRFuncTransforms
   MLIRIR
   MLIRMathDialect
   MLIRMemRefDialect

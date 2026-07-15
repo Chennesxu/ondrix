@@ -49,4 +49,22 @@ def LowerOndspF32ReduceToScalar
   ];
 }
 
+def ConvertOndspQ15ToScalar
+    : Pass<"convert-ondsp-q15-to-scalar", "::mlir::ModuleOp"> {
+  let summary = "Fully lower explicit signed Q15 accumulator semantics";
+  let description = [{
+    Fully lower the explicit signed Q15 accumulator lifecycle to generic
+    scalar integer operations. The pass converts supported accumulator types
+    structurally across functions and control flow and fails if any unsupported
+    ondsp operation or accumulator domain remains.
+  }];
+  let constructor = "ondrix::createConvertOndspQ15ToScalarPass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
+    "mlir::func::FuncDialect",
+  ];
+}
+
 #endif // ONDRIX_CONVERSION_PASSES
