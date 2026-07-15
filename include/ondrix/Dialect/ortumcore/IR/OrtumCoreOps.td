@@ -17,16 +17,16 @@ def OrtumCore_AccInitOp : OrtumCore_Op<"acc_init", [Pure]> {
   let assemblyFormat = "attr-dict `:` type($result)";
 }
 
-class OrtumCore_MacOp<string mnemonic, string opSummary, TypeConstraint payloadType>
+class OrtumCore_Q15MacOp<string mnemonic, string opSummary>
     : OrtumCore_Op<mnemonic, [Pure, AllTypesMatch<["acc", "result"]>]> {
   let summary = opSummary;
-  let arguments = (ins OrtumCore_AccumType:$acc, payloadType:$lhs, payloadType:$rhs);
+  let arguments = (ins OrtumCore_AccumType:$acc, I16:$lhs, I16:$rhs);
   let results = (outs OrtumCore_AccumType:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
 def OrtumCore_MacAddOp
-    : OrtumCore_MacOp<"mac_add", "Saturating signed Q15 multiply-add", I16> {
+    : OrtumCore_Q15MacOp<"mac_add", "Saturating signed Q15 multiply-add"> {
   let description = [{
     Interprets `lhs` and `rhs` as signed i16 raw values with 15 fractional
     bits, computes their exact signed 16-by-16 full product, and adds that
@@ -36,7 +36,7 @@ def OrtumCore_MacAddOp
   }];
 }
 def OrtumCore_MacSubOp
-    : OrtumCore_MacOp<"mac_sub", "Saturating signed Q15 multiply-subtract", I16> {
+    : OrtumCore_Q15MacOp<"mac_sub", "Saturating signed Q15 multiply-subtract"> {
   let description = [{
     Interprets `lhs` and `rhs` as signed i16 raw values with 15 fractional
     bits, computes their exact signed 16-by-16 full product, and subtracts that
