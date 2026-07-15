@@ -391,7 +391,7 @@ public:
     RewritePatternSet patterns(&getContext());
     patterns.add<AccZeroOpLowering, AccImportOpLowering, AccExportOpLowering, MacOpLowering,
                  MacSubOpLowering, ReduceMacOpLowering, CxButterflyOpLowering>(typeConverter,
-                                                                              &getContext());
+                                                                               &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);
