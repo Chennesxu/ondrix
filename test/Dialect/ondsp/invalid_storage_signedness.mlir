@@ -10,7 +10,7 @@ func.func @fixed_storage_must_be_signless(%input: si16) -> si16 {
 
 // expected-error@+2 {{accumulator storage must use a signless integer type}}
 func.func @accumulator_storage_must_be_signless(%input: i16)
-    -> !ondsp.acc<storage = ui40, frac = 30, unsigned> {
-  %0 = ondsp.acc_init %input : (i16) -> !ondsp.acc<storage = ui40, frac = 30, unsigned>
-  return %0 : !ondsp.acc<storage = ui40, frac = 30, unsigned>
+    -> !ondsp.acc<storage = ui40, frac = 30, unsigned, update_overflow = saturate> {
+  %0 = ondsp.acc_init %input : (i16) -> !ondsp.acc<storage = ui40, frac = 30, unsigned, update_overflow = saturate>
+  return %0 : !ondsp.acc<storage = ui40, frac = 30, unsigned, update_overflow = saturate>
 }

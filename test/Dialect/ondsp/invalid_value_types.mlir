@@ -55,19 +55,19 @@ func.func @sat_sub_shift_rejects_memref_result(
 // -----
 
 func.func @acc_init_rejects_unranked_memref(
-    %input: memref<*xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed> {
+    %input: memref<*xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
   // expected-error@+1 {{operand #0 must be integer}}
-  %0 = ondsp.acc_init %input : (memref<*xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed>
-  return %0 : !ondsp.acc<storage = i40, frac = 30, signed>
+  %0 = ondsp.acc_init %input : (memref<*xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  return %0 : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 }
 
 // -----
 
 func.func @acc_init_rejects_float(
-    %input: f32) -> !ondsp.acc<storage = i40, frac = 30, signed> {
+    %input: f32) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
   // expected-error@+1 {{operand #0 must be integer}}
-  %0 = ondsp.acc_init %input : (f32) -> !ondsp.acc<storage = i40, frac = 30, signed>
-  return %0 : !ondsp.acc<storage = i40, frac = 30, signed>
+  %0 = ondsp.acc_init %input : (f32) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  return %0 : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 }
 
 // -----

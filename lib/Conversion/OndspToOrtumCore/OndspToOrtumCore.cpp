@@ -29,12 +29,13 @@ using namespace mlir;
 
 namespace {
 
-// The parameterless target type admits only this accumulator representation;
-// product and update semantics remain operation-specific legalization rules.
+// The parameterless target type admits only this accumulator representation.
+// Product semantics remain operation-specific legalization rules.
 static bool isSupportedOrtumCoreAccumulator(ondrix::ondsp::AccType accumulator) {
   auto storage = dyn_cast<IntegerType>(accumulator.getStorage());
   return storage && storage.getWidth() == 40 && accumulator.getFrac() == 30 &&
-         accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed;
+         accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed &&
+         accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Saturate;
 }
 
 class OndspToOrtumCoreTypeConverter final : public TypeConverter {
@@ -58,7 +59,8 @@ static bool isScalarI32(Type type) { return type.isSignlessInteger(32); }
 static LogicalResult verifyOrtumCoreAccumulator(Operation *op, ondrix::ondsp::AccType accumulator) {
   if (!isSupportedOrtumCoreAccumulator(accumulator))
     return op->emitOpError(
-        "ortumcore lowering requires a signed 40-bit ondsp accumulator with frac=30");
+        "ortumcore lowering requires a signed 40-bit ondsp accumulator with frac=30 and "
+        "saturating updates");
   return success();
 }
 
@@ -110,7 +112,8 @@ static LogicalResult verifySupportedAccumulatorTypes(Operation *root) {
         continue;
       op->emitOpError() << "unsupported accumulator type " << unsupported
                         << "; ortumcore lowering currently requires "
-                           "!ondsp.acc<storage = i40, frac = 30, signed>";
+                           "!ondsp.acc<storage = i40, frac = 30, signed, "
+                           "update_overflow = saturate>";
       return WalkResult::interrupt();
     }
 

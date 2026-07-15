@@ -21,8 +21,10 @@ void OndspDialect::registerTypes() {
 }
 
 LogicalResult AccType::verify(function_ref<InFlightDiagnostic()> emitError, Type storage,
-                              unsigned frac, Signedness signedness) {
+                              unsigned frac, Signedness signedness,
+                              OverflowMode updateOverflow) {
   (void)signedness;
+  (void)updateOverflow;
   auto intType = storage.dyn_cast<IntegerType>();
   if (!intType)
     return emitError() << "accumulator storage must be an integer type";

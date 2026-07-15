@@ -2,6 +2,6 @@
 
 // CHECK: failed to legalize operation 'func.func'
 func.func @nested_accumulator_signature(
-    %arg: tuple<!ondsp.acc<storage = i40, frac = 30, signed>>) {
+    %arg: tuple<!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>>) {
   return
 }

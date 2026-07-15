@@ -1,11 +1,11 @@
 // RUN: ondrix-opt %s -split-input-file -verify-diagnostics
 
 func.func @wrong_full_product_frac(
-    %acc: !ondsp.acc<storage = i40, frac = 29, signed>, %a: i16, %b: i16)
-    -> !ondsp.acc<storage = i40, frac = 29, signed> {
+    %acc: !ondsp.acc<storage = i40, frac = 29, signed, update_overflow = saturate>, %a: i16, %b: i16)
+    -> !ondsp.acc<storage = i40, frac = 29, signed, update_overflow = saturate> {
   // expected-error@+1 {{accumulator frac 29 does not match expected frac 30 for full product}}
-  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 29, signed>, i16, i16) -> !ondsp.acc<storage = i40, frac = 29, signed>
-  return %0 : !ondsp.acc<storage = i40, frac = 29, signed>
+  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 29, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 29, signed, update_overflow = saturate>
+  return %0 : !ondsp.acc<storage = i40, frac = 29, signed, update_overflow = saturate>
 }
 
 // -----
@@ -27,21 +27,21 @@ func.func @fp_reduce_with_integer_product(%a: f32, %b: f32) -> f32 {
 // -----
 
 func.func @negative_high_product_frac(
-    %acc: !ondsp.acc<storage = i40, frac = 0, signed>, %a: i16, %b: i16)
-    -> !ondsp.acc<storage = i40, frac = 0, signed> {
+    %acc: !ondsp.acc<storage = i40, frac = 0, signed, update_overflow = saturate>, %a: i16, %b: i16)
+    -> !ondsp.acc<storage = i40, frac = 0, signed, update_overflow = saturate> {
   // expected-error@+1 {{high product fractional position would be negative}}
-  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 7>, product = #ondsp.product<high>} : (!ondsp.acc<storage = i40, frac = 0, signed>, i16, i16) -> !ondsp.acc<storage = i40, frac = 0, signed>
-  return %0 : !ondsp.acc<storage = i40, frac = 0, signed>
+  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 7>, product = #ondsp.product<high>} : (!ondsp.acc<storage = i40, frac = 0, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 0, signed, update_overflow = saturate>
+  return %0 : !ondsp.acc<storage = i40, frac = 0, signed, update_overflow = saturate>
 }
 
 // -----
 
 func.func @accumulator_signedness_mismatch(
-    %acc: !ondsp.acc<storage = i40, frac = 30, unsigned>, %a: i16, %b: i16)
-    -> !ondsp.acc<storage = i40, frac = 30, unsigned> {
+    %acc: !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>, %a: i16, %b: i16)
+    -> !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate> {
   // expected-error@+1 {{accumulator signedness must match the fixed numeric policy}}
-  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, unsigned>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, unsigned>
-  return %0 : !ondsp.acc<storage = i40, frac = 30, unsigned>
+  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>
+  return %0 : !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>
 }
 
 // -----
@@ -63,9 +63,9 @@ func.func @fixed_reduce_narrow_result(%a: i16, %b: i16) -> i16 {
 // -----
 
 func.func @acc_extract_scale_result_mismatch(
-    %acc: !ondsp.acc<storage = i40, frac = 30, signed>) -> i16 {
+    %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16 {
   // expected-error@+1 {{scale saturate_to type must match the result type}}
-  %0 = ondsp.acc_extract %acc {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i32>} : (!ondsp.acc<storage = i40, frac = 30, signed>) -> i16
+  %0 = ondsp.acc_extract %acc {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i32>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
   return %0 : i16
 }
 

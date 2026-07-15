@@ -11,14 +11,21 @@ class Ondsp_Type<string name, string typeMnemonic>
 }
 
 def Ondsp_AccType : Ondsp_Type<"Acc", "acc"> {
-  let summary = "DSP accumulator state with explicit storage precision";
+  let summary = "DSP accumulator state with explicit update semantics";
+  let description = [{
+    Carries the raw storage width, binary-point position, signedness, and the
+    overflow behavior applied after every accumulator update. Update overflow
+    is distinct from the destination overflow policy used by `acc_export`.
+  }];
   let parameters = (ins
     "mlir::Type":$storage,
     "unsigned":$frac,
-    "Signedness":$signedness
+    "Signedness":$signedness,
+    "OverflowMode":$updateOverflow
   );
   let assemblyFormat =
-      "`<` `storage` `=` $storage `,` `frac` `=` $frac `,` $signedness `>`";
+      "`<` `storage` `=` $storage `,` `frac` `=` $frac `,` $signedness `,` "
+      "`update_overflow` `=` $updateOverflow `>`";
   let genVerifyDecl = 1;
 }
 
