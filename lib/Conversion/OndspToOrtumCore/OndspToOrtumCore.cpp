@@ -64,6 +64,25 @@ static LogicalResult verifyOrtumCoreAccumulator(Operation *op, ondrix::ondsp::Ac
   return success();
 }
 
+static LogicalResult verifySupportedMacPolicy(Operation *op,
+                                              ondrix::ondsp::FixedAttr numeric,
+                                              ondrix::ondsp::ProductAttr product) {
+  auto storage = dyn_cast<IntegerType>(numeric.getStorage());
+  if (numeric.getSignedness() == ondrix::ondsp::Signedness::Signed && storage &&
+      storage.isSignless() && storage.getWidth() == 16 && numeric.getFrac() == 15 &&
+      product.getSelection() == ondrix::ondsp::ProductSelection::Full)
+    return success();
+
+  if (numeric.getSignedness() == ondrix::ondsp::Signedness::Signed && storage &&
+      storage.isSignless() && storage.getWidth() == 32 && numeric.getFrac() == 31 &&
+      product.getSelection() == ondrix::ondsp::ProductSelection::High)
+    return op->emitOpError(
+        "q31 high-product target equivalence is not specified; lower through a proven scalar "
+        "sequence first");
+
+  return op->emitOpError("ortumcore MAC lowering supports only signed q15 full-product semantics");
+}
+
 static bool containsOndspAccumulator(Type type) {
   // TypeConverter legality is shallow for aggregate types; reject source
   // accumulators recursively so tuples and other wrappers cannot leak through.
@@ -220,11 +239,20 @@ class MacOpLowering final : public OpConversionPattern<ondrix::ondsp::MacOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::MacOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(ondrix::ondsp::MacOp op, OpAdaptor,
-                                ConversionPatternRewriter &) const override {
-    return op.emitOpError(
-        "target MAC selection is disabled until accumulator update overflow semantics are "
-        "explicit");
+  LogicalResult matchAndRewrite(ondrix::ondsp::MacOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())) ||
+        failed(verifySupportedMacPolicy(op, op.getNumeric(), op.getProduct())))
+      return failure();
+
+    Type resultType = getTypeConverter()->convertType(op.getResult().getType());
+    if (!isa<ondrix::ortumcore::AccumType>(adaptor.getAcc().getType()) ||
+        !isa<ondrix::ortumcore::AccumType>(resultType))
+      return op.emitOpError("MAC lowering requires converted target accumulator types");
+
+    rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacAddOp>(
+        op, resultType, adaptor.getAcc(), adaptor.getLhs(), adaptor.getRhs());
+    return success();
   }
 };
 
@@ -232,11 +260,20 @@ class MacSubOpLowering final : public OpConversionPattern<ondrix::ondsp::MacSubO
 public:
   using OpConversionPattern<ondrix::ondsp::MacSubOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(ondrix::ondsp::MacSubOp op, OpAdaptor,
-                                ConversionPatternRewriter &) const override {
-    return op.emitOpError(
-        "target MAC selection is disabled until accumulator update overflow semantics are "
-        "explicit");
+  LogicalResult matchAndRewrite(ondrix::ondsp::MacSubOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())) ||
+        failed(verifySupportedMacPolicy(op, op.getNumeric(), op.getProduct())))
+      return failure();
+
+    Type resultType = getTypeConverter()->convertType(op.getResult().getType());
+    if (!isa<ondrix::ortumcore::AccumType>(adaptor.getAcc().getType()) ||
+        !isa<ondrix::ortumcore::AccumType>(resultType))
+      return op.emitOpError("MAC-sub lowering requires converted target accumulator types");
+
+    rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacSubOp>(
+        op, resultType, adaptor.getAcc(), adaptor.getLhs(), adaptor.getRhs());
+    return success();
   }
 };
 
