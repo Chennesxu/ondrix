@@ -1,0 +1,29 @@
+// RUN: not ondrix-opt %s -split-input-file --convert-ondsp-to-ortumcore 2>&1 | FileCheck %s
+
+func.func @q15_mac_requires_update_overflow(
+    %acc: !ondsp.acc<storage = i40, frac = 30, signed>, %a: i16, %b: i16)
+    -> !ondsp.acc<storage = i40, frac = 30, signed> {
+  // CHECK: target MAC selection is disabled until accumulator update overflow semantics are explicit
+  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed>
+  return %0 : !ondsp.acc<storage = i40, frac = 30, signed>
+}
+
+// -----
+
+func.func @q15_mac_sub_requires_update_overflow(
+    %acc: !ondsp.acc<storage = i40, frac = 30, signed>, %a: i16, %b: i16)
+    -> !ondsp.acc<storage = i40, frac = 30, signed> {
+  // CHECK: target MAC selection is disabled until accumulator update overflow semantics are explicit
+  %0 = ondsp.mac_sub %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed>
+  return %0 : !ondsp.acc<storage = i40, frac = 30, signed>
+}
+
+// -----
+
+func.func @q31_mac_requires_update_overflow(
+    %acc: !ondsp.acc<storage = i40, frac = 30, signed>, %a: i32, %b: i32)
+    -> !ondsp.acc<storage = i40, frac = 30, signed> {
+  // CHECK: target MAC selection is disabled until accumulator update overflow semantics are explicit
+  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i32, frac = 31>, product = #ondsp.product<high>} : (!ondsp.acc<storage = i40, frac = 30, signed>, i32, i32) -> !ondsp.acc<storage = i40, frac = 30, signed>
+  return %0 : !ondsp.acc<storage = i40, frac = 30, signed>
+}

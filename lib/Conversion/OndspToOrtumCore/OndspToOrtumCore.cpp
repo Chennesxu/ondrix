@@ -11,6 +11,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
+#include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -28,8 +29,8 @@ using namespace mlir;
 
 namespace {
 
-// The parameterless target type admits only the proven Q15 full-product
-// accumulator domain until another capability is specified.
+// The parameterless target type admits only this accumulator representation;
+// product and update semantics remain operation-specific legalization rules.
 static bool isSupportedOrtumCoreAccumulator(ondrix::ondsp::AccType accumulator) {
   auto storage = dyn_cast<IntegerType>(accumulator.getStorage());
   return storage && storage.getWidth() == 40 && accumulator.getFrac() == 30 &&
@@ -52,20 +53,7 @@ public:
   }
 };
 
-static bool hasStorageType(Type type, Type storage) {
-  if (type == storage)
-    return true;
-
-  if (auto shaped = type.dyn_cast<ShapedType>())
-    return shaped.getElementType() == storage;
-
-  return false;
-}
-
-static bool isScalarI32(Type type) {
-  auto intType = type.dyn_cast<IntegerType>();
-  return intType && intType.getWidth() == 32;
-}
+static bool isScalarI32(Type type) { return type.isSignlessInteger(32); }
 
 static LogicalResult verifyOrtumCoreAccumulator(Operation *op, ondrix::ondsp::AccType accumulator) {
   if (!isSupportedOrtumCoreAccumulator(accumulator))
@@ -95,6 +83,15 @@ static ondrix::ondsp::AccType findUnsupportedAccumulator(Type type) {
   return unsupported;
 }
 
+static ondrix::ondsp::AccType findAccumulatorInAttribute(Attribute attribute) {
+  ondrix::ondsp::AccType accumulator;
+  attribute.walk([&](ondrix::ondsp::AccType type) {
+    accumulator = type;
+    return WalkResult::interrupt();
+  });
+  return accumulator;
+}
+
 static LogicalResult verifySupportedAccumulatorTypes(Operation *root) {
   WalkResult result = root->walk([&](Operation *op) {
     SmallVector<Type> types(op->getOperandTypes());
@@ -116,6 +113,21 @@ static LogicalResult verifySupportedAccumulatorTypes(Operation *root) {
                            "!ondsp.acc<storage = i40, frac = 30, signed>";
       return WalkResult::interrupt();
     }
+
+    auto function = dyn_cast<func::FuncOp>(op);
+    for (NamedAttribute namedAttribute : op->getAttrs()) {
+      // Function signature types are converted structurally by the standard
+      // function conversion patterns and were validated above.
+      if (function && namedAttribute.getName() == function.getFunctionTypeAttrName())
+        continue;
+      ondrix::ondsp::AccType accumulator = findAccumulatorInAttribute(namedAttribute.getValue());
+      if (!accumulator)
+        continue;
+      op->emitOpError() << "attribute '" << namedAttribute.getName().getValue()
+                        << "' contains source accumulator type " << accumulator
+                        << "; accumulator types in metadata attributes are unsupported";
+      return WalkResult::interrupt();
+    }
     return WalkResult::advance();
   });
   return failure(result.wasInterrupted());
@@ -124,6 +136,10 @@ static LogicalResult verifySupportedAccumulatorTypes(Operation *root) {
 static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) {
   if (!typeConverter.isLegal(op) || containsOndspAccumulator(op->getOperandTypes()) ||
       containsOndspAccumulator(op->getResultTypes()))
+    return false;
+  if (llvm::any_of(op->getAttrs(), [](NamedAttribute namedAttribute) {
+        return static_cast<bool>(findAccumulatorInAttribute(namedAttribute.getValue()));
+      }))
     return false;
   for (Region &region : op->getRegions()) {
     if (!typeConverter.isLegal(&region))
@@ -134,36 +150,6 @@ static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) 
     }
   }
   return true;
-}
-
-static LogicalResult verifyStorageOperand(Operation *op, ondrix::ondsp::FixedAttr fixed,
-                                          Type type) {
-  if (!hasStorageType(type, fixed.getStorage()))
-    return op->emitError("operand type does not match fixed numeric storage type");
-  return success();
-}
-
-static LogicalResult verifySupportedMacPolicy(Operation *op, ondrix::ondsp::FixedAttr fixed,
-                                              std::optional<ondrix::ondsp::ProductAttr> product) {
-  if (!product)
-    return op->emitOpError("lowering requires an explicit fixed-point product policy");
-
-  auto intType = fixed.getStorage().dyn_cast<IntegerType>();
-  if (fixed.getSignedness() != ondrix::ondsp::Signedness::Signed || !intType)
-    return op->emitOpError("only signed q15/product=full MAC policy is supported");
-
-  if (intType.getWidth() == 16 && fixed.getFrac() == 15) {
-    if (product->getSelection() != ondrix::ondsp::ProductSelection::Full)
-      return op->emitOpError("signed q15 MAC lowering requires product = #ondsp.product<full>");
-    return success();
-  }
-
-  if (intType.getWidth() == 32 && fixed.getFrac() == 31)
-    return op->emitOpError(
-        "q31 high-product target equivalence is not specified; lower through a proven scalar "
-        "sequence first");
-
-  return op->emitOpError("only signed q15/product=full MAC policy is supported");
 }
 
 class AccInitOpLowering final : public OpConversionPattern<ondrix::ondsp::AccInitOp> {
@@ -231,29 +217,11 @@ class MacOpLowering final : public OpConversionPattern<ondrix::ondsp::MacOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::MacOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(ondrix::ondsp::MacOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    if (failed(verifySupportedMacPolicy(op, op.getNumeric(), op.getProduct())))
-      return failure();
-    if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())))
-      return failure();
-
-    auto fixed = op.getNumeric();
-    if (failed(verifyStorageOperand(op, fixed, op.getLhs().getType())) ||
-        failed(verifyStorageOperand(op, fixed, op.getRhs().getType())))
-      return failure();
-
-    Type resultType = getTypeConverter()->convertType(op.getResult().getType());
-    if (!isa<ondrix::ortumcore::AccumType>(adaptor.getAcc().getType()) ||
-        !isa<ondrix::ortumcore::AccumType>(resultType)) {
-      op.emitError(
-          "standalone ondsp.mac lowering requires !ortumcore.acc accumulator operands/results");
-      return failure();
-    }
-
-    rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacAddOp>(op, resultType, adaptor.getAcc(),
-                                                             adaptor.getLhs(), adaptor.getRhs());
-    return success();
+  LogicalResult matchAndRewrite(ondrix::ondsp::MacOp op, OpAdaptor,
+                                ConversionPatternRewriter &) const override {
+    return op.emitOpError(
+        "target MAC selection is disabled until accumulator update overflow semantics are "
+        "explicit");
   }
 };
 
@@ -261,29 +229,11 @@ class MacSubOpLowering final : public OpConversionPattern<ondrix::ondsp::MacSubO
 public:
   using OpConversionPattern<ondrix::ondsp::MacSubOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(ondrix::ondsp::MacSubOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    if (failed(verifySupportedMacPolicy(op, op.getNumeric(), op.getProduct())))
-      return failure();
-    if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())))
-      return failure();
-
-    auto fixed = op.getNumeric();
-    if (failed(verifyStorageOperand(op, fixed, op.getLhs().getType())) ||
-        failed(verifyStorageOperand(op, fixed, op.getRhs().getType())))
-      return failure();
-
-    Type resultType = getTypeConverter()->convertType(op.getResult().getType());
-    if (!isa<ondrix::ortumcore::AccumType>(adaptor.getAcc().getType()) ||
-        !isa<ondrix::ortumcore::AccumType>(resultType)) {
-      op.emitError(
-          "standalone ondsp.mac_sub lowering requires !ortumcore.acc accumulator operands/results");
-      return failure();
-    }
-
-    rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacSubOp>(op, resultType, adaptor.getAcc(),
-                                                             adaptor.getLhs(), adaptor.getRhs());
-    return success();
+  LogicalResult matchAndRewrite(ondrix::ondsp::MacSubOp op, OpAdaptor,
+                                ConversionPatternRewriter &) const override {
+    return op.emitOpError(
+        "target MAC selection is disabled until accumulator update overflow semantics are "
+        "explicit");
   }
 };
 
@@ -335,13 +285,13 @@ public:
 
     for (Value operand : op.getOperands()) {
       if (!isScalarI32(operand.getType())) {
-        op.emitError("ortumcore butterfly lowering requires scalar packed i32 operands");
+        op.emitError("ortumcore butterfly lowering requires signless scalar packed i32 operands");
         return failure();
       }
     }
     for (Value result : op.getResults()) {
       if (!isScalarI32(result.getType())) {
-        op.emitError("ortumcore butterfly lowering requires scalar packed i32 results");
+        op.emitError("ortumcore butterfly lowering requires signless scalar packed i32 results");
         return failure();
       }
     }
@@ -350,9 +300,9 @@ public:
     if (!scale)
       return op.emitOpError("packed q15 butterfly lowering requires an explicit scale policy");
     if (scale->getPreShiftLeft() != 0 || scale->getPostShiftRight() != 15 ||
-        !scale->getSaturateTo().isInteger(16))
+        scale->getSaturateTo() != fixed.getStorage())
       return op.emitOpError("packed q15 butterfly lowering requires pre_shift_left=0, "
-                            "post_shift_right=15, and saturate_to=i16");
+                            "post_shift_right=15, and saturate_to matching numeric storage");
 
     bool roundToNearest;
     switch (scale->getRounding()) {
