@@ -89,7 +89,11 @@ operations. Saturating accumulators apply those products in increasing lane
 order. Wrapping accumulators may use a horizontal vector reduction because the
 Ondsp legality query classifies fixed-width modular addition as exactly
 reassociable. Memrefs without a statically known unit minor stride retain the
-generic scalar fallback.
+generic scalar fallback. The current LLVM 17 AOT consumer also leaves
+target-specific memory-space attributes unclaimed unless the default LLVM type
+converter can map them. Default and nonnegative integer LLVM address spaces
+that fit the LLVM address-space representation remain vectorizable; invalid
+integer spaces fail before LLVM lowering.
 
 ## LLVM/MLIR Baseline
 

@@ -5,6 +5,8 @@
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
+#include "llvm/ADT/APInt.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -13,6 +15,8 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+
+#include <limits>
 
 namespace ondrix {
 #define GEN_PASS_DEF_VECTORIZEONDSPQ15MEMREFREDUCE
@@ -23,6 +27,31 @@ using namespace mlir;
 
 namespace {
 
+bool isLLVMAddressSpace(IntegerAttr memorySpace) {
+  const llvm::APInt &value = memorySpace.getValue();
+  return !value.isNegative() && value.getActiveBits() <= std::numeric_limits<unsigned>::digits;
+}
+
+bool hasLLVMCompatibleMemorySpace(MemRefType type) {
+  Attribute memorySpace = type.getMemorySpace();
+  if (!memorySpace)
+    return true;
+  auto integerSpace = dyn_cast<IntegerAttr>(memorySpace);
+  return integerSpace && isLLVMAddressSpace(integerSpace);
+}
+
+bool hasInvalidLLVMIntegerMemorySpace(MemRefType type) {
+  auto memorySpace = dyn_cast_or_null<IntegerAttr>(type.getMemorySpace());
+  return memorySpace && !isLLVMAddressSpace(memorySpace);
+}
+
+bool hasInvalidLLVMIntegerMemorySpace(ondrix::ondsp::ReduceMacOp op) {
+  auto lhsType = dyn_cast<MemRefType>(op.getLhs().getType());
+  auto rhsType = dyn_cast<MemRefType>(op.getRhs().getType());
+  return (lhsType && hasInvalidLLVMIntegerMemorySpace(lhsType)) ||
+         (rhsType && hasInvalidLLVMIntegerMemorySpace(rhsType));
+}
+
 bool isSupportedMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
   auto accumulator = dyn_cast<ondrix::ondsp::AccType>(op.getInitial().getType());
   auto numeric = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
@@ -31,7 +60,8 @@ bool isSupportedMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
   return accumulator && numeric && op.getProduct() && lhsType && rhsType &&
          lhsType.getRank() == 1 && rhsType.getRank() == 1 &&
          lhsType.getElementType().isSignlessInteger(16) &&
-         rhsType.getElementType().isSignlessInteger(16) && isLastMemrefDimUnitStride(lhsType) &&
+         rhsType.getElementType().isSignlessInteger(16) && hasLLVMCompatibleMemorySpace(lhsType) &&
+         hasLLVMCompatibleMemorySpace(rhsType) && isLastMemrefDimUnitStride(lhsType) &&
          isLastMemrefDimUnitStride(rhsType) &&
          ondrix::ondsp::isSignedQ15I40Accumulator(accumulator) &&
          ondrix::ondsp::isSignedQ15(numeric) && ondrix::ondsp::isFullProduct(*op.getProduct());
@@ -44,6 +74,9 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    if (hasInvalidLLVMIntegerMemorySpace(op))
+      return op.emitOpError(
+          "integer memory space must be nonnegative and fit in an unsigned LLVM address space");
     if (!isSupportedMemRefReduction(op))
       return failure();
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
@@ -111,8 +144,9 @@ public:
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, memref::MemRefDialect,
                            ondrix::ondsp::OndspDialect, scf::SCFDialect, vector::VectorDialect>();
-    target.addDynamicallyLegalOp<ondrix::ondsp::ReduceMacOp>(
-        [](ondrix::ondsp::ReduceMacOp op) { return !isSupportedMemRefReduction(op); });
+    target.addDynamicallyLegalOp<ondrix::ondsp::ReduceMacOp>([](ondrix::ondsp::ReduceMacOp op) {
+      return !hasInvalidLLVMIntegerMemorySpace(op) && !isSupportedMemRefReduction(op);
+    });
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       signalPassFailure();

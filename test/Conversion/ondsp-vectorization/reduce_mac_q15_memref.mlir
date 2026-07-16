@@ -78,3 +78,47 @@ func.func @unsupported_q31(
 // CHECK-LABEL: func.func @unsupported_q31
 // CHECK: ondsp.reduce_mac
 // CHECK-NOT: vector.load
+
+func.func @integer_memory_space_vectorized(
+    %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    %lhs: memref<8xi16, 1>, %rhs: memref<8xi16, 1>)
+    -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
+  %result = ondsp.reduce_mac %initial, %lhs, %rhs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<8xi16, 1>, memref<8xi16, 1>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @integer_memory_space_vectorized
+// CHECK: vector.load {{.*}} : memref<8xi16, 1>, vector<4xi16>
+
+func.func @lhs_custom_memory_space_fallback(
+    %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    %lhs: memref<8xi16, "device">, %rhs: memref<8xi16>)
+    -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
+  %result = ondsp.reduce_mac %initial, %lhs, %rhs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<8xi16, "device">, memref<8xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @lhs_custom_memory_space_fallback
+// CHECK: ondsp.reduce_mac
+// CHECK-NOT: vector.load
+
+func.func @rhs_custom_memory_space_fallback(
+    %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    %lhs: memref<8xi16>, %rhs: memref<8xi16, "device">)
+    -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
+  %result = ondsp.reduce_mac %initial, %lhs, %rhs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<8xi16>, memref<8xi16, "device">) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @rhs_custom_memory_space_fallback
+// CHECK: ondsp.reduce_mac
+// CHECK-NOT: vector.load

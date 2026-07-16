@@ -119,8 +119,11 @@ def VectorizeOndspQ15MemRefReduce
     chunks and a scalar tail. Vector chunks retain an ordered ondsp.reduce_mac
     operation for subsequent normalization, and the scalar tail uses ondsp.mac.
     The transformation preserves increasing-index accumulator update order.
-    Memrefs without a statically known unit minor stride remain unchanged for
-    a scalar fallback.
+    Default and representable nonnegative integer LLVM memory spaces are
+    supported. Out-of-range integer spaces are rejected before LLVM lowering.
+    Memory spaces that require a target-specific type-attribute conversion
+    remain unchanged, as do memrefs without a statically known unit minor
+    stride.
   }];
   let constructor = "ondrix::createVectorizeOndspQ15MemRefReducePass()";
   let dependentDialects = [
