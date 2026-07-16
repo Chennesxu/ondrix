@@ -3,11 +3,17 @@
 
 typedef int16_t (*kernel_t)(int16_t *, int16_t *, int64_t, int64_t, int64_t, int16_t *, int16_t *,
                             int64_t, int64_t, int64_t);
+typedef int16_t (*seeded_kernel_t)(int16_t, int16_t *, int16_t *, int64_t, int64_t, int64_t,
+                                   int16_t *, int16_t *, int64_t, int64_t, int64_t);
 
 extern int16_t q15_auto_vector_saturate(int16_t *, int16_t *, int64_t, int64_t, int64_t, int16_t *,
                                         int16_t *, int64_t, int64_t, int64_t);
 extern int16_t q15_auto_vector_wrap(int16_t *, int16_t *, int64_t, int64_t, int64_t, int16_t *,
                                     int16_t *, int64_t, int64_t, int64_t);
+extern int16_t q15_seeded_vector_wrap(int16_t, int16_t *, int16_t *, int64_t, int64_t, int64_t,
+                                      int16_t *, int16_t *, int64_t, int64_t, int64_t);
+extern int16_t q15_offset_vector_saturate(int16_t *, int16_t *, int64_t, int64_t, int64_t,
+                                          int16_t *, int16_t *, int64_t, int64_t, int64_t);
 extern int16_t q15_scalar_fallback_saturate(int16_t *, int16_t *, int64_t, int64_t, int64_t,
                                             int16_t *, int16_t *, int64_t, int64_t, int64_t);
 extern int16_t q15_scalar_fallback_wrap(int16_t *, int16_t *, int64_t, int64_t, int64_t, int16_t *,
@@ -35,10 +41,9 @@ static int64_t update_reference(int64_t accumulator, int16_t lhs, int16_t rhs, i
   return (int64_t)updated;
 }
 
-static uint16_t reference(const int16_t *lhs, int64_t lhs_offset, int64_t lhs_stride,
-                          const int16_t *rhs, int64_t rhs_offset, int64_t rhs_stride,
-                          int64_t length, int saturate) {
-  int64_t accumulator = 0;
+static uint16_t reference_with_initial(const int16_t *lhs, int64_t lhs_offset, int64_t lhs_stride,
+                                       const int16_t *rhs, int64_t rhs_offset, int64_t rhs_stride,
+                                       int64_t length, int saturate, int64_t accumulator) {
   for (int64_t i = 0; i < length; ++i)
     accumulator = update_reference(accumulator, lhs[lhs_offset + i * lhs_stride],
                                    rhs[rhs_offset + i * rhs_stride], saturate);
@@ -50,10 +55,22 @@ static uint16_t reference(const int16_t *lhs, int64_t lhs_offset, int64_t lhs_st
   return (uint16_t)quotient;
 }
 
+static uint16_t reference(const int16_t *lhs, int64_t lhs_offset, int64_t lhs_stride,
+                          const int16_t *rhs, int64_t rhs_offset, int64_t rhs_stride,
+                          int64_t length, int saturate) {
+  return reference_with_initial(lhs, lhs_offset, lhs_stride, rhs, rhs_offset, rhs_stride, length,
+                                saturate, 0);
+}
+
 static uint16_t run(kernel_t kernel, int16_t *lhs, int64_t lhs_offset, int64_t lhs_stride,
                     int16_t *rhs, int64_t rhs_offset, int64_t rhs_stride, int64_t length) {
   return (uint16_t)kernel(lhs, lhs, lhs_offset, length, lhs_stride, rhs, rhs, rhs_offset, length,
                           rhs_stride);
+}
+
+static uint16_t run_seeded(seeded_kernel_t kernel, int16_t seed, int16_t *lhs, int16_t *rhs,
+                           int64_t length) {
+  return (uint16_t)kernel(seed, lhs, lhs, 0, length, 1, rhs, rhs, 0, length, 1);
 }
 
 static int check_case(const char *name, int16_t *lhs, int16_t *rhs, int64_t length, int saturate) {
@@ -79,6 +96,28 @@ static int check_strided(int16_t *lhs, int16_t *rhs) {
   return 1;
 }
 
+static int check_seeded(int16_t *lhs, int16_t *rhs) {
+  const int16_t seed = -12345;
+  const int64_t length = 17;
+  const int64_t initial = (int64_t)seed * (INT64_C(1) << 15);
+  const uint16_t expected = reference_with_initial(lhs, 0, 1, rhs, 0, 1, length, 0, initial);
+  const uint16_t actual = run_seeded(q15_seeded_vector_wrap, seed, lhs, rhs, length);
+  if (actual == expected)
+    return 0;
+  fprintf(stderr, "seeded vector wrap: expected 0x%04x, got 0x%04x\n", expected, actual);
+  return 1;
+}
+
+static int check_unit_stride_offset(int16_t *lhs, int16_t *rhs) {
+  const int64_t length = 17;
+  const uint16_t expected = reference(lhs, 1, 1, rhs, 2, 1, length, 1);
+  const uint16_t actual = run(q15_offset_vector_saturate, lhs, 1, 1, rhs, 2, 1, length);
+  if (actual == expected)
+    return 0;
+  fprintf(stderr, "unit-stride offset vector: expected 0x%04x, got 0x%04x\n", expected, actual);
+  return 1;
+}
+
 int main(void) {
   int16_t lhs[520];
   int16_t rhs[520];
@@ -96,6 +135,8 @@ int main(void) {
     failed |= check_case("saturating", lhs, rhs, lengths[i], 1);
     failed |= check_case("wrapping", lhs, rhs, lengths[i], 0);
   }
+  failed |= check_seeded(lhs, rhs);
+  failed |= check_unit_stride_offset(lhs, rhs);
 
   for (unsigned i = 0; i < 520; ++i) {
     lhs[i] = 0;
