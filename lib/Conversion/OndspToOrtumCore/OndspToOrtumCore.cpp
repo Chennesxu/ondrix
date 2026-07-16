@@ -3,6 +3,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
+#include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreAttrs.h"
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreDialect.h"
@@ -67,9 +68,7 @@ static LogicalResult verifyOrtumCoreAccumulator(Operation *op, ondrix::ondsp::Ac
 static LogicalResult verifySupportedMacPolicy(Operation *op, ondrix::ondsp::FixedAttr numeric,
                                               ondrix::ondsp::ProductAttr product) {
   auto storage = dyn_cast<IntegerType>(numeric.getStorage());
-  if (numeric.getSignedness() == ondrix::ondsp::Signedness::Signed && storage &&
-      storage.isSignless() && storage.getWidth() == 16 && numeric.getFrac() == 15 &&
-      product.getSelection() == ondrix::ondsp::ProductSelection::Full)
+  if (ondrix::ondsp::isSignedQ15(numeric) && ondrix::ondsp::isFullProduct(product))
     return success();
 
   if (numeric.getSignedness() == ondrix::ondsp::Signedness::Signed && storage &&

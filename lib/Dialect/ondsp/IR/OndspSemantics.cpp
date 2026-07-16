@@ -49,4 +49,12 @@ ReductionReassociationSafety classifyReductionReassociation(OverflowMode updateO
   return ReductionReassociationSafety::MustPreserveOrder;
 }
 
+bool isSignedQ15(FixedAttr numeric) {
+  auto storage = dyn_cast<IntegerType>(numeric.getStorage());
+  return storage && storage.isSignless() && storage.getWidth() == 16 && numeric.getFrac() == 15 &&
+         numeric.getSignedness() == Signedness::Signed;
+}
+
+bool isFullProduct(ProductAttr product) { return product.getSelection() == ProductSelection::Full; }
+
 } // namespace ondrix::ondsp

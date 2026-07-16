@@ -1,11 +1,22 @@
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
+#include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
+
 #include "llvm/Support/raw_ostream.h"
 
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/MLIRContext.h"
+
 using ondrix::ondsp::classifyReductionReassociation;
+using ondrix::ondsp::FixedAttr;
+using ondrix::ondsp::isFullProduct;
+using ondrix::ondsp::isSignedQ15;
 using ondrix::ondsp::OverflowMode;
+using ondrix::ondsp::ProductAttr;
+using ondrix::ondsp::ProductSelection;
 using ondrix::ondsp::ReductionRangeProof;
 using ondrix::ondsp::ReductionReassociationSafety;
+using ondrix::ondsp::Signedness;
 
 namespace {
 
@@ -24,10 +35,25 @@ bool testReductionReassociationSafety() {
   return passed;
 }
 
+bool testCommonNumericPolicies() {
+  mlir::MLIRContext context;
+  context.getOrLoadDialect<ondrix::ondsp::OndspDialect>();
+  auto i16 = mlir::IntegerType::get(&context, 16);
+  auto i32 = mlir::IntegerType::get(&context, 32);
+
+  bool passed = true;
+  passed &= isSignedQ15(FixedAttr::get(&context, Signedness::Signed, i16, 15));
+  passed &= !isSignedQ15(FixedAttr::get(&context, Signedness::Unsigned, i16, 15));
+  passed &= !isSignedQ15(FixedAttr::get(&context, Signedness::Signed, i32, 15));
+  passed &= isFullProduct(ProductAttr::get(&context, ProductSelection::Full));
+  passed &= !isFullProduct(ProductAttr::get(&context, ProductSelection::High));
+  return passed;
+}
+
 } // namespace
 
 int main() {
-  if (!testReductionReassociationSafety()) {
+  if (!testReductionReassociationSafety() || !testCommonNumericPolicies()) {
     llvm::errs() << "ondsp reassociation semantics: FAIL\n";
     return 1;
   }

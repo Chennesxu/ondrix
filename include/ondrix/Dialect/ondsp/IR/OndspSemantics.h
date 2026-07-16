@@ -40,6 +40,12 @@ ReductionReassociationSafety
 classifyReductionReassociation(OverflowMode updateOverflow,
                                ReductionRangeProof rangeProof = ReductionRangeProof::None);
 
+/// Returns whether a policy denotes signed Q15 in signless i16 storage.
+bool isSignedQ15(FixedAttr numeric);
+
+/// Returns whether a product policy selects the exact full product.
+bool isFullProduct(ProductAttr product);
+
 } // namespace ondrix::ondsp
 
 #endif
