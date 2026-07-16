@@ -40,6 +40,12 @@ static bool isSignedQ15(ondrix::ondsp::FixedAttr numeric) {
          numeric.getSignedness() == ondrix::ondsp::Signedness::Signed;
 }
 
+static bool isSignedQ30Product(ondrix::ondsp::FixedAttr numeric) {
+  auto storage = dyn_cast<IntegerType>(numeric.getStorage());
+  return storage && storage.isSignless() && storage.getWidth() == 32 && numeric.getFrac() == 30 &&
+         numeric.getSignedness() == ondrix::ondsp::Signedness::Signed;
+}
+
 static bool isFullProduct(ondrix::ondsp::ProductAttr product) {
   return product.getSelection() == ondrix::ondsp::ProductSelection::Full;
 }
@@ -322,6 +328,26 @@ using MacSubOpLowering =
     MacLikeOpLowering<ondrix::ondsp::MacSubOp,
                       ondrix::fixedpoint::AccumulatorUpdateOperation::Subtract>;
 
+class AccAddProductOpLowering final : public OpConversionPattern<ondrix::ondsp::AccAddProductOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::AccAddProductOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::AccAddProductOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
+    if (!isSupportedQ15Accumulator(accumulator) || !isSignedQ30Product(op.getProductNumeric()))
+      return op.emitOpError(
+          "Q15 scalar lowering requires signed i32 frac=30 product and signed i40 frac=30 "
+          "accumulator");
+
+    Value result = lowerAccumulatorUpdate(
+        op.getLoc(), adaptor.getAcc(), adaptor.getProduct(), accumulator.getUpdateOverflow(),
+        ondrix::fixedpoint::AccumulatorUpdateOperation::Add, rewriter);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 static FailureOr<MemRefType> getRankOneQ15MemRefType(Operation *op, Value value,
                                                      StringRef operandName) {
   auto type = dyn_cast<MemRefType>(value.getType());
@@ -450,9 +476,10 @@ public:
 
     OndspQ15ToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
-    patterns.add<AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering, MacOpLowering,
-                 MacSubOpLowering, ReduceMacOpLowering, SelectOpTypeConversion>(typeConverter,
-                                                                                &getContext());
+    patterns
+        .add<AccAddProductOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
+             MacOpLowering, MacSubOpLowering, ReduceMacOpLowering, SelectOpTypeConversion>(
+            typeConverter, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);
