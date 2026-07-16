@@ -45,7 +45,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: llvm-build
-          key: ${{ runner.os }}-${{ runner.arch }}-gcc-llvm-6009708b-mlir-release-assertions-native-v2
+          key: ${{ runner.os }}-${{ runner.arch }}-gcc-llvm-6009708b-mlir-release-assertions-native-v3
 
       - name: Configure LLVM and MLIR
         if: steps.llvm-cache.outputs.cache-hit != 'true'
