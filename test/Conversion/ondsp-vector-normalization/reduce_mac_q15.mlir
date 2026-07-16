@@ -1,0 +1,55 @@
+// RUN: ondrix-opt %s --normalize-ondsp-q15-vector-reduce | FileCheck %s
+// RUN: not ondrix-opt %s --normalize-ondsp-q15-vector-reduce --convert-ondsp-q15-to-scalar 2>&1 | FileCheck %s --check-prefix=FINAL-ERROR
+
+// FINAL-ERROR: failed to legalize operation 'ondsp.reduce_mac'
+
+func.func @reduce_q15_vector(
+    %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    %lhs: vector<4xi16>, %rhs: vector<4xi16>)
+    -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
+  %result = ondsp.reduce_mac %initial, %lhs, %rhs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, vector<4xi16>, vector<4xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @reduce_q15_vector
+// CHECK: %[[LHS:.*]] = arith.extsi {{.*}} : vector<4xi16> to vector<4xi32>
+// CHECK: %[[RHS:.*]] = arith.extsi {{.*}} : vector<4xi16> to vector<4xi32>
+// CHECK: %[[PRODUCTS:.*]] = arith.muli %[[LHS]], %[[RHS]] : vector<4xi32>
+// CHECK: %[[P0:.*]] = vector.extract %[[PRODUCTS]][0] : vector<4xi32>
+// CHECK: %[[A0:.*]] = ondsp.acc_add_product {{.*}}, %[[P0]]
+// CHECK: %[[P1:.*]] = vector.extract %[[PRODUCTS]][1] : vector<4xi32>
+// CHECK: %[[A1:.*]] = ondsp.acc_add_product %[[A0]], %[[P1]]
+// CHECK: %[[P2:.*]] = vector.extract %[[PRODUCTS]][2] : vector<4xi32>
+// CHECK: %[[A2:.*]] = ondsp.acc_add_product %[[A1]], %[[P2]]
+// CHECK: %[[P3:.*]] = vector.extract %[[PRODUCTS]][3] : vector<4xi32>
+// CHECK: %[[A3:.*]] = ondsp.acc_add_product %[[A2]], %[[P3]]
+// CHECK: return %[[A3]]
+// CHECK-NOT: ondsp.reduce_mac
+
+func.func @preserve_unsupported_fp_vector(
+    %initial: f32, %lhs: vector<4xf32>, %rhs: vector<4xf32>) -> f32 {
+  %result = ondsp.reduce_mac %initial, %lhs, %rhs {
+    numeric = #ondsp.fp<format = f32, contract = fma>
+  } : (f32, vector<4xf32>, vector<4xf32>) -> f32
+  return %result : f32
+}
+
+// CHECK-LABEL: func.func @preserve_unsupported_fp_vector
+// CHECK: ondsp.reduce_mac
+
+func.func @preserve_unsupported_q31_vector(
+    %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    %lhs: vector<4xi32>, %rhs: vector<4xi32>)
+    -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
+  %result = ondsp.reduce_mac %initial, %lhs, %rhs {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, vector<4xi32>, vector<4xi32>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @preserve_unsupported_q31_vector
+// CHECK: ondsp.reduce_mac

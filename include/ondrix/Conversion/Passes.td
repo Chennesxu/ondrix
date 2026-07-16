@@ -58,7 +58,9 @@ def ConvertOndspQ15ToScalar
     Fully lower the explicit signed Q15 accumulator lifecycle to generic
     scalar integer operations. The pass converts supported accumulator types
     structurally across functions and control flow and fails if any unsupported
-    ondsp operation or accumulator domain remains.
+    ondsp operation or accumulator domain remains. Ondrix intent operations
+    must be lowered first; fixed-length vector reductions must be normalized by
+    `normalize-ondsp-q15-vector-reduce` before this final conversion.
   }];
   let constructor = "ondrix::createConvertOndspQ15ToScalarPass()";
   let dependentDialects = [
@@ -68,6 +70,23 @@ def ConvertOndspQ15ToScalar
     "mlir::func::FuncDialect",
     "mlir::memref::MemRefDialect",
     "mlir::scf::SCFDialect",
+  ];
+}
+
+def NormalizeOndspQ15VectorReduce
+    : Pass<"normalize-ondsp-q15-vector-reduce", "::mlir::ModuleOp"> {
+  let summary = "Normalize fixed-length Q15 vector reductions without reassociation";
+  let description = [{
+    Normalize supported fixed-length Q15 vector reductions to vector full-product
+    arithmetic followed by explicit accumulator updates in increasing lane
+    order. The pass does not form a tree reduction and therefore preserves the
+    ordered reduction contract for saturating accumulators.
+  }];
+  let constructor = "ondrix::createNormalizeOndspQ15VectorReducePass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::vector::VectorDialect",
   ];
 }
 
