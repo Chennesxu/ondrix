@@ -29,9 +29,9 @@ using namespace mlir;
 
 namespace {
 
-static bool isSignedQ30Product(ondrix::ondsp::FixedAttr numeric) {
+static bool isSignedAccumulatorProduct(ondrix::ondsp::FixedAttr numeric) {
   auto storage = dyn_cast<IntegerType>(numeric.getStorage());
-  return storage && storage.isSignless() && storage.getWidth() == 32 && numeric.getFrac() == 30 &&
+  return storage && storage.isSignless() && numeric.getFrac() == 30 &&
          numeric.getSignedness() == ondrix::ondsp::Signedness::Signed;
 }
 
@@ -323,9 +323,9 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
     if (!ondrix::ondsp::isSignedQ15I40Accumulator(accumulator) ||
-        !isSignedQ30Product(op.getProductNumeric()))
+        !isSignedAccumulatorProduct(op.getProductNumeric()))
       return op.emitOpError(
-          "Q15 scalar lowering requires signed i32 frac=30 product and signed i40 frac=30 "
+          "Q15 scalar lowering requires a signed integer frac=30 product and signed i40 frac=30 "
           "accumulator");
 
     Value result = lowerAccumulatorUpdate(
