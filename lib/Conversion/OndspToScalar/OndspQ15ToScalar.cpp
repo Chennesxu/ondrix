@@ -1,4 +1,5 @@
 #include "ondrix/Conversion/OndspToScalar/OndspToScalar.h"
+#include "ondrix/Conversion/Utils/ReductionUtils.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
@@ -339,22 +340,6 @@ public:
   }
 };
 
-static FailureOr<MemRefType> getRankOneQ15MemRefType(Operation *op, Value value,
-                                                     StringRef operandName) {
-  auto type = dyn_cast<MemRefType>(value.getType());
-  if (!type || type.getRank() != 1 || !type.getElementType().isSignlessInteger(16))
-    return op->emitOpError() << operandName
-                             << " must be a rank-1 memref<Nxi16> for Q15 scalar lowering";
-  return type;
-}
-
-static Value getDimZeroSize(Location loc, Value value, MemRefType type, Value zeroIndex,
-                            ConversionPatternRewriter &rewriter) {
-  if (!type.isDynamicDim(0))
-    return rewriter.create<arith::ConstantIndexOp>(loc, type.getDimSize(0));
-  return rewriter.create<memref::DimOp>(loc, value, zeroIndex);
-}
-
 class ReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::ReduceMacOp>::OpConversionPattern;
@@ -369,28 +354,18 @@ public:
           "Q15 scalar reduction requires signed i16 frac=15 full product and signed i40 "
           "frac=30 accumulator");
 
-    FailureOr<MemRefType> lhsType = getRankOneQ15MemRefType(op, op.getLhs(), "lhs");
-    if (failed(lhsType))
-      return failure();
-    FailureOr<MemRefType> rhsType = getRankOneQ15MemRefType(op, op.getRhs(), "rhs");
-    if (failed(rhsType))
+    FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
+        ondrix::conversion::createRankOneMemRefReductionBounds(
+            op, adaptor.getLhs(), adaptor.getRhs(), rewriter.getI16Type(), "Q15 scalar lowering",
+            rewriter);
+    if (failed(bounds))
       return failure();
 
     Location loc = op.getLoc();
-    Value lowerBound = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    Value upperBound = getDimZeroSize(loc, adaptor.getLhs(), *lhsType, lowerBound, rewriter);
-    if (lhsType->isDynamicDim(0) || rhsType->isDynamicDim(0)) {
-      Value rhsSize = getDimZeroSize(loc, adaptor.getRhs(), *rhsType, lowerBound, rewriter);
-      Value lengthsMatch =
-          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, upperBound, rhsSize);
-      rewriter.create<cf::AssertOp>(
-          loc, lengthsMatch,
-          rewriter.getStringAttr("ondsp.reduce_mac requires equal operand lengths"));
-    }
     Value step = rewriter.create<arith::ConstantIndexOp>(loc, 1);
 
     auto loop = rewriter.create<scf::ForOp>(
-        loc, lowerBound, upperBound, step, ValueRange{adaptor.getInitial()},
+        loc, bounds->lowerBound, bounds->upperBound, step, ValueRange{adaptor.getInitial()},
         [&](OpBuilder &builder, Location bodyLoc, Value iv, ValueRange iterArgs) {
           Value lhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), iv);
           Value rhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), iv);

@@ -1,4 +1,5 @@
 #include "ondrix/Conversion/OndspToScalar/OndspToScalar.h"
+#include "ondrix/Conversion/Utils/ReductionUtils.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
@@ -23,24 +24,6 @@ namespace ondrix {
 using namespace mlir;
 
 namespace {
-
-static FailureOr<MemRefType> getRankOneF32MemRefType(Operation *op, Value value,
-                                                     StringRef operandName) {
-  auto type = value.getType().dyn_cast<MemRefType>();
-  if (!type || type.getRank() != 1)
-    return op->emitOpError() << operandName
-                             << " must be a rank-1 memref<Nxf32> for scalar lowering";
-  if (!type.getElementType().isF32())
-    return op->emitOpError() << operandName << " must have f32 elements for scalar lowering";
-  return type;
-}
-
-static Value getDimZeroSize(Location loc, Value value, MemRefType type, Value zeroIndex,
-                            ConversionPatternRewriter &rewriter) {
-  if (!type.isDynamicDim(0))
-    return rewriter.create<arith::ConstantIndexOp>(loc, type.getDimSize(0));
-  return rewriter.create<memref::DimOp>(loc, value, zeroIndex);
-}
 
 static bool isSupportedF32MemRefReduction(ondrix::ondsp::ReduceMacOp op) {
   auto numeric = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
@@ -72,36 +55,18 @@ public:
       return failure();
     }
 
-    FailureOr<MemRefType> lhsMemRefType = getRankOneF32MemRefType(op, op.getLhs(), "lhs");
-    if (failed(lhsMemRefType))
+    FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
+        ondrix::conversion::createRankOneMemRefReductionBounds(
+            op, adaptor.getLhs(), adaptor.getRhs(), rewriter.getF32Type(), "f32 scalar lowering",
+            rewriter);
+    if (failed(bounds))
       return failure();
-    FailureOr<MemRefType> rhsMemRefType = getRankOneF32MemRefType(op, op.getRhs(), "rhs");
-    if (failed(rhsMemRefType))
-      return failure();
-
-    if (!lhsMemRefType->isDynamicDim(0) && !rhsMemRefType->isDynamicDim(0) &&
-        lhsMemRefType->getDimSize(0) != rhsMemRefType->getDimSize(0)) {
-      op.emitOpError("scalar lowering requires lhs and rhs to have equal static lengths");
-      return failure();
-    }
 
     Location loc = op.getLoc();
-    Value lowerBound = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    Value upperBound = getDimZeroSize(loc, adaptor.getLhs(), *lhsMemRefType, lowerBound, rewriter);
-    if (lhsMemRefType->isDynamicDim(0) || rhsMemRefType->isDynamicDim(0)) {
-      Value rhsSize = getDimZeroSize(loc, adaptor.getRhs(), *rhsMemRefType, lowerBound, rewriter);
-      // The scalar correctness path uses the lhs extent as its loop bound, so
-      // dynamic shapes require a runtime proof that both extents agree.
-      Value lengthsMatch =
-          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, upperBound, rhsSize);
-      rewriter.create<cf::AssertOp>(
-          loc, lengthsMatch,
-          rewriter.getStringAttr("ondsp.reduce_mac requires equal operand lengths"));
-    }
     Value step = rewriter.create<arith::ConstantIndexOp>(loc, 1);
 
     auto loop = rewriter.create<scf::ForOp>(
-        loc, lowerBound, upperBound, step, ValueRange{adaptor.getInitial()},
+        loc, bounds->lowerBound, bounds->upperBound, step, ValueRange{adaptor.getInitial()},
         [&](OpBuilder &builder, Location bodyLoc, Value iv, ValueRange iterArgs) {
           Value lhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), iv);
           Value rhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), iv);
