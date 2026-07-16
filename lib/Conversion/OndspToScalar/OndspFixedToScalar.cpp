@@ -21,7 +21,7 @@
 #include <optional>
 
 namespace ondrix {
-#define GEN_PASS_DEF_CONVERTONDSPQ15TOSCALAR
+#define GEN_PASS_DEF_CONVERTONDSPFIXEDTOSCALAR
 #include "ondrix/Conversion/Passes.h.inc"
 } // namespace ondrix
 
@@ -29,19 +29,63 @@ using namespace mlir;
 
 namespace {
 
-static bool isSignedAccumulatorTerm(ondrix::ondsp::FixedAttr numeric) {
+static bool isSignedFixed(ondrix::ondsp::FixedAttr numeric, unsigned width, unsigned frac) {
   auto storage = dyn_cast<IntegerType>(numeric.getStorage());
-  return storage && storage.isSignless() && numeric.getFrac() == 30 &&
-         numeric.getSignedness() == ondrix::ondsp::Signedness::Signed;
+  return storage && storage.isSignless() && storage.getWidth() == width &&
+         numeric.getFrac() == frac && numeric.getSignedness() == ondrix::ondsp::Signedness::Signed;
 }
 
-class OndspQ15ToScalarTypeConverter final : public TypeConverter {
+static bool isSupportedAccumulator(ondrix::ondsp::AccType accumulator) {
+  return ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator) ||
+         ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator);
+}
+
+static bool isSupportedMacPolicy(ondrix::ondsp::AccType accumulator,
+                                 ondrix::ondsp::FixedAttr numeric,
+                                 ondrix::ondsp::ProductAttr product) {
+  if (ondrix::ondsp::isSignedQ15(numeric))
+    return ondrix::ondsp::isFullProduct(product) &&
+           ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator);
+  if (!ondrix::ondsp::isSignedQ31(numeric))
+    return false;
+  if (ondrix::ondsp::isFullProduct(product))
+    return ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator);
+  return ondrix::ondsp::isRawHighProduct(product) &&
+         ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator);
+}
+
+static bool isSupportedImport(ondrix::ondsp::AccType accumulator, ondrix::ondsp::FixedAttr source) {
+  if (ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator))
+    return ondrix::ondsp::isSignedQ31(source);
+  if (!ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator))
+    return false;
+  return ondrix::ondsp::isSignedQ15(source) || isSignedFixed(source, 32, 30);
+}
+
+static bool isSupportedExport(ondrix::ondsp::AccType accumulator,
+                              ondrix::ondsp::FixedAttr destination) {
+  if (ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator))
+    return ondrix::ondsp::isSignedQ31(destination);
+  if (!ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator))
+    return false;
+  return ondrix::ondsp::isSignedQ15(destination) || isSignedFixed(destination, 32, 30);
+}
+
+static bool isSupportedAccumulatorTerm(ondrix::ondsp::AccType accumulator,
+                                       ondrix::ondsp::FixedAttr numeric) {
+  auto storage = dyn_cast<IntegerType>(numeric.getStorage());
+  return isSupportedAccumulator(accumulator) && storage && storage.isSignless() &&
+         numeric.getSignedness() == ondrix::ondsp::Signedness::Signed &&
+         numeric.getFrac() == accumulator.getFrac();
+}
+
+class OndspFixedToScalarTypeConverter final : public TypeConverter {
 public:
-  OndspQ15ToScalarTypeConverter() {
+  OndspFixedToScalarTypeConverter() {
     addConversion([](Type type) { return type; });
     addConversion([](ondrix::ondsp::AccType type,
                      SmallVectorImpl<Type> &results) -> std::optional<LogicalResult> {
-      if (!ondrix::ondsp::isSignedI40Frac30Accumulator(type))
+      if (!isSupportedAccumulator(type))
         return failure();
       results.push_back(type.getStorage());
       return success();
@@ -134,7 +178,7 @@ public:
     Type resultType = getTypeConverter()->convertType(op.getAcc().getType());
     auto integerType = dyn_cast_or_null<IntegerType>(resultType);
     if (!integerType)
-      return op.emitOpError("Q15 scalar lowering requires a supported accumulator type");
+      return op.emitOpError("fixed scalar lowering requires a supported accumulator type");
     rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, integerType,
                                                    rewriter.getIntegerAttr(integerType, 0));
     return success();
@@ -148,11 +192,10 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::AccImportOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
-    if (!ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator) ||
-        !ondrix::ondsp::isSignedQ15(op.getSrc()))
+    if (!isSupportedImport(accumulator, op.getSrc()))
       return op.emitOpError(
-          "Q15 scalar lowering requires signed i16 frac=15 input and signed i40 frac=30 "
-          "accumulator");
+          "fixed scalar lowering supports Q15 to i40/frac30, Q30 to i40/frac30, or Q31 "
+          "to i64/frac62 exact import");
 
     auto accumulatorStorage = cast<IntegerType>(accumulator.getStorage());
     Value extended =
@@ -283,6 +326,24 @@ static Value narrowSignedValue(Location loc, Value input, IntegerType destinatio
   return rewriter.create<arith::TruncIOp>(loc, destinationType, clamped);
 }
 
+static Value lowerSignedProduct(Location loc, Value lhs, Value rhs,
+                                ondrix::ondsp::FixedAttr numeric,
+                                ondrix::ondsp::ProductSemantics semantics, OpBuilder &builder) {
+  IntegerType fullProductType =
+      builder.getIntegerType(cast<IntegerType>(numeric.getStorage()).getWidth() * 2);
+  Value lhsExtended = builder.create<arith::ExtSIOp>(loc, fullProductType, lhs);
+  Value rhsExtended = builder.create<arith::ExtSIOp>(loc, fullProductType, rhs);
+  Value fullProduct = builder.create<arith::MulIOp>(loc, lhsExtended, rhsExtended);
+  if (semantics.selection == ondrix::ondsp::ProductBitSelection::Full)
+    return fullProduct;
+
+  Value shift = builder.create<arith::ConstantIntOp>(
+      loc, cast<IntegerType>(numeric.getStorage()).getWidth(), fullProductType.getWidth());
+  Value shifted = builder.create<arith::ShRSIOp>(loc, fullProduct, shift);
+  IntegerType rawHighType = builder.getIntegerType(semantics.rawWidth);
+  return builder.create<arith::TruncIOp>(loc, rawHighType, shifted);
+}
+
 template <typename OpTy, ondrix::fixedpoint::AccumulatorUpdateOperation operation>
 class MacLikeOpLowering final : public OpConversionPattern<OpTy> {
 public:
@@ -291,17 +352,17 @@ public:
   LogicalResult matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
-    if (!ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator) ||
-        !ondrix::ondsp::isSignedQ15(op.getNumeric()) ||
-        !ondrix::ondsp::isFullProduct(op.getProduct()))
+    if (!isSupportedMacPolicy(accumulator, op.getNumeric(), op.getProduct()))
       return op.emitOpError(
-          "Q15 scalar lowering requires signed i16 frac=15 full product and signed i40 "
-          "frac=30 accumulator");
+          "fixed scalar lowering supports Q15/full with i40/frac30, Q31/full with "
+          "i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
 
-    IntegerType productType = rewriter.getI32Type();
-    Value lhs = rewriter.create<arith::ExtSIOp>(op.getLoc(), productType, adaptor.getLhs());
-    Value rhs = rewriter.create<arith::ExtSIOp>(op.getLoc(), productType, adaptor.getRhs());
-    Value product = rewriter.create<arith::MulIOp>(op.getLoc(), lhs, rhs);
+    FailureOr<ondrix::ondsp::ProductSemantics> semantics =
+        ondrix::ondsp::inferProductSemantics(op, op.getNumeric(), op.getProduct());
+    if (failed(semantics))
+      return failure();
+    Value product = lowerSignedProduct(op.getLoc(), adaptor.getLhs(), adaptor.getRhs(),
+                                       op.getNumeric(), *semantics, rewriter);
     Value updated = lowerAccumulatorUpdate(op.getLoc(), adaptor.getAcc(), product,
                                            accumulator.getUpdateOverflow(), operation, rewriter);
     rewriter.replaceOp(op, updated);
@@ -322,11 +383,10 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::AccAddTermOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
-    if (!ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator) ||
-        !isSignedAccumulatorTerm(op.getTermNumeric()))
+    if (!isSupportedAccumulatorTerm(accumulator, op.getTermNumeric()))
       return op.emitOpError(
-          "Q15 scalar lowering requires a signed integer frac=30 term and signed i40 frac=30 "
-          "accumulator");
+          "fixed scalar lowering requires a supported signed accumulator and a signed term "
+          "with the same fractional position");
 
     Value result = lowerAccumulatorUpdate(
         op.getLoc(), adaptor.getAcc(), adaptor.getTerm(), accumulator.getUpdateOverflow(),
@@ -345,15 +405,19 @@ public:
     auto accumulator = dyn_cast<ondrix::ondsp::AccType>(op.getInitial().getType());
     auto numeric = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     if (!accumulator || !numeric || !op.getProduct() ||
-        !ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator) ||
-        !ondrix::ondsp::isSignedQ15(numeric) || !ondrix::ondsp::isFullProduct(*op.getProduct()))
+        !isSupportedMacPolicy(accumulator, numeric, *op.getProduct()))
       return op.emitOpError(
-          "Q15 scalar reduction requires signed i16 frac=15 full product and signed i40 "
-          "frac=30 accumulator");
+          "fixed scalar reduction supports Q15/full with i40/frac30, Q31/full with "
+          "i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
+
+    FailureOr<ondrix::ondsp::ProductSemantics> semantics =
+        ondrix::ondsp::inferProductSemantics(op, numeric, *op.getProduct());
+    if (failed(semantics))
+      return failure();
 
     FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
         ondrix::conversion::createRankOneMemRefReductionBounds(
-            op, adaptor.getLhs(), adaptor.getRhs(), rewriter.getI16Type(), "Q15 scalar lowering",
+            op, adaptor.getLhs(), adaptor.getRhs(), numeric.getStorage(), "fixed scalar lowering",
             rewriter);
     if (failed(bounds))
       return failure();
@@ -366,10 +430,7 @@ public:
         [&](OpBuilder &builder, Location bodyLoc, Value iv, ValueRange iterArgs) {
           Value lhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), iv);
           Value rhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), iv);
-          IntegerType productType = builder.getI32Type();
-          Value lhsExtended = builder.create<arith::ExtSIOp>(bodyLoc, productType, lhs);
-          Value rhsExtended = builder.create<arith::ExtSIOp>(bodyLoc, productType, rhs);
-          Value product = builder.create<arith::MulIOp>(bodyLoc, lhsExtended, rhsExtended);
+          Value product = lowerSignedProduct(bodyLoc, lhs, rhs, numeric, *semantics, builder);
           Value next = lowerAccumulatorUpdate(
               bodyLoc, iterArgs.front(), product, accumulator.getUpdateOverflow(),
               ondrix::fixedpoint::AccumulatorUpdateOperation::Add, builder);
@@ -388,17 +449,17 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::AccExportOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
-    if (!ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator) ||
-        !ondrix::ondsp::isSignedQ15(op.getDst()) || !op.getResult().getType().isSignlessInteger(16))
+    if (!isSupportedExport(accumulator, op.getDst()))
       return op.emitOpError(
-          "Q15 scalar lowering requires signed i40 frac=30 accumulator and signed i16 "
-          "frac=15 destination");
+          "fixed scalar lowering supports i40/frac30 to Q15 or Q30, and i64/frac62 to Q31 "
+          "export");
 
     unsigned shift = accumulator.getFrac() - op.getDst().getFrac();
     Value rounded =
         roundSignedRightShift(op.getLoc(), adaptor.getAcc(), shift, op.getRounding(), rewriter);
+    auto destinationType = cast<IntegerType>(op.getDst().getStorage());
     Value result =
-        narrowSignedValue(op.getLoc(), rounded, rewriter.getI16Type(), op.getOverflow(), rewriter);
+        narrowSignedValue(op.getLoc(), rounded, destinationType, op.getOverflow(), rewriter);
     rewriter.replaceOp(op, result);
     return success();
   }
@@ -425,11 +486,11 @@ public:
   }
 };
 
-class ConvertOndspQ15ToScalarPass final
-    : public ondrix::impl::ConvertOndspQ15ToScalarBase<ConvertOndspQ15ToScalarPass> {
+class ConvertOndspFixedToScalarPass final
+    : public ondrix::impl::ConvertOndspFixedToScalarBase<ConvertOndspFixedToScalarPass> {
 public:
-  using ondrix::impl::ConvertOndspQ15ToScalarBase<
-      ConvertOndspQ15ToScalarPass>::ConvertOndspQ15ToScalarBase;
+  using ondrix::impl::ConvertOndspFixedToScalarBase<
+      ConvertOndspFixedToScalarPass>::ConvertOndspFixedToScalarBase;
 
   void runOnOperation() override {
     if (failed(verifyAccumulatorUsage(getOperation()))) {
@@ -437,7 +498,7 @@ public:
       return;
     }
 
-    OndspQ15ToScalarTypeConverter typeConverter;
+    OndspFixedToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
                  MacOpLowering, MacSubOpLowering, ReduceMacOpLowering, SelectOpTypeConversion>(
@@ -477,6 +538,6 @@ public:
 
 } // namespace
 
-std::unique_ptr<Pass> ondrix::createConvertOndspQ15ToScalarPass() {
-  return std::make_unique<ConvertOndspQ15ToScalarPass>();
+std::unique_ptr<Pass> ondrix::createConvertOndspFixedToScalarPass() {
+  return std::make_unique<ConvertOndspFixedToScalarPass>();
 }

@@ -1,5 +1,5 @@
 // RUN: ondrix-opt %s --normalize-ondsp-q15-vector-reduce | FileCheck %s
-// RUN: not ondrix-opt %s --normalize-ondsp-q15-vector-reduce --convert-ondsp-q15-to-scalar 2>&1 | FileCheck %s --check-prefix=FINAL-ERROR
+// RUN: not ondrix-opt %s --normalize-ondsp-q15-vector-reduce --convert-ondsp-fixed-to-scalar 2>&1 | FileCheck %s --check-prefix=FINAL-ERROR
 
 // FINAL-ERROR: failed to legalize operation 'ondsp.reduce_mac'
 

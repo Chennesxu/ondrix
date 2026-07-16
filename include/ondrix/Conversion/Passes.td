@@ -51,21 +51,23 @@ def LowerOndspF32ReduceToScalar
   ];
 }
 
-def ConvertOndspQ15ToScalar
-    : Pass<"convert-ondsp-q15-to-scalar", "::mlir::ModuleOp"> {
-  let summary = "Fully lower explicit signed Q15 accumulator semantics";
+def ConvertOndspFixedToScalar
+    : Pass<"convert-ondsp-fixed-to-scalar", "::mlir::ModuleOp"> {
+  let summary = "Fully lower supported explicit fixed-point accumulator semantics";
   let description = [{
-    Fully lower the explicit signed Q15 accumulator lifecycle to generic
-    scalar integer operations. The pass converts supported accumulator types
-    structurally across functions and control flow and fails if any unsupported
-    ondsp operation or accumulator domain remains. Ondrix intent operations
-    must be lowered first. Memref reductions may be chunked by
+    Fully lower supported signed fixed-point accumulator lifecycles to generic
+    scalar integer operations. The current domains are Q15 full product with
+    i40/frac30 accumulation, Q31 full product with i64/frac62 accumulation,
+    and Q31 signed raw-high product with i40/frac30 accumulation. The pass
+    converts accumulator types structurally across functions and control flow
+    and fails if any unsupported ondsp operation or accumulator domain remains.
+    Ondrix intent operations must be lowered first. Q15 memref reductions may be chunked by
     `vectorize-ondsp-q15-memref-reduce`. Proven exact-modulo reductions may
     then be handled by `parallelize-ondsp-q15-wrap-vector-reduce`; remaining
     fixed-length vector reductions must be normalized by
     `normalize-ondsp-q15-vector-reduce` before this final conversion.
   }];
-  let constructor = "ondrix::createConvertOndspQ15ToScalarPass()";
+  let constructor = "ondrix::createConvertOndspFixedToScalarPass()";
   let dependentDialects = [
     "ondrix::ondsp::OndspDialect",
     "mlir::arith::ArithDialect",

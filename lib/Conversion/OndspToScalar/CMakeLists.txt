@@ -1,5 +1,5 @@
 add_ondrix_library(OndspToScalar
-  OndspQ15ToScalar.cpp
+  OndspFixedToScalar.cpp
   OndspToScalar.cpp
 
   DEPENDS

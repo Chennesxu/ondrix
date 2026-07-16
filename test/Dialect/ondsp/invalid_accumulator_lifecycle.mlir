@@ -18,6 +18,15 @@ func.func @export_rejects_fractional_upscale(
 
 // -----
 
+func.func @raw_high_q30_does_not_implicitly_export_as_q31(
+    %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i32 {
+  // expected-error@+1 {{destination frac must not exceed accumulator frac}}
+  %0 = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i32, frac = 31>, rounding = #ondsp.rounding<toward_negative>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i32
+  return %0 : i32
+}
+
+// -----
+
 func.func @export_requires_destination_storage(
     %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i32 {
   // expected-error@+1 {{result type must match destination storage type}}

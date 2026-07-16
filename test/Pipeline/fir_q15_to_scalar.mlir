@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-q15-to-scalar | FileCheck %s
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar | FileCheck %s
 
 func.func @fir_q15_to_scalar(
     %input: memref<8xi16>, %coeffs: memref<8xi16>) -> i16 {

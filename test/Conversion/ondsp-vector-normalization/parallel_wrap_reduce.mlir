@@ -1,5 +1,5 @@
 // RUN: ondrix-opt %s --parallelize-ondsp-q15-wrap-vector-reduce | FileCheck %s
-// RUN: ondrix-opt %s --parallelize-ondsp-q15-wrap-vector-reduce --normalize-ondsp-q15-vector-reduce --convert-ondsp-q15-to-scalar | FileCheck %s --check-prefix=FINAL
+// RUN: ondrix-opt %s --parallelize-ondsp-q15-wrap-vector-reduce --normalize-ondsp-q15-vector-reduce --convert-ondsp-fixed-to-scalar | FileCheck %s --check-prefix=FINAL
 
 func.func @parallel_wrap(
     %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>,

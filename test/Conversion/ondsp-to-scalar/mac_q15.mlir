@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --convert-ondsp-q15-to-scalar | FileCheck %s
+// RUN: ondrix-opt %s --convert-ondsp-fixed-to-scalar | FileCheck %s
 
 func.func @mac_saturate(
     %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,

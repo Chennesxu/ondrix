@@ -46,6 +46,23 @@ bool testQ15FullProducts() {
   return passed;
 }
 
+bool testQ31FullProducts() {
+  bool passed = true;
+  passed &= expectEqual(
+      "q31 max times max full",
+      computeSignedFullProduct(signedValue(32, 2147483647), signedValue(32, 2147483647)),
+      signedValue(64, INT64_C(4611686014132420609)));
+  passed &= expectEqual(
+      "q31 min times min full",
+      computeSignedFullProduct(signedValue(32, -2147483648LL), signedValue(32, -2147483648LL)),
+      signedValue(64, INT64_C(4611686018427387904)));
+  passed &= expectEqual(
+      "q31 min times max full",
+      computeSignedFullProduct(signedValue(32, -2147483648LL), signedValue(32, 2147483647)),
+      signedValue(64, -INT64_C(4611686016279904256)));
+  return passed;
+}
+
 bool testQ31RawHighProducts() {
   bool passed = true;
   passed &= expectEqual(
@@ -69,7 +86,8 @@ bool testQ31RawHighProducts() {
 
 bool testAccumulatorIntermediateWidth() {
   return getAccumulatorUpdateIntermediateWidth(40, 32) == 41 &&
-         getAccumulatorUpdateIntermediateWidth(16, 32) == 33;
+         getAccumulatorUpdateIntermediateWidth(16, 32) == 33 &&
+         getAccumulatorUpdateIntermediateWidth(64, 64) == 65;
 }
 
 bool testAccumulatorBoundaries() {
@@ -316,6 +334,7 @@ bool testSmallWidthExportExhaustive() {
 
 int main() {
   bool passed = testQ15FullProducts();
+  passed &= testQ31FullProducts();
   passed &= testQ31RawHighProducts();
   passed &= testAccumulatorIntermediateWidth();
   passed &= testAccumulatorBoundaries();

@@ -57,8 +57,14 @@ classifyReductionReassociation(OverflowMode updateOverflow,
 /// Returns whether a policy denotes signed Q15 in signless i16 storage.
 bool isSignedQ15(FixedAttr numeric);
 
+/// Returns whether a policy denotes signed Q31 in signless i32 storage.
+bool isSignedQ31(FixedAttr numeric);
+
 /// Returns whether a type denotes a signed i40/frac=30 accumulator domain.
 bool isSignedI40Frac30Accumulator(AccType accumulator);
+
+/// Returns whether a type denotes a signed i64/frac=62 accumulator domain.
+bool isSignedI64Frac62Accumulator(AccType accumulator);
 
 /// Returns whether a product policy selects the exact full product.
 bool isFullProduct(ProductAttr product);

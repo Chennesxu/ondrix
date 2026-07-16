@@ -15,7 +15,9 @@ using ondrix::ondsp::inferProductSemantics;
 using ondrix::ondsp::isFullProduct;
 using ondrix::ondsp::isRawHighProduct;
 using ondrix::ondsp::isSignedI40Frac30Accumulator;
+using ondrix::ondsp::isSignedI64Frac62Accumulator;
 using ondrix::ondsp::isSignedQ15;
+using ondrix::ondsp::isSignedQ31;
 using ondrix::ondsp::OverflowMode;
 using ondrix::ondsp::ProductAttr;
 using ondrix::ondsp::ProductBitSelection;
@@ -48,11 +50,14 @@ bool testCommonNumericPolicies() {
   auto i16 = mlir::IntegerType::get(&context, 16);
   auto i32 = mlir::IntegerType::get(&context, 32);
   auto i40 = mlir::IntegerType::get(&context, 40);
+  auto i64 = mlir::IntegerType::get(&context, 64);
 
   bool passed = true;
   passed &= isSignedQ15(FixedAttr::get(&context, Signedness::Signed, i16, 15));
   passed &= !isSignedQ15(FixedAttr::get(&context, Signedness::Unsigned, i16, 15));
   passed &= !isSignedQ15(FixedAttr::get(&context, Signedness::Signed, i32, 15));
+  passed &= isSignedQ31(FixedAttr::get(&context, Signedness::Signed, i32, 31));
+  passed &= !isSignedQ31(FixedAttr::get(&context, Signedness::Signed, i32, 30));
   passed &= isSignedI40Frac30Accumulator(
       AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Saturate));
   passed &= isSignedI40Frac30Accumulator(
@@ -61,6 +66,10 @@ bool testCommonNumericPolicies() {
       AccType::get(&context, i32, 30, Signedness::Signed, OverflowMode::Saturate));
   passed &= !isSignedI40Frac30Accumulator(
       AccType::get(&context, i40, 29, Signedness::Signed, OverflowMode::Saturate));
+  passed &= isSignedI64Frac62Accumulator(
+      AccType::get(&context, i64, 62, Signedness::Signed, OverflowMode::Saturate));
+  passed &= !isSignedI64Frac62Accumulator(
+      AccType::get(&context, i64, 61, Signedness::Signed, OverflowMode::Saturate));
   passed &= isFullProduct(ProductAttr::get(&context, ProductSelection::Full));
   passed &= !isFullProduct(ProductAttr::get(&context, ProductSelection::HighRaw));
   passed &= isRawHighProduct(ProductAttr::get(&context, ProductSelection::HighRaw));

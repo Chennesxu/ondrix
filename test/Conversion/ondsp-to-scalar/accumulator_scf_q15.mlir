@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --convert-ondsp-q15-to-scalar | FileCheck %s
+// RUN: ondrix-opt %s --convert-ondsp-fixed-to-scalar | FileCheck %s
 
 func.func @for_accumulator(%lower: index, %upper: index, %step: index,
     %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,

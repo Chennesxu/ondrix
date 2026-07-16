@@ -1,7 +1,8 @@
 # Fixed-Point Semantics
 
 This document defines the public fixed-point product and accumulator contract.
-The executable scalar and fixed-width Vector paths currently implement its
+The executable scalar path implements signed-Q15 full products and signed-Q31
+full/raw-high products. The fixed-width Vector path currently implements the
 signed-Q15 full-product subset.
 
 ## Storage and Interpretation
@@ -42,6 +43,16 @@ is not currently part of the public contract.
 
 The executable Q15 path selects `full`, producing a signed 32-bit raw value
 with `frac = 30`. No rounding or saturation occurs during multiplication.
+
+The executable Q31 scalar path supports two separate domains:
+
+- `full`: signed i64/frac62 product and accumulator, explicitly exported to
+  signed i32/frac31;
+- `high_raw`: signed i32/frac30 term accumulated in signed i40/frac30 state,
+  explicitly exported as signed i32/frac30.
+
+The raw-high path cannot be exported directly as Q31 because value-preserving
+`acc_export` does not increase the accumulator fractional position.
 
 ## Accumulator Updates
 
@@ -133,4 +144,5 @@ The contract is checked by:
 
 The execution corpus covers accumulator overflow, wrap and saturation,
 order-sensitive reductions, dynamic lengths, Vector tails, nonzero seeds,
-nonzero unit-stride offsets, and scalar fallback.
+nonzero unit-stride offsets, scalar fallback, Q31 full-product rounding, and
+signed Q31 raw-high bit selection.

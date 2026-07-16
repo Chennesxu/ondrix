@@ -1,4 +1,4 @@
-// RUN: not ondrix-opt %s --convert-ondsp-q15-to-scalar 2>&1 | FileCheck %s
+// RUN: not ondrix-opt %s --convert-ondsp-fixed-to-scalar 2>&1 | FileCheck %s
 
 func.func @select_metadata(
     %condition: i1,
