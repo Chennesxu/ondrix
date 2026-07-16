@@ -12,8 +12,12 @@ func.func @ondsp_ops(%a: i16, %b: i16, %v0: vector<4xi16>, %v1: vector<4xi16>,
   // CHECK: ondsp.mac
   %mac = ondsp.mac %imported, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 
+  // CHECK: ondsp.acc_add_product
+  %product = arith.muli %p0, %p1 : i32
+  %updated = ondsp.acc_add_product %mac, %product {product_numeric = #ondsp.fixed<signed, storage = i32, frac = 30>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i32) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+
   // CHECK: ondsp.acc_export
-  %exported = ondsp.acc_export %mac {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  %exported = ondsp.acc_export %updated {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
 
   // CHECK: ondsp.reduce_mac
   %red = ondsp.reduce_mac %zero, %v0, %v1 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, vector<4xi16>, vector<4xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>

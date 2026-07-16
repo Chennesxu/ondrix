@@ -101,6 +101,24 @@ def Ondsp_MacSubOp : Ondsp_MacLikeOp<"mac_sub", "Multiply-subtract accumulate"> 
   }];
 }
 
+def Ondsp_AccAddProductOp
+    : Ondsp_Op<"acc_add_product", [Pure, AllTypesMatch<["acc", "result"]>]> {
+  let summary = "Add an explicit fixed-point product to an accumulator";
+  let description = [{
+    Adds the already-computed fixed-point `product` to the mathematical
+    accumulator value, then applies `acc.update_overflow` when writing the
+    result back to the accumulator storage width. `product_numeric` describes
+    the product's signedness, storage width, and fractional position. This
+    operation is a target-independent normalization point for consumers that
+    compute products separately from ordered accumulator updates.
+  }];
+  let arguments = (ins Ondsp_Acc:$acc, AnyInteger:$product,
+                   Ondsp_FixedAttr:$product_numeric);
+  let results = (outs Ondsp_Acc:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondsp_AccExportOp : Ondsp_Op<"acc_export", [Pure]> {
   let summary = "Export an accumulator under an explicit destination policy";
   let description = [{

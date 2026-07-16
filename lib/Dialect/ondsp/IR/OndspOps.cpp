@@ -278,6 +278,18 @@ LogicalResult MacSubOp::verify() {
   return verifyMacLike(*this, getAcc(), getLhs(), getRhs(), getNumeric(), getProduct());
 }
 
+LogicalResult AccAddProductOp::verify() {
+  AccType accumulator = getAcc().getType();
+  FixedAttr productNumeric = getProductNumeric();
+  if (getProduct().getType() != productNumeric.getStorage())
+    return emitOpError("product type must match product numeric storage type");
+  if (accumulator.getSignedness() != productNumeric.getSignedness())
+    return emitOpError("product and accumulator signedness must match");
+  if (accumulator.getFrac() != productNumeric.getFrac())
+    return emitOpError("product and accumulator frac must match");
+  return success();
+}
+
 LogicalResult AccExportOp::verify() {
   AccType accumulator = getAcc().getType();
   FixedAttr destination = getDst();
