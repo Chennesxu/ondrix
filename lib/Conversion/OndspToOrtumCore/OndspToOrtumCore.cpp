@@ -9,6 +9,7 @@
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreDialect.h"
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreOps.h"
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreTypes.h"
+#include "ondrix/Target/OrtumCore/OrtumCoreTargetProfile.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
@@ -30,11 +31,26 @@ using namespace mlir;
 
 namespace {
 
+static ondrix::ortumcore::AccumulatorDomain
+getAccumulatorDomain(ondrix::ondsp::AccType accumulator) {
+  return {cast<IntegerType>(accumulator.getStorage()).getWidth(), accumulator.getFrac(),
+          accumulator.getSignedness(), accumulator.getUpdateOverflow()};
+}
+
+static ondrix::ortumcore::ProductDomain getProductDomain(ondrix::ondsp::FixedAttr numeric,
+                                                         ondrix::ondsp::ProductAttr product) {
+  auto selection = ondrix::ondsp::isFullProduct(product)
+                       ? ondrix::ondsp::ProductBitSelection::Full
+                       : ondrix::ondsp::ProductBitSelection::HighRaw;
+  return {cast<IntegerType>(numeric.getStorage()).getWidth(), numeric.getFrac(),
+          numeric.getSignedness(), selection};
+}
+
 // The parameterless target type admits only this accumulator representation.
 // Product semantics remain operation-specific legalization rules.
 static bool isSupportedOrtumCoreAccumulator(ondrix::ondsp::AccType accumulator) {
-  return ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator) &&
-         accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Saturate;
+  return ondrix::ortumcore::OrtumCoreTargetProfile().supportsAccumulator(
+      getAccumulatorDomain(accumulator));
 }
 
 class OndspToOrtumCoreTypeConverter final : public TypeConverter {
@@ -63,15 +79,14 @@ static LogicalResult verifyOrtumCoreAccumulator(Operation *op, ondrix::ondsp::Ac
   return success();
 }
 
-static LogicalResult verifySupportedMacPolicy(Operation *op, ondrix::ondsp::FixedAttr numeric,
+static LogicalResult verifySupportedMacPolicy(Operation *op, ondrix::ondsp::AccType accumulator,
+                                              ondrix::ondsp::FixedAttr numeric,
                                               ondrix::ondsp::ProductAttr product) {
-  auto storage = dyn_cast<IntegerType>(numeric.getStorage());
-  if (ondrix::ondsp::isSignedQ15(numeric) && ondrix::ondsp::isFullProduct(product))
+  if (ondrix::ortumcore::OrtumCoreTargetProfile().supportsMac(getProductDomain(numeric, product),
+                                                              getAccumulatorDomain(accumulator)))
     return success();
 
-  if (numeric.getSignedness() == ondrix::ondsp::Signedness::Signed && storage &&
-      storage.isSignless() && storage.getWidth() == 32 && numeric.getFrac() == 31 &&
-      product.getSelection() == ondrix::ondsp::ProductSelection::HighRaw)
+  if (ondrix::ondsp::isSignedQ31(numeric) && ondrix::ondsp::isRawHighProduct(product))
     return op->emitOpError(
         "q31 raw-high target equivalence is not specified; lower through a proven scalar "
         "sequence first");
@@ -218,7 +233,8 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::MacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())) ||
-        failed(verifySupportedMacPolicy(op, op.getNumeric(), op.getProduct())))
+        failed(
+            verifySupportedMacPolicy(op, op.getAcc().getType(), op.getNumeric(), op.getProduct())))
       return failure();
 
     Type resultType = getTypeConverter()->convertType(op.getResult().getType());
@@ -239,7 +255,8 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::MacSubOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())) ||
-        failed(verifySupportedMacPolicy(op, op.getNumeric(), op.getProduct())))
+        failed(
+            verifySupportedMacPolicy(op, op.getAcc().getType(), op.getNumeric(), op.getProduct())))
       return failure();
 
     Type resultType = getTypeConverter()->convertType(op.getResult().getType());

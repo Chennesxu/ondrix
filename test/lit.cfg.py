@@ -23,6 +23,7 @@ tools = [
     "ondrix-translate",
     "ondrix-fixed-point-semantics-test",
     "ondrix-ondsp-semantics-test",
+    "ondrix-ortumcore-target-profile-test",
     "FileCheck",
     "llc",
     "not",

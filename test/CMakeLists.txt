@@ -12,6 +12,7 @@ set(ONDRIX_TEST_DEPENDS
   not
   ondrix-fixed-point-semantics-test
   ondrix-ondsp-semantics-test
+  ondrix-ortumcore-target-profile-test
   ondrix-opt
   ondrix-translate
 )
@@ -27,6 +28,12 @@ add_llvm_executable(ondrix-ondsp-semantics-test EXCLUDE_FROM_ALL
 )
 llvm_update_compile_flags(ondrix-ondsp-semantics-test)
 target_link_libraries(ondrix-ondsp-semantics-test PRIVATE OndspIR)
+
+add_llvm_executable(ondrix-ortumcore-target-profile-test EXCLUDE_FROM_ALL
+  Support/OrtumCoreTargetProfileTest.cpp
+)
+llvm_update_compile_flags(ondrix-ortumcore-target-profile-test)
+target_link_libraries(ondrix-ortumcore-target-profile-test PRIVATE OrtumCoreTargetProfile)
 
 add_lit_testsuite(check-ondrix "Running the ondrix regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
