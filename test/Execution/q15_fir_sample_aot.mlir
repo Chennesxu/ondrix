@@ -3,6 +3,8 @@
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc %S/Inputs/q15_fir_sample_aot.c %t.o -o %t
 // RUN: %t
+// RUN: cc %S/Inputs/q15_fir_sample_mismatch.c %t.o -o %t.mismatch
+// RUN: not --crash %t.mismatch
 
 func.func @fir_q15_saturate(%input: memref<?xi16>, %coeffs: memref<?xi16>) -> i16 {
   %acc = ondrix.fir %input, %coeffs {
@@ -27,6 +29,21 @@ func.func @fir_q15_wrap(%input: memref<?xi16>, %coeffs: memref<?xi16>) -> i16 {
     rounding = #ondsp.rounding<toward_negative>,
     overflow = #ondsp.overflow<wrap>
   } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>) -> i16
+  return %result : i16
+}
+
+func.func @fir_q15_strided(
+    %input: memref<?xi16, strided<[?], offset: ?>>,
+    %coeffs: memref<?xi16, strided<[?], offset: ?>>) -> i16 {
+  %acc = ondrix.fir %input, %coeffs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (memref<?xi16, strided<[?], offset: ?>>, memref<?xi16, strided<[?], offset: ?>>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<toward_negative>,
+    overflow = #ondsp.overflow<wrap>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
   return %result : i16
 }
 

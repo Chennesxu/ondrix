@@ -14,6 +14,10 @@ extern int16_t fir_q15_wrap(int16_t *input_allocated, int16_t *input_aligned, in
                             int64_t input_size, int64_t input_stride, int16_t *coeffs_allocated,
                             int16_t *coeffs_aligned, int64_t coeffs_offset, int64_t coeffs_size,
                             int64_t coeffs_stride);
+extern int16_t fir_q15_strided(int16_t *input_allocated, int16_t *input_aligned,
+                               int64_t input_offset, int64_t input_size, int64_t input_stride,
+                               int16_t *coeffs_allocated, int16_t *coeffs_aligned,
+                               int64_t coeffs_offset, int64_t coeffs_size, int64_t coeffs_stride);
 extern int16_t dot_q15_saturate(int16_t *lhs_allocated, int16_t *lhs_aligned, int64_t lhs_offset,
                                 int64_t lhs_size, int64_t lhs_stride, int16_t *rhs_allocated,
                                 int16_t *rhs_aligned, int64_t rhs_offset, int64_t rhs_size,
@@ -60,6 +64,19 @@ static uint16_t fir_reference(const int16_t *input, const int16_t *coeffs, int64
   return export_floor_wrap_reference(accumulator);
 }
 
+static uint16_t strided_fir_reference(const int16_t *input, int64_t input_offset,
+                                      int64_t input_stride, const int16_t *coeffs,
+                                      int64_t coeffs_offset, int64_t coeffs_stride, int64_t count,
+                                      int saturate) {
+  int64_t accumulator = 0;
+  for (int64_t i = 0; i < count; ++i) {
+    int16_t lhs = input[input_offset + i * input_stride];
+    int16_t rhs = coeffs[coeffs_offset + i * coeffs_stride];
+    accumulator = update_reference(accumulator, lhs, rhs, saturate);
+  }
+  return export_floor_wrap_reference(accumulator);
+}
+
 static uint16_t seeded_reduce_reference(int16_t seed, const int16_t *lhs, const int16_t *rhs,
                                         int64_t count) {
   int64_t accumulator = (int64_t)seed * (INT64_C(1) << 15);
@@ -87,6 +104,25 @@ static int check_seeded(const char *name, seeded_reduce_kernel kernel, int16_t s
     return 0;
   fprintf(stderr, "%s(%lld): expected bits 0x%04x, got 0x%04x\n", name, (long long)count, expected,
           actual);
+  return 1;
+}
+
+static int check_strided(void) {
+  int16_t input[] = {111, 16384, 222, -16384, 333, 8192, 444, -8192, 555};
+  int16_t coeffs[] = {111, 222, 16384, 333, 444, -16384, 555, 666, 8192, 777, 888, -8192};
+  const int64_t count = 4;
+  const int64_t input_offset = 1;
+  const int64_t input_stride = 2;
+  const int64_t coeffs_offset = 2;
+  const int64_t coeffs_stride = 3;
+
+  uint16_t actual = (uint16_t)fir_q15_strided(input, input, input_offset, count, input_stride,
+                                              coeffs, coeffs, coeffs_offset, count, coeffs_stride);
+  uint16_t expected = strided_fir_reference(input, input_offset, input_stride, coeffs,
+                                            coeffs_offset, coeffs_stride, count, 1);
+  if (actual == expected)
+    return 0;
+  fprintf(stderr, "strided FIR: expected bits 0x%04x, got 0x%04x\n", expected, actual);
   return 1;
 }
 
@@ -132,5 +168,6 @@ int main(void) {
     failed |= check_seeded("random seeded reduce saturate", reduce_q15_seeded_saturate,
                            (int16_t)(state >> 16), input, coeffs, count);
   }
+  failed |= check_strided();
   return failed;
 }
