@@ -26,8 +26,8 @@ static bool isSupportedVectorReduction(ondrix::ondsp::ReduceMacOp op) {
   auto rhsType = dyn_cast<VectorType>(op.getRhs().getType());
   return accumulator && numeric && op.getProduct() && lhsType && rhsType && !lhsType.isScalable() &&
          !rhsType.isScalable() && lhsType.getRank() == 1 && lhsType == rhsType &&
-         lhsType.getElementType().isSignlessInteger(16) && accumulator.getFrac() == 30 &&
-         accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed &&
+         lhsType.getElementType().isSignlessInteger(16) &&
+         ondrix::ondsp::isSignedQ15I40Accumulator(accumulator) &&
          ondrix::ondsp::isSignedQ15(numeric) && ondrix::ondsp::isFullProduct(*op.getProduct());
 }
 

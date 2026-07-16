@@ -33,9 +33,7 @@ namespace {
 // The parameterless target type admits only this accumulator representation.
 // Product semantics remain operation-specific legalization rules.
 static bool isSupportedOrtumCoreAccumulator(ondrix::ondsp::AccType accumulator) {
-  auto storage = dyn_cast<IntegerType>(accumulator.getStorage());
-  return storage && storage.getWidth() == 40 && accumulator.getFrac() == 30 &&
-         accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed &&
+  return ondrix::ondsp::isSignedQ15I40Accumulator(accumulator) &&
          accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Saturate;
 }
 

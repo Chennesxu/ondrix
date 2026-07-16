@@ -29,13 +29,6 @@ using namespace mlir;
 
 namespace {
 
-static bool isSupportedQ15Accumulator(ondrix::ondsp::AccType accumulator) {
-  auto storage = dyn_cast<IntegerType>(accumulator.getStorage());
-  return storage && storage.isSignless() && storage.getWidth() == 40 &&
-         accumulator.getFrac() == 30 &&
-         accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed;
-}
-
 static bool isSignedQ30Product(ondrix::ondsp::FixedAttr numeric) {
   auto storage = dyn_cast<IntegerType>(numeric.getStorage());
   return storage && storage.isSignless() && storage.getWidth() == 32 && numeric.getFrac() == 30 &&
@@ -48,7 +41,7 @@ public:
     addConversion([](Type type) { return type; });
     addConversion([](ondrix::ondsp::AccType type,
                      SmallVectorImpl<Type> &results) -> std::optional<LogicalResult> {
-      if (!isSupportedQ15Accumulator(type))
+      if (!ondrix::ondsp::isSignedQ15I40Accumulator(type))
         return failure();
       results.push_back(type.getStorage());
       return success();
@@ -155,7 +148,8 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::AccImportOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
-    if (!isSupportedQ15Accumulator(accumulator) || !ondrix::ondsp::isSignedQ15(op.getSrc()))
+    if (!ondrix::ondsp::isSignedQ15I40Accumulator(accumulator) ||
+        !ondrix::ondsp::isSignedQ15(op.getSrc()))
       return op.emitOpError(
           "Q15 scalar lowering requires signed i16 frac=15 input and signed i40 frac=30 "
           "accumulator");
@@ -297,7 +291,8 @@ public:
   LogicalResult matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
-    if (!isSupportedQ15Accumulator(accumulator) || !ondrix::ondsp::isSignedQ15(op.getNumeric()) ||
+    if (!ondrix::ondsp::isSignedQ15I40Accumulator(accumulator) ||
+        !ondrix::ondsp::isSignedQ15(op.getNumeric()) ||
         !ondrix::ondsp::isFullProduct(op.getProduct()))
       return op.emitOpError(
           "Q15 scalar lowering requires signed i16 frac=15 full product and signed i40 "
@@ -327,7 +322,8 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::AccAddProductOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
-    if (!isSupportedQ15Accumulator(accumulator) || !isSignedQ30Product(op.getProductNumeric()))
+    if (!ondrix::ondsp::isSignedQ15I40Accumulator(accumulator) ||
+        !isSignedQ30Product(op.getProductNumeric()))
       return op.emitOpError(
           "Q15 scalar lowering requires signed i32 frac=30 product and signed i40 frac=30 "
           "accumulator");
@@ -348,7 +344,8 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = dyn_cast<ondrix::ondsp::AccType>(op.getInitial().getType());
     auto numeric = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
-    if (!accumulator || !numeric || !op.getProduct() || !isSupportedQ15Accumulator(accumulator) ||
+    if (!accumulator || !numeric || !op.getProduct() ||
+        !ondrix::ondsp::isSignedQ15I40Accumulator(accumulator) ||
         !ondrix::ondsp::isSignedQ15(numeric) || !ondrix::ondsp::isFullProduct(*op.getProduct()))
       return op.emitOpError(
           "Q15 scalar reduction requires signed i16 frac=15 full product and signed i40 "
@@ -391,8 +388,8 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::AccExportOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
-    if (!isSupportedQ15Accumulator(accumulator) || !ondrix::ondsp::isSignedQ15(op.getDst()) ||
-        !op.getResult().getType().isSignlessInteger(16))
+    if (!ondrix::ondsp::isSignedQ15I40Accumulator(accumulator) ||
+        !ondrix::ondsp::isSignedQ15(op.getDst()) || !op.getResult().getType().isSignlessInteger(16))
       return op.emitOpError(
           "Q15 scalar lowering requires signed i40 frac=30 accumulator and signed i16 "
           "frac=15 destination");

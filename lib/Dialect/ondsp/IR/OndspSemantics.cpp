@@ -55,6 +55,12 @@ bool isSignedQ15(FixedAttr numeric) {
          numeric.getSignedness() == Signedness::Signed;
 }
 
+bool isSignedQ15I40Accumulator(AccType accumulator) {
+  auto storage = dyn_cast<IntegerType>(accumulator.getStorage());
+  return storage && storage.isSignless() && storage.getWidth() == 40 &&
+         accumulator.getFrac() == 30 && accumulator.getSignedness() == Signedness::Signed;
+}
+
 bool isFullProduct(ProductAttr product) { return product.getSelection() == ProductSelection::Full; }
 
 } // namespace ondrix::ondsp
