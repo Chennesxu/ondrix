@@ -10,6 +10,19 @@
 
 namespace ondrix::ondsp {
 
+/// Identifies which raw bits are retained from an exact fixed-point product.
+enum class ProductBitSelection {
+  Full,
+  HighRaw,
+};
+
+/// Target-independent raw storage and fractional position of a product.
+struct ProductSemantics {
+  unsigned rawWidth;
+  unsigned frac;
+  ProductBitSelection selection;
+};
+
 /// Describes the proof available to a reduction transform. The stronger case
 /// covers every intermediate sum in both the source order and the proposed
 /// reassociation, not merely the final mathematical sum.
@@ -30,10 +43,10 @@ enum class ReductionReassociationSafety {
 mlir::LogicalResult verifyProductPolicy(mlir::Operation *op, mlir::Attribute numeric,
                                         std::optional<ProductAttr> product);
 
-/// Returns the fractional-bit position produced by the selected fixed-point
-/// product without applying target-specific arithmetic behavior.
-mlir::FailureOr<unsigned> inferProductFractionalBits(mlir::Operation *op, FixedAttr numeric,
-                                                     ProductAttr product);
+/// Returns the raw product width, fractional position, and exact bit selection
+/// without applying target-specific arithmetic behavior.
+mlir::FailureOr<ProductSemantics> inferProductSemantics(mlir::Operation *op, FixedAttr numeric,
+                                                        ProductAttr product);
 
 /// Returns the target-independent reassociation rule for an accumulator
 /// update policy and an optional range-analysis proof.
@@ -49,6 +62,9 @@ bool isSignedI40Frac30Accumulator(AccType accumulator);
 
 /// Returns whether a product policy selects the exact full product.
 bool isFullProduct(ProductAttr product);
+
+/// Returns whether a product policy selects the signed raw high half.
+bool isRawHighProduct(ProductAttr product);
 
 } // namespace ondrix::ondsp
 

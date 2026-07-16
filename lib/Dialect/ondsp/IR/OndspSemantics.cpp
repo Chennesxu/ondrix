@@ -21,23 +21,33 @@ LogicalResult verifyProductPolicy(Operation *op, Attribute numeric,
   return success();
 }
 
-FailureOr<unsigned> inferProductFractionalBits(Operation *op, FixedAttr numeric,
-                                               ProductAttr product) {
+FailureOr<ProductSemantics> inferProductSemantics(Operation *op, FixedAttr numeric,
+                                                  ProductAttr product) {
   auto storage = cast<IntegerType>(numeric.getStorage());
+  uint64_t storageWidth = storage.getWidth();
   uint64_t frac = numeric.getFrac();
   if (frac > std::numeric_limits<uint64_t>::max() / 2)
     return op->emitOpError("product fractional position is unrepresentable");
 
   uint64_t productFrac = frac * 2;
-  if (product.getSelection() == ProductSelection::High) {
-    if (productFrac < storage.getWidth())
-      return op->emitOpError("high product fractional position would be negative");
-    productFrac -= storage.getWidth();
+  uint64_t rawWidth = storageWidth;
+  ProductBitSelection selection = ProductBitSelection::HighRaw;
+  if (product.getSelection() == ProductSelection::Full) {
+    if (storageWidth > std::numeric_limits<unsigned>::max() / 2)
+      return op->emitOpError("full product storage width is unrepresentable");
+    rawWidth = storageWidth * 2;
+    selection = ProductBitSelection::Full;
+  } else {
+    if (productFrac < storageWidth)
+      return op->emitOpError("raw high product fractional position would be negative");
+    productFrac -= storageWidth;
   }
 
-  if (productFrac > std::numeric_limits<unsigned>::max())
+  if (rawWidth > std::numeric_limits<unsigned>::max() ||
+      productFrac > std::numeric_limits<unsigned>::max())
     return op->emitOpError("product fractional position is unrepresentable");
-  return static_cast<unsigned>(productFrac);
+  return ProductSemantics{static_cast<unsigned>(rawWidth), static_cast<unsigned>(productFrac),
+                          selection};
 }
 
 ReductionReassociationSafety classifyReductionReassociation(OverflowMode updateOverflow,
@@ -62,5 +72,9 @@ bool isSignedI40Frac30Accumulator(AccType accumulator) {
 }
 
 bool isFullProduct(ProductAttr product) { return product.getSelection() == ProductSelection::Full; }
+
+bool isRawHighProduct(ProductAttr product) {
+  return product.getSelection() == ProductSelection::HighRaw;
+}
 
 } // namespace ondrix::ondsp

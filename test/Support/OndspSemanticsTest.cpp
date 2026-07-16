@@ -4,18 +4,23 @@
 
 #include "llvm/Support/raw_ostream.h"
 
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
 
 using ondrix::ondsp::AccType;
 using ondrix::ondsp::classifyReductionReassociation;
 using ondrix::ondsp::FixedAttr;
+using ondrix::ondsp::inferProductSemantics;
 using ondrix::ondsp::isFullProduct;
-using ondrix::ondsp::isSignedQ15;
+using ondrix::ondsp::isRawHighProduct;
 using ondrix::ondsp::isSignedI40Frac30Accumulator;
+using ondrix::ondsp::isSignedQ15;
 using ondrix::ondsp::OverflowMode;
 using ondrix::ondsp::ProductAttr;
+using ondrix::ondsp::ProductBitSelection;
 using ondrix::ondsp::ProductSelection;
+using ondrix::ondsp::ProductSemantics;
 using ondrix::ondsp::ReductionRangeProof;
 using ondrix::ondsp::ReductionReassociationSafety;
 using ondrix::ondsp::Signedness;
@@ -57,14 +62,45 @@ bool testCommonNumericPolicies() {
   passed &= !isSignedI40Frac30Accumulator(
       AccType::get(&context, i40, 29, Signedness::Signed, OverflowMode::Saturate));
   passed &= isFullProduct(ProductAttr::get(&context, ProductSelection::Full));
-  passed &= !isFullProduct(ProductAttr::get(&context, ProductSelection::High));
+  passed &= !isFullProduct(ProductAttr::get(&context, ProductSelection::HighRaw));
+  passed &= isRawHighProduct(ProductAttr::get(&context, ProductSelection::HighRaw));
   return passed;
+}
+
+bool testProductSemantics() {
+  mlir::MLIRContext context;
+  context.getOrLoadDialect<ondrix::ondsp::OndspDialect>();
+  mlir::OwningOpRef<mlir::ModuleOp> module =
+      mlir::ModuleOp::create(mlir::UnknownLoc::get(&context));
+  auto i16 = mlir::IntegerType::get(&context, 16);
+  auto i32 = mlir::IntegerType::get(&context, 32);
+
+  auto q15 = FixedAttr::get(&context, Signedness::Signed, i16, 15);
+  mlir::FailureOr<ProductSemantics> q15Full = inferProductSemantics(
+      module->getOperation(), q15, ProductAttr::get(&context, ProductSelection::Full));
+  if (mlir::failed(q15Full))
+    return false;
+
+  auto q31 = FixedAttr::get(&context, Signedness::Signed, i32, 31);
+  mlir::FailureOr<ProductSemantics> q31Full = inferProductSemantics(
+      module->getOperation(), q31, ProductAttr::get(&context, ProductSelection::Full));
+  mlir::FailureOr<ProductSemantics> q31HighRaw = inferProductSemantics(
+      module->getOperation(), q31, ProductAttr::get(&context, ProductSelection::HighRaw));
+  if (mlir::failed(q31Full) || mlir::failed(q31HighRaw))
+    return false;
+
+  return q15Full->rawWidth == 32 && q15Full->frac == 30 &&
+         q15Full->selection == ProductBitSelection::Full && q31Full->rawWidth == 64 &&
+         q31Full->frac == 62 && q31Full->selection == ProductBitSelection::Full &&
+         q31HighRaw->rawWidth == 32 && q31HighRaw->frac == 30 &&
+         q31HighRaw->selection == ProductBitSelection::HighRaw;
 }
 
 } // namespace
 
 int main() {
-  if (!testReductionReassociationSafety() || !testCommonNumericPolicies()) {
+  if (!testReductionReassociationSafety() || !testCommonNumericPolicies() ||
+      !testProductSemantics()) {
     llvm::errs() << "ondsp reassociation semantics: FAIL\n";
     return 1;
   }

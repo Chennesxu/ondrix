@@ -31,8 +31,8 @@ func.func @fp_reduce_with_integer_product(%a: memref<8xf32>, %b: memref<8xf32>) 
 func.func @negative_high_product_frac(
     %acc: !ondsp.acc<storage = i40, frac = 0, signed, update_overflow = saturate>, %a: i16, %b: i16)
     -> !ondsp.acc<storage = i40, frac = 0, signed, update_overflow = saturate> {
-  // expected-error@+1 {{high product fractional position would be negative}}
-  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 7>, product = #ondsp.product<high>} : (!ondsp.acc<storage = i40, frac = 0, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 0, signed, update_overflow = saturate>
+  // expected-error@+1 {{raw high product fractional position would be negative}}
+  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 7>, product = #ondsp.product<high_raw>} : (!ondsp.acc<storage = i40, frac = 0, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 0, signed, update_overflow = saturate>
   return %0 : !ondsp.acc<storage = i40, frac = 0, signed, update_overflow = saturate>
 }
 

@@ -11,11 +11,11 @@ def Ondsp_Signedness : I32EnumAttr<"Signedness", "fixed-point signedness",
 }
 
 def Ondsp_ProductFull : I32EnumAttrCase<"Full", 0, "full">;
-def Ondsp_ProductHigh : I32EnumAttrCase<"High", 1, "high">;
+def Ondsp_ProductHighRaw : I32EnumAttrCase<"HighRaw", 1, "high_raw">;
 def Ondsp_ProductSelection
     : I32EnumAttr<"ProductSelection",
-                  "fixed-point product result selection (full product or high half)",
-                  [Ondsp_ProductFull, Ondsp_ProductHigh]> {
+                  "fixed-point product result selection (full product or signed raw high half)",
+                  [Ondsp_ProductFull, Ondsp_ProductHighRaw]> {
   let cppNamespace = "::ondrix::ondsp";
 }
 

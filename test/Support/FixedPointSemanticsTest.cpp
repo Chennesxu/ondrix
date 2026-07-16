@@ -9,6 +9,7 @@
 using ondrix::fixedpoint::AccumulatorOverflowMode;
 using ondrix::fixedpoint::AccumulatorUpdateOperation;
 using ondrix::fixedpoint::computeSignedFullProduct;
+using ondrix::fixedpoint::computeSignedRawHighProduct;
 using ondrix::fixedpoint::exportSignedAccumulator;
 using ondrix::fixedpoint::getAccumulatorUpdateIntermediateWidth;
 using ondrix::fixedpoint::multiplyAccumulateSigned;
@@ -42,6 +43,27 @@ bool testQ15FullProducts() {
   passed &= expectEqual("min times max",
                         computeSignedFullProduct(signedValue(16, -32768), signedValue(16, 32767)),
                         signedValue(32, -1073709056));
+  return passed;
+}
+
+bool testQ31RawHighProducts() {
+  bool passed = true;
+  passed &= expectEqual(
+      "q31 max times max raw high",
+      computeSignedRawHighProduct(signedValue(32, 2147483647), signedValue(32, 2147483647)),
+      signedValue(32, 1073741823));
+  passed &= expectEqual(
+      "q31 min times min raw high",
+      computeSignedRawHighProduct(signedValue(32, -2147483648LL), signedValue(32, -2147483648LL)),
+      signedValue(32, 1073741824));
+  passed &= expectEqual(
+      "q31 min times max raw high",
+      computeSignedRawHighProduct(signedValue(32, -2147483648LL), signedValue(32, 2147483647)),
+      signedValue(32, -1073741824));
+  passed &=
+      expectEqual("q31 negative fraction raw high",
+                  computeSignedRawHighProduct(signedValue(32, -2147483648LL), signedValue(32, 1)),
+                  signedValue(32, -1));
   return passed;
 }
 
@@ -294,6 +316,7 @@ bool testSmallWidthExportExhaustive() {
 
 int main() {
   bool passed = testQ15FullProducts();
+  passed &= testQ31RawHighProducts();
   passed &= testAccumulatorIntermediateWidth();
   passed &= testAccumulatorBoundaries();
   passed &= testAccumulatorChains();

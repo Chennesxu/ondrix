@@ -103,7 +103,7 @@ static LogicalResult verifyFixedStorageOperands(Operation *op, FixedAttr numeric
 }
 
 static StringRef getProductName(ProductAttr product) {
-  return product.getSelection() == ProductSelection::Full ? "full" : "high";
+  return product.getSelection() == ProductSelection::Full ? "full" : "high_raw";
 }
 
 static LogicalResult verifyMacLike(Operation *op, Value acc, Value lhs, Value rhs,
@@ -115,13 +115,13 @@ static LogicalResult verifyMacLike(Operation *op, Value acc, Value lhs, Value rh
   if (accumulator.getSignedness() != numeric.getSignedness())
     return op->emitOpError("accumulator signedness must match the fixed numeric policy");
 
-  FailureOr<unsigned> expectedFrac = inferProductFractionalBits(op, numeric, product);
-  if (failed(expectedFrac))
+  FailureOr<ProductSemantics> semantics = inferProductSemantics(op, numeric, product);
+  if (failed(semantics))
     return failure();
 
-  if (accumulator.getFrac() != *expectedFrac)
+  if (accumulator.getFrac() != semantics->frac)
     return op->emitOpError() << "accumulator frac " << accumulator.getFrac()
-                             << " does not match expected frac " << *expectedFrac << " for "
+                             << " does not match expected frac " << semantics->frac << " for "
                              << getProductName(product) << " product";
   return success();
 }

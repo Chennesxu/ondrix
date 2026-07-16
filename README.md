@@ -39,7 +39,7 @@ target consumers remain under development.
 
 - [Documentation index](docs/README.md)
 - [Current implementation status](docs/status.md)
-- [Executable signed-Q15 semantics](docs/q15-semantics.md)
+- [Fixed-point semantics](docs/fixed-point-semantics.md)
 
 ## Build
 

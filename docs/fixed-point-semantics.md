@@ -1,7 +1,8 @@
-# Executable Signed-Q15 Semantics
+# Fixed-Point Semantics
 
-This document defines the public numeric contract implemented by the first
-Ondrix fixed-point scalar and fixed-width Vector paths.
+This document defines the public fixed-point product and accumulator contract.
+The executable scalar and fixed-width Vector paths currently implement its
+signed-Q15 full-product subset.
 
 ## Storage and Interpretation
 
@@ -18,8 +19,29 @@ For raw two's-complement bits `x`, the represented value is:
 value(x) = signed(x) * 2^-15
 ```
 
-The exact product of two Q15 operands is a signed 32-bit raw value with
-`frac = 30`. No rounding or saturation occurs during multiplication.
+## Product Selection
+
+For two signed operands with storage width `W`, fractional position `F`, and
+exact signed `2W`-bit product `P`, Ondsp defines:
+
+```text
+full.raw      = P
+full.width    = 2W
+full.frac     = 2F
+
+high_raw.raw   = trunc_W(ashr(P, W))
+high_raw.width = W
+high_raw.frac  = 2F - W
+```
+
+`high_raw` is an arithmetic raw-bit selection. It does not imply doubling,
+rounding, saturation, or conversion back to the operand fractional position.
+For signed Q31 (`W = 32`, `F = 31`), `high_raw` therefore produces a Q30 term.
+A fractional or doubled-high multiply requires a separate explicit policy and
+is not currently part of the public contract.
+
+The executable Q15 path selects `full`, producing a signed 32-bit raw value
+with `frac = 30`. No rounding or saturation occurs during multiplication.
 
 ## Accumulator Updates
 

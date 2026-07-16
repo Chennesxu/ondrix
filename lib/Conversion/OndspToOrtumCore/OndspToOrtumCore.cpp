@@ -71,9 +71,9 @@ static LogicalResult verifySupportedMacPolicy(Operation *op, ondrix::ondsp::Fixe
 
   if (numeric.getSignedness() == ondrix::ondsp::Signedness::Signed && storage &&
       storage.isSignless() && storage.getWidth() == 32 && numeric.getFrac() == 31 &&
-      product.getSelection() == ondrix::ondsp::ProductSelection::High)
+      product.getSelection() == ondrix::ondsp::ProductSelection::HighRaw)
     return op->emitOpError(
-        "q31 high-product target equivalence is not specified; lower through a proven scalar "
+        "q31 raw-high target equivalence is not specified; lower through a proven scalar "
         "sequence first");
 
   return op->emitOpError("ortumcore MAC lowering supports only signed q15 full-product semantics");

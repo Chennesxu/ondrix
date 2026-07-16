@@ -32,7 +32,13 @@ def Ondsp_FixedAttr : Ondsp_Attr<"Fixed", "fixed"> {
 }
 
 def Ondsp_ProductAttr : Ondsp_Attr<"Product", "product"> {
-  let summary = "Select the full product or the storage-width high half";
+  let summary = "Select the full product or signed raw high half";
+  let description = [{
+    For two signed `W`-bit operands, `full` returns the exact signed `2W`-bit
+    product. `high_raw` returns `trunc_W(ashr(P, W))`, where `P` is that exact
+    signed product. Raw-high selection does not double, round, or saturate the
+    product.
+  }];
   let parameters = (ins "ProductSelection":$selection);
   let assemblyFormat = "`<` $selection `>`";
 }

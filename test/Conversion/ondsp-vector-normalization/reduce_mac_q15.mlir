@@ -46,7 +46,7 @@ func.func @preserve_unsupported_q31_vector(
     -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
   %result = ondsp.reduce_mac %initial, %lhs, %rhs {
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<high>
+    product = #ondsp.product<high_raw>
   } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, vector<4xi32>, vector<4xi32>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
   return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 }

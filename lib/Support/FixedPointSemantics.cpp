@@ -16,6 +16,13 @@ llvm::APInt computeSignedFullProduct(const llvm::APInt &lhs, const llvm::APInt &
   return lhs.sext(productWidth) * rhs.sext(productWidth);
 }
 
+llvm::APInt computeSignedRawHighProduct(const llvm::APInt &lhs, const llvm::APInt &rhs) {
+  assert(lhs.getBitWidth() == rhs.getBitWidth() &&
+         "raw high product requires equal-width operands");
+  unsigned operandWidth = lhs.getBitWidth();
+  return computeSignedFullProduct(lhs, rhs).ashr(operandWidth).trunc(operandWidth);
+}
+
 llvm::APInt updateSignedAccumulator(const llvm::APInt &accumulator, const llvm::APInt &product,
                                     AccumulatorUpdateOperation operation,
                                     AccumulatorOverflowMode overflowMode) {

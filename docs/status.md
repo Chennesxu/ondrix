@@ -29,6 +29,6 @@ The executable path currently covers:
 - LLVM IR, PIC object generation, C linkage, and process execution.
 
 The current FIR operation represents one output sample over a preconstructed
-input window. Full-output and streaming FIR, Q31 high-product arithmetic,
+input window. Full-output and streaming FIR, executable Q31 arithmetic,
 scalable Vector, a stable C ABI, and the `.ox` frontend are outside this
 supported slice.

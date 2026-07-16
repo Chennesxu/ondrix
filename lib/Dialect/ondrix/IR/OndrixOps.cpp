@@ -77,13 +77,13 @@ static LogicalResult verifyFixedReductionResult(Operation *op, Type resultType,
     return op->emitOpError("fixed reduction result must use !ondsp.acc");
   if (accumulator.getSignedness() != numeric.getSignedness())
     return op->emitOpError("accumulator signedness must match fixed numeric policy");
-  FailureOr<unsigned> expectedFrac =
-      ondrix::ondsp::inferProductFractionalBits(op, numeric, product);
-  if (failed(expectedFrac))
+  FailureOr<ondrix::ondsp::ProductSemantics> semantics =
+      ondrix::ondsp::inferProductSemantics(op, numeric, product);
+  if (failed(semantics))
     return failure();
-  if (accumulator.getFrac() != *expectedFrac)
+  if (accumulator.getFrac() != semantics->frac)
     return op->emitOpError() << "accumulator frac " << accumulator.getFrac()
-                             << " does not match product frac " << *expectedFrac;
+                             << " does not match product frac " << semantics->frac;
   return success();
 }
 
