@@ -17,3 +17,10 @@ func.func @dot_f32_fma(%lhs: f32, %rhs: f32) -> f32 {
   } : (f32, f32) -> f32
   return %result : f32
 }
+
+func.func @dot_f32_fast(%lhs: f32, %rhs: f32) -> f32 {
+  %result = ondrix.dot %lhs, %rhs {
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (f32, f32) -> f32
+  return %result : f32
+}
