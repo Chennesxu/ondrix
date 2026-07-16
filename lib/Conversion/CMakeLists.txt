@@ -1,4 +1,5 @@
 add_subdirectory(Utils)
+add_subdirectory(OrtumCoreToOndsp)
 add_subdirectory(OndrixToOndsp)
 add_subdirectory(OndspToOrtumCore)
 add_subdirectory(OndspToScalar)

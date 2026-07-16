@@ -139,6 +139,8 @@ The contract is checked by:
 - the APInt reference implementation in
   [`lib/Support/FixedPointSemantics.cpp`](../lib/Support/FixedPointSemantics.cpp);
 - scalar and Vector conversion tests under [`test/Conversion`](../test/Conversion);
+- the Q15 OrtumCore capability emulator, which expands target operations back
+  to this Ondsp contract before scalar finalization;
 - PIC object and independent C-reference tests under
   [`test/Execution`](../test/Execution).
 

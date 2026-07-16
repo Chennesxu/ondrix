@@ -24,6 +24,7 @@ add_ondrix_library(OndrixSupport
   OndrixFixedPointSemantics
   OndrixIR
   OndspIR
+  OrtumCoreToOndsp
   OndrixToOndsp
   OndspToScalar
   OndspVectorNormalization

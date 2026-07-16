@@ -33,8 +33,8 @@ The three project dialects have distinct responsibilities:
 Textual MLIR is currently the supported development entry point. The repository
 includes executable signed-Q15 scalar and fixed-width Vector AOT paths for
 single-output FIR and dot-product kernels, plus a signed-Q31 scalar numeric
-slice. The source language and additional target consumers remain under
-development.
+slice and public emulation of the Q15 OrtumCore accumulator capability. The
+source language and additional target consumers remain under development.
 
 ## Documentation
 

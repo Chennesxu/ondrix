@@ -12,7 +12,7 @@ may change while the numeric model is stabilized.
 | Generic Vector CPU lowering | Automatic unit-stride Q15 chunking, ordered saturating updates, and exact-modulo wrapping reduction implemented |
 | Packed Q15 butterfly lowering | Experimental instruction selection only; no public emulator or ABI correctness claim |
 | Object generation and C execution | Implemented for scalar and fixed-width Vector Q15 FIR-sample/dot paths and scalar Q31 numeric operations |
-| Public OrtumCore emulation or LLVM stubs | Planned |
+| Public OrtumCore emulation | Signed-Q15 i40/frac30 saturating accumulator init and MAC add/sub implemented through exact Ondsp expansion |
 | Python-like `.ox` frontend | Planned |
 | Stable public kernel ABI | Planned |
 
@@ -45,3 +45,11 @@ The generic scalar path also covers:
 
 Q31 Vector lowering and Q31 OrtumCore capability selection remain unsupported.
 Raw-high accumulation does not implicitly rescale from Q30 to Q31.
+
+## Public OrtumCore Emulator
+
+The public emulator currently expands `ortumcore.acc_init`,
+`ortumcore.mac_add`, and `ortumcore.mac_sub` to the exact signed-Q15 Ondsp
+accumulator contract. The resulting Ondsp operations reuse the generic fixed
+scalar finalizer. Other OrtumCore operations fail closed until they have a
+typed equation and an executable public consumer.

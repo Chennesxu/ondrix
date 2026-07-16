@@ -1,5 +1,6 @@
 #include "ondrix/Conversion/OndspToScalar/OndspToScalar.h"
 #include "ondrix/Conversion/Utils/ReductionUtils.h"
+#include "ondrix/Conversion/Utils/StructuralTypeConversions.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
@@ -465,27 +466,6 @@ public:
   }
 };
 
-class SelectOpTypeConversion final : public OpConversionPattern<arith::SelectOp> {
-public:
-  using OpConversionPattern<arith::SelectOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(arith::SelectOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    Type resultType = getTypeConverter()->convertType(op.getType());
-    if (!resultType)
-      return failure();
-
-    auto replacement =
-        rewriter.create<arith::SelectOp>(op.getLoc(), resultType, adaptor.getCondition(),
-                                         adaptor.getTrueValue(), adaptor.getFalseValue());
-    // This is a structural type conversion of the same operation, so preserve
-    // its verified semantic and discardable attributes.
-    replacement->setAttrs(op->getAttrs());
-    rewriter.replaceOp(op, replacement);
-    return success();
-  }
-};
-
 class ConvertOndspFixedToScalarPass final
     : public ondrix::impl::ConvertOndspFixedToScalarBase<ConvertOndspFixedToScalarPass> {
 public:
@@ -501,8 +481,9 @@ public:
     OndspFixedToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
-                 MacOpLowering, MacSubOpLowering, ReduceMacOpLowering, SelectOpTypeConversion>(
-        typeConverter, &getContext());
+                 MacOpLowering, MacSubOpLowering, ReduceMacOpLowering>(typeConverter,
+                                                                       &getContext());
+    ondrix::conversion::populateCommonStructuralTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);
@@ -511,8 +492,9 @@ public:
     ConversionTarget target(getContext());
     target.addIllegalDialect<ondrix::ondsp::OndspDialect>();
     scf::populateSCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);
-    target.addDynamicallyLegalOp<UnrealizedConversionCastOp>([&](UnrealizedConversionCastOp op) {
-      return hasLegalConvertedTypes(op.getOperation(), typeConverter);
+    target.addDynamicallyLegalOp<UnrealizedConversionCastOp>([](UnrealizedConversionCastOp op) {
+      return !containsOndspAccumulator(op.getOperandTypes()) &&
+             !containsOndspAccumulator(op.getResultTypes());
     });
     target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
       return typeConverter.isSignatureLegal(op.getFunctionType()) &&

@@ -31,6 +31,27 @@ def ConvertOndspToOrtumCore
   ];
 }
 
+def ConvertOrtumCoreToOndspEmulation
+    : Pass<"convert-ortumcore-to-ondsp-emulation", "::mlir::ModuleOp"> {
+  let summary = "Expand supported OrtumCore capabilities to public Ondsp semantics";
+  let description = [{
+    Fully expand the public OrtumCore accumulator subset to equivalent Ondsp
+    operations. The supported subset is the signed i40/frac30 saturating
+    accumulator, zero initialization, and signed Q15 full-product MAC add/sub.
+    Other OrtumCore operations fail closed. Run `convert-ondsp-fixed-to-scalar`
+    afterwards to obtain generic executable scalar IR.
+  }];
+  let constructor = "ondrix::createConvertOrtumCoreToOndspEmulationPass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "ondrix::ortumcore::OrtumCoreDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
+    "mlir::func::FuncDialect",
+    "mlir::scf::SCFDialect",
+  ];
+}
+
 def LowerOndspF32ReduceToScalar
     : Pass<"lower-ondsp-f32-reduce-to-scalar", "::mlir::ModuleOp"> {
   let summary = "Lower f32 ondsp reductions to generic scalar MLIR";
