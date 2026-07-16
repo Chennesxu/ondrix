@@ -40,4 +40,13 @@ FailureOr<unsigned> inferProductFractionalBits(Operation *op, FixedAttr numeric,
   return static_cast<unsigned>(productFrac);
 }
 
+ReductionReassociationSafety classifyReductionReassociation(OverflowMode updateOverflow,
+                                                            ReductionRangeProof rangeProof) {
+  if (rangeProof == ReductionRangeProof::AllOriginalAndReassociatedSumsFit)
+    return ReductionReassociationSafety::ProvenNoOverflow;
+  if (updateOverflow == OverflowMode::Wrap)
+    return ReductionReassociationSafety::ExactModulo;
+  return ReductionReassociationSafety::MustPreserveOrder;
+}
+
 } // namespace ondrix::ondsp

@@ -11,6 +11,7 @@ set(ONDRIX_TEST_DEPENDS
   llc
   not
   ondrix-fixed-point-semantics-test
+  ondrix-ondsp-semantics-test
   ondrix-opt
   ondrix-translate
 )
@@ -20,6 +21,12 @@ add_llvm_executable(ondrix-fixed-point-semantics-test EXCLUDE_FROM_ALL
 )
 llvm_update_compile_flags(ondrix-fixed-point-semantics-test)
 target_link_libraries(ondrix-fixed-point-semantics-test PRIVATE OndrixFixedPointSemantics)
+
+add_llvm_executable(ondrix-ondsp-semantics-test EXCLUDE_FROM_ALL
+  Support/OndspSemanticsTest.cpp
+)
+llvm_update_compile_flags(ondrix-ondsp-semantics-test)
+target_link_libraries(ondrix-ondsp-semantics-test PRIVATE OndspIR)
 
 add_lit_testsuite(check-ondrix "Running the ondrix regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}

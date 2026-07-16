@@ -22,6 +22,7 @@ tools = [
     "ondrix-opt",
     "ondrix-translate",
     "ondrix-fixed-point-semantics-test",
+    "ondrix-ondsp-semantics-test",
     "FileCheck",
     "llc",
     "not",
