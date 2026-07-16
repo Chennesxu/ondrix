@@ -1,4 +1,4 @@
-#include "ondrix/Conversion/Utils/StructuralTypeConversions.h"
+#include "ondrix/Conversion/Utils/ValueTypeConversions.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -46,8 +46,8 @@ public:
 
 } // namespace
 
-void populateCommonStructuralTypeConversionPatterns(TypeConverter &typeConverter,
-                                                    RewritePatternSet &patterns) {
+void populateValueTypeConversionPatterns(TypeConverter &typeConverter,
+                                         RewritePatternSet &patterns) {
   patterns.add<SelectOpTypeConversion, UnrealizedCastTypeConversion>(typeConverter,
                                                                      patterns.getContext());
 }

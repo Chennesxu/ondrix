@@ -19,14 +19,6 @@ def OrtumCore_AccumType : OrtumCore_Type<"Accum", "acc"> {
   }];
 }
 
-def OrtumCore_FpType : OrtumCore_Type<"Fp", "fp"> {
-  let summary = "Target floating-point semantic value";
-}
-
-def OrtumCore_VecType : OrtumCore_Type<"Vec", "vec"> {
-  let summary = "Packed vector semantic value";
-}
-
 def OrtumCore_VecStateType : OrtumCore_Type<"VecState", "vec.state"> {
   let summary = "Packed-vector mode/state token";
   let description = [{

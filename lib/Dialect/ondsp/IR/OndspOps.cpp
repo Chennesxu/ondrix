@@ -103,7 +103,13 @@ static LogicalResult verifyFixedStorageOperands(Operation *op, FixedAttr numeric
 }
 
 static StringRef getProductName(ProductAttr product) {
-  return product.getSelection() == ProductSelection::Full ? "full" : "high_raw";
+  switch (product.getSelection()) {
+  case ProductSelection::Full:
+    return "full";
+  case ProductSelection::HighRaw:
+    return "high_raw";
+  }
+  return "unsupported";
 }
 
 static LogicalResult verifyMacLike(Operation *op, Value acc, Value lhs, Value rhs,

@@ -4,7 +4,7 @@
 // RUN: cc %S/Inputs/ortumcore_q15_emulation_aot.c %t.o -o %t
 // RUN: %t
 
-func.func @ortumcore_repeat_mac(%lhs: i16, %rhs: i16, %count: index) -> i32 {
+func.func @ortumcore_repeat_mac(%lhs: i16, %rhs: i16, %count: index) -> i64 {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %zero = ortumcore.acc_init : !ortumcore.acc
@@ -16,11 +16,11 @@ func.func @ortumcore_repeat_mac(%lhs: i16, %rhs: i16, %count: index) -> i32 {
   // This test-only cast observes the raw accumulator bits after emulation
   // expands the capability through Ondsp and scalar finalization maps it to i40.
   %bits = builtin.unrealized_conversion_cast %acc : !ortumcore.acc to i40
-  %result = arith.trunci %bits : i40 to i32
-  return %result : i32
+  %result = arith.extsi %bits : i40 to i64
+  return %result : i64
 }
 
-func.func @ortumcore_repeat_mac_sub(%lhs: i16, %rhs: i16, %count: index) -> i32 {
+func.func @ortumcore_repeat_mac_sub(%lhs: i16, %rhs: i16, %count: index) -> i64 {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %zero = ortumcore.acc_init : !ortumcore.acc
@@ -30,6 +30,6 @@ func.func @ortumcore_repeat_mac_sub(%lhs: i16, %rhs: i16, %count: index) -> i32 
     scf.yield %next : !ortumcore.acc
   }
   %bits = builtin.unrealized_conversion_cast %acc : !ortumcore.acc to i40
-  %result = arith.trunci %bits : i40 to i32
-  return %result : i32
+  %result = arith.extsi %bits : i40 to i64
+  return %result : i64
 }

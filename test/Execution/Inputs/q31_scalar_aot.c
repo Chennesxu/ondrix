@@ -7,6 +7,16 @@ extern int32_t q31_repeat_full_saturate(int32_t lhs, int32_t rhs, int64_t count)
 extern int32_t q31_repeat_full_wrap(int32_t lhs, int32_t rhs, int64_t count);
 extern int32_t q31_high_raw_q30(int32_t lhs, int32_t rhs);
 extern int32_t q31_high_raw_sub_q30(int32_t lhs, int32_t rhs);
+extern int32_t q31_reduce_full(int32_t *lhs_allocated, int32_t *lhs_aligned, int64_t lhs_offset,
+                               int64_t lhs_size, int64_t lhs_stride, int32_t *rhs_allocated,
+                               int32_t *rhs_aligned, int64_t rhs_offset, int64_t rhs_size,
+                               int64_t rhs_stride);
+extern int32_t q31_reduce_high_raw_q30(int32_t *lhs_allocated, int32_t *lhs_aligned,
+                                       int64_t lhs_offset, int64_t lhs_size, int64_t lhs_stride,
+                                       int32_t *rhs_allocated, int32_t *rhs_aligned,
+                                       int64_t rhs_offset, int64_t rhs_size, int64_t rhs_stride);
+extern int64_t q31_repeat_full_raw_saturate(int32_t lhs, int32_t rhs, int64_t count);
+extern int64_t q31_repeat_high_raw_saturate(int32_t lhs, int32_t rhs, int64_t count);
 
 static __int128 signed_i64(uint64_t bits) {
   __int128 value = bits;
@@ -75,10 +85,59 @@ static int32_t raw_high_reference(int32_t lhs, int32_t rhs) {
   return (int32_t)floor_divide_by_power_of_two(product, 32);
 }
 
+static int32_t reduce_full_reference(const int32_t *lhs, const int32_t *rhs, int64_t count) {
+  uint64_t accumulator = 0;
+  for (int64_t i = 0; i < count; ++i)
+    accumulator = update_full_reference(accumulator, lhs[i], rhs[i], 1);
+  return export_q31_reference(accumulator, 0);
+}
+
+static int32_t reduce_high_raw_reference(const int32_t *lhs, const int32_t *rhs, int64_t count) {
+  const __int128 minimum = -((__int128)1 << 39);
+  const __int128 maximum = ((__int128)1 << 39) - 1;
+  __int128 accumulator = 0;
+  for (int64_t i = 0; i < count; ++i) {
+    accumulator += raw_high_reference(lhs[i], rhs[i]);
+    if (accumulator < minimum)
+      accumulator = minimum;
+    if (accumulator > maximum)
+      accumulator = maximum;
+  }
+  return saturate_i32(accumulator);
+}
+
+static int64_t repeat_full_raw_reference(int32_t lhs, int32_t rhs, int64_t count) {
+  uint64_t accumulator = 0;
+  for (int64_t i = 0; i < count; ++i)
+    accumulator = update_full_reference(accumulator, lhs, rhs, 1);
+  return (int64_t)signed_i64(accumulator);
+}
+
+static int64_t repeat_high_raw_reference(int32_t lhs, int32_t rhs, int64_t count) {
+  const __int128 minimum = -((__int128)1 << 39);
+  const __int128 maximum = ((__int128)1 << 39) - 1;
+  __int128 accumulator = 0;
+  for (int64_t i = 0; i < count; ++i) {
+    accumulator += raw_high_reference(lhs, rhs);
+    if (accumulator < minimum)
+      accumulator = minimum;
+    if (accumulator > maximum)
+      accumulator = maximum;
+  }
+  return (int64_t)accumulator;
+}
+
 static int check_value(const char *name, int32_t expected, int32_t actual) {
   if (expected == actual)
     return 0;
   fprintf(stderr, "%s: expected %d, got %d\n", name, expected, actual);
+  return 1;
+}
+
+static int check_wide_value(const char *name, int64_t expected, int64_t actual) {
+  if (expected == actual)
+    return 0;
+  fprintf(stderr, "%s: expected %lld, got %lld\n", name, (long long)expected, (long long)actual);
   return 1;
 }
 
@@ -153,11 +212,50 @@ static int check_random_products(void) {
   return failed;
 }
 
+static int check_reductions(void) {
+  static const int64_t lengths[] = {0, 1, 3, 8};
+  int32_t lhs[] = {INT32_MIN, INT32_MIN, INT32_MIN, INT32_MAX, -123456789, 987654321, 1, -1};
+  int32_t rhs[] = {INT32_MIN, INT32_MIN,  INT32_MAX, INT32_MAX,
+                   333333333, -777777777, INT32_MIN, INT32_MAX};
+  int failed = 0;
+  for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
+    int64_t count = lengths[i];
+    int32_t full = q31_reduce_full(lhs, lhs, 0, count, 1, rhs, rhs, 0, count, 1);
+    int32_t high = q31_reduce_high_raw_q30(lhs, lhs, 0, count, 1, rhs, rhs, 0, count, 1);
+    failed |= check_value("q31 full reduction", reduce_full_reference(lhs, rhs, count), full);
+    failed |=
+        check_value("q31 raw-high reduction", reduce_high_raw_reference(lhs, rhs, count), high);
+  }
+  return failed;
+}
+
+static int check_raw_accumulator_endpoints(void) {
+  int failed = 0;
+  static const int64_t full_counts[] = {0, 1, 2, 3};
+  for (unsigned i = 0; i < sizeof(full_counts) / sizeof(full_counts[0]); ++i) {
+    int64_t count = full_counts[i];
+    failed |= check_wide_value("q31 full raw accumulator",
+                               repeat_full_raw_reference(INT32_MIN, INT32_MIN, count),
+                               q31_repeat_full_raw_saturate(INT32_MIN, INT32_MIN, count));
+  }
+
+  static const int64_t high_counts[] = {0, 1, 511, 512, 513};
+  for (unsigned i = 0; i < sizeof(high_counts) / sizeof(high_counts[0]); ++i) {
+    int64_t count = high_counts[i];
+    failed |= check_wide_value("q31 raw-high accumulator",
+                               repeat_high_raw_reference(INT32_MIN, INT32_MIN, count),
+                               q31_repeat_high_raw_saturate(INT32_MIN, INT32_MIN, count));
+  }
+  return failed;
+}
+
 int main(void) {
   int failed = 0;
   failed |= check_full_products();
   failed |= check_repeated_full_products();
   failed |= check_raw_high_products();
   failed |= check_random_products();
+  failed |= check_reductions();
+  failed |= check_raw_accumulator_endpoints();
   return failed;
 }

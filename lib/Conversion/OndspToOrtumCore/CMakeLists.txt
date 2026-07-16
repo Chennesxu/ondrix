@@ -11,6 +11,7 @@ add_ondrix_library(OndspToOrtumCore
   MLIRPass
   MLIRSupport
   MLIRTransformUtils
+  OndrixConversionUtils
   OndspIR
   OrtumCoreIR
   OrtumCoreTargetProfile

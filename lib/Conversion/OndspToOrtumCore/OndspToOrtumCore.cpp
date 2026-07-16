@@ -1,4 +1,5 @@
 #include "ondrix/Conversion/OndspToOrtumCore/OndspToOrtumCore.h"
+#include "ondrix/Conversion/Utils/ConversionLegality.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
@@ -14,7 +15,6 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/IR/AttrTypeSubElements.h"
-#include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
@@ -37,13 +37,15 @@ getAccumulatorDomain(ondrix::ondsp::AccType accumulator) {
           accumulator.getSignedness(), accumulator.getUpdateOverflow()};
 }
 
-static ondrix::ortumcore::ProductDomain getProductDomain(ondrix::ondsp::FixedAttr numeric,
-                                                         ondrix::ondsp::ProductAttr product) {
-  auto selection = ondrix::ondsp::isFullProduct(product)
-                       ? ondrix::ondsp::ProductBitSelection::Full
-                       : ondrix::ondsp::ProductBitSelection::HighRaw;
-  return {cast<IntegerType>(numeric.getStorage()).getWidth(), numeric.getFrac(),
-          numeric.getSignedness(), selection};
+static FailureOr<ondrix::ortumcore::ProductDomain>
+getProductDomain(Operation *op, ondrix::ondsp::FixedAttr numeric,
+                 ondrix::ondsp::ProductAttr product) {
+  FailureOr<ondrix::ondsp::ProductSemantics> semantics =
+      ondrix::ondsp::inferProductSemantics(op, numeric, product);
+  if (failed(semantics))
+    return failure();
+  return ondrix::ortumcore::ProductDomain{cast<IntegerType>(numeric.getStorage()).getWidth(),
+                                          numeric.getFrac(), numeric.getSignedness(), *semantics};
 }
 
 // The parameterless target type admits only this accumulator representation.
@@ -71,6 +73,15 @@ public:
 
 static bool isScalarI32(Type type) { return type.isSignlessInteger(32); }
 
+static bool isOndspType(Type type) {
+  return type.getDialect().getNamespace() == ondrix::ondsp::OndspDialect::getDialectNamespace();
+}
+
+static bool isOndspAttribute(Attribute attribute) {
+  return attribute.getDialect().getNamespace() ==
+         ondrix::ondsp::OndspDialect::getDialectNamespace();
+}
+
 static LogicalResult verifyOrtumCoreAccumulator(Operation *op, ondrix::ondsp::AccType accumulator) {
   if (!isSupportedOrtumCoreAccumulator(accumulator))
     return op->emitOpError(
@@ -82,7 +93,11 @@ static LogicalResult verifyOrtumCoreAccumulator(Operation *op, ondrix::ondsp::Ac
 static LogicalResult verifySupportedMacPolicy(Operation *op, ondrix::ondsp::AccType accumulator,
                                               ondrix::ondsp::FixedAttr numeric,
                                               ondrix::ondsp::ProductAttr product) {
-  if (ondrix::ortumcore::OrtumCoreTargetProfile().supportsMac(getProductDomain(numeric, product),
+  FailureOr<ondrix::ortumcore::ProductDomain> productDomain =
+      getProductDomain(op, numeric, product);
+  if (failed(productDomain))
+    return failure();
+  if (ondrix::ortumcore::OrtumCoreTargetProfile().supportsMac(*productDomain,
                                                               getAccumulatorDomain(accumulator)))
     return success();
 
@@ -97,11 +112,8 @@ static LogicalResult verifySupportedMacPolicy(Operation *op, ondrix::ondsp::AccT
 static bool containsOndspAccumulator(Type type) {
   // TypeConverter legality is shallow for aggregate types; reject source
   // accumulators recursively so tuples and other wrappers cannot leak through.
-  return type.walk([](ondrix::ondsp::AccType) { return WalkResult::interrupt(); }).wasInterrupted();
-}
-
-static bool containsOndspAccumulator(TypeRange types) {
-  return llvm::any_of(types, [](Type type) { return containsOndspAccumulator(type); });
+  return ondrix::conversion::containsMatchingType(
+      type, [](Type nested) { return isa<ondrix::ondsp::AccType>(nested); });
 }
 
 static ondrix::ondsp::AccType findUnsupportedAccumulator(Type type) {
@@ -167,22 +179,8 @@ static LogicalResult verifySupportedAccumulatorTypes(Operation *root) {
 }
 
 static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) {
-  if (!typeConverter.isLegal(op) || containsOndspAccumulator(op->getOperandTypes()) ||
-      containsOndspAccumulator(op->getResultTypes()))
-    return false;
-  if (llvm::any_of(op->getAttrs(), [](NamedAttribute namedAttribute) {
-        return static_cast<bool>(findAccumulatorInAttribute(namedAttribute.getValue()));
-      }))
-    return false;
-  for (Region &region : op->getRegions()) {
-    if (!typeConverter.isLegal(&region))
-      return false;
-    for (Block &block : region) {
-      if (containsOndspAccumulator(block.getArgumentTypes()))
-        return false;
-    }
-  }
-  return true;
+  return ondrix::conversion::hasLegalConvertedTypesAndAttributes(op, typeConverter, isOndspType,
+                                                                 isOndspAttribute);
 }
 
 class AccZeroOpLowering final : public OpConversionPattern<ondrix::ondsp::AccZeroOp> {
@@ -412,7 +410,8 @@ public:
     populateReturnOpTypeConversionPattern(patterns, typeConverter);
 
     ConversionTarget target(getContext());
-    target.addLegalDialect<BuiltinDialect, ondrix::ortumcore::OrtumCoreDialect>();
+    target.addDynamicallyLegalDialect<ondrix::ortumcore::OrtumCoreDialect>(
+        [&](Operation *op) { return hasLegalConvertedTypes(op, typeConverter); });
     target.addDynamicallyLegalOp<UnrealizedConversionCastOp>([&](UnrealizedConversionCastOp op) {
       return hasLegalConvertedTypes(op.getOperation(), typeConverter);
     });

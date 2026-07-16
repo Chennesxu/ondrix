@@ -13,6 +13,8 @@ LogicalResult verifyProductPolicy(Operation *op, Attribute numeric,
   if (isa<FixedAttr>(numeric)) {
     if (!product)
       return op->emitOpError("fixed numeric policy requires a product attribute");
+    if (failed(inferProductSemantics(op, cast<FixedAttr>(numeric), *product)))
+      return failure();
     return success();
   }
 
@@ -23,6 +25,9 @@ LogicalResult verifyProductPolicy(Operation *op, Attribute numeric,
 
 FailureOr<ProductSemantics> inferProductSemantics(Operation *op, FixedAttr numeric,
                                                   ProductAttr product) {
+  if (numeric.getSignedness() != Signedness::Signed)
+    return op->emitOpError("fixed product semantics currently require a signed numeric policy");
+
   auto storage = cast<IntegerType>(numeric.getStorage());
   uint64_t storageWidth = storage.getWidth();
   uint64_t frac = numeric.getFrac();
@@ -30,24 +35,26 @@ FailureOr<ProductSemantics> inferProductSemantics(Operation *op, FixedAttr numer
     return op->emitOpError("product fractional position is unrepresentable");
 
   uint64_t productFrac = frac * 2;
-  uint64_t rawWidth = storageWidth;
-  ProductBitSelection selection = ProductBitSelection::HighRaw;
-  if (product.getSelection() == ProductSelection::Full) {
+  switch (product.getSelection()) {
+  case ProductSelection::Full:
     if (storageWidth > std::numeric_limits<unsigned>::max() / 2)
       return op->emitOpError("full product storage width is unrepresentable");
-    rawWidth = storageWidth * 2;
-    selection = ProductBitSelection::Full;
-  } else {
+    if (storageWidth * 2 > std::numeric_limits<unsigned>::max() ||
+        productFrac > std::numeric_limits<unsigned>::max())
+      return op->emitOpError("product fractional position is unrepresentable");
+    return ProductSemantics{static_cast<unsigned>(storageWidth * 2),
+                            static_cast<unsigned>(productFrac), ProductSelection::Full};
+  case ProductSelection::HighRaw:
     if (productFrac < storageWidth)
       return op->emitOpError("raw high product fractional position would be negative");
     productFrac -= storageWidth;
+    if (storageWidth > std::numeric_limits<unsigned>::max() ||
+        productFrac > std::numeric_limits<unsigned>::max())
+      return op->emitOpError("product fractional position is unrepresentable");
+    return ProductSemantics{static_cast<unsigned>(storageWidth), static_cast<unsigned>(productFrac),
+                            ProductSelection::HighRaw};
   }
-
-  if (rawWidth > std::numeric_limits<unsigned>::max() ||
-      productFrac > std::numeric_limits<unsigned>::max())
-    return op->emitOpError("product fractional position is unrepresentable");
-  return ProductSemantics{static_cast<unsigned>(rawWidth), static_cast<unsigned>(productFrac),
-                          selection};
+  return op->emitOpError("unsupported fixed product selection");
 }
 
 ReductionReassociationSafety classifyReductionReassociation(OverflowMode updateOverflow,

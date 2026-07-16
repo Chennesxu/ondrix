@@ -1,6 +1,7 @@
 #include "ondrix/Conversion/OndspToScalar/OndspToScalar.h"
+#include "ondrix/Conversion/Utils/ConversionLegality.h"
 #include "ondrix/Conversion/Utils/ReductionUtils.h"
-#include "ondrix/Conversion/Utils/StructuralTypeConversions.h"
+#include "ondrix/Conversion/Utils/ValueTypeConversions.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
@@ -94,24 +95,35 @@ public:
   }
 };
 
+static bool isOndspType(Type type) {
+  return type.getDialect().getNamespace() == ondrix::ondsp::OndspDialect::getDialectNamespace();
+}
+
+static bool isOndspAttribute(Attribute attribute) {
+  return attribute.getDialect().getNamespace() ==
+         ondrix::ondsp::OndspDialect::getDialectNamespace();
+}
+
 static bool containsOndspAccumulator(Type type) {
-  return type.walk([](ondrix::ondsp::AccType) { return WalkResult::interrupt(); }).wasInterrupted();
+  return ondrix::conversion::containsMatchingType(
+      type, [](Type nested) { return isa<ondrix::ondsp::AccType>(nested); });
 }
 
 static bool containsOndspAccumulator(TypeRange types) {
-  return llvm::any_of(types, [](Type type) { return containsOndspAccumulator(type); });
-}
-
-static bool containsOndspAccumulator(Attribute attribute) {
-  return attribute.walk([](ondrix::ondsp::AccType) { return WalkResult::interrupt(); })
-      .wasInterrupted();
+  return ondrix::conversion::containsMatchingType(
+      types, [](Type nested) { return isa<ondrix::ondsp::AccType>(nested); });
 }
 
 static bool isNestedAccumulatorContainer(Type type) {
   return !isa<ondrix::ondsp::AccType>(type) && containsOndspAccumulator(type);
 }
 
-static LogicalResult verifyAccumulatorUsage(Operation *root) {
+static bool containsOndspArtifact(Attribute attribute) {
+  return ondrix::conversion::containsMatchingType(attribute, isOndspType) ||
+         ondrix::conversion::containsMatchingAttribute(attribute, isOndspAttribute);
+}
+
+static LogicalResult verifySourceArtifactUsage(Operation *root) {
   WalkResult result = root->walk([](Operation *op) {
     auto containsNested = [](TypeRange types) {
       return llvm::any_of(types, isNestedAccumulatorContainer);
@@ -140,11 +152,16 @@ static LogicalResult verifyAccumulatorUsage(Operation *root) {
       // conversion patterns and were checked structurally above.
       if (function && namedAttribute.getName() == function.getFunctionTypeAttrName())
         continue;
-      if (!containsOndspAccumulator(namedAttribute.getValue()))
+      // Attributes owned by source operations are consumed with those
+      // operations. Host-operation metadata has no generic conversion.
+      if (op->getDialect() &&
+          op->getDialect()->getNamespace() == ondrix::ondsp::OndspDialect::getDialectNamespace())
+        continue;
+      if (!containsOndspArtifact(namedAttribute.getValue()))
         continue;
       op->emitOpError() << "attribute '" << namedAttribute.getName().getValue()
-                        << "' contains a source accumulator type; accumulator types in metadata "
-                           "attributes are unsupported";
+                        << "' contains an Ondsp type or attribute; source artifacts in host "
+                           "metadata are unsupported";
       return WalkResult::interrupt();
     }
     return WalkResult::advance();
@@ -153,21 +170,8 @@ static LogicalResult verifyAccumulatorUsage(Operation *root) {
 }
 
 static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) {
-  if (!typeConverter.isLegal(op) || containsOndspAccumulator(op->getOperandTypes()) ||
-      containsOndspAccumulator(op->getResultTypes()))
-    return false;
-  if (llvm::any_of(op->getAttrs(), [](NamedAttribute namedAttribute) {
-        return containsOndspAccumulator(namedAttribute.getValue());
-      }))
-    return false;
-  for (Region &region : op->getRegions()) {
-    if (!typeConverter.isLegal(&region))
-      return false;
-    for (Block &block : region)
-      if (containsOndspAccumulator(block.getArgumentTypes()))
-        return false;
-  }
-  return true;
+  return ondrix::conversion::hasLegalConvertedTypesAndAttributes(op, typeConverter, isOndspType,
+                                                                 isOndspAttribute);
 }
 
 class AccZeroOpLowering final : public OpConversionPattern<ondrix::ondsp::AccZeroOp> {
@@ -335,7 +339,7 @@ static Value lowerSignedProduct(Location loc, Value lhs, Value rhs,
   Value lhsExtended = builder.create<arith::ExtSIOp>(loc, fullProductType, lhs);
   Value rhsExtended = builder.create<arith::ExtSIOp>(loc, fullProductType, rhs);
   Value fullProduct = builder.create<arith::MulIOp>(loc, lhsExtended, rhsExtended);
-  if (semantics.selection == ondrix::ondsp::ProductBitSelection::Full)
+  if (semantics.selection == ondrix::ondsp::ProductSelection::Full)
     return fullProduct;
 
   Value shift = builder.create<arith::ConstantIntOp>(
@@ -473,7 +477,12 @@ public:
       ConvertOndspFixedToScalarPass>::ConvertOndspFixedToScalarBase;
 
   void runOnOperation() override {
-    if (failed(verifyAccumulatorUsage(getOperation()))) {
+    if (failed(verifySourceArtifactUsage(getOperation()))) {
+      signalPassFailure();
+      return;
+    }
+    if (failed(ondrix::conversion::verifySCFWhileTypeConversionSafety(
+            getOperation(), [](Type type) { return isa<ondrix::ondsp::AccType>(type); }))) {
       signalPassFailure();
       return;
     }
@@ -483,7 +492,7 @@ public:
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
                  MacOpLowering, MacSubOpLowering, ReduceMacOpLowering>(typeConverter,
                                                                        &getContext());
-    ondrix::conversion::populateCommonStructuralTypeConversionPatterns(typeConverter, patterns);
+    ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);

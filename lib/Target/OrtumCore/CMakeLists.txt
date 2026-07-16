@@ -1,7 +1,6 @@
 add_ondrix_library(OrtumCoreTargetProfile
+  OrtumCoreCapabilities.cpp
   OrtumCoreTargetProfile.cpp
-
-  PARTIAL_SOURCES_INTENDED
 
   LINK_LIBS PUBLIC
   MLIRIR

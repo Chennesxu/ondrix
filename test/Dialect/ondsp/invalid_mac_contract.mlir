@@ -112,3 +112,25 @@ func.func @fixed_reduce_requires_matching_signedness(%a: memref<8xi16>, %b: memr
   %0 = ondsp.reduce_mac %zero, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>, memref<8xi16>, memref<8xi16>) -> !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>
   return %0 : !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>
 }
+
+// -----
+
+func.func @unsigned_full_product_is_undefined(
+    %acc: !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>,
+    %a: i16, %b: i16)
+    -> !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate> {
+  // expected-error@+1 {{fixed product semantics currently require a signed numeric policy}}
+  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<unsigned, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>
+  return %0 : !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>
+}
+
+// -----
+
+func.func @unsigned_high_raw_product_is_undefined(
+    %acc: !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>,
+    %a: i32, %b: i32)
+    -> !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate> {
+  // expected-error@+1 {{fixed product semantics currently require a signed numeric policy}}
+  %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<unsigned, storage = i32, frac = 31>, product = #ondsp.product<high_raw>} : (!ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>, i32, i32) -> !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>
+  return %0 : !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>
+}

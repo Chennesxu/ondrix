@@ -98,3 +98,23 @@ func.func @packed_butterfly_rejects_signed_saturation_type(
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = si16>} : (i32, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
 }
+
+// -----
+
+func.func @butterfly_rejects_unsigned_product_contract(
+    %a: vector<2xi16>, %b: vector<2xi16>, %tw: vector<2xi16>)
+    -> (vector<2xi16>, vector<2xi16>) {
+  // expected-error@+1 {{fixed product semantics currently require a signed numeric policy}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<unsigned, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<2xi16>, vector<2xi16>) -> (vector<2xi16>, vector<2xi16>)
+  return %0, %1 : vector<2xi16>, vector<2xi16>
+}
+
+// -----
+
+func.func @butterfly_rejects_negative_high_raw_frac(
+    %a: vector<2xi16>, %b: vector<2xi16>, %tw: vector<2xi16>)
+    -> (vector<2xi16>, vector<2xi16>) {
+  // expected-error@+1 {{raw high product fractional position would be negative}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 0>, product = #ondsp.product<high_raw>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<2xi16>, vector<2xi16>) -> (vector<2xi16>, vector<2xi16>)
+  return %0, %1 : vector<2xi16>, vector<2xi16>
+}

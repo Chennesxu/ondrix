@@ -1,8 +1,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
-extern int32_t ortumcore_repeat_mac(int16_t lhs, int16_t rhs, int64_t count);
-extern int32_t ortumcore_repeat_mac_sub(int16_t lhs, int16_t rhs, int64_t count);
+extern int64_t ortumcore_repeat_mac(int16_t lhs, int16_t rhs, int64_t count);
+extern int64_t ortumcore_repeat_mac_sub(int16_t lhs, int16_t rhs, int64_t count);
 
 static int64_t update_reference(int64_t accumulator, int16_t lhs, int16_t rhs, int subtract) {
   const __int128 minimum = -((__int128)1 << 39);
@@ -16,21 +16,21 @@ static int64_t update_reference(int64_t accumulator, int16_t lhs, int16_t rhs, i
   return (int64_t)updated;
 }
 
-static uint32_t repeat_reference(int16_t lhs, int16_t rhs, int64_t count, int subtract) {
+static int64_t repeat_reference(int16_t lhs, int16_t rhs, int64_t count, int subtract) {
   int64_t accumulator = 0;
   for (int64_t i = 0; i < count; ++i)
     accumulator = update_reference(accumulator, lhs, rhs, subtract);
-  return (uint32_t)(uint64_t)accumulator;
+  return accumulator;
 }
 
 static int check(const char *name, int16_t lhs, int16_t rhs, int64_t count, int subtract) {
-  uint32_t expected = repeat_reference(lhs, rhs, count, subtract);
-  uint32_t actual = (uint32_t)(subtract ? ortumcore_repeat_mac_sub(lhs, rhs, count)
-                                        : ortumcore_repeat_mac(lhs, rhs, count));
+  int64_t expected = repeat_reference(lhs, rhs, count, subtract);
+  int64_t actual =
+      subtract ? ortumcore_repeat_mac_sub(lhs, rhs, count) : ortumcore_repeat_mac(lhs, rhs, count);
   if (actual == expected)
     return 0;
-  fprintf(stderr, "%s(%lld): expected bits 0x%08x, got 0x%08x\n", name, (long long)count, expected,
-          actual);
+  fprintf(stderr, "%s(%lld): expected %lld, got %lld\n", name, (long long)count,
+          (long long)expected, (long long)actual);
   return 1;
 }
 

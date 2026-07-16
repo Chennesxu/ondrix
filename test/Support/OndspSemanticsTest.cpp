@@ -20,7 +20,6 @@ using ondrix::ondsp::isSignedQ15;
 using ondrix::ondsp::isSignedQ31;
 using ondrix::ondsp::OverflowMode;
 using ondrix::ondsp::ProductAttr;
-using ondrix::ondsp::ProductBitSelection;
 using ondrix::ondsp::ProductSelection;
 using ondrix::ondsp::ProductSemantics;
 using ondrix::ondsp::ReductionRangeProof;
@@ -99,10 +98,10 @@ bool testProductSemantics() {
     return false;
 
   return q15Full->rawWidth == 32 && q15Full->frac == 30 &&
-         q15Full->selection == ProductBitSelection::Full && q31Full->rawWidth == 64 &&
-         q31Full->frac == 62 && q31Full->selection == ProductBitSelection::Full &&
+         q15Full->selection == ProductSelection::Full && q31Full->rawWidth == 64 &&
+         q31Full->frac == 62 && q31Full->selection == ProductSelection::Full &&
          q31HighRaw->rawWidth == 32 && q31HighRaw->frac == 30 &&
-         q31HighRaw->selection == ProductBitSelection::HighRaw;
+         q31HighRaw->selection == ProductSelection::HighRaw;
 }
 
 } // namespace

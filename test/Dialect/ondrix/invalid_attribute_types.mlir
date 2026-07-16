@@ -31,3 +31,13 @@ func.func @butterfly_rejects_invalid_numeric(
   %0, %1 = ondrix.butterfly %a, %b, %twiddle {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = "invalid", product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (i32, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
 }
+
+// -----
+
+func.func @butterfly_rejects_unsigned_product_contract(
+    %a: vector<2xi16>, %b: vector<2xi16>, %twiddle: vector<2xi16>)
+    -> (vector<2xi16>, vector<2xi16>) {
+  // expected-error@+1 {{fixed product semantics currently require a signed numeric policy}}
+  %0, %1 = ondrix.butterfly %a, %b, %twiddle {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<unsigned, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<2xi16>, vector<2xi16>) -> (vector<2xi16>, vector<2xi16>)
+  return %0, %1 : vector<2xi16>, vector<2xi16>
+}

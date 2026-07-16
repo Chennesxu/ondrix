@@ -10,17 +10,11 @@
 
 namespace ondrix::ondsp {
 
-/// Identifies which raw bits are retained from an exact fixed-point product.
-enum class ProductBitSelection {
-  Full,
-  HighRaw,
-};
-
 /// Target-independent raw storage and fractional position of a product.
 struct ProductSemantics {
   unsigned rawWidth;
   unsigned frac;
-  ProductBitSelection selection;
+  ProductSelection selection;
 };
 
 /// Describes the proof available to a reduction transform. The stronger case

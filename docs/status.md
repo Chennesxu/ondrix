@@ -12,7 +12,7 @@ may change while the numeric model is stabilized.
 | Generic Vector CPU lowering | Automatic unit-stride Q15 chunking, ordered saturating updates, and exact-modulo wrapping reduction implemented |
 | Packed Q15 butterfly lowering | Experimental instruction selection only; no public emulator or ABI correctness claim |
 | Object generation and C execution | Implemented for scalar and fixed-width Vector Q15 FIR-sample/dot paths and scalar Q31 numeric operations |
-| Public OrtumCore emulation | Signed-Q15 i40/frac30 saturating accumulator init and MAC add/sub implemented through exact Ondsp expansion |
+| Public OrtumCore emulation | Signed i40/frac30 saturating accumulator init and Q15 full-product MAC add/sub implemented through exact Ondsp expansion |
 | Python-like `.ox` frontend | Planned |
 | Stable public kernel ABI | Planned |
 
