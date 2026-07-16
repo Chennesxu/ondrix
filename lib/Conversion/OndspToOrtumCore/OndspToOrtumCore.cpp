@@ -266,8 +266,8 @@ public:
       return failure();
     }
     return op.emitOpError(
-        "fixed reduce_mac has no ortumcore lowering until explicit accumulator update and "
-        "export semantics are implemented");
+        "ordered fixed reduce_mac has no exact ortumcore lowering; scalarize to explicit "
+        "accumulator updates or provide a proven target sequence");
   }
 };
 
