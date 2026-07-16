@@ -1,7 +1,7 @@
 // RUN: ondrix-opt %s -split-input-file -verify-diagnostics
 
 func.func @mac_requires_accumulator(%acc: i32, %lhs: i16, %rhs: i16) -> i32 {
-  // expected-error@+1 {{operand #0 must be Saturating Q15 accumulator semantic value}}
+  // expected-error@+1 {{operand #0 must be Signed i40 frac30 saturating accumulator semantic value}}
   %0 = ortumcore.mac_add %acc, %lhs, %rhs : (i32, i16, i16) -> i32
   return %0 : i32
 }

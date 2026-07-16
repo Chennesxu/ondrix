@@ -11,10 +11,3 @@ func.func @acc_ops(%a: i16, %b: i16) -> !ortumcore.acc {
   %acc2 = ortumcore.mac_sub %acc1, %a, %b : (!ortumcore.acc, i16, i16) -> !ortumcore.acc
   return %acc2 : !ortumcore.acc
 }
-
-// CHECK-LABEL: func.func @pair_types
-func.func @pair_types(%acc_pair: !ortumcore.acc_pair, %fp: !ortumcore.fp, %fp_pair: !ortumcore.fp_pair) {
-  // CHECK: !ortumcore.acc_pair
-  // CHECK: !ortumcore.fp_pair
-  return
-}

@@ -12,7 +12,7 @@ using ondrix::ondsp::classifyReductionReassociation;
 using ondrix::ondsp::FixedAttr;
 using ondrix::ondsp::isFullProduct;
 using ondrix::ondsp::isSignedQ15;
-using ondrix::ondsp::isSignedQ15I40Accumulator;
+using ondrix::ondsp::isSignedI40Frac30Accumulator;
 using ondrix::ondsp::OverflowMode;
 using ondrix::ondsp::ProductAttr;
 using ondrix::ondsp::ProductSelection;
@@ -48,13 +48,13 @@ bool testCommonNumericPolicies() {
   passed &= isSignedQ15(FixedAttr::get(&context, Signedness::Signed, i16, 15));
   passed &= !isSignedQ15(FixedAttr::get(&context, Signedness::Unsigned, i16, 15));
   passed &= !isSignedQ15(FixedAttr::get(&context, Signedness::Signed, i32, 15));
-  passed &= isSignedQ15I40Accumulator(
+  passed &= isSignedI40Frac30Accumulator(
       AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Saturate));
-  passed &= isSignedQ15I40Accumulator(
+  passed &= isSignedI40Frac30Accumulator(
       AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Wrap));
-  passed &= !isSignedQ15I40Accumulator(
+  passed &= !isSignedI40Frac30Accumulator(
       AccType::get(&context, i32, 30, Signedness::Signed, OverflowMode::Saturate));
-  passed &= !isSignedQ15I40Accumulator(
+  passed &= !isSignedI40Frac30Accumulator(
       AccType::get(&context, i40, 29, Signedness::Signed, OverflowMode::Saturate));
   passed &= isFullProduct(ProductAttr::get(&context, ProductSelection::Full));
   passed &= !isFullProduct(ProductAttr::get(&context, ProductSelection::High));

@@ -55,7 +55,7 @@ bool isSignedQ15(FixedAttr numeric) {
          numeric.getSignedness() == Signedness::Signed;
 }
 
-bool isSignedQ15I40Accumulator(AccType accumulator) {
+bool isSignedI40Frac30Accumulator(AccType accumulator) {
   auto storage = dyn_cast<IntegerType>(accumulator.getStorage());
   return storage && storage.isSignless() && storage.getWidth() == 40 &&
          accumulator.getFrac() == 30 && accumulator.getSignedness() == Signedness::Signed;

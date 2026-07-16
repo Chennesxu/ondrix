@@ -63,7 +63,7 @@ bool isSupportedMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
          rhsType.getElementType().isSignlessInteger(16) && hasLLVMCompatibleMemorySpace(lhsType) &&
          hasLLVMCompatibleMemorySpace(rhsType) && isLastMemrefDimUnitStride(lhsType) &&
          isLastMemrefDimUnitStride(rhsType) &&
-         ondrix::ondsp::isSignedQ15I40Accumulator(accumulator) &&
+         ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator) &&
          ondrix::ondsp::isSignedQ15(numeric) && ondrix::ondsp::isFullProduct(*op.getProduct());
 }
 
