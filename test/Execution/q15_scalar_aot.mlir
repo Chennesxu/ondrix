@@ -1,6 +1,6 @@
 // RUN: ondrix-opt %s --convert-ondsp-q15-to-scalar --convert-scf-to-cf --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
-// RUN: llc -filetype=obj %t.ll -o %t.o
+// RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc %S/Inputs/q15_scalar_aot.c %t.o -o %t
 // RUN: %t
 
