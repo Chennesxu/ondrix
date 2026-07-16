@@ -18,7 +18,7 @@ func.func @parallel_wrap(
 // CHECK: %[[PRODUCTS:.*]] = arith.muli %[[LHS]], %[[RHS]] : vector<8xi32>
 // CHECK: %[[WIDE:.*]] = arith.extsi %[[PRODUCTS]] : vector<8xi32> to vector<8xi64>
 // CHECK: %[[SUM:.*]] = vector.reduction <add>, %[[WIDE]] : vector<8xi64> into i64
-// CHECK: ondsp.acc_add_product {{.*}}, %[[SUM]] {product_numeric = #ondsp.fixed<signed, storage = i64, frac = 30>}
+// CHECK: ondsp.acc_add_term {{.*}}, %[[SUM]] {term_numeric = #ondsp.fixed<signed, storage = i64, frac = 30>}
 // CHECK-NOT: vector.extract
 // CHECK-NOT: ondsp.reduce_mac
 

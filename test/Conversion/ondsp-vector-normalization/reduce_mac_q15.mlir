@@ -19,13 +19,13 @@ func.func @reduce_q15_vector(
 // CHECK: %[[RHS:.*]] = arith.extsi {{.*}} : vector<4xi16> to vector<4xi32>
 // CHECK: %[[PRODUCTS:.*]] = arith.muli %[[LHS]], %[[RHS]] : vector<4xi32>
 // CHECK: %[[P0:.*]] = vector.extract %[[PRODUCTS]][0] : vector<4xi32>
-// CHECK: %[[A0:.*]] = ondsp.acc_add_product {{.*}}, %[[P0]]
+// CHECK: %[[A0:.*]] = ondsp.acc_add_term {{.*}}, %[[P0]]
 // CHECK: %[[P1:.*]] = vector.extract %[[PRODUCTS]][1] : vector<4xi32>
-// CHECK: %[[A1:.*]] = ondsp.acc_add_product %[[A0]], %[[P1]]
+// CHECK: %[[A1:.*]] = ondsp.acc_add_term %[[A0]], %[[P1]]
 // CHECK: %[[P2:.*]] = vector.extract %[[PRODUCTS]][2] : vector<4xi32>
-// CHECK: %[[A2:.*]] = ondsp.acc_add_product %[[A1]], %[[P2]]
+// CHECK: %[[A2:.*]] = ondsp.acc_add_term %[[A1]], %[[P2]]
 // CHECK: %[[P3:.*]] = vector.extract %[[PRODUCTS]][3] : vector<4xi32>
-// CHECK: %[[A3:.*]] = ondsp.acc_add_product %[[A2]], %[[P3]]
+// CHECK: %[[A3:.*]] = ondsp.acc_add_term %[[A2]], %[[P3]]
 // CHECK: return %[[A3]]
 // CHECK-NOT: ondsp.reduce_mac
 

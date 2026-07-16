@@ -64,7 +64,7 @@ public:
     auto partialNumeric = ondrix::ondsp::FixedAttr::get(
         rewriter.getContext(), ondrix::ondsp::Signedness::Signed, rewriter.getI64Type(), 30);
 
-    rewriter.replaceOpWithNewOp<ondrix::ondsp::AccAddProductOp>(
+    rewriter.replaceOpWithNewOp<ondrix::ondsp::AccAddTermOp>(
         op, op.getResult().getType(), adaptor.getInitial(), partialSum, partialNumeric);
     return success();
   }
@@ -91,7 +91,7 @@ public:
     // Preserve the universal left-fold order; saturating updates are not generally associative.
     for (int64_t lane = 0; lane < vectorType.getNumElements(); ++lane) {
       Value product = rewriter.create<vector::ExtractOp>(op.getLoc(), products, lane);
-      accumulator = rewriter.create<ondrix::ondsp::AccAddProductOp>(
+      accumulator = rewriter.create<ondrix::ondsp::AccAddTermOp>(
           op.getLoc(), accumulator.getType(), accumulator, product, productNumeric);
     }
 

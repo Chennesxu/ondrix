@@ -59,30 +59,30 @@ func.func @import_requires_sufficient_storage(%input: i32) {
 
 // -----
 
-func.func @product_update_requires_storage_type(
+func.func @term_update_requires_storage_type(
     %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
-    %product: i16) {
-  // expected-error@+1 {{product type must match product numeric storage type}}
-  %0 = ondsp.acc_add_product %acc, %product {product_numeric = #ondsp.fixed<signed, storage = i32, frac = 30>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %term: i16) {
+  // expected-error@+1 {{term type must match term numeric storage type}}
+  %0 = ondsp.acc_add_term %acc, %term {term_numeric = #ondsp.fixed<signed, storage = i32, frac = 30>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
   return
 }
 
 // -----
 
-func.func @product_update_requires_matching_signedness(
+func.func @term_update_requires_matching_signedness(
     %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
-    %product: i32) {
-  // expected-error@+1 {{product and accumulator signedness must match}}
-  %0 = ondsp.acc_add_product %acc, %product {product_numeric = #ondsp.fixed<unsigned, storage = i32, frac = 30>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i32) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %term: i32) {
+  // expected-error@+1 {{term and accumulator signedness must match}}
+  %0 = ondsp.acc_add_term %acc, %term {term_numeric = #ondsp.fixed<unsigned, storage = i32, frac = 30>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i32) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
   return
 }
 
 // -----
 
-func.func @product_update_requires_matching_frac(
+func.func @term_update_requires_matching_frac(
     %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
-    %product: i32) {
-  // expected-error@+1 {{product and accumulator frac must match}}
-  %0 = ondsp.acc_add_product %acc, %product {product_numeric = #ondsp.fixed<signed, storage = i32, frac = 29>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i32) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %term: i32) {
+  // expected-error@+1 {{term and accumulator frac must match}}
+  %0 = ondsp.acc_add_term %acc, %term {term_numeric = #ondsp.fixed<signed, storage = i32, frac = 29>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i32) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
   return
 }

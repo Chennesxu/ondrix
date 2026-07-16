@@ -101,19 +101,21 @@ def Ondsp_MacSubOp : Ondsp_MacLikeOp<"mac_sub", "Multiply-subtract accumulate"> 
   }];
 }
 
-def Ondsp_AccAddProductOp
-    : Ondsp_Op<"acc_add_product", [Pure, AllTypesMatch<["acc", "result"]>]> {
-  let summary = "Add an explicit fixed-point product to an accumulator";
+def Ondsp_AccAddTermOp
+    : Ondsp_Op<"acc_add_term", [Pure, AllTypesMatch<["acc", "result"]>]> {
+  let summary = "Add an explicit fixed-point term to an accumulator";
   let description = [{
-    Adds the already-computed fixed-point `product` to the mathematical
+    Adds the already-computed fixed-point `term` to the mathematical
     accumulator value, then applies `acc.update_overflow` when writing the
-    result back to the accumulator storage width. `product_numeric` describes
-    the product's signedness, storage width, and fractional position. This
-    operation is a target-independent normalization point for consumers that
-    compute products separately from ordered accumulator updates.
+    result back to the accumulator storage width. `term_numeric` describes the
+    term's signedness, storage width, and fractional position. A term may be a
+    single exact product or a product partial sum whose equivalence was proven
+    by a preceding transform. This operation is a target-independent
+    normalization point for consumers that compute terms separately from
+    accumulator updates.
   }];
-  let arguments = (ins Ondsp_Acc:$acc, AnyInteger:$product,
-                   Ondsp_FixedAttr:$product_numeric);
+  let arguments = (ins Ondsp_Acc:$acc, AnyInteger:$term,
+                   Ondsp_FixedAttr:$term_numeric);
   let results = (outs Ondsp_Acc:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

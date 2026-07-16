@@ -29,7 +29,7 @@ using namespace mlir;
 
 namespace {
 
-static bool isSignedAccumulatorProduct(ondrix::ondsp::FixedAttr numeric) {
+static bool isSignedAccumulatorTerm(ondrix::ondsp::FixedAttr numeric) {
   auto storage = dyn_cast<IntegerType>(numeric.getStorage());
   return storage && storage.isSignless() && numeric.getFrac() == 30 &&
          numeric.getSignedness() == ondrix::ondsp::Signedness::Signed;
@@ -315,21 +315,21 @@ using MacSubOpLowering =
     MacLikeOpLowering<ondrix::ondsp::MacSubOp,
                       ondrix::fixedpoint::AccumulatorUpdateOperation::Subtract>;
 
-class AccAddProductOpLowering final : public OpConversionPattern<ondrix::ondsp::AccAddProductOp> {
+class AccAddTermOpLowering final : public OpConversionPattern<ondrix::ondsp::AccAddTermOp> {
 public:
-  using OpConversionPattern<ondrix::ondsp::AccAddProductOp>::OpConversionPattern;
+  using OpConversionPattern<ondrix::ondsp::AccAddTermOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(ondrix::ondsp::AccAddProductOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(ondrix::ondsp::AccAddTermOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
     if (!ondrix::ondsp::isSignedQ15I40Accumulator(accumulator) ||
-        !isSignedAccumulatorProduct(op.getProductNumeric()))
+        !isSignedAccumulatorTerm(op.getTermNumeric()))
       return op.emitOpError(
-          "Q15 scalar lowering requires a signed integer frac=30 product and signed i40 frac=30 "
+          "Q15 scalar lowering requires a signed integer frac=30 term and signed i40 frac=30 "
           "accumulator");
 
     Value result = lowerAccumulatorUpdate(
-        op.getLoc(), adaptor.getAcc(), adaptor.getProduct(), accumulator.getUpdateOverflow(),
+        op.getLoc(), adaptor.getAcc(), adaptor.getTerm(), accumulator.getUpdateOverflow(),
         ondrix::fixedpoint::AccumulatorUpdateOperation::Add, rewriter);
     rewriter.replaceOp(op, result);
     return success();
@@ -439,10 +439,9 @@ public:
 
     OndspQ15ToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
-    patterns
-        .add<AccAddProductOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
-             MacOpLowering, MacSubOpLowering, ReduceMacOpLowering, SelectOpTypeConversion>(
-            typeConverter, &getContext());
+    patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
+                 MacOpLowering, MacSubOpLowering, ReduceMacOpLowering, SelectOpTypeConversion>(
+        typeConverter, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);
