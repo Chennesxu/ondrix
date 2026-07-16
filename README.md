@@ -49,10 +49,10 @@ layer without exposing private backend details.
 | Typed conversion patterns and accumulator type conversion | Implemented |
 | Generic scalar lowering | Implemented for explicit signed Q15 accumulator operations and ordered rank-1 Q15 memref reductions; partial for rank-1 f32 reductions |
 | Packed Q15 butterfly lowering | Experimental instruction selection only; no public emulator or ABI correctness claim |
-| Generic Vector CPU lowering | Order-preserving fixed-length Q15 baseline implemented; parallel/reassociated reductions require a legality proof |
+| Generic Vector CPU lowering | Automatic unit-stride Q15 memref chunking, ordered saturating updates, and exact-modulo wrap reduction implemented |
 | Public OrtumCore emulation / LLVM stubs | Planned |
 | Python-like `.ox` frontend | Planned |
-| Object generation and C ABI execution tests | Implemented for scalar and order-preserving Vector Q15 paths, including dynamic-memref FIR-sample/dot tests; a stable public kernel ABI is planned |
+| Object generation and C ABI execution tests | Implemented for scalar and automatic Vector Q15 FIR-sample/dot paths, including dynamic lengths, tails, overflow, and scalar fallback; a stable public kernel ABI is planned |
 
 Textual MLIR is currently the supported development and testing entry point.
 Operations without a complete public consumer remain experimental and may
@@ -83,11 +83,13 @@ reference through real LLVM IR, object generation, C linkage, and process
 execution, including 40-bit overflow boundaries and dynamic-memref FIR/dot
 cases.
 
-The initial fixed-length Vector path widens and multiplies Q15 lanes with
-Vector dialect operations, then applies accumulator updates in increasing lane
-order. It is a correctness baseline rather than a tree reduction: saturating
-updates remain ordered unless range analysis proves that reassociation cannot
-change the result.
+The Vector path automatically splits unit-stride rank-1 memref reductions into
+fixed-width chunks and a scalar tail. Q15 products use Vector dialect
+operations. Saturating accumulators apply those products in increasing lane
+order. Wrapping accumulators may use a horizontal vector reduction because the
+Ondsp legality query classifies fixed-width modular addition as exactly
+reassociable. Memrefs without a statically known unit minor stride retain the
+generic scalar fallback.
 
 ## LLVM/MLIR Baseline
 
