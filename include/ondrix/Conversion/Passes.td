@@ -59,8 +59,10 @@ def ConvertOndspQ15ToScalar
     scalar integer operations. The pass converts supported accumulator types
     structurally across functions and control flow and fails if any unsupported
     ondsp operation or accumulator domain remains. Ondrix intent operations
-    must be lowered first; fixed-length vector reductions must be normalized by
-    `normalize-ondsp-q15-vector-reduce` before this final conversion.
+    must be lowered first. Memref reductions may be chunked by
+    `vectorize-ondsp-q15-memref-reduce`; fixed-length vector reductions must
+    then be normalized by `normalize-ondsp-q15-vector-reduce` before this final
+    conversion.
   }];
   let constructor = "ondrix::createConvertOndspQ15ToScalarPass()";
   let dependentDialects = [
@@ -87,6 +89,32 @@ def NormalizeOndspQ15VectorReduce
     "ondrix::ondsp::OndspDialect",
     "mlir::arith::ArithDialect",
     "mlir::vector::VectorDialect",
+  ];
+}
+
+def VectorizeOndspQ15MemRefReduce
+    : Pass<"vectorize-ondsp-q15-memref-reduce", "::mlir::ModuleOp"> {
+  let summary = "Vectorize unit-stride Q15 memref reductions without reassociation";
+  let description = [{
+    Split supported rank-1 Q15 memref reductions into fixed-width vector
+    chunks and a scalar tail. Vector chunks retain an ordered ondsp.reduce_mac
+    operation for subsequent normalization, and the scalar tail uses ondsp.mac.
+    The transformation preserves increasing-index accumulator update order.
+    Memrefs without a statically known unit minor stride remain unchanged for
+    a scalar fallback.
+  }];
+  let constructor = "ondrix::createVectorizeOndspQ15MemRefReducePass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
+           "Number of fixed Q15 lanes per vector chunk">,
   ];
 }
 

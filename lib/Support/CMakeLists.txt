@@ -27,6 +27,7 @@ add_ondrix_library(OndrixSupport
   OndrixToOndsp
   OndspToScalar
   OndspVectorNormalization
+  OndspVectorization
   OndspToOrtumCore
   OrtumCoreIR
   )

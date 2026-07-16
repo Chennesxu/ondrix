@@ -12,6 +12,7 @@ std::unique_ptr<mlir::Pass> createConvertOndspQ15ToScalarPass();
 std::unique_ptr<mlir::Pass> createConvertOndspToOrtumCorePass();
 std::unique_ptr<mlir::Pass> createLowerOndspF32ReduceToScalarPass();
 std::unique_ptr<mlir::Pass> createNormalizeOndspQ15VectorReducePass();
+std::unique_ptr<mlir::Pass> createVectorizeOndspQ15MemRefReducePass();
 
 #define GEN_PASS_DECL
 #include "ondrix/Conversion/Passes.h.inc"
