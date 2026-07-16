@@ -1,5 +1,12 @@
 # ondrix
 
+<p align="center">
+  <img
+    src="images/ondrix-banner.png"
+    alt="ondrix - DSL for embedded DSP kernels"
+    width="960">
+</p>
+
 ondrix is a language and compiler framework for portable embedded DSP kernels.
 It separates algorithm intent, target-independent numeric semantics, and
 target capabilities in a layered MLIR stack, with AOT code generation as the
@@ -61,4 +68,4 @@ ninja -C /path/to/ondrix/build check-ondrix
 
 ## License
 
-See [LICENSE](LICENSE).
+Licensed under the [Apache License 2.0](LICENSE).
