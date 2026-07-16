@@ -47,6 +47,13 @@ jobs:
           path: llvm-build
           key: ${{ runner.os }}-${{ runner.arch }}-gcc-llvm-6009708b-mlir-release-assertions-native-v3
 
+      - name: Normalize pinned LLVM source timestamps
+        working-directory: llvm-project
+        run: |
+          commit_epoch="$(git show -s --format=%ct HEAD)"
+          git ls-files -z |
+            xargs -0 touch --no-dereference --date="@${commit_epoch}"
+
       - name: Configure LLVM and MLIR
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: |
