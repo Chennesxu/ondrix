@@ -78,9 +78,9 @@ public:
         [&](OpBuilder &builder, Location bodyLoc, Value index, ValueRange iterArgs) {
           Value lhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), index);
           Value rhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), index);
-          Value next = builder.create<ondrix::ondsp::MacOp>(
-              bodyLoc, iterArgs.front().getType(), iterArgs.front(), lhs, rhs, numeric,
-              *op.getProduct());
+          Value next = builder.create<ondrix::ondsp::MacOp>(bodyLoc, iterArgs.front().getType(),
+                                                            iterArgs.front(), lhs, rhs, numeric,
+                                                            *op.getProduct());
           builder.create<scf::YieldOp>(bodyLoc, next);
         });
 
