@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --vectorize-ondsp-q15-memref-reduce="vector-width=8" --normalize-ondsp-q15-vector-reduce --convert-ondsp-q15-to-scalar --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --vectorize-ondsp-q15-memref-reduce="vector-width=8" --parallelize-ondsp-q15-wrap-vector-reduce --normalize-ondsp-q15-vector-reduce --convert-ondsp-q15-to-scalar --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc %S/Inputs/q15_auto_vector_fir_aot.c %t.o -o %t
@@ -9,6 +9,7 @@
 // RUN: FileCheck %s --check-prefix=AVX2 < %t.s
 
 // AVX2: vpmulld
+// AVX2: vpaddq
 
 func.func @q15_auto_vector_saturate(
     %input: memref<?xi16>, %coeffs: memref<?xi16>) -> i16 {

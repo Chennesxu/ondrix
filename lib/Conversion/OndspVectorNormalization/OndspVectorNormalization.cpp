@@ -12,6 +12,7 @@
 
 namespace ondrix {
 #define GEN_PASS_DEF_NORMALIZEONDSPQ15VECTORREDUCE
+#define GEN_PASS_DEF_PARALLELIZEONDSPQ15WRAPVECTORREDUCE
 #include "ondrix/Conversion/Passes.h.inc"
 } // namespace ondrix
 
@@ -30,6 +31,44 @@ static bool isSupportedVectorReduction(ondrix::ondsp::ReduceMacOp op) {
          ondrix::ondsp::isSignedQ15I40Accumulator(accumulator) &&
          ondrix::ondsp::isSignedQ15(numeric) && ondrix::ondsp::isFullProduct(*op.getProduct());
 }
+
+static bool isParallelizableWrapReduction(ondrix::ondsp::ReduceMacOp op) {
+  if (!isSupportedVectorReduction(op))
+    return false;
+  auto accumulator = cast<ondrix::ondsp::AccType>(op.getInitial().getType());
+  return ondrix::ondsp::classifyReductionReassociation(accumulator.getUpdateOverflow()) ==
+         ondrix::ondsp::ReductionReassociationSafety::ExactModulo;
+}
+
+class WrapReduceMacOpParallelization final
+    : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::ReduceMacOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    if (!isParallelizableWrapReduction(op))
+      return failure();
+
+    auto vectorType = cast<VectorType>(op.getLhs().getType());
+    auto productVectorType = VectorType::get(vectorType.getShape(), rewriter.getI32Type());
+    Value lhs = rewriter.create<arith::ExtSIOp>(op.getLoc(), productVectorType, adaptor.getLhs());
+    Value rhs = rewriter.create<arith::ExtSIOp>(op.getLoc(), productVectorType, adaptor.getRhs());
+    Value products = rewriter.create<arith::MulIOp>(op.getLoc(), lhs, rhs);
+
+    auto wideVectorType = VectorType::get(vectorType.getShape(), rewriter.getI64Type());
+    Value wideProducts = rewriter.create<arith::ExtSIOp>(op.getLoc(), wideVectorType, products);
+    // An i64 modular sum preserves the low 40 bits required by the wrapping accumulator.
+    Value partialSum =
+        rewriter.create<vector::ReductionOp>(op.getLoc(), vector::CombiningKind::ADD, wideProducts);
+    auto partialNumeric = ondrix::ondsp::FixedAttr::get(
+        rewriter.getContext(), ondrix::ondsp::Signedness::Signed, rewriter.getI64Type(), 30);
+
+    rewriter.replaceOpWithNewOp<ondrix::ondsp::AccAddProductOp>(
+        op, op.getResult().getType(), adaptor.getInitial(), partialSum, partialNumeric);
+    return success();
+  }
+};
 
 class ReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
 public:
@@ -82,8 +121,34 @@ public:
   }
 };
 
+class ParallelizeOndspQ15WrapVectorReducePass final
+    : public ondrix::impl::ParallelizeOndspQ15WrapVectorReduceBase<
+          ParallelizeOndspQ15WrapVectorReducePass> {
+public:
+  using ondrix::impl::ParallelizeOndspQ15WrapVectorReduceBase<
+      ParallelizeOndspQ15WrapVectorReducePass>::ParallelizeOndspQ15WrapVectorReduceBase;
+
+  void runOnOperation() override {
+    RewritePatternSet patterns(&getContext());
+    patterns.add<WrapReduceMacOpParallelization>(&getContext());
+
+    ConversionTarget target(getContext());
+    target
+        .addLegalDialect<arith::ArithDialect, ondrix::ondsp::OndspDialect, vector::VectorDialect>();
+    target.addDynamicallyLegalOp<ondrix::ondsp::ReduceMacOp>(
+        [](ondrix::ondsp::ReduceMacOp op) { return !isParallelizableWrapReduction(op); });
+
+    if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
+      signalPassFailure();
+  }
+};
+
 } // namespace
 
 std::unique_ptr<Pass> ondrix::createNormalizeOndspQ15VectorReducePass() {
   return std::make_unique<NormalizeOndspQ15VectorReducePass>();
+}
+
+std::unique_ptr<Pass> ondrix::createParallelizeOndspQ15WrapVectorReducePass() {
+  return std::make_unique<ParallelizeOndspQ15WrapVectorReducePass>();
 }

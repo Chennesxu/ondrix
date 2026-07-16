@@ -60,9 +60,10 @@ def ConvertOndspQ15ToScalar
     structurally across functions and control flow and fails if any unsupported
     ondsp operation or accumulator domain remains. Ondrix intent operations
     must be lowered first. Memref reductions may be chunked by
-    `vectorize-ondsp-q15-memref-reduce`; fixed-length vector reductions must
-    then be normalized by `normalize-ondsp-q15-vector-reduce` before this final
-    conversion.
+    `vectorize-ondsp-q15-memref-reduce`. Proven exact-modulo reductions may
+    then be handled by `parallelize-ondsp-q15-wrap-vector-reduce`; remaining
+    fixed-length vector reductions must be normalized by
+    `normalize-ondsp-q15-vector-reduce` before this final conversion.
   }];
   let constructor = "ondrix::createConvertOndspQ15ToScalarPass()";
   let dependentDialects = [
@@ -85,6 +86,24 @@ def NormalizeOndspQ15VectorReduce
     ordered reduction contract for saturating accumulators.
   }];
   let constructor = "ondrix::createNormalizeOndspQ15VectorReducePass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::vector::VectorDialect",
+  ];
+}
+
+def ParallelizeOndspQ15WrapVectorReduce
+    : Pass<"parallelize-ondsp-q15-wrap-vector-reduce", "::mlir::ModuleOp"> {
+  let summary = "Parallelize exact-modulo Q15 vector reductions";
+  let description = [{
+    Reassociate a fixed-length signed Q15 vector reduction only when the
+    accumulator update policy is exact modulo wrap. Products are computed
+    exactly in vector i32 lanes, widened to i64, horizontally added, and then
+    applied as one explicit accumulator update. Saturating reductions and
+    unsupported policies remain unchanged for ordered normalization.
+  }];
+  let constructor = "ondrix::createParallelizeOndspQ15WrapVectorReducePass()";
   let dependentDialects = [
     "ondrix::ondsp::OndspDialect",
     "mlir::arith::ArithDialect",
