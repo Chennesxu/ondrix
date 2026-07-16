@@ -159,3 +159,61 @@ func.func @q15_repeat_mac_sub_wrap(%lhs: i16, %rhs: i16, %count: index) -> i16 {
   } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>) -> i16
   return %result : i16
 }
+
+func.func @q15_positive_saturation_endpoint() -> i16 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c512 = arith.constant 512 : index
+  %minimum = arith.constant -32768 : i16
+  %adjust_lhs = arith.constant -32767 : i16
+  %adjust_rhs = arith.constant 1 : i16
+  %zero = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %saturated = scf.for %i = %c0 to %c512 step %c1
+      iter_args(%current = %zero)
+      -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) {
+    %next = ondsp.mac %current, %minimum, %minimum {
+      numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+      product = #ondsp.product<full>
+    } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    scf.yield %next : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  }
+  %adjusted = ondsp.mac %saturated, %adjust_lhs, %adjust_rhs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %result = ondsp.acc_export %adjusted {
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<toward_negative>,
+    overflow = #ondsp.overflow<wrap>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %result : i16
+}
+
+func.func @q15_negative_saturation_endpoint() -> i16 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c512 = arith.constant 512 : index
+  %minimum = arith.constant -32768 : i16
+  %adjust_lhs = arith.constant 32767 : i16
+  %adjust_rhs = arith.constant 1 : i16
+  %zero = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %saturated = scf.for %i = %c0 to %c512 step %c1
+      iter_args(%current = %zero)
+      -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) {
+    %next = ondsp.mac_sub %current, %minimum, %minimum {
+      numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+      product = #ondsp.product<full>
+    } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    scf.yield %next : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  }
+  %adjusted = ondsp.mac %saturated, %adjust_lhs, %adjust_rhs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %result = ondsp.acc_export %adjusted {
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<toward_negative>,
+    overflow = #ondsp.overflow<wrap>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %result : i16
+}

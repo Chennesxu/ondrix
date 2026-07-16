@@ -10,6 +10,8 @@ extern int16_t q15_repeat_mac_saturate(int16_t lhs, int16_t rhs, int64_t count);
 extern int16_t q15_repeat_mac_wrap(int16_t lhs, int16_t rhs, int64_t count);
 extern int16_t q15_repeat_mac_sub_saturate(int16_t lhs, int16_t rhs, int64_t count);
 extern int16_t q15_repeat_mac_sub_wrap(int16_t lhs, int16_t rhs, int64_t count);
+extern int16_t q15_positive_saturation_endpoint(void);
+extern int16_t q15_negative_saturation_endpoint(void);
 
 static int check(const char *name, int16_t lhs, int16_t rhs, int16_t expected) {
   int16_t actual = q15_mul_nearest_even(lhs, rhs);
@@ -37,7 +39,10 @@ static int64_t update_reference(int64_t accumulator, int16_t lhs, int16_t rhs, i
 
   const uint64_t mask = (UINT64_C(1) << 40) - 1;
   uint64_t bits = (uint64_t)updated & mask;
-  return (bits & (UINT64_C(1) << 39)) ? (int64_t)(bits - (UINT64_C(1) << 40)) : (int64_t)bits;
+  __int128 signed_value = bits;
+  if (bits & (UINT64_C(1) << 39))
+    signed_value -= (__int128)1 << 40;
+  return (int64_t)signed_value;
 }
 
 static uint16_t export_floor_wrap_reference(int64_t accumulator) {
@@ -123,5 +128,13 @@ int main(void) {
     failed = 1;
   }
   failed |= check_repeated_updates();
+  if (q15_positive_saturation_endpoint() != -1) {
+    fprintf(stderr, "positive accumulator saturation endpoint mismatch\n");
+    failed = 1;
+  }
+  if (q15_negative_saturation_endpoint() != 0) {
+    fprintf(stderr, "negative accumulator saturation endpoint mismatch\n");
+    failed = 1;
+  }
   return failed;
 }

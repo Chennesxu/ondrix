@@ -38,7 +38,10 @@ static int64_t update_reference(int64_t accumulator, int16_t lhs, int16_t rhs, i
 
   const uint64_t mask = (UINT64_C(1) << 40) - 1;
   uint64_t bits = (uint64_t)updated & mask;
-  return (bits & (UINT64_C(1) << 39)) ? (int64_t)(bits - (UINT64_C(1) << 40)) : (int64_t)bits;
+  __int128 signed_value = bits;
+  if (bits & (UINT64_C(1) << 39))
+    signed_value -= (__int128)1 << 40;
+  return (int64_t)signed_value;
 }
 
 static uint16_t export_floor_wrap_reference(int64_t accumulator) {
