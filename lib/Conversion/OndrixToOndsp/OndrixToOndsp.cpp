@@ -6,6 +6,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -26,6 +27,25 @@ static Value createReductionZero(Location loc, Type resultType,
   if (isa<ondrix::ondsp::AccType>(resultType))
     return rewriter.create<ondrix::ondsp::AccZeroOp>(loc, resultType);
   return rewriter.create<arith::ConstantOp>(loc, resultType, rewriter.getZeroAttr(resultType));
+}
+
+static Value createScalarFpDot(Location loc, Value lhs, Value rhs, ondrix::ondsp::FpAttr numeric,
+                               ConversionPatternRewriter &rewriter) {
+  switch (numeric.getContract()) {
+  case ondrix::ondsp::FpContractMode::Off:
+    return rewriter.create<arith::MulFOp>(loc, lhs, rhs);
+  case ondrix::ondsp::FpContractMode::Fma: {
+    Value zero = rewriter.create<arith::ConstantOp>(loc, numeric.getFormat(),
+                                                    rewriter.getZeroAttr(numeric.getFormat()));
+    return rewriter.create<math::FmaOp>(loc, lhs, rhs, zero);
+  }
+  case ondrix::ondsp::FpContractMode::Fast: {
+    Value zero = rewriter.create<arith::ConstantOp>(loc, numeric.getFormat(),
+                                                    rewriter.getZeroAttr(numeric.getFormat()));
+    return rewriter.create<math::FmaOp>(loc, lhs, rhs, zero, arith::FastMathFlags::fast);
+  }
+  }
+  llvm_unreachable("unknown floating-point contract mode");
 }
 
 class FirOpLowering final : public OpConversionPattern<ondrix::ir::FirOp> {
@@ -57,7 +77,9 @@ public:
                                                           *op.getProduct());
         return success();
       }
-      rewriter.replaceOpWithNewOp<arith::MulFOp>(op, adaptor.getLhs(), adaptor.getRhs());
+      auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+      rewriter.replaceOp(
+          op, createScalarFpDot(op.getLoc(), adaptor.getLhs(), adaptor.getRhs(), fp, rewriter));
       return success();
     }
 
@@ -115,7 +137,7 @@ public:
         &getContext());
 
     ConversionTarget target(getContext());
-    target.addLegalDialect<arith::ArithDialect, ondrix::ondsp::OndspDialect>();
+    target.addLegalDialect<arith::ArithDialect, math::MathDialect, ondrix::ondsp::OndspDialect>();
     target.addIllegalDialect<ondrix::ir::OndrixDialect>();
 
     if (failed(applyPartialConversion(module, target, std::move(patterns))))

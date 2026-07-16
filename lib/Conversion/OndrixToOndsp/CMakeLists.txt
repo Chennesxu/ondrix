@@ -7,6 +7,7 @@ add_ondrix_library(OndrixToOndsp
   LINK_LIBS PUBLIC
   MLIRArithDialect
   MLIRIR
+  MLIRMathDialect
   MLIRPass
   MLIRSupport
   MLIRTransformUtils
