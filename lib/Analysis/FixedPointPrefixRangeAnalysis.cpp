@@ -111,18 +111,6 @@ bool intervalContains(const FixedPointRawInterval &container,
          container.upper.sext(width).sge(contained.upper.sext(width));
 }
 
-FailureOr<FixedPointRawInterval> addIntervals(const FixedPointRawInterval &lhs,
-                                              const FixedPointRawInterval &rhs) {
-  if (lhs.frac != rhs.frac)
-    return failure();
-  unsigned inputWidth = std::max(lhs.lower.getBitWidth(), rhs.lower.getBitWidth());
-  if (inputWidth == std::numeric_limits<unsigned>::max())
-    return failure();
-  unsigned width = inputWidth + 1;
-  return FixedPointRawInterval{lhs.lower.sext(width) + rhs.lower.sext(width),
-                               lhs.upper.sext(width) + rhs.upper.sext(width), lhs.frac};
-}
-
 bool isValidScheduleMapping(ArrayRef<CoefficientPair> pairs,
                             ArrayRef<PassthroughUpdate> passthroughs, unsigned coefficientWidth,
                             ArrayRef<FixedPointRawInterval> originalUpdates,
@@ -150,7 +138,7 @@ bool isValidScheduleMapping(ArrayRef<CoefficientPair> pairs,
         !usedReassociatedIndices.insert(pair.reassociatedIndex).second)
       return false;
 
-    FailureOr<FixedPointRawInterval> pairedInterval = addIntervals(
+    FailureOr<FixedPointRawInterval> pairedInterval = addFixedPointRawIntervals(
         originalUpdates[pair.originalLhsIndex], originalUpdates[pair.originalRhsIndex]);
     if (failed(pairedInterval) ||
         !intervalContains(reassociatedUpdates[pair.reassociatedIndex], *pairedInterval))
@@ -173,6 +161,39 @@ bool isValidScheduleMapping(ArrayRef<CoefficientPair> pairs,
 }
 
 } // namespace
+
+FailureOr<FixedPointRawInterval> computeSignedFullProductInterval(ondsp::FixedAttr numeric,
+                                                                  const APInt &coefficient) {
+  auto storage = dyn_cast<IntegerType>(numeric.getStorage());
+  if (!storage || !storage.isSignless() || numeric.getSignedness() != ondsp::Signedness::Signed ||
+      coefficient.getBitWidth() != storage.getWidth() ||
+      storage.getWidth() > std::numeric_limits<unsigned>::max() / 2 ||
+      numeric.getFrac() > std::numeric_limits<unsigned>::max() / 2)
+    return failure();
+
+  unsigned productWidth = storage.getWidth() * 2;
+  unsigned productFrac = numeric.getFrac() * 2;
+  APInt coefficientExtended = coefficient.sext(productWidth);
+  APInt first =
+      APInt::getSignedMinValue(storage.getWidth()).sext(productWidth) * coefficientExtended;
+  APInt second =
+      APInt::getSignedMaxValue(storage.getWidth()).sext(productWidth) * coefficientExtended;
+  if (first.sle(second))
+    return FixedPointRawInterval{std::move(first), std::move(second), productFrac};
+  return FixedPointRawInterval{std::move(second), std::move(first), productFrac};
+}
+
+FailureOr<FixedPointRawInterval> addFixedPointRawIntervals(const FixedPointRawInterval &lhs,
+                                                           const FixedPointRawInterval &rhs) {
+  if (!isValidInterval(lhs) || !isValidInterval(rhs) || lhs.frac != rhs.frac)
+    return failure();
+  unsigned inputWidth = std::max(lhs.lower.getBitWidth(), rhs.lower.getBitWidth());
+  if (inputWidth == std::numeric_limits<unsigned>::max())
+    return failure();
+  unsigned width = inputWidth + 1;
+  return FixedPointRawInterval{lhs.lower.sext(width) + rhs.lower.sext(width),
+                               lhs.upper.sext(width) + rhs.upper.sext(width), lhs.frac};
+}
 
 DistributivePairingPlan::DistributivePairingPlan(DistributivePairingPlan &&other)
     : subject(other.subject), semantics(std::move(other.semantics)), legality(other.legality),

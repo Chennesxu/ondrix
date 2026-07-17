@@ -12,7 +12,9 @@
 #include <cstdint>
 #include <type_traits>
 
+using ondrix::analysis::addFixedPointRawIntervals;
 using ondrix::analysis::CoefficientPair;
+using ondrix::analysis::computeSignedFullProductInterval;
 using ondrix::analysis::DistributivePairingPlan;
 using ondrix::analysis::FixedPointPrefixRangePlanner;
 using ondrix::analysis::FixedPointRawInterval;
@@ -39,6 +41,11 @@ FixedPointRawInterval exactRange(const llvm::APInt &value, unsigned frac) {
   return {value, value, frac};
 }
 
+bool equals(const FixedPointRawInterval &interval, const FixedPointRawInterval &expected) {
+  return interval.lower == expected.lower && interval.upper == expected.upper &&
+         interval.frac == expected.frac;
+}
+
 CoefficientPair coefficientPair(int64_t lhsIndex, int64_t rhsIndex, int64_t reassociatedIndex,
                                 int64_t lhsValue, int64_t rhsValue) {
   return {lhsIndex, rhsIndex, reassociatedIndex, signedValue(16, lhsValue),
@@ -49,6 +56,44 @@ static_assert(!std::is_copy_constructible_v<DistributivePairingPlan>);
 static_assert(!std::is_copy_assignable_v<DistributivePairingPlan>);
 static_assert(std::is_move_constructible_v<DistributivePairingPlan>);
 static_assert(std::is_move_assignable_v<DistributivePairingPlan>);
+
+bool testSignedFullProductIntervals() {
+  mlir::MLIRContext context;
+  context.getOrLoadDialect<ondrix::ondsp::OndspDialect>();
+  auto i16 = mlir::IntegerType::get(&context, 16);
+  auto i32 = mlir::IntegerType::get(&context, 32);
+  auto q15 = FixedAttr::get(&context, Signedness::Signed, i16, 15);
+  auto q31 = FixedAttr::get(&context, Signedness::Signed, i32, 31);
+  auto unsignedQ15 = FixedAttr::get(&context, Signedness::Unsigned, i16, 15);
+
+  auto q15Maximum = computeSignedFullProductInterval(q15, signedValue(16, INT16_MAX));
+  auto q15Minimum = computeSignedFullProductInterval(q15, signedValue(16, INT16_MIN));
+  auto q15Zero = computeSignedFullProductInterval(q15, signedValue(16, 0));
+  auto q31Minimum = computeSignedFullProductInterval(q31, signedValue(32, INT32_MIN));
+  auto unsignedProduct = computeSignedFullProductInterval(unsignedQ15, signedValue(16, INT16_MAX));
+  auto wrongCoefficientWidth = computeSignedFullProductInterval(q15, signedValue(32, 1));
+
+  return mlir::succeeded(q15Maximum) &&
+         equals(*q15Maximum, range(32, INT64_C(-1073709056), INT64_C(1073676289), 30)) &&
+         mlir::succeeded(q15Minimum) &&
+         equals(*q15Minimum, range(32, INT64_C(-1073709056), INT64_C(1073741824), 30)) &&
+         mlir::succeeded(q15Zero) && equals(*q15Zero, range(32, 0, 0, 30)) &&
+         mlir::succeeded(q31Minimum) &&
+         equals(*q31Minimum,
+                range(64, INT64_C(-4611686016279904256), INT64_C(4611686018427387904), 62)) &&
+         mlir::failed(unsignedProduct) && mlir::failed(wrongCoefficientWidth);
+}
+
+bool testRawIntervalAddition() {
+  FixedPointRawInterval lhs = range(32, INT32_MIN, INT32_MAX, 30);
+  FixedPointRawInterval rhs = range(32, INT32_MIN, INT32_MAX, 30);
+  auto sum = addFixedPointRawIntervals(lhs, rhs);
+  auto mismatchedFrac = addFixedPointRawIntervals(lhs, range(32, 0, 0, 29));
+  auto invalid = addFixedPointRawIntervals(range(32, 1, -1, 30), rhs);
+  return mlir::succeeded(sum) &&
+         equals(*sum, range(33, INT64_C(-4294967296), INT64_C(4294967294), 30)) &&
+         mlir::failed(mismatchedFrac) && mlir::failed(invalid);
+}
 
 bool testSuccessfulContainment() {
   FixedPointRawInterval initial = range(4, 0, 0);
@@ -326,7 +371,8 @@ bool testInvalidInputs() {
 } // namespace
 
 int main() {
-  if (!testSuccessfulContainment() || !testOriginalPrefixOverflow() ||
+  if (!testSignedFullProductIntervals() || !testRawIntervalAddition() ||
+      !testSuccessfulContainment() || !testOriginalPrefixOverflow() ||
       !testReassociatedPrefixOverflow() || !testNegativePrefixUnderflow() ||
       !testWiderAccumulator() || !testQ31I65Boundaries() || !testPairingPlanValidation() ||
       !testWrappingPairingPlan() || !testCompleteScheduleMapping() ||

@@ -23,6 +23,16 @@ struct FixedPointRawInterval {
   unsigned frac;
 };
 
+/// Computes the exact raw interval of a signed full-width product between any
+/// value in `numeric`'s storage domain and one constant raw coefficient.
+mlir::FailureOr<FixedPointRawInterval>
+computeSignedFullProductInterval(ondsp::FixedAttr numeric, const llvm::APInt &coefficient);
+
+/// Adds two independent raw intervals in a widened signed domain. Both inputs
+/// must use the same fractional position.
+mlir::FailureOr<FixedPointRawInterval> addFixedPointRawIntervals(const FixedPointRawInterval &lhs,
+                                                                 const FixedPointRawInterval &rhs);
+
 /// Schedule indices and raw coefficient values for one proposed distributive
 /// pair. Original indices address the complete source update schedule;
 /// `reassociatedIndex` addresses the complete candidate schedule.
