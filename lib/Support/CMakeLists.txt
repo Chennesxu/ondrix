@@ -16,6 +16,7 @@ add_ondrix_library(OndrixSupport
 
   DEPENDS
   MLIROndrixPassesIncGen
+  MLIROndrixTransformsPassesIncGen
 
   LINK_LIBS PUBLIC
   MLIRIR
@@ -30,5 +31,6 @@ add_ondrix_library(OndrixSupport
   OndspVectorNormalization
   OndspVectorization
   OndspToOrtumCore
+  OndrixSpecializeConstantFir
   OrtumCoreIR
   )
