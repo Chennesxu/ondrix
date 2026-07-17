@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --vectorize-ondsp-q15-memref-reduce="vector-width=4" --normalize-ondsp-q15-vector-reduce --convert-ondsp-fixed-to-scalar | FileCheck %s
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --vectorize-ondsp-fixed-memref-reduce="vector-width=4" --normalize-ondsp-fixed-vector-reduce --convert-ondsp-fixed-to-scalar | FileCheck %s
 
 func.func @fir_q15_vector(
     %input: memref<?xi16>, %coeffs: memref<?xi16>) -> i16 {

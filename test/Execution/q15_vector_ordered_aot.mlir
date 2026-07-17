@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --normalize-ondsp-q15-vector-reduce --convert-ondsp-fixed-to-scalar --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
+// RUN: ondrix-opt %s --normalize-ondsp-fixed-vector-reduce --convert-ondsp-fixed-to-scalar --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc %S/Inputs/q15_vector_ordered_aot.c %t.o -o %t

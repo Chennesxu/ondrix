@@ -1,5 +1,6 @@
 add_ondrix_library(OndrixConversionUtils
   ConversionLegality.cpp
+  FixedPointDomainUtils.cpp
   ReductionUtils.cpp
   ValueTypeConversions.cpp
 
@@ -10,4 +11,5 @@ add_ondrix_library(OndrixConversionUtils
   MLIRMemRefDialect
   MLIRSCFDialect
   MLIRTransformUtils
+  OndspIR
 )

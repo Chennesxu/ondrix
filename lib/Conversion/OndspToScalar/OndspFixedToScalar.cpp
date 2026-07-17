@@ -1,5 +1,6 @@
 #include "ondrix/Conversion/OndspToScalar/OndspToScalar.h"
 #include "ondrix/Conversion/Utils/ConversionLegality.h"
+#include "ondrix/Conversion/Utils/FixedPointDomainUtils.h"
 #include "ondrix/Conversion/Utils/ReductionUtils.h"
 #include "ondrix/Conversion/Utils/ValueTypeConversions.h"
 
@@ -40,20 +41,6 @@ static bool isSignedFixed(ondrix::ondsp::FixedAttr numeric, unsigned width, unsi
 static bool isSupportedAccumulator(ondrix::ondsp::AccType accumulator) {
   return ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator) ||
          ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator);
-}
-
-static bool isSupportedMacPolicy(ondrix::ondsp::AccType accumulator,
-                                 ondrix::ondsp::FixedAttr numeric,
-                                 ondrix::ondsp::ProductAttr product) {
-  if (ondrix::ondsp::isSignedQ15(numeric))
-    return ondrix::ondsp::isFullProduct(product) &&
-           ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator);
-  if (!ondrix::ondsp::isSignedQ31(numeric))
-    return false;
-  if (ondrix::ondsp::isFullProduct(product))
-    return ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator);
-  return ondrix::ondsp::isRawHighProduct(product) &&
-         ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator);
 }
 
 static bool isSupportedImport(ondrix::ondsp::AccType accumulator, ondrix::ondsp::FixedAttr source) {
@@ -357,17 +344,16 @@ public:
   LogicalResult matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
-    if (!isSupportedMacPolicy(accumulator, op.getNumeric(), op.getProduct()))
+    FailureOr<ondrix::conversion::SupportedFixedMacDomain> domain =
+        ondrix::conversion::getSupportedFixedScalarMacDomain(op, accumulator, op.getNumeric(),
+                                                             op.getProduct());
+    if (failed(domain))
       return op.emitOpError(
           "fixed scalar lowering supports Q15/full with i40/frac30, Q31/full with "
           "i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
 
-    FailureOr<ondrix::ondsp::ProductSemantics> semantics =
-        ondrix::ondsp::inferProductSemantics(op, op.getNumeric(), op.getProduct());
-    if (failed(semantics))
-      return failure();
     Value product = lowerSignedProduct(op.getLoc(), adaptor.getLhs(), adaptor.getRhs(),
-                                       op.getNumeric(), *semantics, rewriter);
+                                       op.getNumeric(), domain->product, rewriter);
     Value updated = lowerAccumulatorUpdate(op.getLoc(), adaptor.getAcc(), product,
                                            accumulator.getUpdateOverflow(), operation, rewriter);
     rewriter.replaceOp(op, updated);
@@ -409,16 +395,18 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = dyn_cast<ondrix::ondsp::AccType>(op.getInitial().getType());
     auto numeric = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
-    if (!accumulator || !numeric || !op.getProduct() ||
-        !isSupportedMacPolicy(accumulator, numeric, *op.getProduct()))
+    if (!accumulator || !numeric || !op.getProduct())
       return op.emitOpError(
           "fixed scalar reduction supports Q15/full with i40/frac30, Q31/full with "
           "i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
 
-    FailureOr<ondrix::ondsp::ProductSemantics> semantics =
-        ondrix::ondsp::inferProductSemantics(op, numeric, *op.getProduct());
-    if (failed(semantics))
-      return failure();
+    FailureOr<ondrix::conversion::SupportedFixedMacDomain> domain =
+        ondrix::conversion::getSupportedFixedScalarMacDomain(op, accumulator, numeric,
+                                                             *op.getProduct());
+    if (failed(domain))
+      return op.emitOpError(
+          "fixed scalar reduction supports Q15/full with i40/frac30, Q31/full with "
+          "i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
 
     FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
         ondrix::conversion::createRankOneMemRefReductionBounds(
@@ -435,7 +423,7 @@ public:
         [&](OpBuilder &builder, Location bodyLoc, Value iv, ValueRange iterArgs) {
           Value lhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), iv);
           Value rhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), iv);
-          Value product = lowerSignedProduct(bodyLoc, lhs, rhs, numeric, *semantics, builder);
+          Value product = lowerSignedProduct(bodyLoc, lhs, rhs, numeric, domain->product, builder);
           Value next = lowerAccumulatorUpdate(
               bodyLoc, iterArgs.front(), product, accumulator.getUpdateOverflow(),
               ondrix::fixedpoint::AccumulatorUpdateOperation::Add, builder);

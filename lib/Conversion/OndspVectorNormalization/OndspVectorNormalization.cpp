@@ -1,4 +1,5 @@
 #include "ondrix/Conversion/OndspVectorNormalization/OndspVectorNormalization.h"
+#include "ondrix/Conversion/Utils/FixedPointDomainUtils.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
@@ -11,8 +12,8 @@
 #include "mlir/Transforms/DialectConversion.h"
 
 namespace ondrix {
-#define GEN_PASS_DEF_NORMALIZEONDSPQ15VECTORREDUCE
-#define GEN_PASS_DEF_PARALLELIZEONDSPQ15WRAPVECTORREDUCE
+#define GEN_PASS_DEF_NORMALIZEONDSPFIXEDVECTORREDUCE
+#define GEN_PASS_DEF_PARALLELIZEONDSPFIXEDWRAPVECTORREDUCE
 #include "ondrix/Conversion/Passes.h.inc"
 } // namespace ondrix
 
@@ -27,9 +28,9 @@ static bool isSupportedVectorReduction(ondrix::ondsp::ReduceMacOp op) {
   auto rhsType = dyn_cast<VectorType>(op.getRhs().getType());
   return accumulator && numeric && op.getProduct() && lhsType && rhsType && !lhsType.isScalable() &&
          !rhsType.isScalable() && lhsType.getRank() == 1 && lhsType == rhsType &&
-         lhsType.getElementType().isSignlessInteger(16) &&
-         ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator) &&
-         ondrix::ondsp::isSignedQ15(numeric) && ondrix::ondsp::isFullProduct(*op.getProduct());
+         lhsType.getElementType() == numeric.getStorage() &&
+         ondrix::conversion::isSupportedFixedVectorMacDomain(accumulator, numeric,
+                                                             *op.getProduct());
 }
 
 static bool isParallelizableWrapReduction(ondrix::ondsp::ReduceMacOp op) {
@@ -38,6 +39,45 @@ static bool isParallelizableWrapReduction(ondrix::ondsp::ReduceMacOp op) {
   auto accumulator = cast<ondrix::ondsp::AccType>(op.getInitial().getType());
   return ondrix::ondsp::classifyReductionReassociation(accumulator.getUpdateOverflow()) ==
          ondrix::ondsp::ReductionReassociationSafety::ExactModulo;
+}
+
+struct LoweredVectorTerms {
+  Value terms;
+  ondrix::ondsp::FixedAttr numeric;
+};
+
+static FailureOr<LoweredVectorTerms> lowerVectorTerms(ondrix::ondsp::ReduceMacOp op, Value lhs,
+                                                      Value rhs,
+                                                      ConversionPatternRewriter &rewriter) {
+  auto accumulator = cast<ondrix::ondsp::AccType>(op.getInitial().getType());
+  auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+  FailureOr<ondrix::conversion::SupportedFixedMacDomain> domain =
+      ondrix::conversion::getSupportedFixedVectorMacDomain(op, accumulator, numeric,
+                                                           *op.getProduct());
+  if (failed(domain))
+    return failure();
+
+  auto vectorType = cast<VectorType>(op.getLhs().getType());
+  auto fullProductVectorType = VectorType::get(vectorType.getShape(), domain->fullProductStorage);
+  Value extendedLhs = rewriter.create<arith::ExtSIOp>(op.getLoc(), fullProductVectorType, lhs);
+  Value extendedRhs = rewriter.create<arith::ExtSIOp>(op.getLoc(), fullProductVectorType, rhs);
+  Value fullProducts = rewriter.create<arith::MulIOp>(op.getLoc(), extendedLhs, extendedRhs);
+
+  Value terms = fullProducts;
+  if (domain->product.selection == ondrix::ondsp::ProductSelection::HighRaw) {
+    IntegerAttr shiftValue =
+        rewriter.getIntegerAttr(domain->fullProductStorage, domain->operandStorage.getWidth());
+    auto shiftValues = SplatElementsAttr::get(fullProductVectorType, shiftValue);
+    Value shift =
+        rewriter.create<arith::ConstantOp>(op.getLoc(), fullProductVectorType, shiftValues);
+    Value shifted = rewriter.create<arith::ShRSIOp>(op.getLoc(), fullProducts, shift);
+    auto termVectorType = VectorType::get(vectorType.getShape(), domain->termStorage);
+    terms = rewriter.create<arith::TruncIOp>(op.getLoc(), termVectorType, shifted);
+  }
+
+  auto termNumeric = ondrix::ondsp::FixedAttr::get(rewriter.getContext(), domain->signedness,
+                                                   domain->termStorage, domain->product.frac);
+  return LoweredVectorTerms{terms, termNumeric};
 }
 
 class WrapReduceMacOpParallelization final
@@ -50,19 +90,22 @@ public:
     if (!isParallelizableWrapReduction(op))
       return failure();
 
-    auto vectorType = cast<VectorType>(op.getLhs().getType());
-    auto productVectorType = VectorType::get(vectorType.getShape(), rewriter.getI32Type());
-    Value lhs = rewriter.create<arith::ExtSIOp>(op.getLoc(), productVectorType, adaptor.getLhs());
-    Value rhs = rewriter.create<arith::ExtSIOp>(op.getLoc(), productVectorType, adaptor.getRhs());
-    Value products = rewriter.create<arith::MulIOp>(op.getLoc(), lhs, rhs);
+    FailureOr<LoweredVectorTerms> lowered =
+        lowerVectorTerms(op, adaptor.getLhs(), adaptor.getRhs(), rewriter);
+    if (failed(lowered))
+      return failure();
 
-    auto wideVectorType = VectorType::get(vectorType.getShape(), rewriter.getI64Type());
-    Value wideProducts = rewriter.create<arith::ExtSIOp>(op.getLoc(), wideVectorType, products);
-    // An i64 modular sum preserves the low 40 bits required by the wrapping accumulator.
+    auto termVectorType = cast<VectorType>(lowered->terms.getType());
+    auto wideVectorType = VectorType::get(termVectorType.getShape(), rewriter.getI64Type());
+    Value wideTerms = lowered->terms;
+    if (termVectorType.getElementType() != rewriter.getI64Type())
+      wideTerms = rewriter.create<arith::ExtSIOp>(op.getLoc(), wideVectorType, lowered->terms);
+    // Modular i64 addition preserves every low bit of the supported i40/i64 accumulators.
     Value partialSum =
-        rewriter.create<vector::ReductionOp>(op.getLoc(), vector::CombiningKind::ADD, wideProducts);
-    auto partialNumeric = ondrix::ondsp::FixedAttr::get(
-        rewriter.getContext(), ondrix::ondsp::Signedness::Signed, rewriter.getI64Type(), 30);
+        rewriter.create<vector::ReductionOp>(op.getLoc(), vector::CombiningKind::ADD, wideTerms);
+    auto partialNumeric =
+        ondrix::ondsp::FixedAttr::get(rewriter.getContext(), lowered->numeric.getSignedness(),
+                                      rewriter.getI64Type(), lowered->numeric.getFrac());
 
     rewriter.replaceOpWithNewOp<ondrix::ondsp::AccAddTermOp>(
         op, op.getResult().getType(), adaptor.getInitial(), partialSum, partialNumeric);
@@ -79,20 +122,18 @@ public:
     if (!isSupportedVectorReduction(op))
       return failure();
 
-    auto vectorType = cast<VectorType>(op.getLhs().getType());
-    auto productVectorType = VectorType::get(vectorType.getShape(), rewriter.getI32Type());
-    Value lhs = rewriter.create<arith::ExtSIOp>(op.getLoc(), productVectorType, adaptor.getLhs());
-    Value rhs = rewriter.create<arith::ExtSIOp>(op.getLoc(), productVectorType, adaptor.getRhs());
-    Value products = rewriter.create<arith::MulIOp>(op.getLoc(), lhs, rhs);
-    auto productNumeric = ondrix::ondsp::FixedAttr::get(
-        rewriter.getContext(), ondrix::ondsp::Signedness::Signed, rewriter.getI32Type(), 30);
+    FailureOr<LoweredVectorTerms> lowered =
+        lowerVectorTerms(op, adaptor.getLhs(), adaptor.getRhs(), rewriter);
+    if (failed(lowered))
+      return failure();
 
+    auto vectorType = cast<VectorType>(lowered->terms.getType());
     Value accumulator = adaptor.getInitial();
     // Preserve the universal left-fold order; saturating updates are not generally associative.
     for (int64_t lane = 0; lane < vectorType.getNumElements(); ++lane) {
-      Value product = rewriter.create<vector::ExtractOp>(op.getLoc(), products, lane);
+      Value term = rewriter.create<vector::ExtractOp>(op.getLoc(), lowered->terms, lane);
       accumulator = rewriter.create<ondrix::ondsp::AccAddTermOp>(
-          op.getLoc(), accumulator.getType(), accumulator, product, productNumeric);
+          op.getLoc(), accumulator.getType(), accumulator, term, lowered->numeric);
     }
 
     rewriter.replaceOp(op, accumulator);
@@ -100,11 +141,12 @@ public:
   }
 };
 
-class NormalizeOndspQ15VectorReducePass final
-    : public ondrix::impl::NormalizeOndspQ15VectorReduceBase<NormalizeOndspQ15VectorReducePass> {
+class NormalizeOndspFixedVectorReducePass final
+    : public ondrix::impl::NormalizeOndspFixedVectorReduceBase<
+          NormalizeOndspFixedVectorReducePass> {
 public:
-  using ondrix::impl::NormalizeOndspQ15VectorReduceBase<
-      NormalizeOndspQ15VectorReducePass>::NormalizeOndspQ15VectorReduceBase;
+  using ondrix::impl::NormalizeOndspFixedVectorReduceBase<
+      NormalizeOndspFixedVectorReducePass>::NormalizeOndspFixedVectorReduceBase;
 
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
@@ -121,12 +163,12 @@ public:
   }
 };
 
-class ParallelizeOndspQ15WrapVectorReducePass final
-    : public ondrix::impl::ParallelizeOndspQ15WrapVectorReduceBase<
-          ParallelizeOndspQ15WrapVectorReducePass> {
+class ParallelizeOndspFixedWrapVectorReducePass final
+    : public ondrix::impl::ParallelizeOndspFixedWrapVectorReduceBase<
+          ParallelizeOndspFixedWrapVectorReducePass> {
 public:
-  using ondrix::impl::ParallelizeOndspQ15WrapVectorReduceBase<
-      ParallelizeOndspQ15WrapVectorReducePass>::ParallelizeOndspQ15WrapVectorReduceBase;
+  using ondrix::impl::ParallelizeOndspFixedWrapVectorReduceBase<
+      ParallelizeOndspFixedWrapVectorReducePass>::ParallelizeOndspFixedWrapVectorReduceBase;
 
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
@@ -145,10 +187,10 @@ public:
 
 } // namespace
 
-std::unique_ptr<Pass> ondrix::createNormalizeOndspQ15VectorReducePass() {
-  return std::make_unique<NormalizeOndspQ15VectorReducePass>();
+std::unique_ptr<Pass> ondrix::createNormalizeOndspFixedVectorReducePass() {
+  return std::make_unique<NormalizeOndspFixedVectorReducePass>();
 }
 
-std::unique_ptr<Pass> ondrix::createParallelizeOndspQ15WrapVectorReducePass() {
-  return std::make_unique<ParallelizeOndspQ15WrapVectorReducePass>();
+std::unique_ptr<Pass> ondrix::createParallelizeOndspFixedWrapVectorReducePass() {
+  return std::make_unique<ParallelizeOndspFixedWrapVectorReducePass>();
 }

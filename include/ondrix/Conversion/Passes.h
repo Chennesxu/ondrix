@@ -7,17 +7,19 @@
 
 namespace ondrix {
 
+#define GEN_PASS_DECL
+#include "ondrix/Conversion/Passes.h.inc"
+
 std::unique_ptr<mlir::Pass> createConvertOndrixToOndspPass();
 std::unique_ptr<mlir::Pass> createConvertOrtumCoreToOndspEmulationPass();
 std::unique_ptr<mlir::Pass> createConvertOndspFixedToScalarPass();
 std::unique_ptr<mlir::Pass> createConvertOndspToOrtumCorePass();
 std::unique_ptr<mlir::Pass> createLowerOndspF32ReduceToScalarPass();
-std::unique_ptr<mlir::Pass> createNormalizeOndspQ15VectorReducePass();
-std::unique_ptr<mlir::Pass> createParallelizeOndspQ15WrapVectorReducePass();
-std::unique_ptr<mlir::Pass> createVectorizeOndspQ15MemRefReducePass();
-
-#define GEN_PASS_DECL
-#include "ondrix/Conversion/Passes.h.inc"
+std::unique_ptr<mlir::Pass> createNormalizeOndspFixedVectorReducePass();
+std::unique_ptr<mlir::Pass> createParallelizeOndspFixedWrapVectorReducePass();
+std::unique_ptr<mlir::Pass> createVectorizeOndspFixedMemRefReducePass();
+std::unique_ptr<mlir::Pass>
+createVectorizeOndspFixedMemRefReducePass(const VectorizeOndspFixedMemRefReduceOptions &options);
 
 #define GEN_PASS_REGISTRATION
 #include "ondrix/Conversion/Passes.h.inc"

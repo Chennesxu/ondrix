@@ -1,4 +1,4 @@
-// RUN: not ondrix-opt %s --vectorize-ondsp-q15-memref-reduce="vector-width=4" 2>&1 | FileCheck %s
+// RUN: not ondrix-opt %s --vectorize-ondsp-fixed-memref-reduce="vector-width=4" 2>&1 | FileCheck %s
 
 func.func @out_of_range_memory_space(
     %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,

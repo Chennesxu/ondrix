@@ -1,5 +1,5 @@
-// RUN: ondrix-opt %s --normalize-ondsp-q15-vector-reduce | FileCheck %s
-// RUN: not ondrix-opt %s --normalize-ondsp-q15-vector-reduce --convert-ondsp-fixed-to-scalar 2>&1 | FileCheck %s --check-prefix=FINAL-ERROR
+// RUN: ondrix-opt %s --normalize-ondsp-fixed-vector-reduce | FileCheck %s
+// RUN: not ondrix-opt %s --normalize-ondsp-fixed-vector-reduce --convert-ondsp-fixed-to-scalar 2>&1 | FileCheck %s --check-prefix=FINAL-ERROR
 
 // FINAL-ERROR: failed to legalize operation 'ondsp.reduce_mac'
 
@@ -38,18 +38,4 @@ func.func @preserve_unsupported_fp_vector(
 }
 
 // CHECK-LABEL: func.func @preserve_unsupported_fp_vector
-// CHECK: ondsp.reduce_mac
-
-func.func @preserve_unsupported_q31_vector(
-    %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
-    %lhs: vector<4xi32>, %rhs: vector<4xi32>)
-    -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
-  %result = ondsp.reduce_mac %initial, %lhs, %rhs {
-    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<high_raw>
-  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, vector<4xi32>, vector<4xi32>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
-  return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
-}
-
-// CHECK-LABEL: func.func @preserve_unsupported_q31_vector
 // CHECK: ondsp.reduce_mac

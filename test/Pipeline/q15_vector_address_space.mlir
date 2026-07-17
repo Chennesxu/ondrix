@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --vectorize-ondsp-q15-memref-reduce="vector-width=4" --normalize-ondsp-q15-vector-reduce --convert-ondsp-fixed-to-scalar --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | FileCheck %s
+// RUN: ondrix-opt %s --vectorize-ondsp-fixed-memref-reduce="vector-width=4" --normalize-ondsp-fixed-vector-reduce --convert-ondsp-fixed-to-scalar --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | FileCheck %s
 
 func.func @reduce_as1(
     %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,

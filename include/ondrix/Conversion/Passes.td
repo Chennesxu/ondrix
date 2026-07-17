@@ -82,11 +82,12 @@ def ConvertOndspFixedToScalar
     and Q31 signed raw-high product with i40/frac30 accumulation. The pass
     converts accumulator types structurally across functions and control flow
     and fails if any unsupported ondsp operation or accumulator domain remains.
-    Ondrix intent operations must be lowered first. Q15 memref reductions may be chunked by
-    `vectorize-ondsp-q15-memref-reduce`. Proven exact-modulo reductions may
-    then be handled by `parallelize-ondsp-q15-wrap-vector-reduce`; remaining
+    Ondrix intent operations must be lowered first. Supported fixed-point
+    memref reductions may be chunked by `vectorize-ondsp-fixed-memref-reduce`.
+    Proven exact-modulo reductions may then be handled by
+    `parallelize-ondsp-fixed-wrap-vector-reduce`; remaining
     fixed-length vector reductions must be normalized by
-    `normalize-ondsp-q15-vector-reduce` before this final conversion.
+    `normalize-ondsp-fixed-vector-reduce` before this final conversion.
   }];
   let constructor = "ondrix::createConvertOndspFixedToScalarPass()";
   let dependentDialects = [
@@ -99,16 +100,18 @@ def ConvertOndspFixedToScalar
   ];
 }
 
-def NormalizeOndspQ15VectorReduce
-    : Pass<"normalize-ondsp-q15-vector-reduce", "::mlir::ModuleOp"> {
-  let summary = "Normalize fixed-length Q15 vector reductions without reassociation";
+def NormalizeOndspFixedVectorReduce
+    : Pass<"normalize-ondsp-fixed-vector-reduce", "::mlir::ModuleOp"> {
+  let summary = "Normalize supported fixed-point vector reductions";
   let description = [{
-    Normalize supported fixed-length Q15 vector reductions to vector full-product
-    arithmetic followed by explicit accumulator updates in increasing lane
-    order. The pass does not form a tree reduction and therefore preserves the
-    ordered reduction contract for saturating accumulators.
+    Normalize supported fixed-length Q15 and Q31 vector reductions to exact
+    vector product arithmetic followed by explicit accumulator updates in
+    increasing lane order. The pass does not form a tree reduction and
+    therefore preserves the ordered reduction contract for saturating
+    accumulators. Q31 raw-high products retain their explicit signed high-half
+    bit selection.
   }];
-  let constructor = "ondrix::createNormalizeOndspQ15VectorReducePass()";
+  let constructor = "ondrix::createNormalizeOndspFixedVectorReducePass()";
   let dependentDialects = [
     "ondrix::ondsp::OndspDialect",
     "mlir::arith::ArithDialect",
@@ -116,17 +119,18 @@ def NormalizeOndspQ15VectorReduce
   ];
 }
 
-def ParallelizeOndspQ15WrapVectorReduce
-    : Pass<"parallelize-ondsp-q15-wrap-vector-reduce", "::mlir::ModuleOp"> {
-  let summary = "Parallelize exact-modulo Q15 vector reductions";
+def ParallelizeOndspFixedWrapVectorReduce
+    : Pass<"parallelize-ondsp-fixed-wrap-vector-reduce", "::mlir::ModuleOp"> {
+  let summary = "Parallelize supported exact-modulo fixed-point vector reductions";
   let description = [{
-    Reassociate a fixed-length signed Q15 vector reduction only when the
-    accumulator update policy is exact modulo wrap. Products are computed
-    exactly in vector i32 lanes, widened to i64, horizontally added, and then
-    applied as one explicit accumulator update. Saturating reductions and
+    Reassociate a supported fixed-length signed Q15 or Q31 vector reduction
+    only when the accumulator update policy is exact modulo wrap. Product terms
+    are represented in i64 lanes, horizontally added modulo 2^64, and then
+    applied as one explicit accumulator update. This preserves the low bits of
+    every currently supported accumulator domain. Saturating reductions and
     unsupported policies remain unchanged for ordered normalization.
   }];
-  let constructor = "ondrix::createParallelizeOndspQ15WrapVectorReducePass()";
+  let constructor = "ondrix::createParallelizeOndspFixedWrapVectorReducePass()";
   let dependentDialects = [
     "ondrix::ondsp::OndspDialect",
     "mlir::arith::ArithDialect",
@@ -134,21 +138,22 @@ def ParallelizeOndspQ15WrapVectorReduce
   ];
 }
 
-def VectorizeOndspQ15MemRefReduce
-    : Pass<"vectorize-ondsp-q15-memref-reduce", "::mlir::ModuleOp"> {
-  let summary = "Vectorize unit-stride Q15 memref reductions without reassociation";
+def VectorizeOndspFixedMemRefReduce
+    : Pass<"vectorize-ondsp-fixed-memref-reduce", "::mlir::ModuleOp"> {
+  let summary = "Chunk supported unit-stride fixed-point memref reductions";
   let description = [{
-    Split supported rank-1 Q15 memref reductions into fixed-width vector
-    chunks and a scalar tail. Vector chunks retain an ordered ondsp.reduce_mac
-    operation for subsequent normalization, and the scalar tail uses ondsp.mac.
-    The transformation preserves increasing-index accumulator update order.
+    Split supported rank-1 Q15 and Q31 memref reductions into fixed-width
+    vector chunks and a scalar tail. Vector chunks retain an ordered
+    ondsp.reduce_mac operation for subsequent normalization, and the scalar
+    tail uses ondsp.mac. The transformation preserves increasing-index
+    accumulator update order.
     Default and representable nonnegative integer LLVM memory spaces are
     supported. Out-of-range integer spaces are rejected before LLVM lowering.
     Memory spaces that require a target-specific type-attribute conversion
     remain unchanged, as do memrefs without a statically known unit minor
     stride.
   }];
-  let constructor = "ondrix::createVectorizeOndspQ15MemRefReducePass()";
+  let constructor = "ondrix::createVectorizeOndspFixedMemRefReducePass()";
   let dependentDialects = [
     "ondrix::ondsp::OndspDialect",
     "mlir::arith::ArithDialect",
@@ -159,7 +164,7 @@ def VectorizeOndspQ15MemRefReduce
   ];
   let options = [
     Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
-           "Number of fixed Q15 lanes per vector chunk">,
+           "Number of fixed-point lanes per vector chunk">,
   ];
 }
 

@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --vectorize-ondsp-q15-memref-reduce="vector-width=4" | FileCheck %s
+// RUN: ondrix-opt %s --vectorize-ondsp-fixed-memref-reduce="vector-width=4" | FileCheck %s
 
 func.func @static_tail(
     %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
@@ -61,21 +61,6 @@ func.func @strided_fallback(
 }
 
 // CHECK-LABEL: func.func @strided_fallback
-// CHECK: ondsp.reduce_mac
-// CHECK-NOT: vector.load
-
-func.func @unsupported_q31(
-    %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
-    %lhs: memref<8xi32>, %rhs: memref<8xi32>)
-    -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
-  %result = ondsp.reduce_mac %initial, %lhs, %rhs {
-    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<high_raw>
-  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<8xi32>, memref<8xi32>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
-  return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
-}
-
-// CHECK-LABEL: func.func @unsupported_q31
 // CHECK: ondsp.reduce_mac
 // CHECK-NOT: vector.load
 

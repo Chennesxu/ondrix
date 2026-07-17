@@ -1,4 +1,5 @@
 #include "ondrix/Conversion/OndspVectorization/OndspVectorization.h"
+#include "ondrix/Conversion/Utils/FixedPointDomainUtils.h"
 #include "ondrix/Conversion/Utils/ReductionUtils.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
@@ -19,7 +20,7 @@
 #include <limits>
 
 namespace ondrix {
-#define GEN_PASS_DEF_VECTORIZEONDSPQ15MEMREFREDUCE
+#define GEN_PASS_DEF_VECTORIZEONDSPFIXEDMEMREFREDUCE
 #include "ondrix/Conversion/Passes.h.inc"
 } // namespace ondrix
 
@@ -59,12 +60,12 @@ bool isSupportedMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
   auto rhsType = dyn_cast<MemRefType>(op.getRhs().getType());
   return accumulator && numeric && op.getProduct() && lhsType && rhsType &&
          lhsType.getRank() == 1 && rhsType.getRank() == 1 &&
-         lhsType.getElementType().isSignlessInteger(16) &&
-         rhsType.getElementType().isSignlessInteger(16) && hasLLVMCompatibleMemorySpace(lhsType) &&
-         hasLLVMCompatibleMemorySpace(rhsType) && isLastMemrefDimUnitStride(lhsType) &&
-         isLastMemrefDimUnitStride(rhsType) &&
-         ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator) &&
-         ondrix::ondsp::isSignedQ15(numeric) && ondrix::ondsp::isFullProduct(*op.getProduct());
+         lhsType.getElementType() == numeric.getStorage() &&
+         rhsType.getElementType() == numeric.getStorage() &&
+         hasLLVMCompatibleMemorySpace(lhsType) && hasLLVMCompatibleMemorySpace(rhsType) &&
+         isLastMemrefDimUnitStride(lhsType) && isLastMemrefDimUnitStride(rhsType) &&
+         ondrix::conversion::isSupportedFixedVectorMacDomain(accumulator, numeric,
+                                                             *op.getProduct());
 }
 
 class ReduceMacOpVectorization final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
@@ -80,11 +81,12 @@ public:
     if (!isSupportedMemRefReduction(op))
       return failure();
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    auto elementType = cast<IntegerType>(numeric.getStorage());
 
     FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
         ondrix::conversion::createRankOneMemRefReductionBounds(
-            op, adaptor.getLhs(), adaptor.getRhs(), rewriter.getI16Type(),
-            "Q15 memref vectorization", rewriter);
+            op, adaptor.getLhs(), adaptor.getRhs(), elementType, "fixed-point memref vectorization",
+            rewriter);
     if (failed(bounds))
       return failure();
 
@@ -92,7 +94,7 @@ public:
     Value vectorStep = rewriter.create<arith::ConstantIndexOp>(loc, vectorWidth);
     Value remainder = rewriter.create<arith::RemUIOp>(loc, bounds->upperBound, vectorStep);
     Value vectorEnd = rewriter.create<arith::SubIOp>(loc, bounds->upperBound, remainder);
-    auto vectorType = VectorType::get({vectorWidth}, rewriter.getI16Type());
+    auto vectorType = VectorType::get({vectorWidth}, elementType);
 
     auto vectorLoop = rewriter.create<scf::ForOp>(
         loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{adaptor.getInitial()},
@@ -125,11 +127,12 @@ private:
   int64_t vectorWidth;
 };
 
-class VectorizeOndspQ15MemRefReducePass final
-    : public ondrix::impl::VectorizeOndspQ15MemRefReduceBase<VectorizeOndspQ15MemRefReducePass> {
+class VectorizeOndspFixedMemRefReducePass final
+    : public ondrix::impl::VectorizeOndspFixedMemRefReduceBase<
+          VectorizeOndspFixedMemRefReducePass> {
 public:
-  using ondrix::impl::VectorizeOndspQ15MemRefReduceBase<
-      VectorizeOndspQ15MemRefReducePass>::VectorizeOndspQ15MemRefReduceBase;
+  using ondrix::impl::VectorizeOndspFixedMemRefReduceBase<
+      VectorizeOndspFixedMemRefReducePass>::VectorizeOndspFixedMemRefReduceBase;
 
   void runOnOperation() override {
     if (vectorWidth <= 0) {
@@ -155,6 +158,11 @@ public:
 
 } // namespace
 
-std::unique_ptr<Pass> ondrix::createVectorizeOndspQ15MemRefReducePass() {
-  return std::make_unique<VectorizeOndspQ15MemRefReducePass>();
+std::unique_ptr<Pass> ondrix::createVectorizeOndspFixedMemRefReducePass() {
+  return std::make_unique<VectorizeOndspFixedMemRefReducePass>();
+}
+
+std::unique_ptr<Pass> ondrix::createVectorizeOndspFixedMemRefReducePass(
+    const VectorizeOndspFixedMemRefReduceOptions &options) {
+  return std::make_unique<VectorizeOndspFixedMemRefReducePass>(options);
 }
