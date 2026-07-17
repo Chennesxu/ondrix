@@ -21,6 +21,8 @@ tool_dirs = [config.ondrix_tools_dir, config.llvm_tools_dir]
 tools = [
     "ondrix-opt",
     "ondrix-translate",
+    "ondrix-constant-sequence-analysis-test",
+    "ondrix-fixed-point-prefix-range-analysis-test",
     "ondrix-fixed-point-semantics-test",
     "ondrix-ondsp-semantics-test",
     "ondrix-ortumcore-target-profile-test",

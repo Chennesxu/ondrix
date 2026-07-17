@@ -110,7 +110,7 @@ and overflow contract. Transformations must distinguish:
 - bit-exact equivalence;
 - exact fixed-width modular equivalence;
 - equivalence requiring a no-overflow proof;
-- explicitly permitted bounded-error equivalence;
+- bounded-error transforms only after an explicit error-bound contract exists;
 - unsupported or illegal transformations.
 
 Proof facts are compiler-produced analysis results, not unchecked rewrite

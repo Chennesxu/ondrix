@@ -102,6 +102,26 @@ exact when product selection, extension, and truncation points are unchanged.
 Saturating updates preserve lane order unless range analysis proves that every
 source and transformed intermediate sum remains in range.
 
+## Transform Equivalence
+
+Ondsp records transform exactness (`exact` or `illegal`) separately from its
+justification (algebraic identity, fixed-width modulo arithmetic, or a
+no-overflow proof). The decision is a compiler result rather than a source
+attribute or an unchecked rewrite hint. Bounded-error transforms remain
+unsupported until an explicit error-bound object and composition rules are
+defined.
+
+For a proven-no-overflow reassociation, the range analysis must establish that
+every prefix interval in both the original update order and the proposed
+update order fits the signed accumulator range. Merely proving that the final
+mathematical sum fits is insufficient. The current planner can produce a
+subject-bound decision from APInt intervals and a complete mapping of equal
+coefficient pairs and unchanged updates across the source and candidate
+schedules. It proves range containment only; the Ondsp semantic classifier
+separately establishes the distributive identity.
+Constant FIR specialization does not yet consume such a plan, so saturating
+symmetric pairing remains disabled.
+
 ## Import and Export
 
 `ondsp.acc_import` is an exact value-preserving conversion into the
