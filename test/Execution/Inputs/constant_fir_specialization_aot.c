@@ -6,14 +6,19 @@ extern int16_t sparse_q15_saturate(int16_t *allocated, int16_t *aligned, int64_t
                                    int64_t size, int64_t stride);
 extern int16_t symmetric_q15_wrap(int16_t *allocated, int16_t *aligned, int64_t offset,
                                   int64_t size, int64_t stride);
+extern int16_t symmetric_q15_saturate(int16_t *allocated, int16_t *aligned, int64_t offset,
+                                      int64_t size, int64_t stride);
 extern int16_t symmetric_q15_strided_wrap(int16_t *allocated, int16_t *aligned, int64_t offset,
                                           int64_t size, int64_t stride);
 extern int32_t symmetric_q31_wrap(int32_t *allocated, int32_t *aligned, int64_t offset,
                                   int64_t size, int64_t stride);
+extern int32_t symmetric_q31_saturate(int32_t *allocated, int32_t *aligned, int64_t offset,
+                                      int64_t size, int64_t stride);
 
 static const int16_t sparse_q15_coefficients[] = {32767, 0, INT16_MIN, 0, 12345};
 static const int16_t symmetric_q15_coefficients[] = {32767, INT16_MIN, 12345, INT16_MIN, 32767};
 static const int32_t symmetric_q31_coefficients[] = {INT32_MAX, INT32_MIN, INT32_MIN, INT32_MAX};
+static const int32_t symmetric_q31_safe_coefficients[] = {1, 2, 2, 1};
 
 static int64_t wrap_signed(__int128 value, unsigned width) {
   const unsigned __int128 mask = ((unsigned __int128)1 << width) - 1;
@@ -51,12 +56,11 @@ static uint16_t reference_q15(const int16_t *input, const int16_t *coefficients,
   return (uint16_t)floor_shift(accumulator, 15);
 }
 
-static uint32_t reference_q31(const int32_t *input) {
+static uint32_t reference_q31(const int32_t *input, const int32_t *coefficients, int saturate) {
   int64_t accumulator = 0;
   for (unsigned index = 0; index < 4; ++index) {
-    __int128 update =
-        (__int128)accumulator + (__int128)input[index] * symmetric_q31_coefficients[index];
-    accumulator = wrap_signed(update, 64);
+    __int128 update = (__int128)accumulator + (__int128)input[index] * coefficients[index];
+    accumulator = saturate ? saturate_signed(update, 64) : wrap_signed(update, 64);
   }
   return (uint32_t)floor_shift(accumulator, 31);
 }
@@ -72,12 +76,14 @@ static int check_q15(const char *name,
   return 1;
 }
 
-static int check_q31(int32_t *input) {
-  uint32_t actual = (uint32_t)symmetric_q31_wrap(input, input, 0, 4, 1);
-  uint32_t expected = reference_q31(input);
+static int check_q31(const char *name,
+                     int32_t (*kernel)(int32_t *, int32_t *, int64_t, int64_t, int64_t),
+                     int32_t *input, const int32_t *coefficients, int saturate) {
+  uint32_t actual = (uint32_t)kernel(input, input, 0, 4, 1);
+  uint32_t expected = reference_q31(input, coefficients, saturate);
   if (actual == expected)
     return 0;
-  fprintf(stderr, "symmetric Q31: expected 0x%08x, got 0x%08x\n", expected, actual);
+  fprintf(stderr, "%s: expected 0x%08x, got 0x%08x\n", name, expected, actual);
   return 1;
 }
 
@@ -114,9 +120,15 @@ int main(void) {
         check_q15("sparse Q15", sparse_q15_saturate, q15_inputs[index], sparse_q15_coefficients, 1);
     failed |= check_q15("symmetric Q15", symmetric_q15_wrap, q15_inputs[index],
                         symmetric_q15_coefficients, 0);
+    failed |= check_q15("saturating symmetric Q15", symmetric_q15_saturate, q15_inputs[index],
+                        symmetric_q15_coefficients, 1);
   }
-  for (unsigned index = 0; index < sizeof(q31_inputs) / sizeof(q31_inputs[0]); ++index)
-    failed |= check_q31(q31_inputs[index]);
+  for (unsigned index = 0; index < sizeof(q31_inputs) / sizeof(q31_inputs[0]); ++index) {
+    failed |= check_q31("symmetric Q31", symmetric_q31_wrap, q31_inputs[index],
+                        symmetric_q31_coefficients, 0);
+    failed |= check_q31("saturating symmetric Q31", symmetric_q31_saturate, q31_inputs[index],
+                        symmetric_q31_safe_coefficients, 1);
+  }
   failed |= check_strided_q15();
   return failed;
 }

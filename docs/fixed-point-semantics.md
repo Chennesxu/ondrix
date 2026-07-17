@@ -119,8 +119,13 @@ subject-bound decision from APInt intervals and a complete mapping of equal
 coefficient pairs and unchanged updates across the source and candidate
 schedules. It proves range containment only; the Ondsp semantic classifier
 separately establishes the distributive identity.
-Constant FIR specialization does not yet consume such a plan, so saturating
-symmetric pairing remains disabled.
+
+Constant FIR specialization consumes this plan for signed full-product
+symmetry. It derives each tap interval from the complete signed input-storage
+range and the immutable raw coefficient, then validates both schedules before
+rewriting. Saturating pairing remains disabled when any prefix may overflow,
+for raw-high products, and while zero-tap elimination would need to be composed
+with the pairing proof.
 
 ## Import and Export
 

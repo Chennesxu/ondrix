@@ -12,6 +12,7 @@ add_ondrix_library(OndrixSpecializeConstantFir
   MLIRPass
   MLIRTransformUtils
   OndrixConstantSequenceAnalysis
+  OndrixFixedPointPrefixRangeAnalysis
   OndrixIR
   OndspIR
 )

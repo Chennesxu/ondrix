@@ -7,6 +7,7 @@ memref.global "private" constant @coeff_symmetric_center_q15 : memref<5xi16> = d
 memref.global "private" constant @coeff_symmetric_nonzero_q15 : memref<4xi16> = dense<[1, 2, 2, 1]>
 memref.global "private" constant @coeff_zero_q15 : memref<3xi16> = dense<0>
 memref.global "private" constant @coeff_symmetric_q31 : memref<4xi32> = dense<[1, 2, 2, 1]>
+memref.global "private" constant @coeff_symmetric_extreme_q31 : memref<2xi32> = dense<[-2147483648, -2147483648]>
 memref.global "private" constant @coeff_sparse_q31 : memref<4xi32> = dense<[1, 0, 2, 0]>
 memref.global "private" constant @coeff_oversized_q15 : memref<65xi16> = dense<0>
 memref.global "private" @coeff_mutable_q15 : memref<4xi16> = dense<[1, 2, 2, 1]>
@@ -147,7 +148,29 @@ func.func @symmetric_q15_saturate(
 }
 
 // CHECK-LABEL: func.func @symmetric_q15_saturate
-// CHECK: ondrix.fir
+// CHECK-NOT: ondrix.fir
+// CHECK-COUNT-2: ondsp.acc_add_term
+// CHECK-NOT: ondsp.mac
+
+func.func @symmetric_q15_nonzero_center_saturate(
+    %input: memref<5xi16>)
+    -> !ondsp.acc<storage = i40, frac = 30, signed,
+                  update_overflow = saturate> {
+  %coeffs = memref.get_global @coeff_symmetric_center_q15 : memref<5xi16>
+  %result = ondrix.fir %input, %coeffs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (memref<5xi16>, memref<5xi16>)
+      -> !ondsp.acc<storage = i40, frac = 30, signed,
+                    update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @symmetric_q15_nonzero_center_saturate
+// CHECK-NOT: ondrix.fir
+// CHECK-COUNT-2: ondsp.acc_add_term
+// CHECK: ondsp.mac
 
 func.func @symmetric_sparse_q15_saturate(
     %input: memref<5xi16>)
@@ -185,6 +208,44 @@ func.func @symmetric_q31_high_raw(
 }
 
 // CHECK-LABEL: func.func @symmetric_q31_high_raw
+// CHECK: ondrix.fir
+
+func.func @symmetric_q31_saturate_safe(
+    %input: memref<4xi32>)
+    -> !ondsp.acc<storage = i64, frac = 62, signed,
+                  update_overflow = saturate> {
+  %coeffs = memref.get_global @coeff_symmetric_q31 : memref<4xi32>
+  %result = ondrix.fir %input, %coeffs {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<full>
+  } : (memref<4xi32>, memref<4xi32>)
+      -> !ondsp.acc<storage = i64, frac = 62, signed,
+                    update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i64, frac = 62, signed,
+                              update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @symmetric_q31_saturate_safe
+// CHECK-NOT: ondrix.fir
+// CHECK-COUNT-2: ondsp.acc_add_term
+// CHECK-NOT: ondsp.mac
+
+func.func @symmetric_q31_saturate_overflow(
+    %input: memref<2xi32>)
+    -> !ondsp.acc<storage = i64, frac = 62, signed,
+                  update_overflow = saturate> {
+  %coeffs = memref.get_global @coeff_symmetric_extreme_q31 : memref<2xi32>
+  %result = ondrix.fir %input, %coeffs {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<full>
+  } : (memref<2xi32>, memref<2xi32>)
+      -> !ondsp.acc<storage = i64, frac = 62, signed,
+                    update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i64, frac = 62, signed,
+                              update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @symmetric_q31_saturate_overflow
 // CHECK: ondrix.fir
 
 func.func @sparse_q31_high_raw(
