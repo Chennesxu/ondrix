@@ -8,6 +8,7 @@ memref.global "private" constant @coeff_symmetric_nonzero_q15 : memref<4xi16> = 
 memref.global "private" constant @coeff_zero_q15 : memref<3xi16> = dense<0>
 memref.global "private" constant @coeff_symmetric_q31 : memref<4xi32> = dense<[1, 2, 2, 1]>
 memref.global "private" constant @coeff_sparse_q31 : memref<4xi32> = dense<[1, 0, 2, 0]>
+memref.global "private" constant @coeff_oversized_q15 : memref<65xi16> = dense<0>
 memref.global "private" @coeff_mutable_q15 : memref<4xi16> = dense<[1, 2, 2, 1]>
 
 func.func @sparse_q15(
@@ -27,6 +28,7 @@ func.func @sparse_q15(
 
 // CHECK-LABEL: func.func @sparse_q15
 // CHECK-NOT: ondrix.fir
+// CHECK-NOT: memref.get_global
 // CHECK: ondsp.acc_zero
 // CHECK: memref.load
 // CHECK: ondsp.mac
@@ -224,6 +226,42 @@ func.func @mutable_q15(
 }
 
 // CHECK-LABEL: func.func @mutable_q15
+// CHECK: ondrix.fir
+
+func.func @dynamic_input_q15(
+    %input: memref<?xi16>)
+    -> !ondsp.acc<storage = i40, frac = 30, signed,
+                  update_overflow = wrap> {
+  %coeffs = memref.get_global @coeff_symmetric_nonzero_q15 : memref<4xi16>
+  %result = ondrix.fir %input, %coeffs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (memref<?xi16>, memref<4xi16>)
+      -> !ondsp.acc<storage = i40, frac = 30, signed,
+                    update_overflow = wrap>
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = wrap>
+}
+
+// CHECK-LABEL: func.func @dynamic_input_q15
+// CHECK: ondrix.fir
+
+func.func @oversized_q15(
+    %input: memref<65xi16>)
+    -> !ondsp.acc<storage = i40, frac = 30, signed,
+                  update_overflow = saturate> {
+  %coeffs = memref.get_global @coeff_oversized_q15 : memref<65xi16>
+  %result = ondrix.fir %input, %coeffs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (memref<65xi16>, memref<65xi16>)
+      -> !ondsp.acc<storage = i40, frac = 30, signed,
+                    update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @oversized_q15
 // CHECK: ondrix.fir
 
 func.func @unrelated_arithmetic(%value: i32) -> i32 {

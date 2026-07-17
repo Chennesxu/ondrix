@@ -14,10 +14,11 @@ def Ondrix_FirOp
   let description = [{
     `ondrix.fir` computes one output sample by pairing `input[i]` with
     `coeffs[i]` in increasing index order. Both operands are rank-1 windows
-    with equal runtime length. Window construction, signal boundaries, and
-    streaming state are outside this operation. A fixed-point FIR produces an
-    explicit `!ondsp.acc` result; destination rounding and overflow are modeled
-    by a subsequent `ondsp.acc_export`.
+    with equal runtime length. Accumulation starts from numeric zero. Window
+    construction, signal boundaries, and streaming state are outside this
+    operation. A fixed-point FIR produces an explicit `!ondsp.acc` result;
+    destination rounding and overflow are modeled by a subsequent
+    `ondsp.acc_export`.
   }];
   let arguments = (ins AnyType:$input, AnyType:$coeffs, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);

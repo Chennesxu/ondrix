@@ -35,7 +35,8 @@ struct ConstantCoefficientFacts {
   bool symmetric = true;
 };
 
-FailureOr<ConstantCoefficientFacts> getConstantCoefficientFacts(ondrix::ir::FirOp op) {
+FailureOr<ConstantCoefficientFacts> getConstantCoefficientFacts(ondrix::ir::FirOp op,
+                                                                int64_t maxTaps) {
   auto getGlobal = op.getCoeffs().getDefiningOp<memref::GetGlobalOp>();
   if (!getGlobal)
     return failure();
@@ -49,8 +50,12 @@ FailureOr<ConstantCoefficientFacts> getConstantCoefficientFacts(ondrix::ir::FirO
   if (!initializer || initializer.getType().getRank() != 1)
     return failure();
 
+  int64_t elementCount = initializer.getNumElements();
+  if (elementCount > maxTaps)
+    return failure();
+
   ConstantCoefficientFacts facts;
-  facts.values.reserve(initializer.getNumElements());
+  facts.values.reserve(elementCount);
   for (const llvm::APInt &value : initializer.getValues<llvm::APInt>()) {
     facts.hasZero |= value.isZero();
     facts.values.push_back(value);
@@ -132,10 +137,8 @@ public:
         coefficientType.isDynamicDim(0))
       return failure();
 
-    FailureOr<ConstantCoefficientFacts> facts = getConstantCoefficientFacts(op);
+    FailureOr<ConstantCoefficientFacts> facts = getConstantCoefficientFacts(op, maxTaps);
     if (failed(facts) || static_cast<int64_t>(facts->values.size()) != inputType.getDimSize(0))
-      return failure();
-    if (static_cast<int64_t>(facts->values.size()) > maxTaps)
       return failure();
 
     FailureOr<ondrix::ondsp::ProductSemantics> productSemantics =
@@ -177,7 +180,10 @@ public:
       }
     }
 
+    auto getGlobal = op.getCoeffs().getDefiningOp<memref::GetGlobalOp>();
     rewriter.replaceOp(op, current);
+    if (getGlobal && getGlobal->use_empty())
+      rewriter.eraseOp(getGlobal);
     return success();
   }
 
