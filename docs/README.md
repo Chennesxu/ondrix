@@ -5,6 +5,7 @@ stable-candidate Ondrix behavior.
 
 - [Current implementation status](status.md)
 - [Fixed-point semantics](fixed-point-semantics.md)
+- [Frontend semantic boundary](frontend-semantics.md)
 
 Internal plans, private target material, review notes, and task history are not
 part of this directory.
