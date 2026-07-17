@@ -66,6 +66,31 @@ ReductionReassociationSafety classifyReductionReassociation(OverflowMode updateO
   return ReductionReassociationSafety::MustPreserveOrder;
 }
 
+TransformEquivalence classifyZeroProductElimination(Attribute numeric) {
+  return isa<FixedAttr>(numeric) ? TransformEquivalence::BitExact : TransformEquivalence::Illegal;
+}
+
+TransformEquivalence classifyDistributiveProductPairing(FixedAttr numeric,
+                                                        const ProductSemantics &product,
+                                                        AccType accumulator,
+                                                        ReductionRangeProof rangeProof) {
+  if (numeric.getSignedness() != Signedness::Signed ||
+      product.selection != ProductSelection::Full ||
+      accumulator.getSignedness() != numeric.getSignedness() ||
+      accumulator.getFrac() != product.frac)
+    return TransformEquivalence::Illegal;
+
+  switch (classifyReductionReassociation(accumulator.getUpdateOverflow(), rangeProof)) {
+  case ReductionReassociationSafety::ExactModulo:
+    return TransformEquivalence::ExactModulo;
+  case ReductionReassociationSafety::ProvenNoOverflow:
+    return TransformEquivalence::ProvenNoOverflow;
+  case ReductionReassociationSafety::MustPreserveOrder:
+    return TransformEquivalence::Illegal;
+  }
+  return TransformEquivalence::Illegal;
+}
+
 bool isSignedQ15(FixedAttr numeric) {
   auto storage = dyn_cast<IntegerType>(numeric.getStorage());
   return storage && storage.isSignless() && storage.getWidth() == 16 && numeric.getFrac() == 15 &&

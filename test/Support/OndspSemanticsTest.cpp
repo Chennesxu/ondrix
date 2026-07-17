@@ -9,7 +9,9 @@
 #include "mlir/IR/MLIRContext.h"
 
 using ondrix::ondsp::AccType;
+using ondrix::ondsp::classifyDistributiveProductPairing;
 using ondrix::ondsp::classifyReductionReassociation;
+using ondrix::ondsp::classifyZeroProductElimination;
 using ondrix::ondsp::FixedAttr;
 using ondrix::ondsp::inferProductSemantics;
 using ondrix::ondsp::isFullProduct;
@@ -25,6 +27,7 @@ using ondrix::ondsp::ProductSemantics;
 using ondrix::ondsp::ReductionRangeProof;
 using ondrix::ondsp::ReductionReassociationSafety;
 using ondrix::ondsp::Signedness;
+using ondrix::ondsp::TransformEquivalence;
 
 namespace {
 
@@ -104,11 +107,36 @@ bool testProductSemantics() {
          q31HighRaw->selection == ProductSelection::HighRaw;
 }
 
+bool testTransformEquivalence() {
+  mlir::MLIRContext context;
+  context.getOrLoadDialect<ondrix::ondsp::OndspDialect>();
+  auto i16 = mlir::IntegerType::get(&context, 16);
+  auto i40 = mlir::IntegerType::get(&context, 40);
+  auto q15 = FixedAttr::get(&context, Signedness::Signed, i16, 15);
+  auto full = ProductSemantics{32, 30, ProductSelection::Full};
+  auto highRaw = ProductSemantics{16, 14, ProductSelection::HighRaw};
+  auto wrapping = AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Wrap);
+  auto saturating = AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Saturate);
+
+  bool passed = true;
+  passed &= classifyZeroProductElimination(q15) == TransformEquivalence::BitExact;
+  passed &=
+      classifyDistributiveProductPairing(q15, full, wrapping) == TransformEquivalence::ExactModulo;
+  passed &=
+      classifyDistributiveProductPairing(q15, full, saturating) == TransformEquivalence::Illegal;
+  passed &= classifyDistributiveProductPairing(
+                q15, full, saturating, ReductionRangeProof::AllOriginalAndReassociatedSumsFit) ==
+            TransformEquivalence::ProvenNoOverflow;
+  passed &=
+      classifyDistributiveProductPairing(q15, highRaw, wrapping) == TransformEquivalence::Illegal;
+  return passed;
+}
+
 } // namespace
 
 int main() {
   if (!testReductionReassociationSafety() || !testCommonNumericPolicies() ||
-      !testProductSemantics()) {
+      !testProductSemantics() || !testTransformEquivalence()) {
     llvm::errs() << "ondsp reassociation semantics: FAIL\n";
     return 1;
   }

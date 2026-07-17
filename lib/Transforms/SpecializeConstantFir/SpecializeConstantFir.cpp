@@ -1,5 +1,6 @@
 #include "ondrix/Transforms/Passes.h"
 
+#include "ondrix/Analysis/ConstantSequenceAnalysis.h"
 #include "ondrix/Dialect/ondrix/IR/OndrixDialect.h"
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
@@ -29,14 +30,8 @@ using namespace mlir;
 
 namespace {
 
-struct ConstantCoefficientFacts {
-  SmallVector<llvm::APInt> values;
-  bool hasZero = false;
-  bool symmetric = true;
-};
-
-FailureOr<ConstantCoefficientFacts> getConstantCoefficientFacts(ondrix::ir::FirOp op,
-                                                                int64_t maxTaps) {
+FailureOr<ondrix::ConstantSequenceFacts> getConstantCoefficientFacts(ondrix::ir::FirOp op,
+                                                                     int64_t maxTaps) {
   auto getGlobal = op.getCoeffs().getDefiningOp<memref::GetGlobalOp>();
   if (!getGlobal)
     return failure();
@@ -50,24 +45,7 @@ FailureOr<ConstantCoefficientFacts> getConstantCoefficientFacts(ondrix::ir::FirO
   if (!initializer || initializer.getType().getRank() != 1)
     return failure();
 
-  int64_t elementCount = initializer.getNumElements();
-  if (elementCount > maxTaps)
-    return failure();
-
-  ConstantCoefficientFacts facts;
-  facts.values.reserve(elementCount);
-  for (const llvm::APInt &value : initializer.getValues<llvm::APInt>()) {
-    facts.hasZero |= value.isZero();
-    facts.values.push_back(value);
-  }
-
-  for (size_t index = 0, end = facts.values.size(); index < end / 2; ++index) {
-    if (facts.values[index] != facts.values[end - index - 1]) {
-      facts.symmetric = false;
-      break;
-    }
-  }
-  return facts;
+  return ondrix::analyzeConstantIntegerSequence(initializer, maxTaps);
 }
 
 Value createIndex(Location loc, int64_t index, PatternRewriter &rewriter) {
@@ -137,8 +115,8 @@ public:
         coefficientType.isDynamicDim(0))
       return failure();
 
-    FailureOr<ConstantCoefficientFacts> facts = getConstantCoefficientFacts(op, maxTaps);
-    if (failed(facts) || static_cast<int64_t>(facts->values.size()) != inputType.getDimSize(0))
+    FailureOr<ondrix::ConstantSequenceFacts> facts = getConstantCoefficientFacts(op, maxTaps);
+    if (failed(facts) || facts->getElementCount() != inputType.getDimSize(0))
       return failure();
 
     FailureOr<ondrix::ondsp::ProductSemantics> productSemantics =
@@ -146,22 +124,24 @@ public:
     if (failed(productSemantics))
       return failure();
 
-    bool canPairSymmetricTaps =
-        facts->values.size() >= 2 && facts->symmetric &&
-        numeric.getSignedness() == ondrix::ondsp::Signedness::Signed &&
-        ondrix::ondsp::isFullProduct(*op.getProduct()) &&
-        productSemantics->rawWidth < std::numeric_limits<unsigned>::max() &&
-        ondrix::ondsp::classifyReductionReassociation(accumulator.getUpdateOverflow()) ==
-            ondrix::ondsp::ReductionReassociationSafety::ExactModulo;
-    if (!facts->hasZero && !canPairSymmetricTaps)
+    bool canEliminateZeroTaps =
+        facts->hasZero() && ondrix::ondsp::classifyZeroProductElimination(numeric) ==
+                                ondrix::ondsp::TransformEquivalence::BitExact;
+    bool canPairSymmetricTaps = facts->getElementCount() >= 2 && facts->isSymmetric() &&
+                                productSemantics->rawWidth < std::numeric_limits<unsigned>::max() &&
+                                ondrix::ondsp::classifyDistributiveProductPairing(
+                                    numeric, *productSemantics, accumulator) ==
+                                    ondrix::ondsp::TransformEquivalence::ExactModulo;
+    if (!canEliminateZeroTaps && !canPairSymmetricTaps)
       return failure();
 
     Value current =
         rewriter.create<ondrix::ondsp::AccZeroOp>(op.getLoc(), op.getResult().getType());
     if (canPairSymmetricTaps) {
-      size_t length = facts->values.size();
+      llvm::ArrayRef<llvm::APInt> values = facts->getValues();
+      size_t length = values.size();
       for (size_t index = 0; index < length / 2; ++index) {
-        const llvm::APInt &coefficient = facts->values[index];
+        const llvm::APInt &coefficient = values[index];
         if (coefficient.isZero())
           continue;
         current = createSymmetricPairUpdate(op, current, index, length - index - 1, coefficient,
@@ -169,11 +149,11 @@ public:
       }
       if (length % 2 != 0) {
         size_t center = length / 2;
-        if (!facts->values[center].isZero())
-          current = createMacUpdate(op, current, center, facts->values[center], numeric, rewriter);
+        if (!values[center].isZero())
+          current = createMacUpdate(op, current, center, values[center], numeric, rewriter);
       }
     } else {
-      for (const auto &[index, coefficient] : llvm::enumerate(facts->values)) {
+      for (const auto &[index, coefficient] : llvm::enumerate(facts->getValues())) {
         if (coefficient.isZero())
           continue;
         current = createMacUpdate(op, current, index, coefficient, numeric, rewriter);

@@ -10,11 +10,20 @@ set(ONDRIX_TEST_DEPENDS
   count
   llc
   not
+  ondrix-constant-sequence-analysis-test
   ondrix-fixed-point-semantics-test
   ondrix-ondsp-semantics-test
   ondrix-ortumcore-target-profile-test
   ondrix-opt
   ondrix-translate
+)
+
+add_llvm_executable(ondrix-constant-sequence-analysis-test EXCLUDE_FROM_ALL
+  Support/ConstantSequenceAnalysisTest.cpp
+)
+llvm_update_compile_flags(ondrix-constant-sequence-analysis-test)
+target_link_libraries(ondrix-constant-sequence-analysis-test PRIVATE
+  OndrixConstantSequenceAnalysis
 )
 
 add_llvm_executable(ondrix-fixed-point-semantics-test EXCLUDE_FROM_ALL

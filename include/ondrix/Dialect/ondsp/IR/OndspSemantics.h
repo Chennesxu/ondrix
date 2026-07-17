@@ -32,6 +32,15 @@ enum class ReductionReassociationSafety {
   ProvenNoOverflow,
 };
 
+/// Classifies an algorithm transform under the explicit numeric contract.
+enum class TransformEquivalence {
+  BitExact,
+  ExactModulo,
+  ProvenNoOverflow,
+  BoundedError,
+  Illegal,
+};
+
 /// Verifies whether a fixed or floating-point policy carries the required
 /// product-selection attribute.
 mlir::LogicalResult verifyProductPolicy(mlir::Operation *op, mlir::Attribute numeric,
@@ -47,6 +56,18 @@ mlir::FailureOr<ProductSemantics> inferProductSemantics(mlir::Operation *op, Fix
 ReductionReassociationSafety
 classifyReductionReassociation(OverflowMode updateOverflow,
                                ReductionRangeProof rangeProof = ReductionRangeProof::None);
+
+/// Returns whether removing a multiplication by zero preserves the numeric
+/// behavior. Floating-point zero products are not removable because NaN,
+/// infinity, and signed zero remain observable.
+TransformEquivalence classifyZeroProductElimination(mlir::Attribute numeric);
+
+/// Classifies `h*x + h*y -> h*(x+y)` after coefficient equality has been
+/// proven. The caller remains responsible for using widened intermediates.
+TransformEquivalence
+classifyDistributiveProductPairing(FixedAttr numeric, const ProductSemantics &product,
+                                   AccType accumulator,
+                                   ReductionRangeProof rangeProof = ReductionRangeProof::None);
 
 /// Returns whether a policy denotes signed Q15 in signless i16 storage.
 bool isSignedQ15(FixedAttr numeric);
