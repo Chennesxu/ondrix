@@ -119,19 +119,19 @@ public:
     if (failed(facts) || facts->getElementCount() != inputType.getDimSize(0))
       return failure();
 
-    FailureOr<ondrix::ondsp::ProductSemantics> productSemantics =
-        ondrix::ondsp::inferProductSemantics(op, numeric, *op.getProduct());
-    if (failed(productSemantics))
+    FailureOr<ondrix::ondsp::DistributivePairingSemantics> pairingSemantics =
+        ondrix::ondsp::classifyDistributiveProductPairing(op, numeric, *op.getProduct(),
+                                                          accumulator);
+    if (failed(pairingSemantics))
       return failure();
 
     bool canEliminateZeroTaps =
-        facts->hasZero() && ondrix::ondsp::classifyZeroProductElimination(numeric) ==
-                                ondrix::ondsp::TransformEquivalence::BitExact;
-    bool canPairSymmetricTaps = facts->getElementCount() >= 2 && facts->isSymmetric() &&
-                                productSemantics->rawWidth < std::numeric_limits<unsigned>::max() &&
-                                ondrix::ondsp::classifyDistributiveProductPairing(
-                                    numeric, *productSemantics, accumulator) ==
-                                    ondrix::ondsp::TransformEquivalence::ExactModulo;
+        facts->hasZero() && ondrix::ondsp::classifyZeroProductElimination(numeric).isExact();
+    bool canPairSymmetricTaps =
+        facts->getElementCount() >= 2 && facts->isSymmetric() &&
+        pairingSemantics->product.rawWidth < std::numeric_limits<unsigned>::max() &&
+        pairingSemantics->legalityWithoutRangeProof.isExactWith(
+            ondrix::ondsp::TransformJustification::FixedWidthModulo);
     if (!canEliminateZeroTaps && !canPairSymmetricTaps)
       return failure();
 
@@ -145,7 +145,7 @@ public:
         if (coefficient.isZero())
           continue;
         current = createSymmetricPairUpdate(op, current, index, length - index - 1, coefficient,
-                                            numeric, *productSemantics, rewriter);
+                                            numeric, pairingSemantics->product, rewriter);
       }
       if (length % 2 != 0) {
         size_t center = length / 2;

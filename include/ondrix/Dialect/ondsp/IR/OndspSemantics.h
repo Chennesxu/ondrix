@@ -17,28 +17,56 @@ struct ProductSemantics {
   ProductSelection selection;
 };
 
-/// Describes the proof available to a reduction transform. The stronger case
-/// covers every intermediate sum in both the source order and the proposed
-/// reassociation, not merely the final mathematical sum.
-enum class ReductionRangeProof {
-  None,
-  AllOriginalAndReassociatedSumsFit,
-};
-
 /// Classifies whether an ordered fixed-point reduction may be reassociated.
 enum class ReductionReassociationSafety {
   MustPreserveOrder,
   ExactModulo,
-  ProvenNoOverflow,
 };
 
-/// Classifies an algorithm transform under the explicit numeric contract.
-enum class TransformEquivalence {
-  BitExact,
-  ExactModulo,
-  ProvenNoOverflow,
-  BoundedError,
+/// Whether a transform preserves the declared numeric behavior.
+enum class TransformExactness {
+  Exact,
   Illegal,
+};
+
+/// Evidence used to justify a transform classification.
+enum class TransformJustification {
+  None,
+  AlgebraicIdentity,
+  FixedWidthModulo,
+  NoOverflowProof,
+};
+
+/// Separates transform exactness from the evidence establishing it.
+class TransformLegality {
+public:
+  static TransformLegality getAlgebraicIdentity();
+  static TransformLegality getFixedWidthModulo();
+  static TransformLegality getNoOverflowProof();
+  static TransformLegality getIllegal();
+
+  bool isLegal() const { return exactness != TransformExactness::Illegal; }
+  bool isExact() const { return exactness == TransformExactness::Exact; }
+  bool isExactWith(TransformJustification expected) const {
+    return isExact() && justification == expected;
+  }
+  TransformExactness getExactness() const { return exactness; }
+  TransformJustification getJustification() const { return justification; }
+
+private:
+  TransformLegality(TransformExactness exactness, TransformJustification justification)
+      : exactness(exactness), justification(justification) {}
+
+  TransformExactness exactness;
+  TransformJustification justification;
+};
+
+/// Numeric decision for the distributive pairing identity. Product semantics
+/// are derived from the actual attributes rather than accepted from a caller.
+struct DistributivePairingSemantics {
+  ProductSemantics product;
+  TransformLegality legalityWithoutRangeProof;
+  bool exactBeforeAccumulatorOverflow;
 };
 
 /// Verifies whether a fixed or floating-point policy carries the required
@@ -51,23 +79,20 @@ mlir::LogicalResult verifyProductPolicy(mlir::Operation *op, mlir::Attribute num
 mlir::FailureOr<ProductSemantics> inferProductSemantics(mlir::Operation *op, FixedAttr numeric,
                                                         ProductAttr product);
 
-/// Returns the target-independent reassociation rule for an accumulator
-/// update policy and an optional range-analysis proof.
-ReductionReassociationSafety
-classifyReductionReassociation(OverflowMode updateOverflow,
-                               ReductionRangeProof rangeProof = ReductionRangeProof::None);
+/// Returns the target-independent reassociation rule implied solely by the
+/// accumulator update policy.
+ReductionReassociationSafety classifyReductionReassociation(OverflowMode updateOverflow);
 
 /// Returns whether removing a multiplication by zero preserves the numeric
 /// behavior. Floating-point zero products are not removable because NaN,
 /// infinity, and signed zero remain observable.
-TransformEquivalence classifyZeroProductElimination(mlir::Attribute numeric);
+TransformLegality classifyZeroProductElimination(mlir::Attribute numeric);
 
 /// Classifies `h*x + h*y -> h*(x+y)` after coefficient equality has been
 /// proven. The caller remains responsible for using widened intermediates.
-TransformEquivalence
-classifyDistributiveProductPairing(FixedAttr numeric, const ProductSemantics &product,
-                                   AccType accumulator,
-                                   ReductionRangeProof rangeProof = ReductionRangeProof::None);
+mlir::FailureOr<DistributivePairingSemantics>
+classifyDistributiveProductPairing(mlir::Operation *op, FixedAttr numeric, ProductAttr product,
+                                   AccType accumulator);
 
 /// Returns whether a policy denotes signed Q15 in signless i16 storage.
 bool isSignedQ15(FixedAttr numeric);

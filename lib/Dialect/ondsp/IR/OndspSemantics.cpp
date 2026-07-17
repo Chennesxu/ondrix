@@ -57,38 +57,49 @@ FailureOr<ProductSemantics> inferProductSemantics(Operation *op, FixedAttr numer
   return op->emitOpError("unsupported fixed product selection");
 }
 
-ReductionReassociationSafety classifyReductionReassociation(OverflowMode updateOverflow,
-                                                            ReductionRangeProof rangeProof) {
-  if (rangeProof == ReductionRangeProof::AllOriginalAndReassociatedSumsFit)
-    return ReductionReassociationSafety::ProvenNoOverflow;
+ReductionReassociationSafety classifyReductionReassociation(OverflowMode updateOverflow) {
   if (updateOverflow == OverflowMode::Wrap)
     return ReductionReassociationSafety::ExactModulo;
   return ReductionReassociationSafety::MustPreserveOrder;
 }
 
-TransformEquivalence classifyZeroProductElimination(Attribute numeric) {
-  return isa<FixedAttr>(numeric) ? TransformEquivalence::BitExact : TransformEquivalence::Illegal;
+TransformLegality TransformLegality::getAlgebraicIdentity() {
+  return TransformLegality(TransformExactness::Exact, TransformJustification::AlgebraicIdentity);
 }
 
-TransformEquivalence classifyDistributiveProductPairing(FixedAttr numeric,
-                                                        const ProductSemantics &product,
-                                                        AccType accumulator,
-                                                        ReductionRangeProof rangeProof) {
-  if (numeric.getSignedness() != Signedness::Signed ||
-      product.selection != ProductSelection::Full ||
-      accumulator.getSignedness() != numeric.getSignedness() ||
-      accumulator.getFrac() != product.frac)
-    return TransformEquivalence::Illegal;
+TransformLegality TransformLegality::getFixedWidthModulo() {
+  return TransformLegality(TransformExactness::Exact, TransformJustification::FixedWidthModulo);
+}
 
-  switch (classifyReductionReassociation(accumulator.getUpdateOverflow(), rangeProof)) {
-  case ReductionReassociationSafety::ExactModulo:
-    return TransformEquivalence::ExactModulo;
-  case ReductionReassociationSafety::ProvenNoOverflow:
-    return TransformEquivalence::ProvenNoOverflow;
-  case ReductionReassociationSafety::MustPreserveOrder:
-    return TransformEquivalence::Illegal;
-  }
-  return TransformEquivalence::Illegal;
+TransformLegality TransformLegality::getNoOverflowProof() {
+  return TransformLegality(TransformExactness::Exact, TransformJustification::NoOverflowProof);
+}
+
+TransformLegality TransformLegality::getIllegal() {
+  return TransformLegality(TransformExactness::Illegal, TransformJustification::None);
+}
+
+TransformLegality classifyZeroProductElimination(Attribute numeric) {
+  return isa<FixedAttr>(numeric) ? TransformLegality::getAlgebraicIdentity()
+                                 : TransformLegality::getIllegal();
+}
+
+FailureOr<DistributivePairingSemantics> classifyDistributiveProductPairing(Operation *op,
+                                                                           FixedAttr numeric,
+                                                                           ProductAttr product,
+                                                                           AccType accumulator) {
+  FailureOr<ProductSemantics> productSemantics = inferProductSemantics(op, numeric, product);
+  if (failed(productSemantics))
+    return failure();
+
+  bool exactBeforeAccumulatorOverflow = numeric.getSignedness() == Signedness::Signed &&
+                                        productSemantics->selection == ProductSelection::Full &&
+                                        accumulator.getSignedness() == numeric.getSignedness() &&
+                                        accumulator.getFrac() == productSemantics->frac;
+  TransformLegality legality = TransformLegality::getIllegal();
+  if (exactBeforeAccumulatorOverflow && accumulator.getUpdateOverflow() == OverflowMode::Wrap)
+    legality = TransformLegality::getFixedWidthModulo();
+  return DistributivePairingSemantics{*productSemantics, legality, exactBeforeAccumulatorOverflow};
 }
 
 bool isSignedQ15(FixedAttr numeric) {

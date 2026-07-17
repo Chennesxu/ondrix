@@ -24,10 +24,9 @@ using ondrix::ondsp::OverflowMode;
 using ondrix::ondsp::ProductAttr;
 using ondrix::ondsp::ProductSelection;
 using ondrix::ondsp::ProductSemantics;
-using ondrix::ondsp::ReductionRangeProof;
 using ondrix::ondsp::ReductionReassociationSafety;
 using ondrix::ondsp::Signedness;
-using ondrix::ondsp::TransformEquivalence;
+using ondrix::ondsp::TransformJustification;
 
 namespace {
 
@@ -37,12 +36,6 @@ bool testReductionReassociationSafety() {
             ReductionReassociationSafety::ExactModulo;
   passed &= classifyReductionReassociation(OverflowMode::Saturate) ==
             ReductionReassociationSafety::MustPreserveOrder;
-  passed &= classifyReductionReassociation(
-                OverflowMode::Saturate, ReductionRangeProof::AllOriginalAndReassociatedSumsFit) ==
-            ReductionReassociationSafety::ProvenNoOverflow;
-  passed &= classifyReductionReassociation(
-                OverflowMode::Wrap, ReductionRangeProof::AllOriginalAndReassociatedSumsFit) ==
-            ReductionReassociationSafety::ProvenNoOverflow;
   return passed;
 }
 
@@ -107,28 +100,39 @@ bool testProductSemantics() {
          q31HighRaw->selection == ProductSelection::HighRaw;
 }
 
-bool testTransformEquivalence() {
+bool testTransformLegality() {
   mlir::MLIRContext context;
   context.getOrLoadDialect<ondrix::ondsp::OndspDialect>();
+  mlir::OwningOpRef<mlir::ModuleOp> module =
+      mlir::ModuleOp::create(mlir::UnknownLoc::get(&context));
   auto i16 = mlir::IntegerType::get(&context, 16);
   auto i40 = mlir::IntegerType::get(&context, 40);
   auto q15 = FixedAttr::get(&context, Signedness::Signed, i16, 15);
-  auto full = ProductSemantics{32, 30, ProductSelection::Full};
-  auto highRaw = ProductSemantics{16, 14, ProductSelection::HighRaw};
+  auto full = ProductAttr::get(&context, ProductSelection::Full);
+  auto highRaw = ProductAttr::get(&context, ProductSelection::HighRaw);
   auto wrapping = AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Wrap);
   auto saturating = AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Saturate);
+  auto wrappingDecision =
+      classifyDistributiveProductPairing(module->getOperation(), q15, full, wrapping);
+  auto saturatingDecision =
+      classifyDistributiveProductPairing(module->getOperation(), q15, full, saturating);
+  auto highRawDecision =
+      classifyDistributiveProductPairing(module->getOperation(), q15, highRaw, wrapping);
+  if (mlir::failed(wrappingDecision) || mlir::failed(saturatingDecision) ||
+      mlir::failed(highRawDecision))
+    return false;
 
   bool passed = true;
-  passed &= classifyZeroProductElimination(q15) == TransformEquivalence::BitExact;
   passed &=
-      classifyDistributiveProductPairing(q15, full, wrapping) == TransformEquivalence::ExactModulo;
-  passed &=
-      classifyDistributiveProductPairing(q15, full, saturating) == TransformEquivalence::Illegal;
-  passed &= classifyDistributiveProductPairing(
-                q15, full, saturating, ReductionRangeProof::AllOriginalAndReassociatedSumsFit) ==
-            TransformEquivalence::ProvenNoOverflow;
-  passed &=
-      classifyDistributiveProductPairing(q15, highRaw, wrapping) == TransformEquivalence::Illegal;
+      classifyZeroProductElimination(q15).isExactWith(TransformJustification::AlgebraicIdentity);
+  passed &= wrappingDecision->legalityWithoutRangeProof.isExactWith(
+      TransformJustification::FixedWidthModulo);
+  passed &= wrappingDecision->exactBeforeAccumulatorOverflow;
+  passed &= wrappingDecision->product.rawWidth == 32 && wrappingDecision->product.frac == 30;
+  passed &= !saturatingDecision->legalityWithoutRangeProof.isLegal();
+  passed &= saturatingDecision->exactBeforeAccumulatorOverflow;
+  passed &= !highRawDecision->legalityWithoutRangeProof.isLegal();
+  passed &= !highRawDecision->exactBeforeAccumulatorOverflow;
   return passed;
 }
 
@@ -136,7 +140,7 @@ bool testTransformEquivalence() {
 
 int main() {
   if (!testReductionReassociationSafety() || !testCommonNumericPolicies() ||
-      !testProductSemantics() || !testTransformEquivalence()) {
+      !testProductSemantics() || !testTransformLegality()) {
     llvm::errs() << "ondsp reassociation semantics: FAIL\n";
     return 1;
   }
