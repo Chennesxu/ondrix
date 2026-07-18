@@ -1,6 +1,5 @@
 #include "ondrix/Analysis/FixedPointPrefixRangeAnalysis.h"
 
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -73,91 +72,8 @@ bool everyPrefixFits(unsigned accumulatorWidth, unsigned analysisWidth,
   return true;
 }
 
-bool equalInterval(const FixedPointRawInterval &lhs, const FixedPointRawInterval &rhs) {
-  return lhs.lower == rhs.lower && lhs.upper == rhs.upper && lhs.frac == rhs.frac;
-}
-
-bool equalIntervals(ArrayRef<FixedPointRawInterval> lhs, ArrayRef<FixedPointRawInterval> rhs) {
-  return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin(), equalInterval);
-}
-
-bool equalCoefficientPair(const CoefficientPair &lhs, const CoefficientPair &rhs) {
-  return lhs.originalLhsIndex == rhs.originalLhsIndex &&
-         lhs.originalRhsIndex == rhs.originalRhsIndex &&
-         lhs.reassociatedIndex == rhs.reassociatedIndex &&
-         lhs.lhsCoefficient == rhs.lhsCoefficient && lhs.rhsCoefficient == rhs.rhsCoefficient;
-}
-
-bool equalCoefficientPairs(ArrayRef<CoefficientPair> lhs, ArrayRef<CoefficientPair> rhs) {
-  return lhs.size() == rhs.size() &&
-         std::equal(lhs.begin(), lhs.end(), rhs.begin(), equalCoefficientPair);
-}
-
-bool equalPassthroughUpdate(const PassthroughUpdate &lhs, const PassthroughUpdate &rhs) {
-  return lhs.originalIndex == rhs.originalIndex && lhs.reassociatedIndex == rhs.reassociatedIndex;
-}
-
-bool equalPassthroughUpdates(ArrayRef<PassthroughUpdate> lhs, ArrayRef<PassthroughUpdate> rhs) {
-  return lhs.size() == rhs.size() &&
-         std::equal(lhs.begin(), lhs.end(), rhs.begin(), equalPassthroughUpdate);
-}
-
-bool intervalContains(const FixedPointRawInterval &container,
-                      const FixedPointRawInterval &contained) {
-  if (container.frac != contained.frac)
-    return false;
-  unsigned width = std::max(container.lower.getBitWidth(), contained.lower.getBitWidth());
-  return container.lower.sext(width).sle(contained.lower.sext(width)) &&
-         container.upper.sext(width).sge(contained.upper.sext(width));
-}
-
-bool isValidScheduleMapping(ArrayRef<CoefficientPair> pairs,
-                            ArrayRef<PassthroughUpdate> passthroughs, unsigned coefficientWidth,
-                            ArrayRef<FixedPointRawInterval> originalUpdates,
-                            ArrayRef<FixedPointRawInterval> reassociatedUpdates) {
-  if (pairs.empty() ||
-      pairs.size() > (std::numeric_limits<size_t>::max() - passthroughs.size()) / 2 ||
-      originalUpdates.size() != pairs.size() * 2 + passthroughs.size() ||
-      reassociatedUpdates.size() != pairs.size() + passthroughs.size() ||
-      originalUpdates.size() > static_cast<size_t>(std::numeric_limits<int64_t>::max()) ||
-      reassociatedUpdates.size() > static_cast<size_t>(std::numeric_limits<int64_t>::max()))
-    return false;
-
-  llvm::SmallDenseSet<int64_t, 16> usedOriginalIndices;
-  llvm::SmallDenseSet<int64_t, 16> usedReassociatedIndices;
-  for (const CoefficientPair &pair : pairs) {
-    if (pair.originalLhsIndex < 0 || pair.originalRhsIndex <= pair.originalLhsIndex ||
-        pair.reassociatedIndex < 0 ||
-        static_cast<size_t>(pair.originalRhsIndex) >= originalUpdates.size() ||
-        static_cast<size_t>(pair.reassociatedIndex) >= reassociatedUpdates.size() ||
-        pair.lhsCoefficient.getBitWidth() != coefficientWidth ||
-        pair.rhsCoefficient.getBitWidth() != coefficientWidth ||
-        pair.lhsCoefficient != pair.rhsCoefficient ||
-        !usedOriginalIndices.insert(pair.originalLhsIndex).second ||
-        !usedOriginalIndices.insert(pair.originalRhsIndex).second ||
-        !usedReassociatedIndices.insert(pair.reassociatedIndex).second)
-      return false;
-
-    FailureOr<FixedPointRawInterval> pairedInterval = addFixedPointRawIntervals(
-        originalUpdates[pair.originalLhsIndex], originalUpdates[pair.originalRhsIndex]);
-    if (failed(pairedInterval) ||
-        !intervalContains(reassociatedUpdates[pair.reassociatedIndex], *pairedInterval))
-      return false;
-  }
-
-  for (const PassthroughUpdate &passthrough : passthroughs) {
-    if (passthrough.originalIndex < 0 || passthrough.reassociatedIndex < 0 ||
-        static_cast<size_t>(passthrough.originalIndex) >= originalUpdates.size() ||
-        static_cast<size_t>(passthrough.reassociatedIndex) >= reassociatedUpdates.size() ||
-        !usedOriginalIndices.insert(passthrough.originalIndex).second ||
-        !usedReassociatedIndices.insert(passthrough.reassociatedIndex).second ||
-        !intervalContains(reassociatedUpdates[passthrough.reassociatedIndex],
-                          originalUpdates[passthrough.originalIndex]))
-      return false;
-  }
-
-  return usedOriginalIndices.size() == originalUpdates.size() &&
-         usedReassociatedIndices.size() == reassociatedUpdates.size();
+bool equalCoefficients(ArrayRef<APInt> lhs, ArrayRef<APInt> rhs) {
+  return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin());
 }
 
 } // namespace
@@ -196,12 +112,9 @@ FailureOr<FixedPointRawInterval> addFixedPointRawIntervals(const FixedPointRawIn
 }
 
 DistributivePairingPlan::DistributivePairingPlan(DistributivePairingPlan &&other)
-    : subject(other.subject), semantics(std::move(other.semantics)), evidence(other.evidence),
-      numeric(other.numeric), product(other.product), accumulator(other.accumulator),
-      coefficientPairs(std::move(other.coefficientPairs)),
-      passthroughUpdates(std::move(other.passthroughUpdates)), initial(std::move(other.initial)),
-      originalUpdates(std::move(other.originalUpdates)),
-      reassociatedUpdates(std::move(other.reassociatedUpdates)), consumed(other.consumed) {
+    : subject(other.subject), semantics(std::move(other.semantics)), numeric(other.numeric),
+      product(other.product), accumulator(other.accumulator),
+      coefficients(std::move(other.coefficients)), consumed(other.consumed) {
   other.subject = nullptr;
   other.consumed = true;
 }
@@ -211,41 +124,30 @@ DistributivePairingPlan &DistributivePairingPlan::operator=(DistributivePairingP
     return *this;
   subject = other.subject;
   semantics = std::move(other.semantics);
-  evidence = other.evidence;
   numeric = other.numeric;
   product = other.product;
   accumulator = other.accumulator;
-  coefficientPairs = std::move(other.coefficientPairs);
-  passthroughUpdates = std::move(other.passthroughUpdates);
-  initial = std::move(other.initial);
-  originalUpdates = std::move(other.originalUpdates);
-  reassociatedUpdates = std::move(other.reassociatedUpdates);
+  coefficients = std::move(other.coefficients);
   consumed = other.consumed;
   other.subject = nullptr;
   other.consumed = true;
   return *this;
 }
 
-LogicalResult DistributivePairingPlan::consumeIfValid(
-    Operation *operation, ondsp::FixedAttr candidateNumeric, ondsp::ProductAttr candidateProduct,
-    ondsp::AccType candidateAccumulator, ArrayRef<CoefficientPair> candidateCoefficientPairs,
-    ArrayRef<PassthroughUpdate> candidatePassthroughUpdates,
-    const FixedPointRawInterval &candidateInitial,
-    ArrayRef<FixedPointRawInterval> candidateOriginalUpdates,
-    ArrayRef<FixedPointRawInterval> candidateReassociatedUpdates,
-    DistributivePairingConsumer consumer) && {
+LogicalResult DistributivePairingPlan::consumeIfValid(Operation *operation,
+                                                      ondsp::FixedAttr candidateNumeric,
+                                                      ondsp::ProductAttr candidateProduct,
+                                                      ondsp::AccType candidateAccumulator,
+                                                      ArrayRef<APInt> candidateCoefficients,
+                                                      DistributivePairingConsumer consumer) && {
   if (consumed)
     return failure();
   consumed = true;
   if (subject != operation || numeric != candidateNumeric || product != candidateProduct ||
       accumulator != candidateAccumulator ||
-      !equalCoefficientPairs(coefficientPairs, candidateCoefficientPairs) ||
-      !equalPassthroughUpdates(passthroughUpdates, candidatePassthroughUpdates) ||
-      !equalInterval(initial, candidateInitial) ||
-      !equalIntervals(originalUpdates, candidateOriginalUpdates) ||
-      !equalIntervals(reassociatedUpdates, candidateReassociatedUpdates))
+      !equalCoefficients(coefficients, candidateCoefficients))
     return failure();
-  return consumer(semantics, evidence);
+  return consumer(semantics, coefficients);
 }
 
 LogicalResult FixedPointPrefixRangePlanner::proveAllPrefixesFit(
@@ -272,31 +174,43 @@ LogicalResult FixedPointPrefixRangePlanner::proveAllPrefixesFit(
   return success();
 }
 
-FailureOr<DistributivePairingPlan> FixedPointPrefixRangePlanner::planDistributivePairing(
+FailureOr<DistributivePairingPlan> FixedPointPrefixRangePlanner::planZeroSeededSymmetricPairing(
     Operation *subject, ondsp::FixedAttr numeric, ondsp::ProductAttr product,
-    ondsp::AccType accumulator, ArrayRef<CoefficientPair> coefficientPairs,
-    ArrayRef<PassthroughUpdate> passthroughUpdates, const FixedPointRawInterval &initial,
-    ArrayRef<FixedPointRawInterval> originalUpdates,
-    ArrayRef<FixedPointRawInterval> reassociatedUpdates) {
+    ondsp::AccType accumulator, ArrayRef<APInt> coefficients) {
   auto numericStorage = dyn_cast<IntegerType>(numeric.getStorage());
   auto accumulatorStorage = dyn_cast<IntegerType>(accumulator.getStorage());
-  if (!subject || !numericStorage || !accumulatorStorage || !isValidInterval(initial) ||
-      initial.frac != accumulator.getFrac() ||
-      !hasFractionalPosition(originalUpdates, accumulator.getFrac()) ||
-      !hasFractionalPosition(reassociatedUpdates, accumulator.getFrac()) ||
-      llvm::any_of(
-          originalUpdates,
-          [](const FixedPointRawInterval &interval) { return !isValidInterval(interval); }) ||
-      llvm::any_of(
-          reassociatedUpdates,
-          [](const FixedPointRawInterval &interval) { return !isValidInterval(interval); }) ||
-      !isValidScheduleMapping(coefficientPairs, passthroughUpdates, numericStorage.getWidth(),
-                              originalUpdates, reassociatedUpdates))
+  if (!subject || !numericStorage || !accumulatorStorage || coefficients.size() < 2 ||
+      coefficients.size() > static_cast<size_t>(std::numeric_limits<int64_t>::max()))
     return failure();
 
-  ArrayRef<FixedPointRawInterval> noUpdates;
-  if (failed(proveAllPrefixesFit(accumulatorStorage.getWidth(), initial, noUpdates, noUpdates)))
-    return failure();
+  SmallVector<FixedPointRawInterval> originalUpdates;
+  SmallVector<FixedPointRawInterval> reassociatedUpdates;
+  originalUpdates.reserve(coefficients.size());
+  reassociatedUpdates.reserve((coefficients.size() + 1) / 2);
+  for (const APInt &coefficient : coefficients) {
+    FailureOr<FixedPointRawInterval> interval =
+        computeSignedFullProductInterval(numeric, coefficient);
+    if (failed(interval))
+      return failure();
+    originalUpdates.push_back(std::move(*interval));
+  }
+
+  size_t pairCount = coefficients.size() / 2;
+  for (size_t index = 0; index < pairCount; ++index) {
+    size_t mirror = coefficients.size() - index - 1;
+    if (coefficients[index] != coefficients[mirror])
+      return failure();
+    FailureOr<FixedPointRawInterval> pairedInterval =
+        addFixedPointRawIntervals(originalUpdates[index], originalUpdates[mirror]);
+    if (failed(pairedInterval))
+      return failure();
+    reassociatedUpdates.push_back(std::move(*pairedInterval));
+  }
+  if (coefficients.size() % 2 != 0)
+    reassociatedUpdates.push_back(originalUpdates[pairCount]);
+
+  FixedPointRawInterval initial{APInt(accumulatorStorage.getWidth(), 0),
+                                APInt(accumulatorStorage.getWidth(), 0), accumulator.getFrac()};
 
   FailureOr<ondsp::DistributivePairingSemantics> semantics =
       ondsp::classifyDistributiveProductPairing(subject, numeric, product, accumulator);
@@ -304,7 +218,6 @@ FailureOr<DistributivePairingPlan> FixedPointPrefixRangePlanner::planDistributiv
     return failure();
 
   ondsp::TransformLegality legalityWithoutRangeProof = semantics->legalityWithoutRangeProof;
-  DistributivePairingEvidence::Kind evidenceKind = DistributivePairingEvidence::Kind::ExactModulo;
   if (legalityWithoutRangeProof.isExact()) {
     if (!legalityWithoutRangeProof.isExactWith(ondsp::TransformJustification::FixedWidthModulo))
       return failure();
@@ -313,13 +226,10 @@ FailureOr<DistributivePairingPlan> FixedPointPrefixRangePlanner::planDistributiv
         failed(proveAllPrefixesFit(accumulatorStorage.getWidth(), initial, originalUpdates,
                                    reassociatedUpdates)))
       return failure();
-    evidenceKind = DistributivePairingEvidence::Kind::ProvenNoOverflow;
   }
 
-  return DistributivePairingPlan(subject, std::move(*semantics),
-                                 DistributivePairingEvidence(evidenceKind), numeric, product,
-                                 accumulator, coefficientPairs, passthroughUpdates, initial,
-                                 originalUpdates, reassociatedUpdates);
+  return DistributivePairingPlan(subject, std::move(*semantics), numeric, product, accumulator,
+                                 coefficients);
 }
 
 } // namespace ondrix::analysis

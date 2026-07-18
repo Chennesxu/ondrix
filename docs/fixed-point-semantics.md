@@ -104,21 +104,23 @@ source and transformed intermediate sum remains in range.
 
 ## Transform Equivalence
 
-Ondsp records transform exactness (`exact` or `illegal`) separately from its
-justification (algebraic identity, fixed-width modulo arithmetic, or a
-no-overflow proof). The decision is a compiler result rather than a source
-attribute or an unchecked rewrite hint. Bounded-error transforms remain
-unsupported until an explicit error-bound object and composition rules are
-defined.
+Ondsp records algebraic transform exactness (`exact` or `illegal`) separately
+from its justification, such as an algebraic identity or fixed-width modulo
+arithmetic. A range proof is owned by the analysis that derives it; it is not a
+public Ondsp legality value, source attribute, or unchecked rewrite hint.
+Bounded-error transforms remain unsupported until an explicit error-bound
+object and composition rules are defined.
 
 For a proven-no-overflow reassociation, the range analysis must establish that
 every prefix interval in both the original update order and the proposed
 update order fits the signed accumulator range. Merely proving that the final
-mathematical sum fits is insufficient. The current planner can produce a
-subject-bound decision from APInt intervals and a complete mapping of equal
-coefficient pairs and unchanged updates across the source and candidate
-schedules. It proves range containment only; the Ondsp semantic classifier
-separately establishes the distributive identity.
+mathematical sum fits is insufficient. For symmetric FIR pairing, the planner
+accepts the complete raw coefficient sequence and derives the original and
+candidate APInt intervals internally from the full signed input domain. It
+returns a move-only plan bound to the operation, policies, accumulator, and
+coefficient sequence rather than an independent proof token or reusable
+boolean. Validated facts are exposed only to a one-shot consumer. The Ondsp
+semantic classifier separately establishes the distributive identity.
 
 Constant FIR specialization consumes this plan for signed full-product
 symmetry. It derives each tap interval from the complete signed input-storage

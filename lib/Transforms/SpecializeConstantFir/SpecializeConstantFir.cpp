@@ -101,77 +101,14 @@ Value createSymmetricPairUpdate(ondrix::ir::FirOp op, Value accumulator, int64_t
                                                       accumulator, term, termNumeric);
 }
 
-struct SymmetricFirPairingSchedule {
-  ondrix::analysis::FixedPointRawInterval initial;
-  llvm::SmallVector<ondrix::analysis::CoefficientPair> coefficientPairs;
-  llvm::SmallVector<ondrix::analysis::PassthroughUpdate> passthroughUpdates;
-  llvm::SmallVector<ondrix::analysis::FixedPointRawInterval> originalUpdates;
-  llvm::SmallVector<ondrix::analysis::FixedPointRawInterval> reassociatedUpdates;
-};
-
-FailureOr<SymmetricFirPairingSchedule>
-buildSymmetricFirPairingSchedule(llvm::ArrayRef<llvm::APInt> coefficients,
-                                 ondrix::ondsp::FixedAttr numeric,
-                                 ondrix::ondsp::AccType accumulator) {
-  auto accumulatorStorage = dyn_cast<IntegerType>(accumulator.getStorage());
-  if (!accumulatorStorage || coefficients.size() < 2 ||
-      coefficients.size() > static_cast<size_t>(std::numeric_limits<int64_t>::max()))
-    return failure();
-
-  SymmetricFirPairingSchedule schedule{{llvm::APInt(accumulatorStorage.getWidth(), 0),
-                                        llvm::APInt(accumulatorStorage.getWidth(), 0),
-                                        accumulator.getFrac()},
-                                       {},
-                                       {},
-                                       {},
-                                       {}};
-  schedule.originalUpdates.reserve(coefficients.size());
-  schedule.reassociatedUpdates.reserve((coefficients.size() + 1) / 2);
-  schedule.coefficientPairs.reserve(coefficients.size() / 2);
-
-  for (const llvm::APInt &coefficient : coefficients) {
-    FailureOr<ondrix::analysis::FixedPointRawInterval> interval =
-        ondrix::analysis::computeSignedFullProductInterval(numeric, coefficient);
-    if (failed(interval))
-      return failure();
-    schedule.originalUpdates.push_back(std::move(*interval));
-  }
-
-  size_t pairCount = coefficients.size() / 2;
-  for (size_t index = 0; index < pairCount; ++index) {
-    size_t mirror = coefficients.size() - index - 1;
-    if (coefficients[index] != coefficients[mirror])
-      return failure();
-    FailureOr<ondrix::analysis::FixedPointRawInterval> pairedInterval =
-        ondrix::analysis::addFixedPointRawIntervals(schedule.originalUpdates[index],
-                                                    schedule.originalUpdates[mirror]);
-    if (failed(pairedInterval))
-      return failure();
-    schedule.coefficientPairs.push_back({static_cast<int64_t>(index), static_cast<int64_t>(mirror),
-                                         static_cast<int64_t>(index), coefficients[index],
-                                         coefficients[mirror]});
-    schedule.reassociatedUpdates.push_back(std::move(*pairedInterval));
-  }
-
-  if (coefficients.size() % 2 != 0) {
-    size_t center = pairCount;
-    schedule.passthroughUpdates.push_back(
-        {static_cast<int64_t>(center), static_cast<int64_t>(pairCount)});
-    schedule.reassociatedUpdates.push_back(schedule.originalUpdates[center]);
-  }
-  return schedule;
-}
-
-Value createSymmetricFirAccumulator(ondrix::ir::FirOp op,
-                                    const ondrix::ConstantSequenceFacts &facts,
+Value createSymmetricFirAccumulator(ondrix::ir::FirOp op, llvm::ArrayRef<llvm::APInt> coefficients,
                                     ondrix::ondsp::FixedAttr numeric,
                                     const ondrix::ondsp::ProductSemantics &productSemantics,
                                     PatternRewriter &rewriter) {
   Value current = rewriter.create<ondrix::ondsp::AccZeroOp>(op.getLoc(), op.getResult().getType());
-  llvm::ArrayRef<llvm::APInt> values = facts.getValues();
-  size_t length = values.size();
+  size_t length = coefficients.size();
   for (size_t index = 0; index < length / 2; ++index) {
-    const llvm::APInt &coefficient = values[index];
+    const llvm::APInt &coefficient = coefficients[index];
     if (coefficient.isZero())
       continue;
     current = createSymmetricPairUpdate(op, current, index, length - index - 1, coefficient,
@@ -179,8 +116,8 @@ Value createSymmetricFirAccumulator(ondrix::ir::FirOp op,
   }
   if (length % 2 != 0) {
     size_t center = length / 2;
-    if (!values[center].isZero())
-      current = createMacUpdate(op, current, center, values[center], numeric, rewriter);
+    if (!coefficients[center].isZero())
+      current = createMacUpdate(op, current, center, coefficients[center], numeric, rewriter);
   }
   return current;
 }
@@ -209,30 +146,20 @@ LogicalResult tryRewriteSaturatingSymmetricFir(ondrix::ir::FirOp op,
                                                ondrix::ondsp::FixedAttr numeric,
                                                ondrix::ondsp::AccType accumulator,
                                                PatternRewriter &rewriter) {
-  FailureOr<SymmetricFirPairingSchedule> schedule =
-      buildSymmetricFirPairingSchedule(facts.getValues(), numeric, accumulator);
-  if (failed(schedule))
-    return failure();
-
   FailureOr<ondrix::analysis::DistributivePairingPlan> plan =
-      ondrix::analysis::FixedPointPrefixRangePlanner::planDistributivePairing(
-          op.getOperation(), numeric, *op.getProduct(), accumulator, schedule->coefficientPairs,
-          schedule->passthroughUpdates, schedule->initial, schedule->originalUpdates,
-          schedule->reassociatedUpdates);
+      ondrix::analysis::FixedPointPrefixRangePlanner::planZeroSeededSymmetricPairing(
+          op.getOperation(), numeric, *op.getProduct(), accumulator, facts.getValues());
   if (failed(plan))
     return failure();
 
   return std::move(*plan).consumeIfValid(
-      op.getOperation(), numeric, *op.getProduct(), accumulator, schedule->coefficientPairs,
-      schedule->passthroughUpdates, schedule->initial, schedule->originalUpdates,
-      schedule->reassociatedUpdates,
+      op.getOperation(), numeric, *op.getProduct(), accumulator, facts.getValues(),
       [&](const ondrix::ondsp::DistributivePairingSemantics &validatedSemantics,
-          const ondrix::analysis::DistributivePairingEvidence &evidence) {
-        if (!evidence.isProvenNoOverflow())
-          return failure();
+          llvm::ArrayRef<llvm::APInt> validatedCoefficients) {
         replaceFirAndEraseUnusedCoefficientHandle(
             op,
-            createSymmetricFirAccumulator(op, facts, numeric, validatedSemantics.product, rewriter),
+            createSymmetricFirAccumulator(op, validatedCoefficients, numeric,
+                                          validatedSemantics.product, rewriter),
             rewriter);
         return success();
       });
@@ -274,7 +201,8 @@ public:
             ondrix::ondsp::TransformJustification::FixedWidthModulo)) {
       replaceFirAndEraseUnusedCoefficientHandle(
           op,
-          createSymmetricFirAccumulator(op, *facts, numeric, pairingSemantics->product, rewriter),
+          createSymmetricFirAccumulator(op, facts->getValues(), numeric, pairingSemantics->product,
+                                        rewriter),
           rewriter);
       return success();
     }

@@ -33,52 +33,12 @@ computeSignedFullProductInterval(ondsp::FixedAttr numeric, const llvm::APInt &co
 mlir::FailureOr<FixedPointRawInterval> addFixedPointRawIntervals(const FixedPointRawInterval &lhs,
                                                                  const FixedPointRawInterval &rhs);
 
-/// Schedule indices and raw coefficient values for one proposed distributive
-/// pair. Original indices address the complete source update schedule;
-/// `reassociatedIndex` addresses the complete candidate schedule.
-struct CoefficientPair {
-  int64_t originalLhsIndex;
-  int64_t originalRhsIndex;
-  int64_t reassociatedIndex;
-  llvm::APInt lhsCoefficient;
-  llvm::APInt rhsCoefficient;
-};
-
-/// Maps an unchanged source update into the complete candidate schedule.
-struct PassthroughUpdate {
-  int64_t originalIndex;
-  int64_t reassociatedIndex;
-};
-
-class FixedPointPrefixRangePlanner;
-
-/// Opaque evidence produced only after the prefix-range planner validates a
-/// complete distributive-pairing plan. Callers may inspect but cannot create
-/// evidence that authorizes a rewrite.
-class DistributivePairingEvidence final {
-public:
-  bool isExactModulo() const { return kind == Kind::ExactModulo; }
-  bool isProvenNoOverflow() const { return kind == Kind::ProvenNoOverflow; }
-
-private:
-  friend class FixedPointPrefixRangePlanner;
-
-  enum class Kind {
-    ExactModulo,
-    ProvenNoOverflow,
-  };
-
-  explicit DistributivePairingEvidence(Kind kind) : kind(kind) {}
-
-  Kind kind;
-};
-
 using DistributivePairingConsumer = llvm::function_ref<mlir::LogicalResult(
-    const ondsp::DistributivePairingSemantics &, const DistributivePairingEvidence &)>;
+    const ondsp::DistributivePairingSemantics &, llvm::ArrayRef<llvm::APInt>)>;
 
-/// A move-only decision bound to the operation, numeric domain, complete
-/// schedule mapping, initial range, and update intervals analyzed. Legality is
-/// exposed only to a one-shot callback after fresh facts have been validated.
+/// A move-only decision bound to the operation, numeric domain, and complete
+/// coefficient sequence analyzed. Validated semantics and coefficients are
+/// exposed only to a one-shot callback after fresh facts have been checked.
 class DistributivePairingPlan final {
 public:
   DistributivePairingPlan(const DistributivePairingPlan &) = delete;
@@ -88,39 +48,23 @@ public:
 
   mlir::LogicalResult consumeIfValid(mlir::Operation *operation, ondsp::FixedAttr numeric,
                                      ondsp::ProductAttr product, ondsp::AccType accumulator,
-                                     llvm::ArrayRef<CoefficientPair> coefficientPairs,
-                                     llvm::ArrayRef<PassthroughUpdate> passthroughUpdates,
-                                     const FixedPointRawInterval &initial,
-                                     llvm::ArrayRef<FixedPointRawInterval> originalUpdates,
-                                     llvm::ArrayRef<FixedPointRawInterval> reassociatedUpdates,
+                                     llvm::ArrayRef<llvm::APInt> coefficients,
                                      DistributivePairingConsumer consumer) &&;
 
 private:
   friend class FixedPointPrefixRangePlanner;
   DistributivePairingPlan(mlir::Operation *subject, ondsp::DistributivePairingSemantics semantics,
-                          DistributivePairingEvidence evidence, ondsp::FixedAttr numeric,
-                          ondsp::ProductAttr product, ondsp::AccType accumulator,
-                          llvm::ArrayRef<CoefficientPair> coefficientPairs,
-                          llvm::ArrayRef<PassthroughUpdate> passthroughUpdates,
-                          const FixedPointRawInterval &initial,
-                          llvm::ArrayRef<FixedPointRawInterval> originalUpdates,
-                          llvm::ArrayRef<FixedPointRawInterval> reassociatedUpdates)
-      : subject(subject), semantics(std::move(semantics)), evidence(evidence), numeric(numeric),
-        product(product), accumulator(accumulator), coefficientPairs(coefficientPairs),
-        passthroughUpdates(passthroughUpdates), initial(initial), originalUpdates(originalUpdates),
-        reassociatedUpdates(reassociatedUpdates) {}
+                          ondsp::FixedAttr numeric, ondsp::ProductAttr product,
+                          ondsp::AccType accumulator, llvm::ArrayRef<llvm::APInt> coefficients)
+      : subject(subject), semantics(std::move(semantics)), numeric(numeric), product(product),
+        accumulator(accumulator), coefficients(coefficients) {}
 
   mlir::Operation *subject;
   ondsp::DistributivePairingSemantics semantics;
-  DistributivePairingEvidence evidence;
   ondsp::FixedAttr numeric;
   ondsp::ProductAttr product;
   ondsp::AccType accumulator;
-  llvm::SmallVector<CoefficientPair> coefficientPairs;
-  llvm::SmallVector<PassthroughUpdate> passthroughUpdates;
-  FixedPointRawInterval initial;
-  llvm::SmallVector<FixedPointRawInterval> originalUpdates;
-  llvm::SmallVector<FixedPointRawInterval> reassociatedUpdates;
+  llvm::SmallVector<llvm::APInt> coefficients;
   bool consumed = false;
 };
 
@@ -132,15 +76,13 @@ public:
                       llvm::ArrayRef<FixedPointRawInterval> originalUpdates,
                       llvm::ArrayRef<FixedPointRawInterval> reassociatedUpdates);
 
-  /// Builds a plan for complete source and candidate update schedules. Every
-  /// source and candidate index must occur exactly once in either a pair or a
-  /// passthrough mapping.
-  static mlir::FailureOr<DistributivePairingPlan> planDistributivePairing(
-      mlir::Operation *subject, ondsp::FixedAttr numeric, ondsp::ProductAttr product,
-      ondsp::AccType accumulator, llvm::ArrayRef<CoefficientPair> coefficientPairs,
-      llvm::ArrayRef<PassthroughUpdate> passthroughUpdates, const FixedPointRawInterval &initial,
-      llvm::ArrayRef<FixedPointRawInterval> originalUpdates,
-      llvm::ArrayRef<FixedPointRawInterval> reassociatedUpdates);
+  /// Builds a zero-seeded symmetric-pairing plan. Product intervals for the
+  /// source and candidate schedules are derived internally from the complete
+  /// signed input domain and the supplied raw coefficients.
+  static mlir::FailureOr<DistributivePairingPlan>
+  planZeroSeededSymmetricPairing(mlir::Operation *subject, ondsp::FixedAttr numeric,
+                                 ondsp::ProductAttr product, ondsp::AccType accumulator,
+                                 llvm::ArrayRef<llvm::APInt> coefficients);
 };
 
 } // namespace ondrix::analysis

@@ -13,22 +13,17 @@
 #include <type_traits>
 
 using ondrix::analysis::addFixedPointRawIntervals;
-using ondrix::analysis::CoefficientPair;
 using ondrix::analysis::computeSignedFullProductInterval;
-using ondrix::analysis::DistributivePairingEvidence;
 using ondrix::analysis::DistributivePairingPlan;
 using ondrix::analysis::FixedPointPrefixRangePlanner;
 using ondrix::analysis::FixedPointRawInterval;
-using ondrix::analysis::PassthroughUpdate;
 using ondrix::ondsp::AccType;
 using ondrix::ondsp::FixedAttr;
 using ondrix::ondsp::OverflowMode;
 using ondrix::ondsp::ProductAttr;
 using ondrix::ondsp::ProductSelection;
 using ondrix::ondsp::Signedness;
-
-static_assert(!std::is_aggregate_v<DistributivePairingEvidence>);
-static_assert(!std::is_default_constructible_v<DistributivePairingEvidence>);
+using ondrix::ondsp::TransformJustification;
 
 namespace {
 
@@ -47,12 +42,6 @@ FixedPointRawInterval exactRange(const llvm::APInt &value, unsigned frac) {
 bool equals(const FixedPointRawInterval &interval, const FixedPointRawInterval &expected) {
   return interval.lower == expected.lower && interval.upper == expected.upper &&
          interval.frac == expected.frac;
-}
-
-CoefficientPair coefficientPair(int64_t lhsIndex, int64_t rhsIndex, int64_t reassociatedIndex,
-                                int64_t lhsValue, int64_t rhsValue) {
-  return {lhsIndex, rhsIndex, reassociatedIndex, signedValue(16, lhsValue),
-          signedValue(16, rhsValue)};
 }
 
 static_assert(!std::is_copy_constructible_v<DistributivePairingPlan>);
@@ -174,17 +163,11 @@ bool testPairingPlanValidation() {
   auto numeric = FixedAttr::get(&context, Signedness::Signed, i16, 15);
   auto product = ProductAttr::get(&context, ProductSelection::Full);
   auto accumulator = AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Saturate);
-  llvm::SmallVector<CoefficientPair> pairs = {coefficientPair(0, 1, 0, 3, 3)};
-  llvm::SmallVector<PassthroughUpdate> passthroughs;
-  FixedPointRawInterval initial = range(40, 0, 0, 30);
-  llvm::SmallVector<FixedPointRawInterval> original = {range(32, -16, 16, 30),
-                                                       range(32, -16, 16, 30)};
-  llvm::SmallVector<FixedPointRawInterval> reassociated = {range(33, -32, 32, 30)};
+  llvm::SmallVector<llvm::APInt> coefficients = {signedValue(16, 3), signedValue(16, 3)};
 
   auto buildPlan = [&]() {
-    return FixedPointPrefixRangePlanner::planDistributivePairing(
-        subject->getOperation(), numeric, product, accumulator, pairs, passthroughs, initial,
-        original, reassociated);
+    return FixedPointPrefixRangePlanner::planZeroSeededSymmetricPairing(
+        subject->getOperation(), numeric, product, accumulator, coefficients);
   };
 
   auto moveSource = buildPlan();
@@ -194,7 +177,7 @@ bool testPairingPlanValidation() {
   bool movedFromConsumed = false;
   if (mlir::succeeded(std::move(*moveSource)
                           .consumeIfValid(subject->getOperation(), numeric, product, accumulator,
-                                          pairs, passthroughs, initial, original, reassociated,
+                                          coefficients,
                                           [&](const auto &, const auto &) {
                                             movedFromConsumed = true;
                                             return mlir::success();
@@ -203,8 +186,7 @@ bool testPairingPlanValidation() {
     return false;
   bool movedPlanConsumed = false;
   if (mlir::failed(std::move(movedPlan).consumeIfValid(subject->getOperation(), numeric, product,
-                                                       accumulator, pairs, passthroughs, initial,
-                                                       original, reassociated,
+                                                       accumulator, coefficients,
                                                        [&](const auto &, const auto &) {
                                                          movedPlanConsumed = true;
                                                          return mlir::success();
@@ -218,21 +200,20 @@ bool testPairingPlanValidation() {
 
   bool consumed = false;
   auto consume = [&](const ondrix::ondsp::DistributivePairingSemantics &semantics,
-                     const DistributivePairingEvidence &evidence) {
-    consumed = evidence.isProvenNoOverflow() && semantics.product.rawWidth == 32 &&
-               semantics.product.frac == 30;
+                     llvm::ArrayRef<llvm::APInt> validatedCoefficients) {
+    consumed = semantics.product.rawWidth == 32 && semantics.product.frac == 30 &&
+               validatedCoefficients.size() == 2 && validatedCoefficients[0] == coefficients[0] &&
+               validatedCoefficients[1] == coefficients[1];
     return consumed ? mlir::success() : mlir::failure();
   };
   if (mlir::failed(std::move(*plan).consumeIfValid(subject->getOperation(), numeric, product,
-                                                   accumulator, pairs, passthroughs, initial,
-                                                   original, reassociated, consume)) ||
+                                                   accumulator, coefficients, consume)) ||
       !consumed)
     return false;
 
   bool reused = false;
   if (mlir::succeeded(std::move(*plan).consumeIfValid(subject->getOperation(), numeric, product,
-                                                      accumulator, pairs, passthroughs, initial,
-                                                      original, reassociated,
+                                                      accumulator, coefficients,
                                                       [&](const auto &, const auto &) {
                                                         reused = true;
                                                         return mlir::success();
@@ -241,12 +222,22 @@ bool testPairingPlanValidation() {
     return false;
 
   auto stalePlan = buildPlan();
-  if (mlir::failed(stalePlan))
+  auto changedPlan = buildPlan();
+  if (mlir::failed(stalePlan) || mlir::failed(changedPlan))
     return false;
   bool staleConsumed = false;
+  llvm::SmallVector<llvm::APInt> changedCoefficients = {signedValue(16, 4), signedValue(16, 4)};
   return mlir::failed(std::move(*stalePlan)
                           .consumeIfValid(other->getOperation(), numeric, product, accumulator,
-                                          pairs, passthroughs, initial, original, reassociated,
+                                          coefficients,
+                                          [&](const auto &, const auto &) {
+                                            staleConsumed = true;
+                                            return mlir::success();
+                                          })) &&
+         !staleConsumed &&
+         mlir::failed(std::move(*changedPlan)
+                          .consumeIfValid(subject->getOperation(), numeric, product, accumulator,
+                                          changedCoefficients,
                                           [&](const auto &, const auto &) {
                                             staleConsumed = true;
                                             return mlir::success();
@@ -264,29 +255,24 @@ bool testWrappingPairingPlan() {
   auto numeric = FixedAttr::get(&context, Signedness::Signed, i16, 15);
   auto product = ProductAttr::get(&context, ProductSelection::Full);
   auto accumulator = AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Wrap);
-  llvm::SmallVector<CoefficientPair> pairs = {coefficientPair(0, 1, 0, 3, 3)};
-  llvm::SmallVector<PassthroughUpdate> passthroughs;
-  FixedPointRawInterval initial = range(40, INT64_C(549755813887), INT64_C(549755813887), 30);
-  llvm::SmallVector<FixedPointRawInterval> original = {range(32, 1, 1, 30), range(32, 1, 1, 30)};
-  llvm::SmallVector<FixedPointRawInterval> reassociated = {range(33, 2, 2, 30)};
+  llvm::SmallVector<llvm::APInt> coefficients(512, signedValue(16, INT16_MIN));
 
-  auto plan = FixedPointPrefixRangePlanner::planDistributivePairing(
-      subject->getOperation(), numeric, product, accumulator, pairs, passthroughs, initial,
-      original, reassociated);
+  auto plan = FixedPointPrefixRangePlanner::planZeroSeededSymmetricPairing(
+      subject->getOperation(), numeric, product, accumulator, coefficients);
   if (mlir::failed(plan))
     return false;
   bool exactModulo = false;
   return mlir::succeeded(std::move(*plan).consumeIfValid(
-             subject->getOperation(), numeric, product, accumulator, pairs, passthroughs, initial,
-             original, reassociated,
-             [&](const auto &, const DistributivePairingEvidence &evidence) {
-               exactModulo = evidence.isExactModulo();
+             subject->getOperation(), numeric, product, accumulator, coefficients,
+             [&](const ondrix::ondsp::DistributivePairingSemantics &semantics, const auto &) {
+               exactModulo = semantics.legalityWithoutRangeProof.isExactWith(
+                   TransformJustification::FixedWidthModulo);
                return exactModulo ? mlir::success() : mlir::failure();
              })) &&
          exactModulo;
 }
 
-bool testCompleteScheduleMapping() {
+bool testPlannerDerivesTrustedSchedules() {
   mlir::MLIRContext context;
   context.getOrLoadDialect<ondrix::ondsp::OndspDialect>();
   mlir::OwningOpRef<mlir::ModuleOp> subject =
@@ -295,67 +281,25 @@ bool testCompleteScheduleMapping() {
   auto i40 = mlir::IntegerType::get(&context, 40);
   auto numeric = FixedAttr::get(&context, Signedness::Signed, i16, 15);
   auto product = ProductAttr::get(&context, ProductSelection::Full);
-  auto accumulator = AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Saturate);
-  llvm::SmallVector<CoefficientPair> pairs = {coefficientPair(0, 1, 0, 3, 3)};
-  llvm::SmallVector<PassthroughUpdate> passthroughs = {{2, 1}};
-  FixedPointRawInterval initial = range(40, 0, 0, 30);
-  llvm::SmallVector<FixedPointRawInterval> original = {range(32, 1, 1, 30), range(32, 1, 1, 30),
-                                                       range(32, 1, 1, 30)};
-  llvm::SmallVector<FixedPointRawInterval> validCandidate = {range(33, 2, 2, 30),
-                                                             range(32, 1, 1, 30)};
-  llvm::SmallVector<FixedPointRawInterval> wrongPassthrough = {range(33, 2, 2, 30),
-                                                               range(32, 2, 2, 30)};
-  llvm::SmallVector<FixedPointRawInterval> narrowPair = {range(33, 1, 1, 30), range(32, 1, 1, 30)};
-  llvm::SmallVector<PassthroughUpdate> missingPassthrough;
+  auto saturating = AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Saturate);
+  auto wrapping = AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Wrap);
+  llvm::SmallVector<llvm::APInt> safeOdd = {signedValue(16, 1), signedValue(16, 2),
+                                            signedValue(16, 1)};
+  llvm::SmallVector<llvm::APInt> nonsymmetric = {signedValue(16, 1), signedValue(16, 2)};
+  llvm::SmallVector<llvm::APInt> wrongWidth = {signedValue(32, 1), signedValue(32, 1)};
+  llvm::SmallVector<llvm::APInt> oneCoefficient = {signedValue(16, 1)};
+  llvm::SmallVector<llvm::APInt> overflowing(512, signedValue(16, INT16_MIN));
 
-  auto plan = FixedPointPrefixRangePlanner::planDistributivePairing(
-      subject->getOperation(), numeric, product, accumulator, pairs, passthroughs, initial,
-      original, validCandidate);
-  auto wrongPassthroughPlan = FixedPointPrefixRangePlanner::planDistributivePairing(
-      subject->getOperation(), numeric, product, accumulator, pairs, passthroughs, initial,
-      original, wrongPassthrough);
-  auto narrowPairPlan = FixedPointPrefixRangePlanner::planDistributivePairing(
-      subject->getOperation(), numeric, product, accumulator, pairs, passthroughs, initial,
-      original, narrowPair);
-  auto incompletePlan = FixedPointPrefixRangePlanner::planDistributivePairing(
-      subject->getOperation(), numeric, product, accumulator, pairs, missingPassthrough, initial,
-      original, validCandidate);
-  return mlir::succeeded(plan) && mlir::failed(wrongPassthroughPlan) &&
-         mlir::failed(narrowPairPlan) && mlir::failed(incompletePlan);
-}
-
-bool testInvalidPairingSchedules() {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<ondrix::ondsp::OndspDialect>();
-  mlir::OwningOpRef<mlir::ModuleOp> subject =
-      mlir::ModuleOp::create(mlir::UnknownLoc::get(&context));
-  auto i16 = mlir::IntegerType::get(&context, 16);
-  auto i40 = mlir::IntegerType::get(&context, 40);
-  auto numeric = FixedAttr::get(&context, Signedness::Signed, i16, 15);
-  auto product = ProductAttr::get(&context, ProductSelection::Full);
-  auto accumulator = AccType::get(&context, i40, 30, Signedness::Signed, OverflowMode::Saturate);
-  FixedPointRawInterval initial = range(40, 0, 0, 30);
-  llvm::SmallVector<FixedPointRawInterval> original = {range(32, 0, 0, 30), range(32, 0, 0, 30),
-                                                       range(32, 0, 0, 30), range(32, 0, 0, 30)};
-  llvm::SmallVector<FixedPointRawInterval> reassociated = {range(33, 0, 0, 30),
-                                                           range(33, 0, 0, 30)};
-  llvm::SmallVector<PassthroughUpdate> passthroughs;
-  llvm::SmallVector<CoefficientPair> duplicateOriginal = {coefficientPair(0, 1, 0, 3, 3),
-                                                          coefficientPair(1, 2, 1, 3, 3)};
-  llvm::SmallVector<CoefficientPair> duplicateReassociated = {coefficientPair(0, 1, 0, 3, 3),
-                                                              coefficientPair(2, 3, 0, 3, 3)};
-  llvm::SmallVector<CoefficientPair> reversed = {coefficientPair(1, 0, 0, 3, 3),
-                                                 coefficientPair(2, 3, 1, 3, 3)};
-  llvm::SmallVector<CoefficientPair> outOfRange = {coefficientPair(0, 4, 0, 3, 3),
-                                                   coefficientPair(2, 3, 1, 3, 3)};
-
-  auto fails = [&](llvm::ArrayRef<CoefficientPair> candidatePairs) {
-    return mlir::failed(FixedPointPrefixRangePlanner::planDistributivePairing(
-        subject->getOperation(), numeric, product, accumulator, candidatePairs, passthroughs,
-        initial, original, reassociated));
+  auto plan = [&](AccType accumulator, llvm::ArrayRef<llvm::APInt> coefficients) {
+    return FixedPointPrefixRangePlanner::planZeroSeededSymmetricPairing(
+        subject->getOperation(), numeric, product, accumulator, coefficients);
   };
-  return fails(duplicateOriginal) && fails(duplicateReassociated) && fails(reversed) &&
-         fails(outOfRange);
+  return mlir::succeeded(plan(saturating, safeOdd)) &&
+         mlir::failed(plan(saturating, nonsymmetric)) &&
+         mlir::failed(plan(saturating, wrongWidth)) &&
+         mlir::failed(plan(saturating, oneCoefficient)) &&
+         mlir::failed(plan(saturating, overflowing)) &&
+         mlir::succeeded(plan(wrapping, overflowing));
 }
 
 bool testInvalidInputs() {
@@ -378,8 +322,7 @@ int main() {
       !testSuccessfulContainment() || !testOriginalPrefixOverflow() ||
       !testReassociatedPrefixOverflow() || !testNegativePrefixUnderflow() ||
       !testWiderAccumulator() || !testQ31I65Boundaries() || !testPairingPlanValidation() ||
-      !testWrappingPairingPlan() || !testCompleteScheduleMapping() ||
-      !testInvalidPairingSchedules() || !testInvalidInputs()) {
+      !testWrappingPairingPlan() || !testPlannerDerivesTrustedSchedules() || !testInvalidInputs()) {
     llvm::errs() << "fixed-point prefix range analysis: FAIL\n";
     return 1;
   }
