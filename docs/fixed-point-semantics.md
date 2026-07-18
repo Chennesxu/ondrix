@@ -129,6 +129,12 @@ rewriting. Saturating pairing remains disabled when any prefix may overflow,
 for raw-high products, and while zero-tap elimination would need to be composed
 with the pairing proof.
 
+The constant-reduction chunk planner applies the same ownership rule to Vector
+reassociation. It internally groups complete product intervals by the selected
+fixed Vector width, retains the original scalar tail, and proves every prefix
+of both schedules. A successful move-only plan authorizes horizontal chunk
+sums only for the bound operation, policies, coefficients, and width.
+
 ### Constant FIR Pipeline Placement
 
 Constant FIR specialization is an opt-in algorithm-layer branch, not a default
@@ -142,7 +148,8 @@ Until a cost model or target profile selects among alternatives, pipelines must
 keep these choices explicit:
 
 ```text
-generic CPU:  ondrix.fir -> ondsp.reduce_mac -> Vector or scalar lowering
+generic CPU:  ondrix.fir -> ondsp.reduce_mac
+              -> proven constant saturating chunks, or ordered Vector/scalar fallback
 specialized:  ondrix.fir -> constant FIR specialization -> scalar lowering
 target:       retain structured intent until a proven target capability matches
 ```
@@ -169,17 +176,19 @@ or `saturate`.
 Unit-stride rank-1 memref reductions are split into fixed-width chunks and a
 scalar tail.
 
-- Saturating reductions vectorize loads and products, then apply lane updates
-  in increasing order.
+- Saturating reductions with immutable coefficients may use horizontal chunks
+  only when complete source and chunk-prefix analysis proves overflow is
+  unreachable. Other saturating reductions vectorize loads and products, then
+  apply lane updates in increasing order.
 - Wrapping reductions may horizontally reduce widened products because Ondsp
   classifies the reassociation as exact modulo the accumulator width.
 - Memrefs without a statically known unit minor stride remain on the scalar
   path.
 - Q31 `high_raw` computes the exact signed i64 product before selecting the
   arithmetic high i32 half; no implicit fractional doubling is introduced.
-- Default and representable nonnegative integer LLVM address spaces are
-  supported. Target-specific memory-space attributes require a target mapping,
-  and invalid integer spaces fail before LLVM lowering.
+- Generic LLVM Vector lowering currently supports only the default address
+  space. Other memory spaces remain on the scalar path until a target-specific
+  Vector mapping exists; invalid integer spaces fail before LLVM lowering.
 
 Vector IR expresses semantic lane operations, not a performance guarantee.
 Targets without native wide-lane multiplication may legally scalarize a Q31
