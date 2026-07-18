@@ -1,8 +1,12 @@
+// RUN: ondrix-opt %s --specialize-ondrix-constant-fir | FileCheck %s --check-prefix=SPECIALIZED --implicit-check-not=ondrix.fir
 // RUN: ondrix-opt %s --specialize-ondrix-constant-fir --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc %S/Inputs/constant_fir_specialization_aot.c %t.o -o %t
 // RUN: %t
+
+// SPECIALIZED-LABEL: func.func @symmetric_q15_saturate
+// SPECIALIZED: ondsp.acc_add_term
 
 memref.global "private" constant @sparse_q15_coefficients : memref<5xi16> =
   dense<[32767, 0, -32768, 0, 12345]>

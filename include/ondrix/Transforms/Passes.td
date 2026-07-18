@@ -10,11 +10,13 @@ def SpecializeOndrixConstantFir
     Opt-in specialization for fixed-point `ondrix.fir` operations whose
     coefficient windows come directly from constant memref globals. Zero taps
     are removed while retaining the source update order. Symmetric
-    full-product taps may be paired only for wrapping
-    accumulators, where reassociation is exact modulo the accumulator width.
-    Symmetric pairing remains disabled for mutable, dynamic, floating-point,
-    raw-high, and saturating cases. Independent zero-tap removal may still
-    apply when immutable fixed-point coefficients prove that it is exact.
+    full-product taps may be paired for wrapping accumulators, where
+    reassociation is exact modulo the accumulator width. Saturating
+    accumulators may be paired only when complete prefix-range analysis proves
+    that neither the source nor reassociated schedule can overflow. Symmetric
+    pairing remains disabled for mutable, dynamic, floating-point, and
+    raw-high cases. Independent zero-tap removal may still apply when immutable
+    fixed-point coefficients prove that it is exact.
   }];
   let constructor = "ondrix::createSpecializeOndrixConstantFirPass()";
   let dependentDialects = [
