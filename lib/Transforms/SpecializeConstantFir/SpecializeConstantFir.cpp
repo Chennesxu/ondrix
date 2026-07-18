@@ -227,8 +227,8 @@ LogicalResult tryRewriteSaturatingSymmetricFir(ondrix::ir::FirOp op,
       schedule->passthroughUpdates, schedule->initial, schedule->originalUpdates,
       schedule->reassociatedUpdates,
       [&](const ondrix::ondsp::DistributivePairingSemantics &validatedSemantics,
-          const ondrix::ondsp::TransformLegality &legality) {
-        if (!legality.isExactWith(ondrix::ondsp::TransformJustification::NoOverflowProof))
+          const ondrix::analysis::DistributivePairingEvidence &evidence) {
+        if (!evidence.isProvenNoOverflow())
           return failure();
         replaceFirAndEraseUnusedCoefficientHandle(
             op,

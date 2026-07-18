@@ -34,7 +34,6 @@ enum class TransformJustification {
   None,
   AlgebraicIdentity,
   FixedWidthModulo,
-  NoOverflowProof,
 };
 
 /// Separates transform exactness from the evidence establishing it.
@@ -42,7 +41,6 @@ class TransformLegality {
 public:
   static TransformLegality getAlgebraicIdentity();
   static TransformLegality getFixedWidthModulo();
-  static TransformLegality getNoOverflowProof();
   static TransformLegality getIllegal();
 
   bool isLegal() const { return exactness != TransformExactness::Illegal; }

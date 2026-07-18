@@ -196,7 +196,7 @@ FailureOr<FixedPointRawInterval> addFixedPointRawIntervals(const FixedPointRawIn
 }
 
 DistributivePairingPlan::DistributivePairingPlan(DistributivePairingPlan &&other)
-    : subject(other.subject), semantics(std::move(other.semantics)), legality(other.legality),
+    : subject(other.subject), semantics(std::move(other.semantics)), evidence(other.evidence),
       numeric(other.numeric), product(other.product), accumulator(other.accumulator),
       coefficientPairs(std::move(other.coefficientPairs)),
       passthroughUpdates(std::move(other.passthroughUpdates)), initial(std::move(other.initial)),
@@ -211,7 +211,7 @@ DistributivePairingPlan &DistributivePairingPlan::operator=(DistributivePairingP
     return *this;
   subject = other.subject;
   semantics = std::move(other.semantics);
-  legality = other.legality;
+  evidence = other.evidence;
   numeric = other.numeric;
   product = other.product;
   accumulator = other.accumulator;
@@ -245,7 +245,7 @@ LogicalResult DistributivePairingPlan::consumeIfValid(
       !equalIntervals(originalUpdates, candidateOriginalUpdates) ||
       !equalIntervals(reassociatedUpdates, candidateReassociatedUpdates))
     return failure();
-  return consumer(semantics, legality);
+  return consumer(semantics, evidence);
 }
 
 LogicalResult FixedPointPrefixRangePlanner::proveAllPrefixesFit(
@@ -303,16 +303,21 @@ FailureOr<DistributivePairingPlan> FixedPointPrefixRangePlanner::planDistributiv
   if (failed(semantics) || !semantics->exactBeforeAccumulatorOverflow)
     return failure();
 
-  ondsp::TransformLegality legality = semantics->legalityWithoutRangeProof;
-  if (!legality.isExact()) {
+  ondsp::TransformLegality legalityWithoutRangeProof = semantics->legalityWithoutRangeProof;
+  DistributivePairingEvidence::Kind evidenceKind = DistributivePairingEvidence::Kind::ExactModulo;
+  if (legalityWithoutRangeProof.isExact()) {
+    if (!legalityWithoutRangeProof.isExactWith(ondsp::TransformJustification::FixedWidthModulo))
+      return failure();
+  } else {
     if (accumulator.getUpdateOverflow() != ondsp::OverflowMode::Saturate ||
         failed(proveAllPrefixesFit(accumulatorStorage.getWidth(), initial, originalUpdates,
                                    reassociatedUpdates)))
       return failure();
-    legality = ondsp::TransformLegality::getNoOverflowProof();
+    evidenceKind = DistributivePairingEvidence::Kind::ProvenNoOverflow;
   }
 
-  return DistributivePairingPlan(subject, std::move(*semantics), legality, numeric, product,
+  return DistributivePairingPlan(subject, std::move(*semantics),
+                                 DistributivePairingEvidence(evidenceKind), numeric, product,
                                  accumulator, coefficientPairs, passthroughUpdates, initial,
                                  originalUpdates, reassociatedUpdates);
 }

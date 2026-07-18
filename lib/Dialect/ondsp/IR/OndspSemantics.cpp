@@ -71,10 +71,6 @@ TransformLegality TransformLegality::getFixedWidthModulo() {
   return TransformLegality(TransformExactness::Exact, TransformJustification::FixedWidthModulo);
 }
 
-TransformLegality TransformLegality::getNoOverflowProof() {
-  return TransformLegality(TransformExactness::Exact, TransformJustification::NoOverflowProof);
-}
-
 TransformLegality TransformLegality::getIllegal() {
   return TransformLegality(TransformExactness::Illegal, TransformJustification::None);
 }

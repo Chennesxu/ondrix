@@ -50,8 +50,31 @@ struct PassthroughUpdate {
   int64_t reassociatedIndex;
 };
 
+class FixedPointPrefixRangePlanner;
+
+/// Opaque evidence produced only after the prefix-range planner validates a
+/// complete distributive-pairing plan. Callers may inspect but cannot create
+/// evidence that authorizes a rewrite.
+class DistributivePairingEvidence final {
+public:
+  bool isExactModulo() const { return kind == Kind::ExactModulo; }
+  bool isProvenNoOverflow() const { return kind == Kind::ProvenNoOverflow; }
+
+private:
+  friend class FixedPointPrefixRangePlanner;
+
+  enum class Kind {
+    ExactModulo,
+    ProvenNoOverflow,
+  };
+
+  explicit DistributivePairingEvidence(Kind kind) : kind(kind) {}
+
+  Kind kind;
+};
+
 using DistributivePairingConsumer = llvm::function_ref<mlir::LogicalResult(
-    const ondsp::DistributivePairingSemantics &, const ondsp::TransformLegality &)>;
+    const ondsp::DistributivePairingSemantics &, const DistributivePairingEvidence &)>;
 
 /// A move-only decision bound to the operation, numeric domain, complete
 /// schedule mapping, initial range, and update intervals analyzed. Legality is
@@ -75,21 +98,21 @@ public:
 private:
   friend class FixedPointPrefixRangePlanner;
   DistributivePairingPlan(mlir::Operation *subject, ondsp::DistributivePairingSemantics semantics,
-                          ondsp::TransformLegality legality, ondsp::FixedAttr numeric,
+                          DistributivePairingEvidence evidence, ondsp::FixedAttr numeric,
                           ondsp::ProductAttr product, ondsp::AccType accumulator,
                           llvm::ArrayRef<CoefficientPair> coefficientPairs,
                           llvm::ArrayRef<PassthroughUpdate> passthroughUpdates,
                           const FixedPointRawInterval &initial,
                           llvm::ArrayRef<FixedPointRawInterval> originalUpdates,
                           llvm::ArrayRef<FixedPointRawInterval> reassociatedUpdates)
-      : subject(subject), semantics(std::move(semantics)), legality(legality), numeric(numeric),
+      : subject(subject), semantics(std::move(semantics)), evidence(evidence), numeric(numeric),
         product(product), accumulator(accumulator), coefficientPairs(coefficientPairs),
         passthroughUpdates(passthroughUpdates), initial(initial), originalUpdates(originalUpdates),
         reassociatedUpdates(reassociatedUpdates) {}
 
   mlir::Operation *subject;
   ondsp::DistributivePairingSemantics semantics;
-  ondsp::TransformLegality legality;
+  DistributivePairingEvidence evidence;
   ondsp::FixedAttr numeric;
   ondsp::ProductAttr product;
   ondsp::AccType accumulator;

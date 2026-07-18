@@ -15,6 +15,7 @@
 using ondrix::analysis::addFixedPointRawIntervals;
 using ondrix::analysis::CoefficientPair;
 using ondrix::analysis::computeSignedFullProductInterval;
+using ondrix::analysis::DistributivePairingEvidence;
 using ondrix::analysis::DistributivePairingPlan;
 using ondrix::analysis::FixedPointPrefixRangePlanner;
 using ondrix::analysis::FixedPointRawInterval;
@@ -25,7 +26,9 @@ using ondrix::ondsp::OverflowMode;
 using ondrix::ondsp::ProductAttr;
 using ondrix::ondsp::ProductSelection;
 using ondrix::ondsp::Signedness;
-using ondrix::ondsp::TransformJustification;
+
+static_assert(!std::is_aggregate_v<DistributivePairingEvidence>);
+static_assert(!std::is_default_constructible_v<DistributivePairingEvidence>);
 
 namespace {
 
@@ -215,9 +218,9 @@ bool testPairingPlanValidation() {
 
   bool consumed = false;
   auto consume = [&](const ondrix::ondsp::DistributivePairingSemantics &semantics,
-                     const ondrix::ondsp::TransformLegality &legality) {
-    consumed = legality.isExactWith(TransformJustification::NoOverflowProof) &&
-               semantics.product.rawWidth == 32 && semantics.product.frac == 30;
+                     const DistributivePairingEvidence &evidence) {
+    consumed = evidence.isProvenNoOverflow() && semantics.product.rawWidth == 32 &&
+               semantics.product.frac == 30;
     return consumed ? mlir::success() : mlir::failure();
   };
   if (mlir::failed(std::move(*plan).consumeIfValid(subject->getOperation(), numeric, product,
@@ -276,8 +279,8 @@ bool testWrappingPairingPlan() {
   return mlir::succeeded(std::move(*plan).consumeIfValid(
              subject->getOperation(), numeric, product, accumulator, pairs, passthroughs, initial,
              original, reassociated,
-             [&](const auto &, const ondrix::ondsp::TransformLegality &legality) {
-               exactModulo = legality.isExactWith(TransformJustification::FixedWidthModulo);
+             [&](const auto &, const DistributivePairingEvidence &evidence) {
+               exactModulo = evidence.isExactModulo();
                return exactModulo ? mlir::success() : mlir::failure();
              })) &&
          exactModulo;
