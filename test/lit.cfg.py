@@ -23,6 +23,7 @@ tools = [
     "ondrix-translate",
     "ondrix-constant-sequence-analysis-test",
     "ondrix-fixed-point-prefix-range-analysis-test",
+    "ondrix-fir-algorithmic-work-test",
     "ondrix-fixed-point-semantics-test",
     "ondrix-ondsp-semantics-test",
     "ondrix-ortumcore-target-profile-test",

@@ -12,6 +12,7 @@ set(ONDRIX_TEST_DEPENDS
   not
   ondrix-constant-sequence-analysis-test
   ondrix-fixed-point-prefix-range-analysis-test
+  ondrix-fir-algorithmic-work-test
   ondrix-fixed-point-semantics-test
   ondrix-ondsp-semantics-test
   ondrix-ortumcore-target-profile-test
@@ -34,6 +35,12 @@ llvm_update_compile_flags(ondrix-fixed-point-prefix-range-analysis-test)
 target_link_libraries(ondrix-fixed-point-prefix-range-analysis-test PRIVATE
   OndrixFixedPointPrefixRangeAnalysis
 )
+
+add_llvm_executable(ondrix-fir-algorithmic-work-test EXCLUDE_FROM_ALL
+  Support/FirAlgorithmicWorkTest.cpp
+)
+llvm_update_compile_flags(ondrix-fir-algorithmic-work-test)
+target_link_libraries(ondrix-fir-algorithmic-work-test PRIVATE OndrixFirAlgorithmicWork)
 
 add_llvm_executable(ondrix-fixed-point-semantics-test EXCLUDE_FROM_ALL
   Support/FixedPointSemanticsTest.cpp
