@@ -127,6 +127,27 @@ rewriting. Saturating pairing remains disabled when any prefix may overflow,
 for raw-high products, and while zero-tap elimination would need to be composed
 with the pairing proof.
 
+### Constant FIR Pipeline Placement
+
+Constant FIR specialization is an opt-in algorithm-layer branch, not a default
+canonicalization. It consumes `ondrix.fir` and emits explicit loads plus
+`ondsp.mac` or `ondsp.acc_add_term`, so running it also consumes the structured
+reduction recognized by the generic Vector path. The current OrtumCore
+conversion does not consume `ondsp.acc_add_term`; the supported consumer for a
+specialized FIR is therefore the generic fixed-point scalar finalizer.
+
+Until a cost model or target profile selects among alternatives, pipelines must
+keep these choices explicit:
+
+```text
+generic CPU:  ondrix.fir -> ondsp.reduce_mac -> Vector or scalar lowering
+specialized:  ondrix.fir -> constant FIR specialization -> scalar lowering
+target:       retain structured intent until a proven target capability matches
+```
+
+A default pipeline must not run constant specialization before generic Vector
+or target selection merely because immutable coefficients are available.
+
 ## Import and Export
 
 `ondsp.acc_import` is an exact value-preserving conversion into the
