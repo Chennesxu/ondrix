@@ -11,5 +11,6 @@ add_ondrix_library(OndspVectorNormalization
   MLIRTransformUtils
   MLIRVectorDialect
   OndrixConversionUtils
+  OndrixFixedPointVectorUtils
   OndspIR
 )

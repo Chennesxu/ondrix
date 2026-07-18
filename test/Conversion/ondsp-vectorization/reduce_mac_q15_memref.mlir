@@ -64,7 +64,7 @@ func.func @strided_fallback(
 // CHECK: ondsp.reduce_mac
 // CHECK-NOT: vector.load
 
-func.func @integer_memory_space_vectorized(
+func.func @nonzero_integer_memory_space_fallback(
     %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
     %lhs: memref<8xi16, 1>, %rhs: memref<8xi16, 1>)
     -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
@@ -75,8 +75,9 @@ func.func @integer_memory_space_vectorized(
   return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 }
 
-// CHECK-LABEL: func.func @integer_memory_space_vectorized
-// CHECK: vector.load {{.*}} : memref<8xi16, 1>, vector<4xi16>
+// CHECK-LABEL: func.func @nonzero_integer_memory_space_fallback
+// CHECK: ondsp.reduce_mac
+// CHECK-NOT: vector.load
 
 func.func @lhs_custom_memory_space_fallback(
     %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,

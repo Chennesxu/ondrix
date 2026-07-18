@@ -4,6 +4,8 @@ add_ondrix_library(OndrixConversionUtils
   ReductionUtils.cpp
   ValueTypeConversions.cpp
 
+  PARTIAL_SOURCES_INTENDED
+
   LINK_LIBS PUBLIC
   MLIRArithDialect
   MLIRControlFlowDialect
@@ -11,5 +13,18 @@ add_ondrix_library(OndrixConversionUtils
   MLIRMemRefDialect
   MLIRSCFDialect
   MLIRTransformUtils
+  OndspIR
+)
+
+add_ondrix_library(OndrixFixedPointVectorUtils
+  FixedPointVectorUtils.cpp
+
+  PARTIAL_SOURCES_INTENDED
+
+  LINK_LIBS PUBLIC
+  MLIRArithDialect
+  MLIRIR
+  MLIRVectorDialect
+  OndrixConversionUtils
   OndspIR
 )

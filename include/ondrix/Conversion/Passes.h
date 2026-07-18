@@ -17,6 +17,9 @@ std::unique_ptr<mlir::Pass> createConvertOndspToOrtumCorePass();
 std::unique_ptr<mlir::Pass> createLowerOndspF32ReduceToScalarPass();
 std::unique_ptr<mlir::Pass> createNormalizeOndspFixedVectorReducePass();
 std::unique_ptr<mlir::Pass> createParallelizeOndspFixedWrapVectorReducePass();
+std::unique_ptr<mlir::Pass> createVectorizeOndspConstantSaturatingMemRefReducePass();
+std::unique_ptr<mlir::Pass> createVectorizeOndspConstantSaturatingMemRefReducePass(
+    const VectorizeOndspConstantSaturatingMemRefReduceOptions &options);
 std::unique_ptr<mlir::Pass> createVectorizeOndspFixedMemRefReducePass();
 std::unique_ptr<mlir::Pass>
 createVectorizeOndspFixedMemRefReducePass(const VectorizeOndspFixedMemRefReduceOptions &options);

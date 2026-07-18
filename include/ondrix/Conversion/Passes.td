@@ -83,7 +83,9 @@ def ConvertOndspFixedToScalar
     converts accumulator types structurally across functions and control flow
     and fails if any unsupported ondsp operation or accumulator domain remains.
     Ondrix intent operations must be lowered first. Supported fixed-point
-    memref reductions may be chunked by `vectorize-ondsp-fixed-memref-reduce`.
+    constant saturating reductions may first be handled by
+    `vectorize-ondsp-constant-saturating-memref-reduce`; remaining memref reductions
+    may be chunked by `vectorize-ondsp-fixed-memref-reduce`.
     Proven exact-modulo reductions may then be handled by
     `parallelize-ondsp-fixed-wrap-vector-reduce`; remaining
     fixed-length vector reductions must be normalized by
@@ -138,6 +140,34 @@ def ParallelizeOndspFixedWrapVectorReduce
   ];
 }
 
+def VectorizeOndspConstantSaturatingMemRefReduce
+    : Pass<"vectorize-ondsp-constant-saturating-memref-reduce", "::mlir::ModuleOp"> {
+  let summary = "Vectorize constant saturating reductions under a no-overflow proof";
+  let description = [{
+    Replace supported zero-seeded saturating Q15 and Q31 full-product memref
+    reductions with fixed-width Vector product chunks and horizontal sums only
+    when immutable coefficients and complete prefix-range analysis prove that
+    neither the source nor transformed schedule can overflow. Unsupported,
+    mutable, seeded, raw-high, and unproven reductions remain unchanged for
+    the ordered Vector or scalar fallback.
+  }];
+  let constructor = "ondrix::createVectorizeOndspConstantSaturatingMemRefReducePass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
+           "Number of fixed-point lanes per no-overflow horizontal chunk">,
+    Option<"maxElements", "max-elements", "int64_t", /*default=*/"4096",
+           "Maximum immutable coefficient count analyzed">,
+  ];
+}
+
 def VectorizeOndspFixedMemRefReduce
     : Pass<"vectorize-ondsp-fixed-memref-reduce", "::mlir::ModuleOp"> {
   let summary = "Chunk supported unit-stride fixed-point memref reductions";
@@ -147,11 +177,11 @@ def VectorizeOndspFixedMemRefReduce
     ondsp.reduce_mac operation for subsequent normalization, and the scalar
     tail uses ondsp.mac. The transformation preserves increasing-index
     accumulator update order.
-    Default and representable nonnegative integer LLVM memory spaces are
-    supported. Out-of-range integer spaces are rejected before LLVM lowering.
-    Memory spaces that require a target-specific type-attribute conversion
-    remain unchanged, as do memrefs without a statically known unit minor
-    stride.
+    Only the default LLVM memory space is supported because MLIR 17 Vector to
+    LLVM lowering rejects nonzero address spaces. Other valid memory spaces
+    remain unchanged for scalar or target-specific lowering; invalid integer
+    spaces are rejected. Memrefs without a statically known unit minor stride
+    also remain unchanged.
   }];
   let constructor = "ondrix::createVectorizeOndspFixedMemRefReducePass()";
   let dependentDialects = [

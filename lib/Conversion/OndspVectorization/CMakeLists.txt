@@ -14,5 +14,8 @@ add_ondrix_library(OndspVectorization
   MLIRTransformUtils
   MLIRVectorDialect
   OndrixConversionUtils
+  OndrixFixedPointVectorUtils
+  OndrixConstantSequenceAnalysis
+  OndrixFixedPointPrefixRangeAnalysis
   OndspIR
 )

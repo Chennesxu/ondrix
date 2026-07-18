@@ -13,5 +13,6 @@ func.func @reduce_as1(
 
 // CHECK-LABEL: llvm.func @reduce_as1(
 // CHECK-SAME: !llvm.ptr<1>
-// CHECK: llvm.load {{.*}} : !llvm.ptr<1> -> vector<4xi16>
+// CHECK: llvm.load {{.*}} : !llvm.ptr<1> -> i16
+// CHECK-NOT: vector<
 // CHECK-NOT: ondsp.
