@@ -134,6 +134,36 @@ DistributivePairingPlan &DistributivePairingPlan::operator=(DistributivePairingP
   return *this;
 }
 
+NoOverflowChunkReassociationPlan::NoOverflowChunkReassociationPlan(
+    NoOverflowChunkReassociationPlan &&other)
+    : subject(other.subject), coefficientSource(other.coefficientSource),
+      productSemantics(other.productSemantics), numeric(other.numeric), product(other.product),
+      accumulator(other.accumulator), coefficients(std::move(other.coefficients)),
+      chunkWidth(other.chunkWidth), consumed(other.consumed) {
+  other.subject = nullptr;
+  other.coefficientSource = {};
+  other.consumed = true;
+}
+
+NoOverflowChunkReassociationPlan &
+NoOverflowChunkReassociationPlan::operator=(NoOverflowChunkReassociationPlan &&other) {
+  if (this == &other)
+    return *this;
+  subject = other.subject;
+  coefficientSource = other.coefficientSource;
+  productSemantics = other.productSemantics;
+  numeric = other.numeric;
+  product = other.product;
+  accumulator = other.accumulator;
+  coefficients = std::move(other.coefficients);
+  chunkWidth = other.chunkWidth;
+  consumed = other.consumed;
+  other.subject = nullptr;
+  other.coefficientSource = {};
+  other.consumed = true;
+  return *this;
+}
+
 LogicalResult DistributivePairingPlan::consumeIfValid(Operation *operation,
                                                       ondsp::FixedAttr candidateNumeric,
                                                       ondsp::ProductAttr candidateProduct,
@@ -148,6 +178,24 @@ LogicalResult DistributivePairingPlan::consumeIfValid(Operation *operation,
       !equalCoefficients(coefficients, candidateCoefficients))
     return failure();
   return consumer(semantics, coefficients);
+}
+
+LogicalResult
+NoOverflowChunkReassociationPlan::consumeIfValid(ondsp::ReduceMacOp reduction,
+                                                 int64_t candidateChunkWidth,
+                                                 ChunkReassociationConsumer consumer) && {
+  if (consumed)
+    return failure();
+  consumed = true;
+  auto candidateNumeric = dyn_cast<ondsp::FixedAttr>(reduction.getNumeric());
+  auto candidateAccumulator = dyn_cast<ondsp::AccType>(reduction.getInitial().getType());
+  if (subject != reduction.getOperation() || coefficientSource != reduction.getRhs() ||
+      numeric != candidateNumeric || !reduction.getProduct() ||
+      product != *reduction.getProduct() || accumulator != candidateAccumulator ||
+      !reduction.getInitial().getDefiningOp<ondsp::AccZeroOp>() ||
+      chunkWidth != candidateChunkWidth)
+    return failure();
+  return consumer(productSemantics, coefficients, chunkWidth);
 }
 
 LogicalResult FixedPointPrefixRangePlanner::proveAllPrefixesFit(
@@ -230,6 +278,70 @@ FailureOr<DistributivePairingPlan> FixedPointPrefixRangePlanner::planZeroSeededS
 
   return DistributivePairingPlan(subject, std::move(*semantics), numeric, product, accumulator,
                                  coefficients);
+}
+
+FailureOr<NoOverflowChunkReassociationPlan>
+FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
+    ondsp::ReduceMacOp reduction, const ondrix::DirectConstantIntegerMemRefFacts &constant,
+    int64_t chunkWidth) {
+  auto numeric = dyn_cast<ondsp::FixedAttr>(reduction.getNumeric());
+  auto accumulator = dyn_cast<ondsp::AccType>(reduction.getInitial().getType());
+  if (!numeric || !accumulator || !reduction.getProduct() ||
+      reduction.getRhs() != constant.getSource() ||
+      !reduction.getInitial().getDefiningOp<ondsp::AccZeroOp>())
+    return failure();
+  ondsp::ProductAttr product = *reduction.getProduct();
+  ArrayRef<APInt> coefficients = constant.getSequence().getValues();
+  auto accumulatorStorage = dyn_cast<IntegerType>(accumulator.getStorage());
+  if (!accumulatorStorage || !accumulatorStorage.isSignless() || chunkWidth <= 1 ||
+      coefficients.size() < static_cast<size_t>(chunkWidth) ||
+      coefficients.size() > static_cast<size_t>(std::numeric_limits<int64_t>::max()) ||
+      accumulator.getUpdateOverflow() != ondsp::OverflowMode::Saturate)
+    return failure();
+
+  FailureOr<ondsp::ProductSemantics> productSemantics =
+      ondsp::inferProductSemantics(reduction, numeric, product);
+  if (failed(productSemantics) || productSemantics->selection != ondsp::ProductSelection::Full ||
+      accumulator.getSignedness() != numeric.getSignedness() ||
+      accumulator.getFrac() != productSemantics->frac)
+    return failure();
+
+  SmallVector<FixedPointRawInterval> originalUpdates;
+  originalUpdates.reserve(coefficients.size());
+  for (const APInt &coefficient : coefficients) {
+    FailureOr<FixedPointRawInterval> interval =
+        computeSignedFullProductInterval(numeric, coefficient);
+    if (failed(interval))
+      return failure();
+    originalUpdates.push_back(std::move(*interval));
+  }
+
+  SmallVector<FixedPointRawInterval> chunkedUpdates;
+  size_t fullChunkCount = coefficients.size() / static_cast<size_t>(chunkWidth);
+  chunkedUpdates.reserve(fullChunkCount + coefficients.size() % static_cast<size_t>(chunkWidth));
+  for (size_t chunk = 0; chunk < fullChunkCount; ++chunk) {
+    size_t first = chunk * static_cast<size_t>(chunkWidth);
+    FixedPointRawInterval partial = originalUpdates[first];
+    for (int64_t lane = 1; lane < chunkWidth; ++lane) {
+      FailureOr<FixedPointRawInterval> sum =
+          addFixedPointRawIntervals(partial, originalUpdates[first + static_cast<size_t>(lane)]);
+      if (failed(sum))
+        return failure();
+      partial = std::move(*sum);
+    }
+    chunkedUpdates.push_back(std::move(partial));
+  }
+  for (size_t index = fullChunkCount * static_cast<size_t>(chunkWidth);
+       index < originalUpdates.size(); ++index)
+    chunkedUpdates.push_back(originalUpdates[index]);
+
+  FixedPointRawInterval initial{APInt(accumulatorStorage.getWidth(), 0),
+                                APInt(accumulatorStorage.getWidth(), 0), accumulator.getFrac()};
+  if (failed(proveAllPrefixesFit(accumulatorStorage.getWidth(), initial, originalUpdates,
+                                 chunkedUpdates)))
+    return failure();
+  return NoOverflowChunkReassociationPlan(reduction, constant.getSource(), *productSemantics,
+                                          numeric, product, accumulator, coefficients, chunkWidth);
 }
 
 } // namespace ondrix::analysis

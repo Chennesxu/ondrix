@@ -1,5 +1,8 @@
 #include "ondrix/Analysis/ConstantSequenceAnalysis.h"
 
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/SymbolTable.h"
+
 using namespace mlir;
 
 namespace ondrix {
@@ -28,6 +31,27 @@ FailureOr<ConstantSequenceFacts> analyzeConstantIntegerSequence(DenseIntElements
     }
   }
   return facts;
+}
+
+FailureOr<DirectConstantIntegerMemRefFacts>
+analyzeDirectConstantIntegerMemRefGlobal(Value value, int64_t maxElements) {
+  auto getGlobal = value.getDefiningOp<memref::GetGlobalOp>();
+  if (!getGlobal)
+    return failure();
+
+  auto global =
+      SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(getGlobal, getGlobal.getNameAttr());
+  if (!global)
+    return failure();
+
+  auto initializer = dyn_cast_or_null<DenseIntElementsAttr>(global.getConstantInitValue());
+  if (!initializer)
+    return failure();
+  FailureOr<ConstantSequenceFacts> sequence =
+      analyzeConstantIntegerSequence(initializer, maxElements);
+  if (failed(sequence))
+    return failure();
+  return DirectConstantIntegerMemRefFacts(value, std::move(*sequence));
 }
 
 } // namespace ondrix

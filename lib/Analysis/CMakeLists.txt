@@ -6,6 +6,7 @@ add_ondrix_library(OndrixConstantSequenceAnalysis
   LINK_LIBS PUBLIC
   LLVMSupport
   MLIRIR
+  MLIRMemRefDialect
 )
 
 add_ondrix_library(OndrixFixedPointPrefixRangeAnalysis
@@ -16,5 +17,6 @@ add_ondrix_library(OndrixFixedPointPrefixRangeAnalysis
   LINK_LIBS PUBLIC
   LLVMSupport
   MLIRSupport
+  OndrixConstantSequenceAnalysis
   OndspIR
 )

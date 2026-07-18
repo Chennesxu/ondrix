@@ -1,6 +1,8 @@
 #ifndef ONDRIX_ANALYSIS_FIXEDPOINTPREFIXRANGEANALYSIS_H
 #define ONDRIX_ANALYSIS_FIXEDPOINTPREFIXRANGEANALYSIS_H
 
+#include "ondrix/Analysis/ConstantSequenceAnalysis.h"
+#include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
 #include "llvm/ADT/APInt.h"
@@ -68,6 +70,44 @@ private:
   bool consumed = false;
 };
 
+using ChunkReassociationConsumer = llvm::function_ref<mlir::LogicalResult(
+    const ondsp::ProductSemantics &, llvm::ArrayRef<llvm::APInt>, int64_t)>;
+
+/// A move-only decision authorizing fixed-width chunk reassociation for one
+/// zero-seeded constant reduction. The planner owns schedule construction;
+/// consumers cannot supply narrower update intervals.
+class NoOverflowChunkReassociationPlan final {
+public:
+  NoOverflowChunkReassociationPlan(const NoOverflowChunkReassociationPlan &) = delete;
+  NoOverflowChunkReassociationPlan &operator=(const NoOverflowChunkReassociationPlan &) = delete;
+  NoOverflowChunkReassociationPlan(NoOverflowChunkReassociationPlan &&other);
+  NoOverflowChunkReassociationPlan &operator=(NoOverflowChunkReassociationPlan &&other);
+
+  mlir::LogicalResult consumeIfValid(ondsp::ReduceMacOp reduction, int64_t chunkWidth,
+                                     ChunkReassociationConsumer consumer) &&;
+
+private:
+  friend class FixedPointPrefixRangePlanner;
+  NoOverflowChunkReassociationPlan(mlir::Operation *subject, mlir::Value coefficientSource,
+                                   ondsp::ProductSemantics productSemantics,
+                                   ondsp::FixedAttr numeric, ondsp::ProductAttr product,
+                                   ondsp::AccType accumulator,
+                                   llvm::ArrayRef<llvm::APInt> coefficients, int64_t chunkWidth)
+      : subject(subject), coefficientSource(coefficientSource), productSemantics(productSemantics),
+        numeric(numeric), product(product), accumulator(accumulator), coefficients(coefficients),
+        chunkWidth(chunkWidth) {}
+
+  mlir::Operation *subject;
+  mlir::Value coefficientSource;
+  ondsp::ProductSemantics productSemantics;
+  ondsp::FixedAttr numeric;
+  ondsp::ProductAttr product;
+  ondsp::AccType accumulator;
+  llvm::SmallVector<llvm::APInt> coefficients;
+  int64_t chunkWidth;
+  bool consumed = false;
+};
+
 /// Stateless planner for prefix containment and transform-specific legality.
 class FixedPointPrefixRangePlanner final {
 public:
@@ -83,6 +123,15 @@ public:
   planZeroSeededSymmetricPairing(mlir::Operation *subject, ondsp::FixedAttr numeric,
                                  ondsp::ProductAttr product, ondsp::AccType accumulator,
                                  llvm::ArrayRef<llvm::APInt> coefficients);
+
+  /// Builds a plan for replacing ordered constant products with fixed-width
+  /// horizontal chunk sums followed by the original scalar tail. Both source
+  /// and candidate schedules are derived internally and must fit a saturating
+  /// accumulator for the complete signed input domain.
+  static mlir::FailureOr<NoOverflowChunkReassociationPlan>
+  planZeroSeededConstantChunkReduction(ondsp::ReduceMacOp reduction,
+                                       const ondrix::DirectConstantIntegerMemRefFacts &coefficients,
+                                       int64_t chunkWidth);
 };
 
 } // namespace ondrix::analysis

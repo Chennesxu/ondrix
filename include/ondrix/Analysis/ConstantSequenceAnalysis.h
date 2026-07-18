@@ -6,9 +6,11 @@
 #include "llvm/ADT/SmallVector.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
 
 #include <cstdint>
+#include <utility>
 
 namespace ondrix {
 
@@ -30,10 +32,34 @@ private:
   bool symmetric = true;
 };
 
+/// Integer sequence facts bound to one direct constant memref global value.
+/// Only the corresponding analysis entry point can construct this evidence.
+class DirectConstantIntegerMemRefFacts final {
+public:
+  mlir::Value getSource() const { return source; }
+  const ConstantSequenceFacts &getSequence() const { return sequence; }
+
+private:
+  friend mlir::FailureOr<DirectConstantIntegerMemRefFacts>
+  analyzeDirectConstantIntegerMemRefGlobal(mlir::Value value, int64_t maxElements);
+
+  DirectConstantIntegerMemRefFacts(mlir::Value source, ConstantSequenceFacts sequence)
+      : source(source), sequence(std::move(sequence)) {}
+
+  mlir::Value source;
+  ConstantSequenceFacts sequence;
+};
+
 /// Infers integer sequence properties without materializing more than
 /// `maxElements` values.
 mlir::FailureOr<ConstantSequenceFacts>
 analyzeConstantIntegerSequence(mlir::DenseIntElementsAttr elements, int64_t maxElements);
+
+/// Resolves a direct `memref.get_global` of a constant rank-one integer global
+/// and infers its sequence properties. Views and casts are intentionally not
+/// followed until their immutability and indexing semantics are modeled.
+mlir::FailureOr<DirectConstantIntegerMemRefFacts>
+analyzeDirectConstantIntegerMemRefGlobal(mlir::Value value, int64_t maxElements);
 
 } // namespace ondrix
 

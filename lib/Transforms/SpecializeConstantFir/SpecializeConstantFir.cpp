@@ -14,9 +14,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
@@ -33,20 +31,11 @@ namespace {
 
 FailureOr<ondrix::ConstantSequenceFacts> getConstantCoefficientFacts(ondrix::ir::FirOp op,
                                                                      int64_t maxTaps) {
-  auto getGlobal = op.getCoeffs().getDefiningOp<memref::GetGlobalOp>();
-  if (!getGlobal)
+  FailureOr<ondrix::DirectConstantIntegerMemRefFacts> facts =
+      ondrix::analyzeDirectConstantIntegerMemRefGlobal(op.getCoeffs(), maxTaps);
+  if (failed(facts))
     return failure();
-
-  auto global =
-      SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(getGlobal, getGlobal.getNameAttr());
-  if (!global)
-    return failure();
-
-  auto initializer = dyn_cast_or_null<DenseIntElementsAttr>(global.getConstantInitValue());
-  if (!initializer || initializer.getType().getRank() != 1)
-    return failure();
-
-  return ondrix::analyzeConstantIntegerSequence(initializer, maxTaps);
+  return facts->getSequence();
 }
 
 Value createIndex(Location loc, int64_t index, PatternRewriter &rewriter) {
