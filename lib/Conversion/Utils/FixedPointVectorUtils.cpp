@@ -10,8 +10,9 @@ using namespace mlir;
 namespace ondrix::conversion {
 namespace {
 
-FixedVectorHorizontalSum materializeFixedVectorHorizontalSum(
-    Operation *anchor, const FixedVectorProductTerms &terms, OpBuilder &builder) {
+FixedVectorHorizontalSum materializeFixedVectorHorizontalSum(Operation *anchor,
+                                                             const FixedVectorProductTerms &terms,
+                                                             OpBuilder &builder) {
   auto termVectorType = cast<VectorType>(terms.getTerms().getType());
   auto termStorage = cast<IntegerType>(termVectorType.getElementType());
 
@@ -21,9 +22,9 @@ FixedVectorHorizontalSum materializeFixedVectorHorizontalSum(
     wideTerms = builder.create<arith::ExtSIOp>(anchor->getLoc(), wideVectorType, terms.getTerms());
   Value sum =
       builder.create<vector::ReductionOp>(anchor->getLoc(), vector::CombiningKind::ADD, wideTerms);
-  auto numeric = ondrix::ondsp::FixedAttr::get(builder.getContext(),
-                                               terms.getNumeric().getSignedness(),
-                                               builder.getI64Type(), terms.getNumeric().getFrac());
+  auto numeric =
+      ondrix::ondsp::FixedAttr::get(builder.getContext(), terms.getNumeric().getSignedness(),
+                                    builder.getI64Type(), terms.getNumeric().getFrac());
   return FixedVectorHorizontalSum{sum, numeric};
 }
 
@@ -31,9 +32,8 @@ FixedVectorHorizontalSum materializeFixedVectorHorizontalSum(
 
 FailureOr<FixedVectorProductTerms>
 lowerFixedVectorProductTerms(Operation *anchor, ondrix::ondsp::AccType accumulator,
-                             ondrix::ondsp::FixedAttr numeric,
-                             ondrix::ondsp::ProductAttr product, Value lhs, Value rhs,
-                             OpBuilder &builder) {
+                             ondrix::ondsp::FixedAttr numeric, ondrix::ondsp::ProductAttr product,
+                             Value lhs, Value rhs, OpBuilder &builder) {
   FailureOr<SupportedFixedMacDomain> domain =
       getSupportedFixedVectorMacDomain(anchor, accumulator, numeric, product);
   auto lhsType = dyn_cast<VectorType>(lhs.getType());
@@ -42,8 +42,7 @@ lowerFixedVectorProductTerms(Operation *anchor, ondrix::ondsp::AccType accumulat
       lhsType != rhsType || lhsType.getElementType() != domain->operandStorage)
     return failure();
 
-  auto fullProductVectorType =
-      VectorType::get(lhsType.getShape(), domain->fullProductStorage);
+  auto fullProductVectorType = VectorType::get(lhsType.getShape(), domain->fullProductStorage);
   Value extendedLhs = builder.create<arith::ExtSIOp>(anchor->getLoc(), fullProductVectorType, lhs);
   Value extendedRhs = builder.create<arith::ExtSIOp>(anchor->getLoc(), fullProductVectorType, rhs);
   Value fullProducts = builder.create<arith::MulIOp>(anchor->getLoc(), extendedLhs, extendedRhs);

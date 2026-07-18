@@ -79,9 +79,8 @@ static int check_q15_offset(int16_t *storage) {
   uint16_t scalar = (uint16_t)q15_scalar_reference(storage, storage, 1, 17, 1);
   if (vector == expected && scalar == expected)
     return 0;
-  fprintf(stderr,
-          "Q15 offset reduction: expected 0x%04x, vector 0x%04x, scalar 0x%04x\n",
-          expected, vector, scalar);
+  fprintf(stderr, "Q15 offset reduction: expected 0x%04x, vector 0x%04x, scalar 0x%04x\n", expected,
+          vector, scalar);
   return 1;
 }
 
@@ -95,7 +94,7 @@ int main(void) {
       {1, -2, 3, -4, 5},
   };
   int16_t q15_offset_input[18] = {
-      123, INT16_MIN, INT16_MAX, -1, 1, 12345, -23456, 17, -19,
+      123, INT16_MIN, INT16_MAX, -1,  1,  12345, -23456, 17,  -19,
       23,  -29,       31,        -37, 41, -43,   47,     -53, 59,
   };
 

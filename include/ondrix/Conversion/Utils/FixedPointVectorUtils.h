@@ -15,10 +15,10 @@ public:
   ondrix::ondsp::FixedAttr getNumeric() const { return numeric; }
 
 private:
-  friend mlir::FailureOr<FixedVectorProductTerms> lowerFixedVectorProductTerms(
-      mlir::Operation *anchor, ondrix::ondsp::AccType accumulator,
-      ondrix::ondsp::FixedAttr numeric, ondrix::ondsp::ProductAttr product, mlir::Value lhs,
-      mlir::Value rhs, mlir::OpBuilder &builder);
+  friend mlir::FailureOr<FixedVectorProductTerms>
+  lowerFixedVectorProductTerms(mlir::Operation *anchor, ondrix::ondsp::AccType accumulator,
+                               ondrix::ondsp::FixedAttr numeric, ondrix::ondsp::ProductAttr product,
+                               mlir::Value lhs, mlir::Value rhs, mlir::OpBuilder &builder);
 
   FixedVectorProductTerms(mlir::Value terms, ondrix::ondsp::FixedAttr numeric)
       : terms(terms), numeric(numeric) {}
@@ -37,9 +37,8 @@ struct FixedVectorHorizontalSum {
 /// domain. Unsupported numeric and accumulator combinations fail closed.
 mlir::FailureOr<FixedVectorProductTerms>
 lowerFixedVectorProductTerms(mlir::Operation *anchor, ondrix::ondsp::AccType accumulator,
-                             ondrix::ondsp::FixedAttr numeric,
-                             ondrix::ondsp::ProductAttr product, mlir::Value lhs, mlir::Value rhs,
-                             mlir::OpBuilder &builder);
+                             ondrix::ondsp::FixedAttr numeric, ondrix::ondsp::ProductAttr product,
+                             mlir::Value lhs, mlir::Value rhs, mlir::OpBuilder &builder);
 
 /// Validates product terms, widens them to i64, and forms their horizontal sum.
 /// This helper only materializes arithmetic; callers own reassociation legality.
