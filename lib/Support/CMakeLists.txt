@@ -22,6 +22,7 @@ add_ondrix_library(OndrixSupport
   MLIRIR
   MLIRPass
   MLIRSupport
+  OndrixMemRefToSCF
   OndrixFixedPointSemantics
   OndrixIR
   OndspIR
@@ -32,5 +33,6 @@ add_ondrix_library(OndrixSupport
   OndspVectorization
   OndspToOrtumCore
   OndrixSpecializeConstantFir
+  OndrixTileFirFilter
   OrtumCoreIR
   )

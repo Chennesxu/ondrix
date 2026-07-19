@@ -75,6 +75,25 @@ def LowerOndspF32ReduceToScalar
   ];
 }
 
+def LowerRankOneMemRefCopyToSCF
+    : Pass<"lower-rank-one-memref-copy-to-scf", "::mlir::ModuleOp"> {
+  let summary = "Lower rank-one memref copies to explicit SCF loops";
+  let description = [{
+    Replace ranked one-dimensional memref.copy operations with two increasing-
+    index scf.for loops and a temporary buffer. The first loop snapshots the
+    logical source elements and the second writes the target, preserving
+    overlapping-copy semantics and arbitrary source and destination layouts.
+    This avoids the external memrefCopy runtime required by MLIR 17 for dynamic
+    strided descriptors. Copies of other ranks remain unchanged.
+  }];
+  let constructor = "ondrix::createLowerRankOneMemRefCopyToSCFPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+  ];
+}
+
 def ConvertOndspFixedToScalar
     : Pass<"convert-ondsp-fixed-to-scalar", "::mlir::ModuleOp"> {
   let summary = "Fully lower supported explicit fixed-point accumulator semantics";
