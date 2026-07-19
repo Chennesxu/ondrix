@@ -13,7 +13,10 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
     "ondrix::ir::OndrixDialect",
     "ondrix::ondsp::OndspDialect",
     "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
     "mlir::math::MathDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::tensor::TensorDialect",
   ];
 }
 

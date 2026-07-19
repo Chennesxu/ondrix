@@ -174,6 +174,60 @@ static LogicalResult verifyFirWindow(FirOp op) {
   return success();
 }
 
+static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
+  if (op.getBoundary() != FirBoundaryMode::Valid)
+    return op.emitOpError("currently supports only valid FIR boundaries");
+
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType coeffType = op.getCoeffs().getType();
+  RankedTensorType initType = op.getInit().getType();
+
+  if (inputType.getRank() != 1 || coeffType.getRank() != 1 || initType.getRank() != 1)
+    return op.emitOpError("requires rank-1 input, coefficient, and init tensors");
+  if (inputType.getElementType() != coeffType.getElementType())
+    return op.emitOpError("input and coefficient element types must match");
+
+  int64_t inputLength = inputType.getDimSize(0);
+  int64_t coefficientLength = coeffType.getDimSize(0);
+  int64_t outputLength = initType.getDimSize(0);
+  if (!ShapedType::isDynamic(coefficientLength) && coefficientLength == 0)
+    return op.emitOpError("valid FIR requires at least one coefficient");
+  if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(coefficientLength)) {
+    if (inputLength < coefficientLength)
+      return op.emitOpError("valid FIR input must cover one coefficient window");
+    int64_t expectedOutputLength = inputLength - coefficientLength + 1;
+    if (!ShapedType::isDynamic(outputLength) && outputLength != expectedOutputLength)
+      return op.emitOpError() << "valid FIR output length must be " << expectedOutputLength;
+  }
+
+  Type inputElement = inputType.getElementType();
+  Type outputElement = initType.getElementType();
+  if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric())) {
+    if (inputElement != fixed.getStorage())
+      return op.emitOpError("input and coefficient element type must match fixed numeric storage");
+    if (!op.getAccumulator() || !op.getDst() || !op.getRounding() || !op.getOverflow())
+      return op.emitOpError(
+          "fixed FIR filter requires accumulator, dst, rounding, and overflow attributes");
+    if (failed(verifyFixedReductionResult(op, *op.getAccumulator(), fixed, *op.getProduct())))
+      return failure();
+    if (op.getAccumulator()->getSignedness() != op.getDst()->getSignedness())
+      return op.emitOpError("accumulator and destination signedness must match");
+    if (op.getAccumulator()->getFrac() < op.getDst()->getFrac())
+      return op.emitOpError("destination frac must not exceed accumulator frac");
+    if (outputElement != op.getDst()->getStorage())
+      return op.emitOpError("init and result element type must match destination storage");
+    return success();
+  }
+
+  if (op.getAccumulator() || op.getDst() || op.getRounding() || op.getOverflow())
+    return op.emitOpError(
+        "floating-point FIR filter must not specify fixed-point accumulator or export policy");
+  auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  if (inputElement != fp.getFormat() || outputElement != fp.getFormat())
+    return op.emitOpError("floating-point input, coefficients, init, and result must match format");
+  return success();
+}
+
 static LogicalResult verifyDotDomain(DotOp op) {
   auto lhsShaped = dyn_cast<ShapedType>(op.getLhs().getType());
   auto rhsShaped = dyn_cast<ShapedType>(op.getRhs().getType());
@@ -244,6 +298,20 @@ LogicalResult FirOp::verify() {
   if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
   return verifyFirWindow(*this);
+}
+
+Speculation::Speculatability FirFilterOp::getSpeculatability() {
+  return (ondrix::requiresConservativeDSPSpeculation(getInput().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getCoeffs().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getInit().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
+
+LogicalResult FirFilterOp::verify() {
+  if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
+    return failure();
+  return verifyFirFilterDomain(*this);
 }
 
 LogicalResult DotOp::verify() {

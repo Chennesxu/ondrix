@@ -121,3 +121,44 @@ func.func @dynamic_tensor_fir_remains_in_loop(
 // LICM-LABEL: func.func @dynamic_tensor_fir_remains_in_loop
 // LICM: scf.for
 // LICM: ondrix.fir
+
+func.func @static_tensor_fir_filter_is_speculatable(
+    %input: tensor<8xf32>, %coeffs: tensor<3xf32>, %init: tensor<6xf32>,
+    %upper: index) -> tensor<6xf32> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %result = scf.for %i = %c0 to %upper step %c1
+      iter_args(%current = %init) -> tensor<6xf32> {
+    %filtered = ondrix.fir_filter %input, %coeffs, %init {
+      boundary = #ondrix.fir_boundary<valid>,
+      numeric = #ondsp.fp<format = f32, contract = off>
+    } : (tensor<8xf32>, tensor<3xf32>, tensor<6xf32>) -> tensor<6xf32>
+    scf.yield %filtered : tensor<6xf32>
+  }
+  return %result : tensor<6xf32>
+}
+
+// LICM-LABEL: func.func @static_tensor_fir_filter_is_speculatable
+// LICM: %[[FILTER:.*]] = ondrix.fir_filter
+// LICM: scf.for
+// LICM-NOT: ondrix.fir_filter
+
+func.func @dynamic_tensor_fir_filter_remains_in_loop(
+    %input: tensor<?xf32>, %coeffs: tensor<?xf32>, %init: tensor<?xf32>,
+    %upper: index) -> tensor<?xf32> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %result = scf.for %i = %c0 to %upper step %c1
+      iter_args(%current = %init) -> tensor<?xf32> {
+    %filtered = ondrix.fir_filter %input, %coeffs, %init {
+      boundary = #ondrix.fir_boundary<valid>,
+      numeric = #ondsp.fp<format = f32, contract = off>
+    } : (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
+    scf.yield %filtered : tensor<?xf32>
+  }
+  return %result : tensor<?xf32>
+}
+
+// LICM-LABEL: func.func @dynamic_tensor_fir_filter_remains_in_loop
+// LICM: scf.for
+// LICM: ondrix.fir_filter

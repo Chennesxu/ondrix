@@ -6,10 +6,13 @@ add_ondrix_library(OndrixToOndsp
 
   LINK_LIBS PUBLIC
   MLIRArithDialect
+  MLIRControlFlowDialect
   MLIRIR
   MLIRMathDialect
   MLIRPass
   MLIRSupport
+  MLIRSCFDialect
+  MLIRTensorDialect
   MLIRTransformUtils
   OndrixIR
   OndspIR

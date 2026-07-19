@@ -6,7 +6,10 @@
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -48,6 +51,45 @@ static Value createScalarFpDot(Location loc, Value lhs, Value rhs, ondrix::ondsp
   llvm_unreachable("unknown floating-point contract mode");
 }
 
+static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value accumulator,
+                                       ondrix::ondsp::FpAttr numeric, OpBuilder &builder) {
+  switch (numeric.getContract()) {
+  case ondrix::ondsp::FpContractMode::Off: {
+    Value product = builder.create<arith::MulFOp>(loc, lhs, rhs);
+    return builder.create<arith::AddFOp>(loc, accumulator, product);
+  }
+  case ondrix::ondsp::FpContractMode::Fma:
+    return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator);
+  case ondrix::ondsp::FpContractMode::Fast:
+    return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator, arith::FastMathFlags::fast);
+  }
+  llvm_unreachable("unknown floating-point contract mode");
+}
+
+static void assertValidFirFilterShape(Location loc, Value inputLength, Value coefficientLength,
+                                      Value outputLength, Value zero, Value one,
+                                      OpBuilder &builder) {
+  Value hasCoefficients =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientLength, zero);
+  builder.create<cf::AssertOp>(
+      loc, hasCoefficients, builder.getStringAttr("valid FIR requires at least one coefficient"));
+
+  Value inputCoversWindow =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, inputLength, coefficientLength);
+  builder.create<cf::AssertOp>(
+      loc, inputCoversWindow,
+      builder.getStringAttr("valid FIR input must cover one coefficient window"));
+
+  Value remaining = builder.create<arith::SubIOp>(loc, inputLength, coefficientLength);
+  Value requiredOutputLength = builder.create<arith::AddIOp>(loc, remaining, one);
+  Value outputMatches = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, outputLength,
+                                                      requiredOutputLength);
+  builder.create<cf::AssertOp>(
+      loc, outputMatches,
+      builder.getStringAttr(
+          "valid FIR output length must equal input length minus coefficient length plus one"));
+}
+
 class FirOpLowering final : public OpConversionPattern<ondrix::ir::FirOp> {
 public:
   using OpConversionPattern<ondrix::ir::FirOp>::OpConversionPattern;
@@ -59,6 +101,69 @@ public:
         op.getLoc(), op.getResult().getType(), initial, adaptor.getInput(), adaptor.getCoeffs(),
         op.getNumeric(), op.getProduct().value_or(ondrix::ondsp::ProductAttr()));
     rewriter.replaceOp(op, replacement);
+    return success();
+  }
+};
+
+class FirFilterOpLowering final : public OpConversionPattern<ondrix::ir::FirFilterOp> {
+public:
+  using OpConversionPattern<ondrix::ir::FirFilterOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::FirFilterOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value inputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInput(), zero);
+    Value coefficientLength = rewriter.create<tensor::DimOp>(loc, adaptor.getCoeffs(), zero);
+    Value outputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInit(), zero);
+    assertValidFirFilterShape(loc, inputLength, coefficientLength, outputLength, zero, one,
+                              rewriter);
+
+    auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+    auto outputLoop = rewriter.create<scf::ForOp>(
+        loc, zero, outputLength, one, ValueRange{adaptor.getInit()},
+        [&](OpBuilder &builder, Location bodyLoc, Value outputIndex, ValueRange outputArgs) {
+          Value initial;
+          if (fixed)
+            initial = builder.create<ondrix::ondsp::AccZeroOp>(bodyLoc, *op.getAccumulator());
+          else
+            initial = builder.create<arith::ConstantOp>(bodyLoc, fp.getFormat(),
+                                                        builder.getZeroAttr(fp.getFormat()));
+
+          auto tapLoop = builder.create<scf::ForOp>(
+              bodyLoc, zero, coefficientLength, one, ValueRange{initial},
+              [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange accumulatorArgs) {
+                Value inputIndex = tapBuilder.create<arith::AddIOp>(tapLoc, outputIndex, tap);
+                Value inputValue = tapBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getInput(),
+                                                                        ValueRange{inputIndex});
+                Value coefficient = tapBuilder.create<tensor::ExtractOp>(
+                    tapLoc, adaptor.getCoeffs(), ValueRange{tap});
+                Value next;
+                if (fixed) {
+                  next = tapBuilder.create<ondrix::ondsp::MacOp>(
+                      tapLoc, *op.getAccumulator(), accumulatorArgs.front(), inputValue,
+                      coefficient, fixed, *op.getProduct());
+                } else {
+                  next = createFpAccumulatorUpdate(tapLoc, inputValue, coefficient,
+                                                   accumulatorArgs.front(), fp, tapBuilder);
+                }
+                tapBuilder.create<scf::YieldOp>(tapLoc, next);
+              });
+
+          Value sample = tapLoop.getResult(0);
+          if (fixed) {
+            sample = builder.create<ondrix::ondsp::AccExportOp>(
+                bodyLoc, op.getDst()->getStorage(), sample, *op.getDst(), *op.getRounding(),
+                *op.getOverflow());
+          }
+          Value updated = builder.create<tensor::InsertOp>(bodyLoc, sample, outputArgs.front(),
+                                                           ValueRange{outputIndex});
+          builder.create<scf::YieldOp>(bodyLoc, updated);
+        });
+
+    rewriter.replaceOp(op, outputLoop.getResult(0));
     return success();
   }
 };
@@ -133,11 +238,12 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns.add<FirOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering>(
-        &getContext());
+    patterns.add<FirOpLowering, FirFilterOpLowering, DotOpLowering, ButterflyOpLowering,
+                 QuantizeOpLowering>(&getContext());
 
     ConversionTarget target(getContext());
-    target.addLegalDialect<arith::ArithDialect, math::MathDialect, ondrix::ondsp::OndspDialect>();
+    target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,
+                           scf::SCFDialect, tensor::TensorDialect, ondrix::ondsp::OndspDialect>();
     target.addIllegalDialect<ondrix::ir::OndrixDialect>();
 
     if (failed(applyPartialConversion(module, target, std::move(patterns))))

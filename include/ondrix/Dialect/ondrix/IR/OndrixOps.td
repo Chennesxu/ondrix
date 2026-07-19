@@ -2,7 +2,9 @@
 #define ONDRIX_DIALECT_ONDRIX_IR_ONDRIXOPS_TD
 
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "ondrix/Dialect/ondrix/IR/OndrixAttrs.td"
 include "ondrix/Dialect/ondrix/IR/OndrixDialect.td"
 include "ondrix/Dialect/ondsp/IR/OndspAttrs.td"
 include "ondrix/Dialect/ondsp/IR/OndspTypes.td"
@@ -23,6 +25,57 @@ def Ondrix_FirOp
   let arguments = (ins AnyType:$input, AnyType:$coeffs, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);
   let results = (outs AnyType:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondrix_FirFilterOp
+    : Ondrix_Op<"fir_filter", [
+        DestinationStyleOpInterface,
+        DeclareOpInterfaceMethods<ConditionallySpeculatable>,
+        NoMemoryEffect,
+        TypesMatchWith<"result type matches init type", "init", "result",
+                       "$_self">]> {
+  let summary = "Compute a valid-boundary FIR output tensor";
+  let description = [{
+    `ondrix.fir_filter` computes every valid FIR output sample. For input
+    length `N` and non-empty coefficient length `K`, `N >= K` and the output
+    length is `N - K + 1`. Output sample `n` starts from numeric zero and
+    pairs `input[n + k]` with `coeffs[k]` for `k = 0..K-1` in increasing
+    order. The `init` tensor provides the destination shape and storage; its
+    element values are not part of the mathematical result.
+
+    The first contract accepts ranked one-dimensional tensors only and
+    requires `boundary = valid`. This tensor-only surface gives value
+    semantics and does not impose an unverifiable memref no-alias promise.
+    Other boundary modes, streaming state, stride, and dilation require
+    separate contracts.
+
+    Dynamic extent relationships are execution preconditions. The generic
+    lowering emits dominating assertions as diagnostic guards, but those
+    checks are not observable behavior of an otherwise dead pure operation.
+
+    Fixed-point execution explicitly names the accumulator domain and export
+    policy. Floating-point execution uses the policy in `numeric` and must not
+    carry fixed-point accumulator or export attributes.
+  }];
+  let arguments = (ins
+      AnyRankedTensor:$input,
+      AnyRankedTensor:$coeffs,
+      AnyRankedTensor:$init,
+      Ondrix_FirBoundaryModeAttr:$boundary,
+      Ondsp_NumericAttr:$numeric,
+      OptionalAttr<Ondsp_ProductAttr>:$product,
+      OptionalAttr<TypeAttrOf<Ondsp_Acc>>:$accumulator,
+      OptionalAttr<Ondsp_FixedAttr>:$dst,
+      OptionalAttr<Ondsp_RoundingModeAttr>:$rounding,
+      OptionalAttr<Ondsp_OverflowModeAttr>:$overflow);
+  let results = (outs AnyRankedTensor:$result);
+  let extraClassDeclaration = [{
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      return {2, 3};
+    }
+  }];
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }

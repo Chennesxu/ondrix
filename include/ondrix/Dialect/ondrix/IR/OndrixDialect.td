@@ -7,6 +7,12 @@ def Ondrix_Dialect : Dialect {
   let name = "ondrix";
   let summary = "High-level DSP kernel intent dialect";
   let cppNamespace = "::ondrix::ir";
+
+  let useDefaultAttributePrinterParser = 1;
+
+  let extraClassDeclaration = [{
+    void registerAttributes();
+  }];
 }
 
 class Ondrix_Op<string mnemonic, list<Trait> traits = []>

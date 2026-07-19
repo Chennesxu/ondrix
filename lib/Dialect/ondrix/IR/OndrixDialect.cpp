@@ -1,5 +1,6 @@
 #include "ondrix/Dialect/ondrix/IR/OndrixDialect.h"
 
+#include "ondrix/Dialect/ondrix/IR/OndrixAttrs.h"
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
 
 using namespace mlir;
@@ -12,4 +13,5 @@ void OndrixDialect::initialize() {
 #define GET_OP_LIST
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.cpp.inc"
       >();
+  registerAttributes();
 }
