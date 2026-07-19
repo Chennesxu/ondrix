@@ -9,8 +9,11 @@ add_ondrix_library(OndrixIR
   MLIROndrixOpsIncGen
 
   LINK_LIBS PUBLIC
+  MLIRArithDialect
   MLIRIR
   MLIRDestinationStyleOpInterface
   MLIRSupport
+  MLIRTensorDialect
+  MLIRTilingInterface
   OndspIR
 )

@@ -14,6 +14,10 @@ std::unique_ptr<mlir::Pass> createSpecializeOndrixConstantFirPass();
 std::unique_ptr<mlir::Pass>
 createSpecializeOndrixConstantFirPass(const SpecializeOndrixConstantFirOptions &options);
 
+std::unique_ptr<mlir::Pass> createTileOndrixFirFilterPass();
+std::unique_ptr<mlir::Pass>
+createTileOndrixFirFilterPass(const TileOndrixFirFilterOptions &options);
+
 #define GEN_PASS_REGISTRATION
 #include "ondrix/Transforms/Passes.h.inc"
 

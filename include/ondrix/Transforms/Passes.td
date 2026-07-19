@@ -31,4 +31,28 @@ def SpecializeOndrixConstantFir
   ];
 }
 
+def TileOndrixFirFilter
+    : Pass<"tile-ondrix-fir-filter", "::mlir::ModuleOp"> {
+  let summary = "Tile valid FIR filters along the output axis";
+  let description = [{
+    Opt-in output-axis tiling for tensor `ondrix.fir_filter` operations. The
+    pass delegates loop construction and destination insertion to MLIR's SCF
+    TilingInterface implementation. Each output tile reads the corresponding
+    input halo and retains the complete coefficient tensor; the ordered tap
+    reduction remains inside the tiled operation and is not reassociated.
+  }];
+  let constructor = "ondrix::createTileOndrixFirFilterPass()";
+  let dependentDialects = [
+    "ondrix::ir::OndrixDialect",
+    "mlir::affine::AffineDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::tensor::TensorDialect",
+  ];
+  let options = [
+    Option<"tileSize", "tile-size", "int64_t", /*default=*/"4",
+           "Number of output samples computed by each tile">,
+  ];
+}
+
 #endif // ONDRIX_TRANSFORMS_PASSES

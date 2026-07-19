@@ -9,6 +9,12 @@
 // RUN: not --crash %t.mismatch empty
 // RUN: not --crash %t.mismatch short
 // RUN: not --crash %t.mismatch output
+// RUN: ondrix-opt %s --tile-ondrix-fir-filter="tile-size=4" --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --lower-rank-one-memref-copy-to-scf --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.tiled.mlir
+// RUN: FileCheck %s --check-prefix=TILED-LOWERED < %t.tiled.mlir
+// RUN: ondrix-translate %t.tiled.mlir --mlir-to-llvmir > %t.tiled.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.tiled.ll -o %t.tiled.o
+// RUN: cc %S/Inputs/fir_filter_tensor_aot.c %t.tiled.o -lm -o %t.tiled
+// RUN: %t.tiled
 
 // LOWERED-NOT: ondrix.
 // LOWERED-NOT: ondsp.
@@ -17,6 +23,12 @@
 // ALIAS-LABEL: llvm.func @q15_fir_filter_shared_coeff_init
 // ALIAS: llvm.call @malloc
 // ALIAS: "llvm.intr.memcpy"
+
+// TILED-LOWERED-NOT: ondrix.
+// TILED-LOWERED-NOT: ondsp.
+// TILED-LOWERED-NOT: tensor.
+// TILED-LOWERED-NOT: affine.
+// TILED-LOWERED-NOT: @memrefCopy
 
 func.func @q15_fir_filter_value(
     %input: tensor<?xi16>, %coeffs: tensor<?xi16>, %init: tensor<?xi16>,

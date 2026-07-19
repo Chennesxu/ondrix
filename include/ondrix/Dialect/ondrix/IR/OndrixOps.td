@@ -4,6 +4,7 @@
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/Interfaces/TilingInterface.td"
 include "ondrix/Dialect/ondrix/IR/OndrixAttrs.td"
 include "ondrix/Dialect/ondrix/IR/OndrixDialect.td"
 include "ondrix/Dialect/ondsp/IR/OndspAttrs.td"
@@ -33,6 +34,7 @@ def Ondrix_FirFilterOp
     : Ondrix_Op<"fir_filter", [
         DestinationStyleOpInterface,
         DeclareOpInterfaceMethods<ConditionallySpeculatable>,
+        TilingInterface,
         NoMemoryEffect,
         TypesMatchWith<"result type matches init type", "init", "result",
                        "$_self">]> {
@@ -50,6 +52,10 @@ def Ondrix_FirFilterOp
     semantics and does not impose an unverifiable memref no-alias promise.
     Other boundary modes, streaming state, stride, and dilation require
     separate contracts.
+
+    The tiling interface exposes only the output dimension as parallel. An
+    output tile retains the complete coefficient tensor and reads the required
+    input halo. Tiling does not split or reassociate the ordered tap updates.
 
     Dynamic extent relationships are execution preconditions. The generic
     lowering emits dominating assertions as diagnostic guards, but those
@@ -75,6 +81,24 @@ def Ondrix_FirFilterOp
     std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
       return {2, 3};
     }
+
+    ::llvm::SmallVector<::mlir::utils::IteratorType> getLoopIteratorTypes();
+    ::llvm::SmallVector<::mlir::Range>
+    getIterationDomain(::mlir::OpBuilder &builder);
+    ::mlir::FailureOr<::mlir::TilingResult>
+    getTiledImplementation(::mlir::OpBuilder &builder,
+                           ::llvm::ArrayRef<::mlir::OpFoldResult> offsets,
+                           ::llvm::ArrayRef<::mlir::OpFoldResult> sizes);
+    ::mlir::LogicalResult getResultTilePosition(
+        ::mlir::OpBuilder &builder, unsigned resultNumber,
+        ::llvm::ArrayRef<::mlir::OpFoldResult> offsets,
+        ::llvm::ArrayRef<::mlir::OpFoldResult> sizes,
+        ::llvm::SmallVector<::mlir::OpFoldResult> &resultOffsets,
+        ::llvm::SmallVector<::mlir::OpFoldResult> &resultSizes);
+    ::mlir::FailureOr<::mlir::TilingResult>
+    generateResultTileValue(::mlir::OpBuilder &builder, unsigned resultNumber,
+                            ::llvm::ArrayRef<::mlir::OpFoldResult> offsets,
+                            ::llvm::ArrayRef<::mlir::OpFoldResult> sizes);
   }];
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

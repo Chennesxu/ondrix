@@ -32,6 +32,14 @@ an output-axis `scf.for`, an increasing-index tap `scf.for`, explicit Ondsp
 accumulator updates and export for fixed point, and the selected FP update for
 floating point.
 
+`ondrix.fir_filter` also implements `TilingInterface` for its single parallel
+output axis. An output tile at `[offset, offset + size)` reads the input halo
+`[offset, offset + size + K - 1)`, retains the complete coefficient tensor, and
+uses the corresponding init slice. The ordered tap reduction remains inside
+each tiled operation. The opt-in `tile-ondrix-fir-filter` pass delegates SCF
+loop construction, tail sizes, and destination insertion to MLIR's interface
+tiler; it does not tile or reassociate the tap axis.
+
 ## Prototype Contracts
 
 The valid-mode prototype computes:
@@ -106,13 +114,23 @@ saturating updates generally require serial accumulator flow between tap
 tiles. Tap chunking therefore remains a numeric transform with explicit
 ordering or reassociation proof.
 
-A full-output Ondrix operation can expose destination style and, later, tiling
-over output axes. `ondrix.fir_filter` now establishes the destination-style
-part. Its first lowering deliberately emits scalar tensor extracts instead of
-calling the memref-only `ondsp.reduce_mac` consumer. A later buffer or tiled
-lowering may form valid windows and reuse that reduction when it can preserve
-the same ordered tap semantics. Linalg reduction lowering is legal only after
-the concrete numeric policy proves that changing the update order is exact.
+A full-output Ondrix operation can expose destination style and tiling over
+output axes. `ondrix.fir_filter` now establishes both the destination-style
+contract and output-only `TilingInterface` implementation. Its lowering
+deliberately emits scalar tensor extracts instead of calling the memref-only
+`ondsp.reduce_mac` consumer. A later buffer lowering may form valid windows and
+reuse that reduction when it can preserve the same ordered tap semantics.
+Linalg reduction lowering is legal only after the concrete numeric policy
+proves that changing the update order is exact.
+
+After One-Shot Bufferize, MLIR 17 may materialize dynamic-strided rank-1
+`memref.copy` operations for tiled destination insertion. Its default LLVM
+lowering calls the external `memrefCopy` runner utility. Standalone AOT tests
+instead run the explicit `lower-rank-one-memref-copy-to-scf` conversion, which
+snapshots logical rank-1 elements in a temporary buffer before writing the
+destination. This preserves offset, stride, and overlapping-view semantics
+without adding a runtime ABI dependency. It is a generic buffer conversion
+step, not part of FIR numeric semantics.
 
 ## Unresolved Stable Contract
 
@@ -122,15 +140,17 @@ The following remain outside the first valid tensor contract:
 - stride, dilation, and coefficient indexing direction;
 - a buffer-semantics form with explicit alias and in-place legality;
 - state ownership for streaming execution;
-- output-axis tiling and fusion behavior.
+- fusion behavior and target-aware output tile selection.
 
-Dynamic extent relationships are execution preconditions. The generic lowering
-keeps all three checks in a dominating position before either loop and aborts
-when an observed execution violates them. Because the source operation is pure,
-these diagnostic checks need not survive when the operation and its result are
-dead. Extent arithmetic is overflow-safe under the verified `K > 0` and
-`N >= K` preconditions because `N - K + 1 <= N`.
-Executable Q15, Q31, and ordered f32 tests pass through Ondrix lowering,
-fixed-point finalization, One-Shot Bufferize, LLVM IR, object generation, C
-linkage, and process execution. The older memref compositions remain useful as
-architecture tests for tap-axis Vector reuse and padded boundaries.
+Dynamic extent relationships are execution preconditions. The untiled generic
+lowering keeps all three checks in a dominating position before either loop and
+aborts when an observed execution violates them. Output tiling assumes the
+source preconditions and does not promise to preserve these diagnostics.
+Because the source operation is pure, diagnostic checks need not survive when
+the operation and its result are dead. Extent arithmetic is overflow-safe under
+the verified `K > 0` and `N >= K` preconditions because `N - K + 1 <= N`.
+Executable untiled and output-tiled Q15, Q31, and ordered f32 tests pass through
+Ondrix lowering, fixed-point finalization, One-Shot Bufferize, LLVM IR, object
+generation, C linkage, and process execution. The older memref compositions
+remain useful as architecture tests for tap-axis Vector reuse and padded
+boundaries.

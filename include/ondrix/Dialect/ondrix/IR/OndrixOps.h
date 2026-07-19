@@ -7,6 +7,7 @@
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/TilingInterface.h"
 
 #include "ondrix/Dialect/ondrix/IR/OndrixAttrs.h"
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"

@@ -5,8 +5,11 @@
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 #include "ondrix/Support/DSPTypeUtils.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/TilingInterface.h"
 
 #include <optional>
 
@@ -228,6 +231,38 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
   return success();
 }
 
+static OpFoldResult getTensorDim(OpBuilder &builder, Location loc, Value tensor, int64_t dim) {
+  auto type = cast<RankedTensorType>(tensor.getType());
+  if (!type.isDynamicDim(dim))
+    return builder.getIndexAttr(type.getDimSize(dim));
+  return builder.create<tensor::DimOp>(loc, tensor, dim).getResult();
+}
+
+static OpFoldResult addFirInputHalo(OpBuilder &builder, Location loc, OpFoldResult outputTileSize,
+                                    OpFoldResult coefficientLength) {
+  auto getConstant = [](OpFoldResult value) -> std::optional<int64_t> {
+    if (auto attribute = value.dyn_cast<Attribute>())
+      return cast<IntegerAttr>(attribute).getInt();
+    return std::nullopt;
+  };
+  std::optional<int64_t> staticTileSize = getConstant(outputTileSize);
+  std::optional<int64_t> staticCoefficientLength = getConstant(coefficientLength);
+  if (staticTileSize && staticCoefficientLength)
+    return builder.getIndexAttr(*staticTileSize + (*staticCoefficientLength - 1));
+
+  auto materialize = [&](OpFoldResult value) -> Value {
+    if (auto dynamic = value.dyn_cast<Value>())
+      return dynamic;
+    return builder.create<arith::ConstantIndexOp>(
+        loc, cast<IntegerAttr>(value.get<Attribute>()).getInt());
+  };
+  Value tileSize = materialize(outputTileSize);
+  Value coefficients = materialize(coefficientLength);
+  Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
+  Value halo = builder.create<arith::SubIOp>(loc, coefficients, one);
+  return builder.create<arith::AddIOp>(loc, tileSize, halo).getResult();
+}
+
 static LogicalResult verifyDotDomain(DotOp op) {
   auto lhsShaped = dyn_cast<ShapedType>(op.getLhs().getType());
   auto rhsShaped = dyn_cast<ShapedType>(op.getRhs().getType());
@@ -312,6 +347,58 @@ LogicalResult FirFilterOp::verify() {
   if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
   return verifyFirFilterDomain(*this);
+}
+
+SmallVector<utils::IteratorType> FirFilterOp::getLoopIteratorTypes() {
+  return {utils::IteratorType::parallel};
+}
+
+SmallVector<Range> FirFilterOp::getIterationDomain(OpBuilder &builder) {
+  OpFoldResult zero = builder.getIndexAttr(0);
+  OpFoldResult one = builder.getIndexAttr(1);
+  return {{zero, getTensorDim(builder, getLoc(), getInit(), 0), one}};
+}
+
+FailureOr<TilingResult> FirFilterOp::getTiledImplementation(OpBuilder &builder,
+                                                            ArrayRef<OpFoldResult> offsets,
+                                                            ArrayRef<OpFoldResult> sizes) {
+  if (offsets.size() != 1 || sizes.size() != 1)
+    return failure();
+
+  Location loc = getLoc();
+  OpFoldResult one = builder.getIndexAttr(1);
+  OpFoldResult coefficientLength = getTensorDim(builder, loc, getCoeffs(), 0);
+  OpFoldResult inputTileSize = addFirInputHalo(builder, loc, sizes.front(), coefficientLength);
+  Value tiledInput = builder.create<tensor::ExtractSliceOp>(
+      loc, getInput(), offsets, ArrayRef<OpFoldResult>{inputTileSize}, ArrayRef<OpFoldResult>{one});
+  Value tiledInit = builder.create<tensor::ExtractSliceOp>(loc, getInit(), offsets, sizes,
+                                                           ArrayRef<OpFoldResult>{one});
+
+  SmallVector<Value> tiledOperands{tiledInput, getCoeffs(), tiledInit};
+  Operation *tiledOp =
+      mlir::clone(builder, getOperation(), TypeRange{tiledInit.getType()}, tiledOperands);
+  return TilingResult{{tiledOp}, SmallVector<Value>(tiledOp->getResults())};
+}
+
+LogicalResult FirFilterOp::getResultTilePosition(OpBuilder &builder, unsigned resultNumber,
+                                                 ArrayRef<OpFoldResult> offsets,
+                                                 ArrayRef<OpFoldResult> sizes,
+                                                 SmallVector<OpFoldResult> &resultOffsets,
+                                                 SmallVector<OpFoldResult> &resultSizes) {
+  if (resultNumber != 0 || offsets.size() != 1 || sizes.size() != 1)
+    return failure();
+  resultOffsets.assign(offsets.begin(), offsets.end());
+  resultSizes.assign(sizes.begin(), sizes.end());
+  return success();
+}
+
+FailureOr<TilingResult> FirFilterOp::generateResultTileValue(OpBuilder &builder,
+                                                             unsigned resultNumber,
+                                                             ArrayRef<OpFoldResult> offsets,
+                                                             ArrayRef<OpFoldResult> sizes) {
+  if (resultNumber != 0)
+    return failure();
+  return getTiledImplementation(builder, offsets, sizes);
 }
 
 LogicalResult DotOp::verify() {
