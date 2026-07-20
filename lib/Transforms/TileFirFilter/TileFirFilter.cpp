@@ -5,6 +5,7 @@
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -21,6 +22,33 @@ namespace ondrix {
 using namespace mlir;
 
 namespace {
+
+void assertValidFirFilterShape(ondrix::ir::FirFilterOp op, OpBuilder &builder) {
+  Location loc = op.getLoc();
+  Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+  Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
+  Value inputLength = builder.create<tensor::DimOp>(loc, op.getInput(), zero);
+  Value coefficientLength = builder.create<tensor::DimOp>(loc, op.getCoeffs(), zero);
+  Value outputLength = builder.create<tensor::DimOp>(loc, op.getInit(), zero);
+
+  Value hasCoefficients =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientLength, zero);
+  builder.create<cf::AssertOp>(
+      loc, hasCoefficients, builder.getStringAttr("valid FIR requires at least one coefficient"));
+  Value inputCoversWindow =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, inputLength, coefficientLength);
+  builder.create<cf::AssertOp>(
+      loc, inputCoversWindow,
+      builder.getStringAttr("valid FIR input must cover one coefficient window"));
+  Value remaining = builder.create<arith::SubIOp>(loc, inputLength, coefficientLength);
+  Value requiredOutputLength = builder.create<arith::AddIOp>(loc, remaining, one);
+  Value outputMatches = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, outputLength,
+                                                      requiredOutputLength);
+  builder.create<cf::AssertOp>(
+      loc, outputMatches,
+      builder.getStringAttr("valid FIR output length must equal input length minus coefficient "
+                            "length plus one"));
+}
 
 class TileOndrixFirFilterPass final
     : public ondrix::impl::TileOndrixFirFilterBase<TileOndrixFirFilterPass> {
@@ -43,6 +71,7 @@ public:
     options.setTileSizes(tileSizes);
     for (ondrix::ir::FirFilterOp filter : filters) {
       rewriter.setInsertionPoint(filter);
+      assertValidFirFilterShape(filter, rewriter);
       FailureOr<scf::SCFTilingResult> tiled =
           scf::tileUsingSCFForOp(rewriter, cast<TilingInterface>(filter.getOperation()), options);
       if (failed(tiled)) {

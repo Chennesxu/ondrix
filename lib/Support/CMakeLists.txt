@@ -22,6 +22,7 @@ add_ondrix_library(OndrixSupport
   MLIRIR
   MLIRPass
   MLIRSupport
+  OndrixBufferizationInterfaces
   OndrixMemRefToSCF
   OndrixFixedPointSemantics
   OndrixIR

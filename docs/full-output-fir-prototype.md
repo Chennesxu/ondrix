@@ -27,10 +27,17 @@ aliasing case and checks results against the original coefficient values.
 Fixed-point forms carry the input numeric policy, product selection,
 accumulator type, destination numeric policy, rounding, and destination
 overflow. Floating-point forms carry only their floating-point evaluation
-policy and reject fixed-point lifecycle attributes. The generic lowering emits
-an output-axis `scf.for`, an increasing-index tap `scf.for`, explicit Ondsp
-accumulator updates and export for fixed point, and the selected FP update for
-floating point.
+policy and reject fixed-point lifecycle attributes. The generic tensor lowering
+emits an output-axis `scf.for`, an increasing-index tap `scf.for`, explicit
+Ondsp accumulator updates and export for fixed point, and the selected FP
+update for floating point.
+
+An external `BufferizableOpInterface` model provides the optimized buffer path.
+It reuses the destination buffer, writes samples directly, and represents each
+valid input window and the coefficient sequence as rank-1 `memref.subview`
+values consumed by `ondsp.reduce_mac`. This reconnects tiled full-output Q15
+and Q31 FIR to the existing fixed-width Vector tap-reduction passes. F32 keeps
+the ordered scalar reduction until an exact FP Vector policy is implemented.
 
 `ondrix.fir_filter` also implements `TilingInterface` for its single parallel
 output axis. An output tile at `[offset, offset + size)` reads the input halo
@@ -102,11 +109,11 @@ boundaries cannot be represented by a contiguous subview; the full-boundary
 spike instead builds an ordered, bounds-guarded `ondsp.mac` chain. Both forms
 consume the same numeric update semantics.
 
-The current composition also repeats the dynamic window/coefficient length
-check inside each output iteration. A stable full-output lowering should
-establish that relationship once through its verifier, a runtime shape
-witness, or an equivalent dominating check, then avoid rechecking it in every
-single-sample reduction.
+The output-tiling pass emits the three dynamic valid-boundary shape checks once
+before the outer tile loop. Bufferization derives the window and coefficient
+subviews from the same coefficient-length SSA value, so canonicalization removes
+the redundant inner reduction-length check instead of repeating it for every
+sample or tile.
 
 The current scalar-result `ondsp.reduce_mac` is not a suitable destination-
 style tiled operation: a tap tile has no independently insertable result, and
@@ -116,21 +123,23 @@ ordering or reassociation proof.
 
 A full-output Ondrix operation can expose destination style and tiling over
 output axes. `ondrix.fir_filter` now establishes both the destination-style
-contract and output-only `TilingInterface` implementation. Its lowering
-deliberately emits scalar tensor extracts instead of calling the memref-only
-`ondsp.reduce_mac` consumer. A later buffer lowering may form valid windows and
-reuse that reduction when it can preserve the same ordered tap semantics.
-Linalg reduction lowering is legal only after the concrete numeric policy
+contract and output-only `TilingInterface` implementation. Its external
+bufferization model forms valid windows and reuses the memref-only
+`ondsp.reduce_mac` consumer while preserving the same ordered tap semantics.
+Linalg reduction lowering remains legal only after the concrete numeric policy
 proves that changing the update order is exact.
 
-After One-Shot Bufferize, MLIR 17 may materialize dynamic-strided rank-1
-`memref.copy` operations for tiled destination insertion. Its default LLVM
-lowering calls the external `memrefCopy` runner utility. Standalone AOT tests
-instead run the explicit `lower-rank-one-memref-copy-to-scf` conversion, which
-snapshots logical rank-1 elements in a temporary buffer before writing the
-destination. This preserves offset, stride, and overlapping-view semantics
-without adding a runtime ABI dependency. It is a generic buffer conversion
-step, not part of FIR numeric semantics.
+MLIR's SCF tiler still materializes tensor destination insertion, but One-Shot
+Bufferize maps the tiled source and destination to equivalent subviews. CSE and
+canonicalization remove that self-copy. When coefficients alias the destination
+tensor, bufferization instead creates one protective coefficient snapshot
+before the outer tile loop; no allocation or copy remains inside the tile loop.
+
+The separate `lower-rank-one-memref-copy-to-scf` pass remains a standalone AOT
+fallback for unrelated rank-1 copies. It snapshots logical elements before
+writing the destination, preserving offset, stride, and overlapping-view
+semantics without a runtime `memrefCopy` dependency. It is not part of the
+optimized FIR pipeline and is not a performance lowering.
 
 ## Unresolved Stable Contract
 
@@ -138,7 +147,7 @@ The following remain outside the first valid tensor contract:
 
 - equations and verification for same and full boundary modes;
 - stride, dilation, and coefficient indexing direction;
-- a buffer-semantics form with explicit alias and in-place legality;
+- a public buffer-semantics form with explicit alias and in-place legality;
 - state ownership for streaming execution;
 - fusion behavior and target-aware output tile selection.
 
@@ -150,7 +159,9 @@ Because the source operation is pure, diagnostic checks need not survive when
 the operation and its result are dead. Extent arithmetic is overflow-safe under
 the verified `K > 0` and `N >= K` preconditions because `N - K + 1 <= N`.
 Executable untiled and output-tiled Q15, Q31, and ordered f32 tests pass through
-Ondrix lowering, fixed-point finalization, One-Shot Bufferize, LLVM IR, object
-generation, C linkage, and process execution. The older memref compositions
-remain useful as architecture tests for tap-axis Vector reuse and padded
-boundaries.
+Ondrix lowering or external bufferization, fixed-point finalization, LLVM IR,
+object generation, C linkage, and process execution. The optimized tiled Q15
+and Q31 path additionally executes existing fixed-width Vector tap chunking;
+the alias regression verifies that any protective snapshot dominates the tile
+loop. The older memref compositions remain useful as architecture tests for
+physical-stride fallback and padded boundaries.

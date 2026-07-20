@@ -9,7 +9,9 @@
 // RUN: not --crash %t.mismatch empty
 // RUN: not --crash %t.mismatch short
 // RUN: not --crash %t.mismatch output
-// RUN: ondrix-opt %s --tile-ondrix-fir-filter="tile-size=4" --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --lower-rank-one-memref-copy-to-scf --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.tiled.mlir
+// RUN: ondrix-opt %s --tile-ondrix-fir-filter="tile-size=4" --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --cse --canonicalize --vectorize-ondsp-fixed-memref-reduce="vector-width=4" --normalize-ondsp-fixed-vector-reduce --lower-ondsp-f32-reduce-to-scalar --canonicalize > %t.tiled-vector.mlir
+// RUN: FileCheck %s --check-prefix=TILED-VECTOR < %t.tiled-vector.mlir
+// RUN: ondrix-opt %t.tiled-vector.mlir --convert-ondsp-fixed-to-scalar --expand-strided-metadata --lower-affine --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.tiled.mlir
 // RUN: FileCheck %s --check-prefix=TILED-LOWERED < %t.tiled.mlir
 // RUN: ondrix-translate %t.tiled.mlir --mlir-to-llvmir > %t.tiled.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.tiled.ll -o %t.tiled.o
@@ -23,6 +25,52 @@
 // ALIAS-LABEL: llvm.func @q15_fir_filter_shared_coeff_init
 // ALIAS: llvm.call @malloc
 // ALIAS: "llvm.intr.memcpy"
+
+// TILED-VECTOR-LABEL: func.func @q15_fir_filter_value
+// TILED-VECTOR-COUNT-3: cf.assert
+// TILED-VECTOR-NOT: memref.alloc
+// TILED-VECTOR-NOT: memref.copy
+// TILED-VECTOR: scf.for
+// TILED-VECTOR-NOT: cf.assert
+// TILED-VECTOR-NOT: memref.alloc
+// TILED-VECTOR-NOT: memref.copy
+// TILED-VECTOR-COUNT-2: vector.load {{.*}}vector<4xi16>
+// TILED-VECTOR: arith.muli {{.*}} : vector<4xi32>
+// TILED-VECTOR-NOT: memref.alloc
+// TILED-VECTOR-NOT: memref.copy
+// TILED-VECTOR-LABEL: func.func @q31_fir_filter_value
+// TILED-VECTOR-COUNT-3: cf.assert
+// TILED-VECTOR-NOT: memref.alloc
+// TILED-VECTOR-NOT: memref.copy
+// TILED-VECTOR: scf.for
+// TILED-VECTOR-NOT: cf.assert
+// TILED-VECTOR-NOT: memref.alloc
+// TILED-VECTOR-NOT: memref.copy
+// TILED-VECTOR-COUNT-2: vector.load {{.*}}vector<4xi32>
+// TILED-VECTOR: arith.muli {{.*}} : vector<4xi64>
+// TILED-VECTOR-NOT: memref.alloc
+// TILED-VECTOR-NOT: memref.copy
+// TILED-VECTOR-LABEL: func.func @q15_fir_filter_shared_coeff_init
+// TILED-VECTOR-COUNT-3: cf.assert
+// TILED-VECTOR: memref.alloc
+// TILED-VECTOR: memref.copy
+// TILED-VECTOR: scf.for
+// TILED-VECTOR-NOT: cf.assert
+// TILED-VECTOR-NOT: memref.alloc
+// TILED-VECTOR-NOT: memref.copy
+// TILED-VECTOR-COUNT-2: vector.load {{.*}}vector<4xi16>
+// TILED-VECTOR: arith.muli {{.*}} : vector<4xi32>
+// TILED-VECTOR-NOT: memref.alloc
+// TILED-VECTOR-NOT: memref.copy
+// TILED-VECTOR-LABEL: func.func @f32_fir_filter_value
+// TILED-VECTOR-COUNT-3: cf.assert
+// TILED-VECTOR: scf.for
+// TILED-VECTOR-NOT: cf.assert
+// TILED-VECTOR-NOT: memref.alloc
+// TILED-VECTOR-NOT: memref.copy
+// TILED-VECTOR: math.fma
+// TILED-VECTOR-NOT: memref.alloc
+// TILED-VECTOR-NOT: memref.copy
 
 // TILED-LOWERED-NOT: ondrix.
 // TILED-LOWERED-NOT: ondsp.

@@ -88,26 +88,26 @@ static uint32_t f32_bits(float value) {
 int main(void) {
   int failed = 0;
 
-  int16_t q15_input[] = {32767, -32768, 4096, -8192, 16384, 1, -2, 3};
-  int16_t q15_coeffs[] = {-32768, 16384, 8192};
+  int16_t q15_input[] = {32767, -32768, 4096, -8192, 16384, 1, -2, 3, -5, 7};
+  int16_t q15_coeffs[] = {-32768, 16384, 8192, -4096, 2048};
   int16_t q15_init[6] = {11, 12, 13, 14, 15, 16};
   for (int64_t index = 0; index < 6; ++index) {
-    int16_t actual = q15_fir_filter_value(MEMREF_ARGS(q15_input, 8), MEMREF_ARGS(q15_coeffs, 3),
+    int16_t actual = q15_fir_filter_value(MEMREF_ARGS(q15_input, 10), MEMREF_ARGS(q15_coeffs, 5),
                                           MEMREF_ARGS(q15_init, 6), index);
-    int16_t expected = q15_reference(q15_input, q15_coeffs, index, 3);
+    int16_t expected = q15_reference(q15_input, q15_coeffs, index, 5);
     if (actual != expected) {
       fprintf(stderr, "Q15 output %lld: expected %d, got %d\n", (long long)index, expected, actual);
       failed = 1;
     }
   }
 
-  int16_t shared_coeffs_and_init[] = {-32768, 16384, 8192};
-  int16_t shared_original[3];
+  int16_t shared_coeffs_and_init[] = {-32768, 16384, 8192, -4096, 2048};
+  int16_t shared_original[5];
   memcpy(shared_original, shared_coeffs_and_init, sizeof(shared_original));
-  for (int64_t index = 0; index < 3; ++index) {
+  for (int64_t index = 0; index < 5; ++index) {
     int16_t actual = q15_fir_filter_shared_coeff_init(
-        MEMREF_ARGS(q15_input, 5), MEMREF_ARGS(shared_coeffs_and_init, 3), index);
-    int16_t expected = q15_reference(q15_input, shared_original, index, 3);
+        MEMREF_ARGS(q15_input, 9), MEMREF_ARGS(shared_coeffs_and_init, 5), index);
+    int16_t expected = q15_reference(q15_input, shared_original, index, 5);
     if (actual != expected) {
       fprintf(stderr, "Q15 shared operand %lld: expected %d, got %d\n", (long long)index, expected,
               actual);
@@ -116,13 +116,13 @@ int main(void) {
     memcpy(shared_coeffs_and_init, shared_original, sizeof(shared_original));
   }
 
-  int32_t q31_input[] = {INT32_MIN, INT32_MAX, INT32_C(1) << 30, -(INT32_C(1) << 30), 17};
-  int32_t q31_coeffs[] = {INT32_MIN, INT32_MAX, 1};
+  int32_t q31_input[] = {INT32_MIN, INT32_MAX, INT32_C(1) << 30, -(INT32_C(1) << 30), 17, -31, 63};
+  int32_t q31_coeffs[] = {INT32_MIN, INT32_MAX, 1, -(INT32_C(1) << 29), INT32_C(1) << 28};
   int32_t q31_init[3] = {101, 102, 103};
   for (int64_t index = 0; index < 3; ++index) {
-    int32_t actual = q31_fir_filter_value(MEMREF_ARGS(q31_input, 5), MEMREF_ARGS(q31_coeffs, 3),
+    int32_t actual = q31_fir_filter_value(MEMREF_ARGS(q31_input, 7), MEMREF_ARGS(q31_coeffs, 5),
                                           MEMREF_ARGS(q31_init, 3), index);
-    int32_t expected = q31_reference(q31_input, q31_coeffs, index, 3);
+    int32_t expected = q31_reference(q31_input, q31_coeffs, index, 5);
     if (actual != expected) {
       fprintf(stderr, "Q31 output %lld: expected %d, got %d\n", (long long)index, expected, actual);
       failed = 1;

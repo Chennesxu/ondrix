@@ -3,8 +3,10 @@
 
 // TILE4-LABEL: func.func @dynamic_q15
 // TILE4: %[[STEP:.*]] = arith.constant 4 : index
+// TILE4-COUNT-3: cf.assert
 // TILE4: %[[OUTPUT_SIZE:.*]] = tensor.dim %[[INIT:.*]], %{{.*}}
 // TILE4: %[[RESULT:.*]] = scf.for %[[OFFSET:.*]] = %{{.*}} to %[[OUTPUT_SIZE]] step %[[STEP]] iter_args(%[[DEST:.*]] = %[[INIT]])
+// TILE4-NOT: cf.assert
 // TILE4: %[[TILE_SIZE:.*]] = affine.min
 // TILE4: %[[COEFF_SIZE:.*]] = tensor.dim %[[COEFFS:.*]], %{{.*}}
 // TILE4: %[[HALO:.*]] = arith.subi %[[COEFF_SIZE]], %{{.*}}
@@ -16,6 +18,7 @@
 // TILE4-SAME: boundary = #ondrix.fir_boundary<valid>
 // TILE4-SAME: product = #ondsp.product<full>
 // TILE4: tensor.insert_slice %[[TILED]] into %[[DEST]][%[[OFFSET]]] [%[[TILE_SIZE]]] [1]
+// TILE4-NOT: cf.assert
 // TILE4: return %[[RESULT]]
 func.func @dynamic_q15(
     %input: tensor<?xi16>, %coeffs: tensor<?xi16>, %init: tensor<?xi16>)

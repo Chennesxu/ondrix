@@ -11,7 +11,7 @@ may change while the numeric model is stabilized.
 | Generic scalar lowering | Signed-Q15 full product and signed-Q31 full/raw-high accumulator operations implemented; ordered rank-1 Q15/Q31 memref reductions implemented; rank-1 f32 reduction is partial |
 | Generic Vector CPU lowering | Automatic unit-stride Q15/Q31 chunking, ordered saturating updates, and exact-modulo wrapping reduction implemented |
 | Algorithm transforms | Opt-in specialization for static rank-1 FIR samples using direct constant memref globals: zero-tap elimination, exact-modulo symmetric full-product pairing, and symmetric saturating pairing when complete prefix-range analysis proves both schedules safe |
-| Full-output FIR | Experimental tensor-only destination-style `ondrix.fir_filter` for valid boundaries with output-axis `TilingInterface` and untiled/tiled Q15/Q31/f32 AOT execution; memref/alias, padded boundaries, fusion, target-aware tile selection, and streaming remain open |
+| Full-output FIR | Experimental tensor-only destination-style `ondrix.fir_filter` for valid boundaries with output-axis tiling, direct destination bufferization, Q15/Q31 Vector tap reductions, ordered f32 scalar reduction, alias-safe tiled AOT execution, and no per-tile copy/allocation; public buffer semantics, padded boundaries, fusion, target-aware tile selection, and streaming remain open |
 | Packed Q15 butterfly lowering | Experimental instruction selection only; no public emulator or ABI correctness claim |
 | Object generation and C execution | Implemented for scalar and fixed-width Vector Q15/Q31 FIR-sample/dot paths |
 | Public OrtumCore emulation | Signed i40/frac30 saturating accumulator init and Q15 full-product MAC add/sub implemented through exact Ondsp expansion |

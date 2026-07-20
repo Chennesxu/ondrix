@@ -7,6 +7,7 @@ add_ondrix_library(OndrixTileFirFilter
   LINK_LIBS PUBLIC
   MLIRAffineDialect
   MLIRArithDialect
+  MLIRControlFlowDialect
   MLIRIR
   MLIRPass
   MLIRSCFDialect

@@ -46,6 +46,7 @@ def TileOndrixFirFilter
     "ondrix::ir::OndrixDialect",
     "mlir::affine::AffineDialect",
     "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
     "mlir::scf::SCFDialect",
     "mlir::tensor::TensorDialect",
   ];
