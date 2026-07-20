@@ -18,6 +18,12 @@ extern int16_t q15_fir_filter_shared_coeff_init(int16_t *, int16_t *, int64_t, i
 extern float f32_fir_filter_value(float *, float *, int64_t, int64_t, int64_t, float *, float *,
                                   int64_t, int64_t, int64_t, float *, float *, int64_t, int64_t,
                                   int64_t, int64_t);
+extern int16_t q15_proven_fir_filter_value(int16_t *, int16_t *, int64_t, int64_t, int64_t,
+                                           int16_t *, int16_t *, int64_t, int64_t, int64_t,
+                                           int64_t);
+extern int32_t q31_proven_fir_filter_value(int32_t *, int32_t *, int64_t, int64_t, int64_t,
+                                           int32_t *, int32_t *, int64_t, int64_t, int64_t,
+                                           int64_t);
 
 static int64_t clamp_i40(__int128 value) {
   const __int128 minimum = -((__int128)1 << 39);
@@ -141,6 +147,37 @@ int main(void) {
     if (f32_bits(actual) != f32_bits(expected)) {
       fprintf(stderr, "f32 output %lld: expected 0x%08x, got 0x%08x\n", (long long)index,
               f32_bits(expected), f32_bits(actual));
+      failed = 1;
+    }
+  }
+
+  const int16_t q15_proven_coefficients[] = {-4096, 2048, -1024, 512, -256, 128, -64, 32};
+  int16_t q15_proven_input[] = {32767, -32768, 24576, -16384, 8192, -4096,
+                                2048,  -1024,  512,   -256,   128,  -64};
+  int16_t q15_proven_init[5] = {0};
+  for (int64_t index = 0; index < 5; ++index) {
+    int16_t actual = q15_proven_fir_filter_value(MEMREF_ARGS(q15_proven_input, 12),
+                                                 MEMREF_ARGS(q15_proven_init, 5), index);
+    int16_t expected = q15_reference(q15_proven_input, q15_proven_coefficients, index, 8);
+    if (actual != expected) {
+      fprintf(stderr, "Q15 proven output %lld: expected %d, got %d\n", (long long)index, expected,
+              actual);
+      failed = 1;
+    }
+  }
+
+  const int32_t q31_proven_coefficients[] = {INT32_C(1) << 26, -(INT32_C(1) << 25),
+                                             INT32_C(1) << 24, -(INT32_C(1) << 23)};
+  int32_t q31_proven_input[] = {INT32_MIN, INT32_MAX, INT32_C(1) << 30, -(INT32_C(1) << 29), 17,
+                                -31,       63};
+  int32_t q31_proven_init[4] = {0};
+  for (int64_t index = 0; index < 4; ++index) {
+    int32_t actual = q31_proven_fir_filter_value(MEMREF_ARGS(q31_proven_input, 7),
+                                                 MEMREF_ARGS(q31_proven_init, 4), index);
+    int32_t expected = q31_reference(q31_proven_input, q31_proven_coefficients, index, 4);
+    if (actual != expected) {
+      fprintf(stderr, "Q31 proven output %lld: expected %d, got %d\n", (long long)index, expected,
+              actual);
       failed = 1;
     }
   }
