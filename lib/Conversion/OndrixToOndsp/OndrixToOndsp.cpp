@@ -114,6 +114,33 @@ static void assertFullFirFilterShape(Location loc, Value inputLength, Value coef
           "full FIR output length must equal input length plus coefficient length minus one"));
 }
 
+static void assertFullFirFilterTileShape(Location loc, Value inputLength, Value coefficientLength,
+                                         Value outputLength, Value outputOrigin, Value zero,
+                                         Value one, OpBuilder &builder) {
+  Value hasInput = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, inputLength, zero);
+  builder.create<cf::AssertOp>(
+      loc, hasInput, builder.getStringAttr("full FIR requires at least one input sample"));
+  Value hasCoefficients =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientLength, zero);
+  builder.create<cf::AssertOp>(loc, hasCoefficients,
+                               builder.getStringAttr("full FIR requires at least one coefficient"));
+
+  Value leftPadding = builder.create<arith::SubIOp>(loc, coefficientLength, one);
+  Value completeOutputLength = builder.create<arith::AddIOp>(loc, inputLength, leftPadding);
+  Value extentDidNotOverflow = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge,
+                                                             completeOutputLength, inputLength);
+  Value originInRange = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ule, outputOrigin,
+                                                      completeOutputLength);
+  Value remaining = builder.create<arith::SubIOp>(loc, completeOutputLength, outputOrigin);
+  Value tileInRange =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ule, outputLength, remaining);
+  Value validRange = builder.create<arith::AndIOp>(loc, extentDidNotOverflow, originInRange);
+  validRange = builder.create<arith::AndIOp>(loc, validRange, tileInRange);
+  builder.create<cf::AssertOp>(
+      loc, validRange,
+      builder.getStringAttr("full FIR output tile must lie within the complete output range"));
+}
+
 class FirOpLowering final : public OpConversionPattern<ondrix::ir::FirOp> {
 public:
   using OpConversionPattern<ondrix::ir::FirOp>::OpConversionPattern;
@@ -141,9 +168,13 @@ public:
     Value inputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInput(), zero);
     Value coefficientLength = rewriter.create<tensor::DimOp>(loc, adaptor.getCoeffs(), zero);
     Value outputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInit(), zero);
+    Value outputOrigin = adaptor.getOutputOrigin();
     if (op.getBoundary() == ondrix::ir::FirBoundaryMode::Valid)
       assertValidFirFilterShape(loc, inputLength, coefficientLength, outputLength, zero, one,
                                 rewriter);
+    else if (outputOrigin)
+      assertFullFirFilterTileShape(loc, inputLength, coefficientLength, outputLength, outputOrigin,
+                                   zero, one, rewriter);
     else
       assertFullFirFilterShape(loc, inputLength, coefficientLength, outputLength, zero, one,
                                rewriter);
@@ -157,6 +188,9 @@ public:
     auto outputLoop = rewriter.create<scf::ForOp>(
         loc, zero, outputLength, one, ValueRange{adaptor.getInit()},
         [&](OpBuilder &builder, Location bodyLoc, Value outputIndex, ValueRange outputArgs) {
+          Value globalOutputIndex = outputIndex;
+          if (outputOrigin)
+            globalOutputIndex = builder.create<arith::AddIOp>(bodyLoc, outputOrigin, outputIndex);
           Value initial;
           if (fixed)
             initial = builder.create<ondrix::ondsp::AccZeroOp>(bodyLoc, *op.getAccumulator());
@@ -168,11 +202,12 @@ public:
           Value inputBase;
           if (op.getBoundary() == ondrix::ir::FirBoundaryMode::Full) {
             Value outputBeforeLeft = builder.create<arith::CmpIOp>(
-                bodyLoc, arith::CmpIPredicate::ult, outputIndex, leftPadding);
-            Value leftDeficit = builder.create<arith::SubIOp>(bodyLoc, leftPadding, outputIndex);
+                bodyLoc, arith::CmpIPredicate::ult, globalOutputIndex, leftPadding);
+            Value leftDeficit =
+                builder.create<arith::SubIOp>(bodyLoc, leftPadding, globalOutputIndex);
             firstValidTap =
                 builder.create<arith::SelectOp>(bodyLoc, outputBeforeLeft, leftDeficit, zero);
-            inputBase = builder.create<arith::SubIOp>(bodyLoc, outputIndex, leftPadding);
+            inputBase = builder.create<arith::SubIOp>(bodyLoc, globalOutputIndex, leftPadding);
           }
 
           auto tapLoop = builder.create<scf::ForOp>(
@@ -180,7 +215,8 @@ public:
               [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange accumulatorArgs) {
                 Value next;
                 if (op.getBoundary() == ondrix::ir::FirBoundaryMode::Valid) {
-                  Value inputIndex = tapBuilder.create<arith::AddIOp>(tapLoc, outputIndex, tap);
+                  Value inputIndex =
+                      tapBuilder.create<arith::AddIOp>(tapLoc, globalOutputIndex, tap);
                   Value inputValue = tapBuilder.create<tensor::ExtractOp>(
                       tapLoc, adaptor.getInput(), ValueRange{inputIndex});
                   Value coefficient = tapBuilder.create<tensor::ExtractOp>(

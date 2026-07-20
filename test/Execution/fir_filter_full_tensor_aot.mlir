@@ -20,11 +20,33 @@
 // RUN: not --crash %t.generic.mismatch input
 // RUN: not --crash %t.generic.mismatch coefficients
 // RUN: not --crash %t.generic.mismatch output
+// RUN: ondrix-opt %s --tile-ondrix-fir-filter="tile-size=4" --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --cse --canonicalize --vectorize-ondsp-fixed-memref-reduce="vector-width=4" --normalize-ondsp-fixed-vector-reduce --lower-ondsp-f32-reduce-to-scalar --canonicalize > %t.tiled-vector.mlir
+// RUN: FileCheck %s --check-prefix=TILED-VECTOR < %t.tiled-vector.mlir
+// RUN: ondrix-opt %t.tiled-vector.mlir --convert-ondsp-fixed-to-scalar --expand-strided-metadata --lower-affine --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.tiled.mlir
+// RUN: FileCheck %s --check-prefix=LOWERED < %t.tiled.mlir
+// RUN: ondrix-translate %t.tiled.mlir --mlir-to-llvmir > %t.tiled.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.tiled.ll -o %t.tiled.o
+// RUN: cc %S/Inputs/fir_filter_full_tensor_aot.c %t.tiled.o -lm -o %t.tiled
+// RUN: %t.tiled
+// RUN: cc %S/Inputs/fir_filter_full_tensor_mismatch.c %t.tiled.o -lm -o %t.tiled.mismatch
+// RUN: not --crash %t.tiled.mismatch input
+// RUN: not --crash %t.tiled.mismatch coefficients
+// RUN: not --crash %t.tiled.mismatch output
 
 // VECTOR-LABEL: func.func @q15_full_filter_value
 // VECTOR-COUNT-3: cf.assert
 // VECTOR-NOT: memref.alloc
 // VECTOR-NOT: memref.copy
+// TILED-VECTOR-LABEL: func.func @q15_full_filter_value
+// TILED-VECTOR-COUNT-1: "FIR requires at least one coefficient"
+// TILED-VECTOR-COUNT-1: "full FIR requires at least one input sample"
+// TILED-VECTOR-COUNT-1: "full FIR output length must equal input length plus coefficient length minus one"
+// TILED-VECTOR: scf.for
+// TILED-VECTOR-COUNT-2: vector.load {{.*}}vector<4xi16>
+// TILED-VECTOR: arith.muli {{.*}} : vector<4xi32>
+// TILED-VECTOR-LABEL: func.func @q31_full_filter_value
+// TILED-VECTOR-COUNT-2: vector.load {{.*}}vector<4xi32>
+// TILED-VECTOR: arith.muli {{.*}} : vector<4xi64>
 // VECTOR: scf.if
 // VECTOR: ondsp.mac
 // VECTOR-COUNT-2: vector.load {{.*}}vector<4xi16>

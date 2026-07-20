@@ -156,6 +156,7 @@ struct FirFilterOpInterface
     Value inputLength = rewriter.create<memref::DimOp>(loc, *input, zero);
     Value coefficientLength = rewriter.create<memref::DimOp>(loc, *coefficients, zero);
     Value outputLength = rewriter.create<memref::DimOp>(loc, *output, zero);
+    Value globalOutputOrigin = op.getOutputOrigin() ? op.getOutputOrigin() : zero;
     SmallVector<OpFoldResult> coefficientOffsets{rewriter.getIndexAttr(0)};
     SmallVector<OpFoldResult> coefficientSizes{coefficientLength};
     SmallVector<OpFoldResult> coefficientStrides{rewriter.getIndexAttr(1)};
@@ -165,11 +166,15 @@ struct FirFilterOpInterface
     auto createValidRange = [&](Value lower, Value upper) {
       rewriter.create<scf::ForOp>(
           loc, lower, upper, one, ValueRange{},
-          [&](OpBuilder &builder, Location bodyLoc, Value outputIndex, ValueRange) {
-            Value inputOffset = outputIndex;
+          [&](OpBuilder &builder, Location bodyLoc, Value localOutputIndex, ValueRange) {
+            Value globalOutputIndex = localOutputIndex;
+            if (op.getOutputOrigin())
+              globalOutputIndex =
+                  builder.create<arith::AddIOp>(bodyLoc, globalOutputOrigin, localOutputIndex);
+            Value inputOffset = globalOutputIndex;
             if (op.getBoundary() == FirBoundaryMode::Full) {
               Value leftPadding = builder.create<arith::SubIOp>(bodyLoc, coefficientLength, one);
-              inputOffset = builder.create<arith::SubIOp>(bodyLoc, outputIndex, leftPadding);
+              inputOffset = builder.create<arith::SubIOp>(bodyLoc, globalOutputIndex, leftPadding);
             }
             SmallVector<OpFoldResult> offsets{inputOffset};
             SmallVector<OpFoldResult> sizes{coefficientLength};
@@ -177,7 +182,7 @@ struct FirFilterOpInterface
             Value window =
                 builder.create<memref::SubViewOp>(bodyLoc, *input, offsets, sizes, strides);
             Value sample = createReducedFirSample(op, window, coefficientView, builder, bodyLoc);
-            builder.create<memref::StoreOp>(bodyLoc, sample, *output, outputIndex);
+            builder.create<memref::StoreOp>(bodyLoc, sample, *output, localOutputIndex);
             builder.create<scf::YieldOp>(bodyLoc);
           });
     };
@@ -185,28 +190,50 @@ struct FirFilterOpInterface
     if (op.getBoundary() == FirBoundaryMode::Valid) {
       createValidRange(zero, outputLength);
     } else {
-      assertFullFirFilterShape(loc, inputLength, coefficientLength, outputLength, zero, one,
-                               rewriter);
+      // The output tiler proves the complete dynamic shape once before its
+      // loop. Untiled operations still need the standalone diagnostic guard.
+      if (!op.getOutputOrigin())
+        assertFullFirFilterShape(loc, inputLength, coefficientLength, outputLength, zero, one,
+                                 rewriter);
       Value leftPadding = rewriter.create<arith::SubIOp>(loc, coefficientLength, one);
       auto createGuardedRange = [&](Value lower, Value upper) {
         rewriter.create<scf::ForOp>(
             loc, lower, upper, one, ValueRange{},
-            [&](OpBuilder &builder, Location bodyLoc, Value outputIndex, ValueRange) {
-              Value sample = createGuardedFullFirSample(op, *input, coefficientView, outputIndex,
-                                                        inputLength, coefficientLength, leftPadding,
-                                                        zero, one, builder, bodyLoc);
-              builder.create<memref::StoreOp>(bodyLoc, sample, *output, outputIndex);
+            [&](OpBuilder &builder, Location bodyLoc, Value localOutputIndex, ValueRange) {
+              Value globalOutputIndex = localOutputIndex;
+              if (op.getOutputOrigin())
+                globalOutputIndex =
+                    builder.create<arith::AddIOp>(bodyLoc, globalOutputOrigin, localOutputIndex);
+              Value sample = createGuardedFullFirSample(
+                  op, *input, coefficientView, globalOutputIndex, inputLength, coefficientLength,
+                  leftPadding, zero, one, builder, bodyLoc);
+              builder.create<memref::StoreOp>(bodyLoc, sample, *output, localOutputIndex);
               builder.create<scf::YieldOp>(bodyLoc);
             });
       };
 
-      createGuardedRange(zero, leftPadding);
-      createValidRange(leftPadding, inputLength);
-      Value inputBeforePadding =
-          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, inputLength, leftPadding);
-      Value rightStart =
-          rewriter.create<arith::SelectOp>(loc, inputBeforePadding, leftPadding, inputLength);
-      createGuardedRange(rightStart, outputLength);
+      Value globalOutputEnd = outputLength;
+      if (op.getOutputOrigin())
+        globalOutputEnd = rewriter.create<arith::AddIOp>(loc, globalOutputOrigin, outputLength);
+
+      Value leftEnd = rewriter.create<arith::MinUIOp>(loc, globalOutputEnd, leftPadding);
+      leftEnd = rewriter.create<arith::MaxUIOp>(loc, leftEnd, globalOutputOrigin);
+      Value localLeftEnd = rewriter.create<arith::SubIOp>(loc, leftEnd, globalOutputOrigin);
+      createGuardedRange(zero, localLeftEnd);
+
+      Value interiorStart = rewriter.create<arith::MaxUIOp>(loc, globalOutputOrigin, leftPadding);
+      Value interiorEnd = rewriter.create<arith::MinUIOp>(loc, globalOutputEnd, inputLength);
+      interiorEnd = rewriter.create<arith::MaxUIOp>(loc, interiorEnd, interiorStart);
+      Value localInteriorStart =
+          rewriter.create<arith::SubIOp>(loc, interiorStart, globalOutputOrigin);
+      Value localInteriorEnd = rewriter.create<arith::SubIOp>(loc, interiorEnd, globalOutputOrigin);
+      createValidRange(localInteriorStart, localInteriorEnd);
+
+      Value rightBoundary = rewriter.create<arith::MaxUIOp>(loc, inputLength, leftPadding);
+      Value rightStart = rewriter.create<arith::MaxUIOp>(loc, globalOutputOrigin, rightBoundary);
+      rightStart = rewriter.create<arith::MinUIOp>(loc, rightStart, globalOutputEnd);
+      Value localRightStart = rewriter.create<arith::SubIOp>(loc, rightStart, globalOutputOrigin);
+      createGuardedRange(localRightStart, outputLength);
     }
 
     replaceOpWithBufferizedValues(rewriter, op, *output);

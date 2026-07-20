@@ -117,3 +117,26 @@ func.func @f32_full_filter(
   } : (tensor<2xf32>, tensor<3xf32>, tensor<4xf32>) -> tensor<4xf32>
   return %result : tensor<4xf32>
 }
+
+// CHECK-LABEL: func.func @q15_full_output_tile
+// CHECK-COUNT-3: cf.assert
+// CHECK: scf.for %[[LOCAL:[a-zA-Z0-9_]+]] =
+// CHECK: %[[GLOBAL:.*]] = arith.addi %[[ORIGIN:[a-zA-Z0-9_]+]], %[[LOCAL]]
+// CHECK: arith.subi %{{.*}}, %[[GLOBAL]]
+// CHECK: tensor.insert {{.*}}[%[[LOCAL]]]
+// CHECK-NOT: ondrix.fir_filter
+func.func @q15_full_output_tile(
+    %input: tensor<?xi16>, %coeffs: tensor<?xi16>, %init: tensor<?xi16>,
+    %origin: index) -> tensor<?xi16> {
+  %result = ondrix.fir_filter %input, %coeffs, %init, %origin {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    boundary = #ondrix.fir_boundary<full>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<?xi16>, tensor<?xi16>, tensor<?xi16>, index) -> tensor<?xi16>
+  return %result : tensor<?xi16>
+}

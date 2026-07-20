@@ -101,7 +101,8 @@ process-level rejection of invalid dynamic extents. Full-boundary execution
 also covers `K > N`, both padded edges, Vectorized interiors, and tensor alias
 conflicts. Floating-point padded edges include infinity, NaN, and signed-zero
 cases that distinguish skipped updates from eagerly multiplying explicit zero
-padding.
+padding. The same full-boundary corpus executes untiled optimized, generic
+tensor-to-scalar, and output-tiled optimized object pipelines.
 
 ## Architecture Result
 
@@ -119,10 +120,10 @@ If `K > N`, the interior is empty and the two edge ranges still cover every
 output exactly once. All forms consume the same numeric update semantics.
 
 The output-tiling pass emits the three dynamic valid-boundary shape checks once
-before the outer tile loop. Bufferization derives the window and coefficient
-subviews from the same coefficient-length SSA value, so canonicalization removes
-the redundant inner reduction-length check instead of repeating it for every
-sample or tile.
+before the outer tile loop. Full-boundary tiles rely on the same dominating
+shape proof and use their explicit output origin only for local-to-global index
+mapping. Bufferization derives each window and coefficient subview from the
+same coefficient-length SSA value.
 
 The current scalar-result `ondsp.reduce_mac` is not a suitable destination-
 style tiled operation: a tap tile has no independently insertable result, and
