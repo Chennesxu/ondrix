@@ -10,6 +10,12 @@
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -27,12 +33,17 @@
 namespace ondrix {
 #define GEN_PASS_DEF_VECTORIZEONDSPCONSTANTSATURATINGMEMREFREDUCE
 #define GEN_PASS_DEF_VECTORIZEONDSPFIXEDMEMREFREDUCE
+#define GEN_PASS_DEF_VERIFYONDSPCONSTANTREASSOCIATIONPROOFTRACE
 #include "ondrix/Conversion/Passes.h.inc"
 } // namespace ondrix
 
 using namespace mlir;
 
 namespace {
+
+constexpr uint64_t maxProofTraceBytes = 64ULL * 1024 * 1024;
+constexpr int64_t maxProofTraceElements = 65536;
+constexpr unsigned maxProofTraceAPIntWidth = 4096;
 
 bool isRepresentableLLVMAddressSpace(IntegerAttr memorySpace) {
   const llvm::APInt &value = memorySpace.getValue();
@@ -89,55 +100,60 @@ Value createHorizontalAccumulatorUpdate(ondrix::ondsp::ReduceMacOp op, Value acc
       op.getLoc(), accumulator.getType(), accumulator, horizontal->sum, horizontal->numeric);
 }
 
+FailureOr<ondrix::analysis::NoOverflowChunkReassociationPlan>
+planConstantSaturatingReduction(ondrix::ondsp::ReduceMacOp op, int64_t vectorWidth,
+                                int64_t maxElements) {
+  if (!isSupportedMemRefReduction(op) || !op.getInitial().getDefiningOp<ondrix::ondsp::AccZeroOp>())
+    return failure();
+
+  auto accumulator = cast<ondrix::ondsp::AccType>(op.getInitial().getType());
+  auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+  if (accumulator.getUpdateOverflow() != ondrix::ondsp::OverflowMode::Saturate ||
+      !ondrix::ondsp::isFullProduct(*op.getProduct()))
+    return failure();
+  FailureOr<ondrix::conversion::SupportedFixedMacDomain> domain =
+      ondrix::conversion::getSupportedFixedVectorMacDomain(op, accumulator, numeric,
+                                                           *op.getProduct());
+  if (failed(domain) || domain->termStorage.getWidth() > 64)
+    return failure();
+
+  FailureOr<ondrix::ConstantIntegerMemRefFacts> constant =
+      ondrix::analyzeConstantIntegerMemRef(op.getRhs(), maxElements);
+  if (failed(constant))
+    return failure();
+  auto rhsType = cast<MemRefType>(op.getRhs().getType());
+  if (!rhsType.isDynamicDim(0) &&
+      constant->getSequence().getElementCount() != rhsType.getDimSize(0))
+    return failure();
+  return ondrix::analysis::FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
+      op, *constant, vectorWidth);
+}
+
 class ConstantSaturatingReduceMacVectorization final
     : public OpRewritePattern<ondrix::ondsp::ReduceMacOp> {
 public:
-  ConstantSaturatingReduceMacVectorization(MLIRContext *context, int64_t vectorWidth,
-                                           int64_t maxElements)
-      : OpRewritePattern(context), vectorWidth(vectorWidth), maxElements(maxElements) {}
+  ConstantSaturatingReduceMacVectorization(
+      MLIRContext *context, int64_t vectorWidth, int64_t maxElements,
+      const DenseMap<Operation *, int64_t> &subjectOrdinals,
+      SmallVectorImpl<ondrix::analysis::NoOverflowChunkReassociationTrace> &proofTraces)
+      : OpRewritePattern(context), vectorWidth(vectorWidth), maxElements(maxElements),
+        subjectOrdinals(subjectOrdinals), proofTraces(proofTraces) {}
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op,
                                 PatternRewriter &rewriter) const override {
-    if (!isSupportedMemRefReduction(op) ||
-        !op.getInitial().getDefiningOp<ondrix::ondsp::AccZeroOp>())
-      return failure();
-
-    auto accumulator = cast<ondrix::ondsp::AccType>(op.getInitial().getType());
-    auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
-    if (accumulator.getUpdateOverflow() != ondrix::ondsp::OverflowMode::Saturate ||
-        !ondrix::ondsp::isFullProduct(*op.getProduct()))
-      return failure();
-    FailureOr<ondrix::conversion::SupportedFixedMacDomain> domain =
-        ondrix::conversion::getSupportedFixedVectorMacDomain(op, accumulator, numeric,
-                                                             *op.getProduct());
-    if (failed(domain))
-      return failure();
-    if (domain->termStorage.getWidth() > 64)
-      return failure();
-
-    FailureOr<ondrix::ConstantIntegerMemRefFacts> constant =
-        ondrix::analyzeConstantIntegerMemRef(op.getRhs(), maxElements);
-    if (failed(constant))
-      return failure();
-    const ondrix::ConstantSequenceFacts &facts = constant->getSequence();
-    auto rhsType = cast<MemRefType>(op.getRhs().getType());
-    if (!rhsType.isDynamicDim(0) && facts.getElementCount() != rhsType.getDimSize(0))
-      return failure();
-
     FailureOr<ondrix::analysis::NoOverflowChunkReassociationPlan> plan =
-        ondrix::analysis::FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
-            op, *constant, vectorWidth);
+        planConstantSaturatingReduction(op, vectorWidth, maxElements);
     if (failed(plan))
       return failure();
+    auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
 
     return std::move(*plan).consumeIfValid(
         op, vectorWidth,
         [&](const ondrix::ondsp::ProductSemantics &productSemantics,
             llvm::ArrayRef<llvm::APInt> validatedCoefficients, int64_t validatedWidth,
-            const ondrix::analysis::NoOverflowChunkReassociationTrace &) {
+            const ondrix::analysis::NoOverflowChunkReassociationTrace &proofTrace) {
           if (productSemantics.selection != ondrix::ondsp::ProductSelection::Full ||
-              validatedCoefficients.size() != static_cast<size_t>(facts.getElementCount()) ||
-              validatedWidth != vectorWidth)
+              validatedCoefficients.empty() || validatedWidth != vectorWidth)
             return failure();
 
           FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
@@ -175,6 +191,9 @@ public:
                 builder.create<scf::YieldOp>(bodyLoc, next);
               });
 
+          ondrix::analysis::NoOverflowChunkReassociationTrace recordedTrace = proofTrace;
+          recordedTrace.subjectOrdinal = subjectOrdinals.lookup(op.getOperation());
+          proofTraces.push_back(std::move(recordedTrace));
           rewriter.replaceOp(op, tailLoop.getResult(0));
           return success();
         });
@@ -183,6 +202,192 @@ public:
 private:
   int64_t vectorWidth;
   int64_t maxElements;
+  const DenseMap<Operation *, int64_t> &subjectOrdinals;
+  SmallVectorImpl<ondrix::analysis::NoOverflowChunkReassociationTrace> &proofTraces;
+};
+
+LogicalResult writeProofTrace(StringRef path,
+                              ArrayRef<ondrix::analysis::NoOverflowChunkReassociationTrace> traces,
+                              int64_t vectorWidth, int64_t maxElements,
+                              int64_t candidateReductionCount, ModuleOp module) {
+  if (path.empty())
+    return success();
+  if (traces.empty()) {
+    module.emitError("proof trace requested, but no reduction was proof-authorized");
+    return failure();
+  }
+  if (maxElements > maxProofTraceElements) {
+    module.emitError("proof trace max-elements exceeds the experimental audit limit of ")
+        << maxProofTraceElements;
+    return failure();
+  }
+  llvm::json::Array proofs;
+  for (const auto &trace : traces) {
+    auto hasSupportedWidth = [](const llvm::APInt &value) {
+      return value.getBitWidth() <= maxProofTraceAPIntWidth;
+    };
+    bool supported =
+        trace.coefficients.size() <= static_cast<size_t>(maxProofTraceElements) &&
+        trace.originalPrefixes.size() <= static_cast<size_t>(maxProofTraceElements) + 1 &&
+        trace.reassociatedPrefixes.size() <= static_cast<size_t>(maxProofTraceElements) + 1;
+    for (const llvm::APInt &coefficient : trace.coefficients)
+      supported &= hasSupportedWidth(coefficient);
+    for (const ondrix::analysis::FixedPointRawInterval &prefix : trace.originalPrefixes)
+      supported &= hasSupportedWidth(prefix.lower) && hasSupportedWidth(prefix.upper);
+    for (const ondrix::analysis::FixedPointRawInterval &prefix : trace.reassociatedPrefixes)
+      supported &= hasSupportedWidth(prefix.lower) && hasSupportedWidth(prefix.upper);
+    if (!supported) {
+      module.emitError("proof evidence exceeds the experimental audit resource limits");
+      return failure();
+    }
+    proofs.emplace_back(ondrix::analysis::toJSON(trace));
+  }
+  llvm::json::Object document{{"schema_version", 1},
+                              {"vector_width", vectorWidth},
+                              {"analysis_max_elements", maxElements},
+                              {"candidate_reduction_count", candidateReductionCount},
+                              {"proofs", std::move(proofs)}};
+
+  std::string serialized;
+  llvm::raw_string_ostream serializedOutput(serialized);
+  serializedOutput << llvm::json::Value(std::move(document)) << '\n';
+  serializedOutput.flush();
+  if (serialized.size() > maxProofTraceBytes) {
+    module.emitError("proof trace exceeds the 64 MiB audit limit");
+    return failure();
+  }
+
+  std::error_code error;
+  llvm::raw_fd_ostream output(path, error, llvm::sys::fs::OF_Text);
+  if (error) {
+    module.emitError("failed to open proof trace output '") << path << "': " << error.message();
+    return failure();
+  }
+  output << serialized;
+  return success();
+}
+
+class VerifyOndspConstantReassociationProofTracePass final
+    : public ondrix::impl::VerifyOndspConstantReassociationProofTraceBase<
+          VerifyOndspConstantReassociationProofTracePass> {
+public:
+  using ondrix::impl::VerifyOndspConstantReassociationProofTraceBase<
+      VerifyOndspConstantReassociationProofTracePass>::
+      VerifyOndspConstantReassociationProofTraceBase;
+
+  void runOnOperation() override {
+    if (proofTraceInput.empty()) {
+      getOperation().emitError("proof-trace-input must not be empty");
+      signalPassFailure();
+      return;
+    }
+    if (maxElements <= 0) {
+      getOperation().emitError("max-elements must be positive");
+      signalPassFailure();
+      return;
+    }
+
+    auto buffer = llvm::MemoryBuffer::getFile(proofTraceInput);
+    if (!buffer) {
+      getOperation().emitError("failed to read proof trace '")
+          << proofTraceInput << "': " << buffer.getError().message();
+      signalPassFailure();
+      return;
+    }
+    if ((*buffer)->getBufferSize() > maxProofTraceBytes) {
+      getOperation().emitError("proof trace exceeds the 64 MiB audit limit");
+      signalPassFailure();
+      return;
+    }
+    llvm::Expected<llvm::json::Value> parsed = llvm::json::parse((*buffer)->getBuffer());
+    if (!parsed) {
+      getOperation().emitError("failed to parse proof trace '")
+          << proofTraceInput << "': " << llvm::toString(parsed.takeError());
+      signalPassFailure();
+      return;
+    }
+    const llvm::json::Object *document = parsed->getAsObject();
+    std::optional<int64_t> schema =
+        document ? document->getInteger("schema_version") : std::nullopt;
+    std::optional<int64_t> vectorWidth =
+        document ? document->getInteger("vector_width") : std::nullopt;
+    std::optional<int64_t> analysisMaxElements =
+        document ? document->getInteger("analysis_max_elements") : std::nullopt;
+    std::optional<int64_t> candidateReductionCount =
+        document ? document->getInteger("candidate_reduction_count") : std::nullopt;
+    const llvm::json::Array *proofs = document ? document->getArray("proofs") : nullptr;
+    if (!schema || *schema != 1 || !vectorWidth || *vectorWidth <= 1 || !analysisMaxElements ||
+        *analysisMaxElements <= 0 || *analysisMaxElements > maxElements ||
+        *analysisMaxElements > maxProofTraceElements || !candidateReductionCount ||
+        *candidateReductionCount < 0 || !proofs || proofs->empty()) {
+      getOperation().emitError("proof trace must contain a nonempty schema-version 1 proof array");
+      signalPassFailure();
+      return;
+    }
+
+    SmallVector<ondrix::ondsp::ReduceMacOp> reductions;
+    getOperation().walk([&](ondrix::ondsp::ReduceMacOp op) { reductions.push_back(op); });
+    if (*candidateReductionCount != static_cast<int64_t>(reductions.size()) ||
+        proofs->size() > reductions.size()) {
+      getOperation().emitError("proof trace candidate reduction set no longer matches the module");
+      signalPassFailure();
+      return;
+    }
+
+    DenseMap<int64_t, ondrix::analysis::NoOverflowChunkReassociationTrace> tracesByOrdinal;
+    ondrix::analysis::NoOverflowChunkReassociationTraceParseLimits parseLimits;
+    parseLimits.maxCoefficients = static_cast<size_t>(*analysisMaxElements);
+    parseLimits.maxPrefixes = static_cast<size_t>(*analysisMaxElements) + 1;
+    parseLimits.maxAPIntWidth = maxProofTraceAPIntWidth;
+    for (const auto &[recordIndex, value] : llvm::enumerate(*proofs)) {
+      FailureOr<ondrix::analysis::NoOverflowChunkReassociationTrace> trace =
+          ondrix::analysis::parseNoOverflowChunkReassociationTrace(value, parseLimits);
+      if (failed(trace) || trace->subjectOrdinal >= static_cast<int64_t>(reductions.size()) ||
+          trace->chunkWidth != *vectorWidth ||
+          !tracesByOrdinal.try_emplace(trace->subjectOrdinal, std::move(*trace)).second) {
+        getOperation().emitError("invalid or duplicate proof trace record ") << recordIndex;
+        signalPassFailure();
+        return;
+      }
+    }
+
+    for (const auto &[ordinal, reduction] : llvm::enumerate(reductions)) {
+      auto trace = tracesByOrdinal.find(static_cast<int64_t>(ordinal));
+      FailureOr<ondrix::analysis::NoOverflowChunkReassociationPlan> plan = failure();
+      plan = planConstantSaturatingReduction(reduction, *vectorWidth, *analysisMaxElements);
+      if (failed(plan)) {
+        if (trace == tracesByOrdinal.end())
+          continue;
+        reduction.emitError("proof trace authorizes an ineligible reduction: ") << ordinal;
+        signalPassFailure();
+        return;
+      }
+      if (trace == tracesByOrdinal.end()) {
+        reduction.emitError("proof trace omits a proof-authorized reduction: ") << ordinal;
+        signalPassFailure();
+        return;
+      }
+
+      bool matched = false;
+      matched = succeeded(std::move(*plan).consumeIfValid(
+          reduction, *vectorWidth,
+          [&](const auto &, const auto &, int64_t,
+              const ondrix::analysis::NoOverflowChunkReassociationTrace &current) {
+            ondrix::analysis::NoOverflowChunkReassociationTrace rebound = current;
+            rebound.subjectOrdinal = static_cast<int64_t>(ordinal);
+            return succeeded(
+                       ondrix::analysis::verifyNoOverflowChunkReassociationTrace(trace->second)) &&
+                           ondrix::analysis::areEquivalent(trace->second, rebound)
+                       ? success()
+                       : failure();
+          }));
+      if (!matched) {
+        reduction.emitError("proof trace record no longer matches this reduction: ") << ordinal;
+        signalPassFailure();
+        return;
+      }
+    }
+  }
 };
 
 class ReduceMacOpVectorization final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
@@ -292,19 +497,37 @@ public:
       signalPassFailure();
       return;
     }
+    if (!proofTraceOutput.empty() && maxElements > maxProofTraceElements) {
+      getOperation().emitError("proof trace max-elements exceeds the experimental audit limit of ")
+          << maxProofTraceElements;
+      signalPassFailure();
+      return;
+    }
 
-    RewritePatternSet patterns(&getContext());
-    patterns.add<ConstantSaturatingReduceMacVectorization>(&getContext(), vectorWidth, maxElements);
     SmallVector<Operation *> reductions;
     getOperation().walk(
         [&](ondrix::ondsp::ReduceMacOp op) { reductions.push_back(op.getOperation()); });
-    if (reductions.empty())
+    DenseMap<Operation *, int64_t> subjectOrdinals;
+    for (const auto &[ordinal, reduction] : llvm::enumerate(reductions))
+      subjectOrdinals.try_emplace(reduction, static_cast<int64_t>(ordinal));
+    SmallVector<ondrix::analysis::NoOverflowChunkReassociationTrace> proofTraces;
+    if (reductions.empty()) {
+      if (failed(writeProofTrace(proofTraceOutput, proofTraces, vectorWidth, maxElements, 0,
+                                 getOperation())))
+        signalPassFailure();
       return;
+    }
+
+    RewritePatternSet patterns(&getContext());
+    patterns.add<ConstantSaturatingReduceMacVectorization>(&getContext(), vectorWidth, maxElements,
+                                                           subjectOrdinals, proofTraces);
 
     GreedyRewriteConfig config;
     config.strictMode = GreedyRewriteStrictness::ExistingOps;
     FrozenRewritePatternSet frozenPatterns(std::move(patterns));
-    if (failed(applyOpPatternsAndFold(reductions, frozenPatterns, config)))
+    if (failed(applyOpPatternsAndFold(reductions, frozenPatterns, config)) ||
+        failed(writeProofTrace(proofTraceOutput, proofTraces, vectorWidth, maxElements,
+                               static_cast<int64_t>(reductions.size()), getOperation())))
       signalPassFailure();
   }
 };
@@ -322,6 +545,10 @@ std::unique_ptr<Pass> ondrix::createVectorizeOndspConstantSaturatingMemRefReduce
 std::unique_ptr<Pass> ondrix::createVectorizeOndspConstantSaturatingMemRefReducePass(
     const VectorizeOndspConstantSaturatingMemRefReduceOptions &options) {
   return std::make_unique<VectorizeOndspConstantSaturatingMemRefReducePass>(options);
+}
+
+std::unique_ptr<Pass> ondrix::createVerifyOndspConstantReassociationProofTracePass() {
+  return std::make_unique<VerifyOndspConstantReassociationProofTracePass>();
 }
 
 std::unique_ptr<Pass> ondrix::createVectorizeOndspFixedMemRefReducePass(

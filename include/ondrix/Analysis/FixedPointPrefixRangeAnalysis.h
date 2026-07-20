@@ -13,6 +13,7 @@
 
 #include "mlir/Support/LLVM.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <utility>
 
@@ -45,9 +46,17 @@ struct NoOverflowChunkReassociationTrace {
   llvm::SmallVector<FixedPointRawInterval> reassociatedPrefixes;
 };
 
+/// Resource limits applied before materializing untrusted trace fields.
+struct NoOverflowChunkReassociationTraceParseLimits {
+  size_t maxCoefficients = 65536;
+  size_t maxPrefixes = 65537;
+  unsigned maxAPIntWidth = 4096;
+};
+
 llvm::json::Object toJSON(const NoOverflowChunkReassociationTrace &trace);
 mlir::FailureOr<NoOverflowChunkReassociationTrace>
-parseNoOverflowChunkReassociationTrace(const llvm::json::Value &value);
+parseNoOverflowChunkReassociationTrace(const llvm::json::Value &value,
+                                       NoOverflowChunkReassociationTraceParseLimits limits = {});
 mlir::LogicalResult
 verifyNoOverflowChunkReassociationTrace(const NoOverflowChunkReassociationTrace &trace);
 bool areEquivalent(const NoOverflowChunkReassociationTrace &lhs,

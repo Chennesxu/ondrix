@@ -5,6 +5,7 @@ add_ondrix_library(OndspVectorization
   MLIROndrixPassesIncGen
 
   LINK_LIBS PUBLIC
+  LLVMSupport
   MLIRArithDialect
   MLIRControlFlowDialect
   MLIRIR

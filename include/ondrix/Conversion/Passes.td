@@ -188,6 +188,28 @@ def VectorizeOndspConstantSaturatingMemRefReduce
            "Number of fixed-point lanes per no-overflow horizontal chunk">,
     Option<"maxElements", "max-elements", "int64_t", /*default=*/"4096",
            "Maximum immutable coefficient count analyzed">,
+    Option<"proofTraceOutput", "proof-trace-output", "std::string", /*default=*/"\"\"",
+           "Optional path for an experimental JSON proof audit trace">,
+  ];
+}
+
+def VerifyOndspConstantReassociationProofTrace
+    : Pass<"verify-ondsp-constant-reassociation-proof-trace", "::mlir::ModuleOp"> {
+  let summary = "Revalidate an experimental constant-reassociation proof trace";
+  let description = [{
+    Read an experimental JSON audit trace emitted by constant saturating
+    reduction Vectorization. For every record, locate the original ordered
+    reduction by its module walk ordinal, rederive immutable coefficient facts,
+    rebuild the subject-bound prefix-range plan, and compare all numeric fields,
+    coefficients, and original/reassociated prefix bounds. This pass is
+    read-only and does not make transformations legal.
+  }];
+  let constructor = "ondrix::createVerifyOndspConstantReassociationProofTracePass()";
+  let options = [
+    Option<"proofTraceInput", "proof-trace-input", "std::string", /*default=*/"\"\"",
+           "Path to the experimental JSON proof trace">,
+    Option<"maxElements", "max-elements", "int64_t", /*default=*/"4096",
+           "Maximum immutable coefficient count revalidated">,
   ];
 }
 

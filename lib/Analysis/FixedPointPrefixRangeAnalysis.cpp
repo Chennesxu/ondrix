@@ -135,14 +135,14 @@ json::Object apIntToJSON(const APInt &value) {
                       {"value", text.str().str()}};
 }
 
-FailureOr<APInt> parseAPInt(const json::Value &value) {
+FailureOr<APInt> parseAPInt(const json::Value &value, unsigned maxWidth) {
   const json::Object *object = value.getAsObject();
   if (!object)
     return failure();
   std::optional<int64_t> width = object->getInteger("width");
   std::optional<StringRef> text = object->getString("value");
-  if (!width || *width <= 0 || *width > std::numeric_limits<unsigned>::max() || !text ||
-      text->empty())
+  if (!width || *width <= 0 || *width > maxWidth || !text || text->empty() ||
+      text->size() > static_cast<size_t>(*width) + 1)
     return failure();
 
   StringRef magnitude = *text;
@@ -166,7 +166,7 @@ json::Object intervalToJSON(const FixedPointRawInterval &interval) {
                       {"frac", static_cast<int64_t>(interval.frac)}};
 }
 
-FailureOr<FixedPointRawInterval> parseInterval(const json::Value &value) {
+FailureOr<FixedPointRawInterval> parseInterval(const json::Value &value, unsigned maxWidth) {
   const json::Object *object = value.getAsObject();
   if (!object)
     return failure();
@@ -176,8 +176,8 @@ FailureOr<FixedPointRawInterval> parseInterval(const json::Value &value) {
   if (!lowerValue || !upperValue || !frac || *frac < 0 ||
       *frac > std::numeric_limits<unsigned>::max())
     return failure();
-  FailureOr<APInt> lower = parseAPInt(*lowerValue);
-  FailureOr<APInt> upper = parseAPInt(*upperValue);
+  FailureOr<APInt> lower = parseAPInt(*lowerValue, maxWidth);
+  FailureOr<APInt> upper = parseAPInt(*upperValue, maxWidth);
   if (failed(lower) || failed(upper))
     return failure();
   FixedPointRawInterval interval{std::move(*lower), std::move(*upper),
@@ -189,9 +189,9 @@ FailureOr<FixedPointRawInterval> parseInterval(const json::Value &value) {
 
 template <typename Element, typename Parser>
 FailureOr<SmallVector<Element>> parseArray(const json::Object &object, StringRef name,
-                                           Parser parser) {
+                                           size_t maxElements, Parser parser) {
   const json::Array *array = object.getArray(name);
-  if (!array)
+  if (!array || array->size() > maxElements)
     return failure();
   SmallVector<Element> result;
   result.reserve(array->size());
@@ -260,7 +260,8 @@ json::Object toJSON(const NoOverflowChunkReassociationTrace &trace) {
 }
 
 FailureOr<NoOverflowChunkReassociationTrace>
-parseNoOverflowChunkReassociationTrace(const json::Value &value) {
+parseNoOverflowChunkReassociationTrace(const json::Value &value,
+                                       NoOverflowChunkReassociationTraceParseLimits limits) {
   const json::Object *object = value.getAsObject();
   if (!object)
     return failure();
@@ -292,12 +293,20 @@ parseNoOverflowChunkReassociationTrace(const json::Value &value) {
       *chunkWidth <= 1)
     return failure();
 
-  FailureOr<SmallVector<APInt>> coefficients =
-      parseArray<APInt>(*object, "coefficients", parseAPInt);
+  if (limits.maxCoefficients == 0 || limits.maxPrefixes == 0 || limits.maxAPIntWidth == 0)
+    return failure();
+
+  FailureOr<SmallVector<APInt>> coefficients = parseArray<APInt>(
+      *object, "coefficients", limits.maxCoefficients,
+      [&](const json::Value &entry) { return parseAPInt(entry, limits.maxAPIntWidth); });
   FailureOr<SmallVector<FixedPointRawInterval>> originalPrefixes =
-      parseArray<FixedPointRawInterval>(*object, "original_prefixes", parseInterval);
+      parseArray<FixedPointRawInterval>(
+          *object, "original_prefixes", limits.maxPrefixes,
+          [&](const json::Value &entry) { return parseInterval(entry, limits.maxAPIntWidth); });
   FailureOr<SmallVector<FixedPointRawInterval>> reassociatedPrefixes =
-      parseArray<FixedPointRawInterval>(*object, "reassociated_prefixes", parseInterval);
+      parseArray<FixedPointRawInterval>(
+          *object, "reassociated_prefixes", limits.maxPrefixes,
+          [&](const json::Value &entry) { return parseInterval(entry, limits.maxAPIntWidth); });
   if (failed(coefficients) || failed(originalPrefixes) || failed(reassociatedPrefixes))
     return failure();
 

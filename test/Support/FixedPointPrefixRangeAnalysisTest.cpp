@@ -421,10 +421,25 @@ bool testConstantChunkReductionPlan() {
   auto parsed = parseNoOverflowChunkReassociationTrace(serialized);
   if (mlir::failed(parsed) || !areEquivalent(q31Trace, *parsed))
     return false;
+  ondrix::analysis::NoOverflowChunkReassociationTraceParseLimits oneCoefficient;
+  oneCoefficient.maxCoefficients = 1;
+  if (mlir::succeeded(parseNoOverflowChunkReassociationTrace(serialized, oneCoefficient)))
+    return false;
   llvm::json::Object malformed = toJSON(q31Trace);
   malformed["numeric_signedness"] = "unsigned";
   if (mlir::succeeded(
           parseNoOverflowChunkReassociationTrace(llvm::json::Value(std::move(malformed)))))
+    return false;
+  llvm::json::Object oversizedWidth = toJSON(q31Trace);
+  llvm::json::Array *oversizedCoefficients = oversizedWidth.getArray("coefficients");
+  if (!oversizedCoefficients || oversizedCoefficients->empty())
+    return false;
+  llvm::json::Object *oversizedCoefficient = oversizedCoefficients->front().getAsObject();
+  if (!oversizedCoefficient)
+    return false;
+  (*oversizedCoefficient)["width"] = 4097;
+  if (mlir::succeeded(
+          parseNoOverflowChunkReassociationTrace(llvm::json::Value(std::move(oversizedWidth)))))
     return false;
   NoOverflowChunkReassociationTrace mutated = *parsed;
   mutated.coefficients.front() += 1;
