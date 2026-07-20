@@ -52,6 +52,13 @@ shape, state, and aliasing. The experimental `ondrix.fir_filter` and
 `ondrix.fir_stream` operations encode those separate contracts; a future
 frontend must not infer either one from the single-sample operation.
 
+The experimental `ondrix.sos_filter_tdf2` operation is the first recursive
+filter contract. It deliberately names one form and fixes coefficient order,
+feedback sign convention, per-section scaling, state layout, update order, and
+floating-point contraction. A future source-level `iir` construct must choose
+or infer those semantics explicitly; it must not treat all direct forms or
+fixed-point state-quantization schemes as interchangeable.
+
 ## Source Types and Numeric Policy
 
 The source language should provide an explicit fixed-point value type, with
