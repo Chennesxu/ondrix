@@ -4,8 +4,32 @@
 
 #include <algorithm>
 #include <cassert>
+#include <utility>
 
 namespace ondrix::fixedpoint {
+
+namespace {
+
+bool isValidOverflowMode(AccumulatorOverflowMode mode) {
+  switch (mode) {
+  case AccumulatorOverflowMode::Wrap:
+  case AccumulatorOverflowMode::Saturate:
+    return true;
+  }
+  return false;
+}
+
+bool isValidRoundingMode(RoundingMode mode) {
+  switch (mode) {
+  case RoundingMode::TowardNegative:
+  case RoundingMode::NearestEven:
+  case RoundingMode::TowardZero:
+    return true;
+  }
+  return false;
+}
+
+} // namespace
 
 unsigned getAccumulatorUpdateIntermediateWidth(unsigned accumulatorWidth, unsigned productWidth) {
   return std::max(accumulatorWidth, productWidth) + 1;
@@ -112,6 +136,50 @@ llvm::APInt exportSignedAccumulator(const llvm::APInt &accumulator,
   if (extended.sgt(maximum.sext(comparisonWidth)))
     return maximum;
   return rounded.sextOrTrunc(destinationWidth);
+}
+
+std::optional<SignedUniformSosDf2Step> evaluateSignedUniformSosDf2Section(
+    const llvm::APInt &input, const llvm::APInt &scale, const llvm::APInt &b0,
+    const llvm::APInt &b1, const llvm::APInt &b2, const llvm::APInt &a1, const llvm::APInt &a2,
+    const llvm::APInt &d1, const llvm::APInt &d2, const SignedUniformSosDf2Policy &policy) {
+  if (policy.storageWidth == 0 || policy.fractionalBits > policy.storageWidth ||
+      policy.accumulatorWidth < policy.storageWidth ||
+      policy.accumulatorWidth - policy.storageWidth < policy.storageWidth ||
+      !isValidOverflowMode(policy.updateOverflow) || !isValidRoundingMode(policy.stateRounding) ||
+      !isValidOverflowMode(policy.stateOverflow) || !isValidRoundingMode(policy.outputRounding) ||
+      !isValidOverflowMode(policy.outputOverflow))
+    return std::nullopt;
+
+  auto hasStorageWidth = [&](const llvm::APInt &value) {
+    return value.getBitWidth() == policy.storageWidth;
+  };
+  if (!hasStorageWidth(input) || !hasStorageWidth(scale) || !hasStorageWidth(b0) ||
+      !hasStorageWidth(b1) || !hasStorageWidth(b2) || !hasStorageWidth(a1) ||
+      !hasStorageWidth(a2) || !hasStorageWidth(d1) || !hasStorageWidth(d2))
+    return std::nullopt;
+
+  auto update = [&](const llvm::APInt &accumulator, const llvm::APInt &lhs,
+                    const llvm::APInt &rhs) {
+    return multiplyAccumulateSigned(accumulator, lhs, rhs, AccumulatorUpdateOperation::Add,
+                                    policy.updateOverflow);
+  };
+
+  llvm::APInt stateAccumulator(policy.accumulatorWidth, 0);
+  stateAccumulator = update(stateAccumulator, input, scale);
+  stateAccumulator = update(stateAccumulator, d1, a1);
+  stateAccumulator = update(stateAccumulator, d2, a2);
+  llvm::APInt nextD1 =
+      exportSignedAccumulator(stateAccumulator, policy.fractionalBits, policy.storageWidth,
+                              policy.stateRounding, policy.stateOverflow);
+
+  llvm::APInt outputAccumulator(policy.accumulatorWidth, 0);
+  outputAccumulator = update(outputAccumulator, nextD1, b0);
+  outputAccumulator = update(outputAccumulator, d1, b1);
+  outputAccumulator = update(outputAccumulator, d2, b2);
+  llvm::APInt output =
+      exportSignedAccumulator(outputAccumulator, policy.fractionalBits, policy.storageWidth,
+                              policy.outputRounding, policy.outputOverflow);
+  return SignedUniformSosDf2Step{std::move(output), std::move(nextD1), d1};
 }
 
 } // namespace ondrix::fixedpoint

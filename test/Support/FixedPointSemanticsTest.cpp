@@ -10,10 +10,12 @@ using ondrix::fixedpoint::AccumulatorOverflowMode;
 using ondrix::fixedpoint::AccumulatorUpdateOperation;
 using ondrix::fixedpoint::computeSignedFullProduct;
 using ondrix::fixedpoint::computeSignedRawHighProduct;
+using ondrix::fixedpoint::evaluateSignedUniformSosDf2Section;
 using ondrix::fixedpoint::exportSignedAccumulator;
 using ondrix::fixedpoint::getAccumulatorUpdateIntermediateWidth;
 using ondrix::fixedpoint::multiplyAccumulateSigned;
 using ondrix::fixedpoint::RoundingMode;
+using ondrix::fixedpoint::SignedUniformSosDf2Policy;
 
 namespace {
 
@@ -330,6 +332,286 @@ bool testSmallWidthExportExhaustive() {
   return true;
 }
 
+int64_t updateReference(int64_t accumulator, int64_t product, unsigned width,
+                        AccumulatorOverflowMode overflowMode) {
+  int64_t updated = accumulator + product;
+  if (overflowMode == AccumulatorOverflowMode::Wrap)
+    return wrapSigned(updated, width);
+  int64_t minimum = -(int64_t{1} << (width - 1));
+  int64_t maximum = (int64_t{1} << (width - 1)) - 1;
+  return std::clamp(updated, minimum, maximum);
+}
+
+int64_t exportReference(int64_t accumulator, unsigned shift, unsigned width, RoundingMode rounding,
+                        AccumulatorOverflowMode overflowMode) {
+  int64_t rounded = roundReference(accumulator, shift, rounding);
+  if (overflowMode == AccumulatorOverflowMode::Wrap)
+    return wrapSigned(rounded, width);
+  int64_t minimum = -(int64_t{1} << (width - 1));
+  int64_t maximum = (int64_t{1} << (width - 1)) - 1;
+  return std::clamp(rounded, minimum, maximum);
+}
+
+bool testSignedUniformSosDf2Validation() {
+  SignedUniformSosDf2Policy policy{3,
+                                   2,
+                                   6,
+                                   AccumulatorOverflowMode::Saturate,
+                                   RoundingMode::NearestEven,
+                                   AccumulatorOverflowMode::Saturate,
+                                   RoundingMode::TowardZero,
+                                   AccumulatorOverflowMode::Wrap};
+  llvm::APInt zero = signedValue(3, 0);
+  auto evaluate = [&](const SignedUniformSosDf2Policy &candidate, const llvm::APInt &input) {
+    return evaluateSignedUniformSosDf2Section(input, zero, zero, zero, zero, zero, zero, zero, zero,
+                                              candidate);
+  };
+  if (!evaluate(policy, zero))
+    return false;
+
+  SignedUniformSosDf2Policy invalid = policy;
+  invalid.storageWidth = 0;
+  if (evaluate(invalid, zero))
+    return false;
+  invalid = policy;
+  invalid.fractionalBits = 4;
+  if (evaluate(invalid, zero))
+    return false;
+  invalid = policy;
+  invalid.accumulatorWidth = 5;
+  if (evaluate(invalid, zero))
+    return false;
+  invalid = policy;
+  invalid.updateOverflow = static_cast<AccumulatorOverflowMode>(2);
+  if (evaluate(invalid, zero))
+    return false;
+  invalid = policy;
+  invalid.stateRounding = static_cast<RoundingMode>(3);
+  if (evaluate(invalid, zero))
+    return false;
+  invalid = policy;
+  invalid.stateOverflow = static_cast<AccumulatorOverflowMode>(2);
+  if (evaluate(invalid, zero))
+    return false;
+  invalid = policy;
+  invalid.outputRounding = static_cast<RoundingMode>(3);
+  if (evaluate(invalid, zero))
+    return false;
+  invalid = policy;
+  invalid.outputOverflow = static_cast<AccumulatorOverflowMode>(2);
+  if (evaluate(invalid, zero))
+    return false;
+  return !evaluate(policy, signedValue(4, 0));
+}
+
+bool testSmallWidthSosDf2Exhaustive() {
+  constexpr unsigned storageWidth = 3;
+  constexpr unsigned fractionalBits = 2;
+  constexpr unsigned accumulatorWidth = 6;
+  constexpr int64_t minimum = -4;
+  constexpr int64_t maximum = 3;
+  constexpr int64_t scale = -3;
+  constexpr int64_t b0 = 3;
+  constexpr int64_t b1 = -2;
+  constexpr int64_t b2 = 1;
+  constexpr int64_t a1 = -1;
+  constexpr int64_t a2 = 2;
+
+  for (int64_t input = minimum; input <= maximum; ++input) {
+    for (int64_t d1 = minimum; d1 <= maximum; ++d1) {
+      for (int64_t d2 = minimum; d2 <= maximum; ++d2) {
+        for (AccumulatorOverflowMode updateOverflow :
+             {AccumulatorOverflowMode::Wrap, AccumulatorOverflowMode::Saturate}) {
+          for (RoundingMode stateRounding : {RoundingMode::TowardNegative,
+                                             RoundingMode::NearestEven, RoundingMode::TowardZero}) {
+            for (AccumulatorOverflowMode stateOverflow :
+                 {AccumulatorOverflowMode::Wrap, AccumulatorOverflowMode::Saturate}) {
+              for (RoundingMode outputRounding :
+                   {RoundingMode::TowardNegative, RoundingMode::NearestEven,
+                    RoundingMode::TowardZero}) {
+                for (AccumulatorOverflowMode outputOverflow :
+                     {AccumulatorOverflowMode::Wrap, AccumulatorOverflowMode::Saturate}) {
+                  SignedUniformSosDf2Policy policy{storageWidth,   fractionalBits, accumulatorWidth,
+                                                   updateOverflow, stateRounding,  stateOverflow,
+                                                   outputRounding, outputOverflow};
+                  auto actual = evaluateSignedUniformSosDf2Section(
+                      signedValue(storageWidth, input), signedValue(storageWidth, scale),
+                      signedValue(storageWidth, b0), signedValue(storageWidth, b1),
+                      signedValue(storageWidth, b2), signedValue(storageWidth, a1),
+                      signedValue(storageWidth, a2), signedValue(storageWidth, d1),
+                      signedValue(storageWidth, d2), policy);
+                  if (!actual)
+                    return false;
+
+                  int64_t stateAccumulator = 0;
+                  stateAccumulator = updateReference(stateAccumulator, input * scale,
+                                                     accumulatorWidth, updateOverflow);
+                  stateAccumulator =
+                      updateReference(stateAccumulator, d1 * a1, accumulatorWidth, updateOverflow);
+                  stateAccumulator =
+                      updateReference(stateAccumulator, d2 * a2, accumulatorWidth, updateOverflow);
+                  int64_t nextD1 = exportReference(stateAccumulator, fractionalBits, storageWidth,
+                                                   stateRounding, stateOverflow);
+                  int64_t outputAccumulator = 0;
+                  outputAccumulator = updateReference(outputAccumulator, nextD1 * b0,
+                                                      accumulatorWidth, updateOverflow);
+                  outputAccumulator =
+                      updateReference(outputAccumulator, d1 * b1, accumulatorWidth, updateOverflow);
+                  outputAccumulator =
+                      updateReference(outputAccumulator, d2 * b2, accumulatorWidth, updateOverflow);
+                  int64_t output = exportReference(outputAccumulator, fractionalBits, storageWidth,
+                                                   outputRounding, outputOverflow);
+
+                  if (!expectEqual("small-width SOS output", actual->output,
+                                   signedValue(storageWidth, output)) ||
+                      !expectEqual("small-width SOS d1", actual->d1,
+                                   signedValue(storageWidth, nextD1)) ||
+                      !expectEqual("small-width SOS d2", actual->d2, signedValue(storageWidth, d1)))
+                    return false;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return true;
+}
+
+bool testSosDf2ImpulseConvention() {
+  constexpr unsigned storageWidth = 16;
+  SignedUniformSosDf2Policy policy{storageWidth,
+                                   0,
+                                   32,
+                                   AccumulatorOverflowMode::Saturate,
+                                   RoundingMode::TowardNegative,
+                                   AccumulatorOverflowMode::Saturate,
+                                   RoundingMode::TowardNegative,
+                                   AccumulatorOverflowMode::Saturate};
+  const llvm::APInt zero = signedValue(storageWidth, 0);
+  const llvm::APInt one = signedValue(storageWidth, 1);
+  const llvm::APInt b0 = signedValue(storageWidth, 2);
+  const llvm::APInt b1 = signedValue(storageWidth, 3);
+  const llvm::APInt b2 = signedValue(storageWidth, 5);
+  const llvm::APInt a1 = signedValue(storageWidth, 7);
+  const llvm::APInt a2 = signedValue(storageWidth, 11);
+
+  auto step0 = evaluateSignedUniformSosDf2Section(one, one, b0, b1, b2, a1, a2, zero, zero, policy);
+  if (!step0 || !expectEqual("SOS impulse y0", step0->output, signedValue(storageWidth, 2)) ||
+      !expectEqual("SOS impulse d1[0]", step0->d1, signedValue(storageWidth, 1)) ||
+      !expectEqual("SOS impulse d2[0]", step0->d2, zero))
+    return false;
+
+  auto step1 = evaluateSignedUniformSosDf2Section(zero, one, b0, b1, b2, a1, a2, step0->d1,
+                                                  step0->d2, policy);
+  if (!step1 || !expectEqual("SOS impulse y1", step1->output, signedValue(storageWidth, 17)) ||
+      !expectEqual("SOS impulse d1[1]", step1->d1, signedValue(storageWidth, 7)) ||
+      !expectEqual("SOS impulse d2[1]", step1->d2, signedValue(storageWidth, 1)))
+    return false;
+
+  auto step2 = evaluateSignedUniformSosDf2Section(zero, one, b0, b1, b2, a1, a2, step1->d1,
+                                                  step1->d2, policy);
+  return step2 && expectEqual("SOS impulse y2", step2->output, signedValue(storageWidth, 146)) &&
+         expectEqual("SOS impulse d1[2]", step2->d1, signedValue(storageWidth, 60)) &&
+         expectEqual("SOS impulse d2[2]", step2->d2, signedValue(storageWidth, 7));
+}
+
+bool testQ15SosDf2Directed() {
+  constexpr unsigned storageWidth = 16;
+  constexpr unsigned fractionalBits = 15;
+  constexpr unsigned accumulatorWidth = 40;
+  constexpr int64_t input = -32768;
+  constexpr int64_t scale = -32768;
+  constexpr int64_t b0 = -32768;
+  constexpr int64_t b1 = 32767;
+  constexpr int64_t b2 = 32767;
+  constexpr int64_t a1 = 32767;
+  constexpr int64_t a2 = -32768;
+  constexpr int64_t d1 = -32768;
+  constexpr int64_t d2 = 32767;
+
+  for (AccumulatorOverflowMode destinationOverflow :
+       {AccumulatorOverflowMode::Wrap, AccumulatorOverflowMode::Saturate}) {
+    SignedUniformSosDf2Policy policy{
+        storageWidth,
+        fractionalBits,
+        accumulatorWidth,
+        AccumulatorOverflowMode::Saturate,
+        RoundingMode::NearestEven,
+        destinationOverflow,
+        RoundingMode::TowardZero,
+        destinationOverflow,
+    };
+    auto actual = evaluateSignedUniformSosDf2Section(
+        signedValue(storageWidth, input), signedValue(storageWidth, scale),
+        signedValue(storageWidth, b0), signedValue(storageWidth, b1), signedValue(storageWidth, b2),
+        signedValue(storageWidth, a1), signedValue(storageWidth, a2), signedValue(storageWidth, d1),
+        signedValue(storageWidth, d2), policy);
+    if (!actual)
+      return false;
+
+    int64_t stateAccumulator = input * scale;
+    stateAccumulator += d1 * a1;
+    stateAccumulator += d2 * a2;
+    int64_t nextD1 = exportReference(stateAccumulator, fractionalBits, storageWidth,
+                                     policy.stateRounding, policy.stateOverflow);
+    int64_t outputAccumulator = nextD1 * b0 + d1 * b1 + d2 * b2;
+    int64_t output = exportReference(outputAccumulator, fractionalBits, storageWidth,
+                                     policy.outputRounding, policy.outputOverflow);
+    if (!expectEqual("Q15 SOS output", actual->output, signedValue(storageWidth, output)) ||
+        !expectEqual("Q15 SOS d1", actual->d1, signedValue(storageWidth, nextD1)) ||
+        !expectEqual("Q15 SOS d2", actual->d2, signedValue(storageWidth, d1)))
+      return false;
+  }
+  return true;
+}
+
+bool testQ31SosDf2UpdateOverflow() {
+  constexpr unsigned storageWidth = 32;
+  constexpr unsigned fractionalBits = 31;
+  constexpr unsigned accumulatorWidth = 64;
+  constexpr int64_t minimumQ31 = INT64_C(-2147483648);
+  const llvm::APInt zero = signedValue(storageWidth, 0);
+  const llvm::APInt minimum = signedValue(storageWidth, minimumQ31);
+
+  __int128 product = static_cast<__int128>(minimumQ31) * minimumQ31;
+  __int128 exactUpdate = product + product;
+  __int128 signedMinimum64 = -(static_cast<__int128>(1) << 63);
+  __int128 signedMaximum64 = (static_cast<__int128>(1) << 63) - 1;
+  if (exactUpdate != (static_cast<__int128>(1) << 63))
+    return false;
+
+  for (AccumulatorOverflowMode updateOverflow :
+       {AccumulatorOverflowMode::Wrap, AccumulatorOverflowMode::Saturate}) {
+    SignedUniformSosDf2Policy policy{storageWidth,
+                                     fractionalBits,
+                                     accumulatorWidth,
+                                     updateOverflow,
+                                     RoundingMode::TowardNegative,
+                                     AccumulatorOverflowMode::Saturate,
+                                     RoundingMode::TowardNegative,
+                                     AccumulatorOverflowMode::Saturate};
+    auto actual = evaluateSignedUniformSosDf2Section(minimum, minimum, zero, zero, zero, minimum,
+                                                     zero, minimum, zero, policy);
+    if (!actual)
+      return false;
+
+    __int128 updated = updateOverflow == AccumulatorOverflowMode::Wrap
+                           ? exactUpdate - (static_cast<__int128>(1) << 64)
+                           : std::clamp(exactUpdate, signedMinimum64, signedMaximum64);
+    __int128 exported = updated / (static_cast<__int128>(1) << fractionalBits);
+    exported =
+        std::clamp(exported, static_cast<__int128>(INT32_MIN), static_cast<__int128>(INT32_MAX));
+    if (!expectEqual("Q31 SOS 65-bit update", actual->d1,
+                     signedValue(storageWidth, static_cast<int64_t>(exported))) ||
+        !expectEqual("Q31 SOS zero output", actual->output, zero) ||
+        !expectEqual("Q31 SOS state shift", actual->d2, minimum))
+      return false;
+  }
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -343,6 +625,11 @@ int main() {
   passed &= testAccumulatorExportOverflow();
   passed &= testSmallWidthExhaustive();
   passed &= testSmallWidthExportExhaustive();
+  passed &= testSignedUniformSosDf2Validation();
+  passed &= testSmallWidthSosDf2Exhaustive();
+  passed &= testSosDf2ImpulseConvention();
+  passed &= testQ15SosDf2Directed();
+  passed &= testQ31SosDf2UpdateOverflow();
   if (!passed)
     return 1;
   llvm::outs() << "fixed-point accumulator semantics: PASS\n";
