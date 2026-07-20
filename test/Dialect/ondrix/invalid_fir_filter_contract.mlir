@@ -255,3 +255,16 @@ func.func @full_rejects_negative_output_origin(
   } : (tensor<4xi16>, tensor<3xi16>, tensor<1xi16>, index) -> tensor<1xi16>
   return
 }
+
+// -----
+
+func.func @full_rejects_static_origin_beyond_dynamic_output(
+    %input: tensor<4xf32>, %coeffs: tensor<3xf32>, %init: tensor<?xf32>) {
+  %origin = arith.constant 7 : index
+  // expected-error @+1 {{full FIR output tile exceeds the complete output range}}
+  %0 = ondrix.fir_filter %input, %coeffs, %init, %origin {
+    boundary = #ondrix.fir_boundary<full>,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<4xf32>, tensor<3xf32>, tensor<?xf32>, index) -> tensor<?xf32>
+  return
+}

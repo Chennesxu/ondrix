@@ -217,11 +217,13 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
       if (!op.getOutputOrigin()) {
         if (!ShapedType::isDynamic(outputLength) && outputLength != completeOutputLength)
           return op.emitOpError() << "full FIR output length must be " << completeOutputLength;
-      } else if (!ShapedType::isDynamic(outputLength)) {
+      } else {
         APInt outputOriginValue;
         if (matchPattern(op.getOutputOrigin(), m_ConstantInt(&outputOriginValue))) {
           int64_t outputOrigin = outputOriginValue.getSExtValue();
-          if (outputOrigin < 0 || outputOrigin > completeOutputLength ||
+          if (outputOrigin < 0 || outputOrigin > completeOutputLength)
+            return op.emitOpError("full FIR output tile exceeds the complete output range");
+          if (!ShapedType::isDynamic(outputLength) &&
               outputLength > completeOutputLength - outputOrigin)
             return op.emitOpError("full FIR output tile exceeds the complete output range");
         }
