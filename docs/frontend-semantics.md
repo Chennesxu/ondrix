@@ -47,9 +47,10 @@ The current operations have different expected roles:
 - fixed-point casts and quantization are source expressions whose normalized
   semantics belong to Ondsp rather than the algorithm dialect.
 
-Full-output and streaming FIR require distinct contracts for boundaries,
-output shape, state, and aliasing. They must not be inferred from the current
-single-sample operation.
+Full-output and streaming FIR use distinct contracts for boundaries, output
+shape, state, and aliasing. The experimental `ondrix.fir_filter` and
+`ondrix.fir_stream` operations encode those separate contracts; a future
+frontend must not infer either one from the single-sample operation.
 
 ## Source Types and Numeric Policy
 

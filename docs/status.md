@@ -11,9 +11,10 @@ may change while the numeric model is stabilized.
 | Generic scalar lowering | Signed-Q15 full product and signed-Q31 full/raw-high accumulator operations implemented; ordered rank-1 Q15/Q31 memref reductions implemented; rank-1 f32 reduction is partial |
 | Generic Vector CPU lowering | Automatic unit-stride Q15/Q31 chunking, ordered saturating updates, and exact-modulo wrapping reduction implemented |
 | Algorithm transforms | Opt-in specialization for static rank-1 FIR samples using direct constant memref globals: zero-tap elimination, exact-modulo symmetric full-product pairing, and symmetric saturating pairing when complete prefix-range analysis proves both schedules safe |
-| Full-output FIR | Experimental tensor-only destination-style `ondrix.fir_filter` for valid and zero-padded full boundaries; both expose output-axis tiling, with full tiles carrying an explicit global output origin; full lowering uses guarded scalar edges plus a Q15/Q31 Vectorized interior; ordered f32, dynamic shape guards, `K > N`, alias-safe tiled/untiled AOT execution, and direct bufferization are covered; same boundaries, public buffer semantics, fusion, target-aware selection, and streaming remain open |
+| Full-output FIR | Experimental tensor-only destination-style `ondrix.fir_filter` for valid and zero-padded full boundaries; both expose output-axis tiling, with full tiles carrying an explicit global output origin; full lowering uses guarded scalar edges plus a Q15/Q31 Vectorized interior; ordered f32, dynamic shape guards, `K > N`, alias-safe tiled/untiled AOT execution, and direct bufferization are covered; same boundaries, public buffer semantics, fusion, and target-aware selection remain open |
+| Streaming FIR | Experimental tensor-only `ondrix.fir_stream` with explicit chronological `K-1` history; ordered Q15/Q31/f32 generic scalar lowering, empty and short chunks, `K=1`, dynamic shape guards, multi-chunk state equivalence, and object+C execution are covered; public buffer semantics, Vector scheduling, reset/resampling policies, circular-buffer capabilities, and stable frontend binding remain open |
 | Packed Q15 butterfly lowering | Experimental instruction selection only; no public emulator or ABI correctness claim |
-| Object generation and C execution | Implemented for scalar and fixed-width Vector Q15/Q31 FIR-sample/dot paths |
+| Object generation and C execution | Implemented for scalar and fixed-width Vector Q15/Q31 FIR-sample/full-output paths and ordered scalar Q15/Q31/f32 streaming chunks |
 | Public OrtumCore emulation | Signed i40/frac30 saturating accumulator init and Q15 full-product MAC add/sub implemented through exact Ondsp expansion |
 | Python-like `.ox` frontend | Planned |
 | Stable public kernel ABI | Planned |
@@ -30,10 +31,10 @@ The executable path currently covers:
 - generic scalar and fixed-width Vector lowering;
 - LLVM IR, PIC object generation, C linkage, and process execution.
 
-The current FIR operation represents one output sample over a preconstructed
-input window. Full-output and streaming FIR, Q31 target lowering, scalable
-Vector, a stable C ABI, and the `.ox` frontend are outside this supported Q15
-slice.
+The sample, full-output, and explicit-state streaming forms remain separate
+algorithm contracts. Same-boundary FIR, streaming Vector scheduling, Q31 target
+lowering, scalable Vector, a stable C ABI, and the `.ox` frontend remain outside
+this supported Q15 slice.
 
 ## Supported Q31 Slice
 
