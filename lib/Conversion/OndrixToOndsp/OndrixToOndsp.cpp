@@ -4,6 +4,7 @@
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
+#include "ondrix/Support/FirStreamRuntimeShape.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -317,47 +318,8 @@ public:
     Value coefficientLength = rewriter.create<tensor::DimOp>(loc, adaptor.getCoeffs(), zero);
     Value stateLength = rewriter.create<tensor::DimOp>(loc, adaptor.getState(), zero);
 
-    Value hasCoefficients =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientLength, zero);
-    rewriter.create<cf::AssertOp>(
-        loc, hasCoefficients,
-        rewriter.getStringAttr("FIR stream requires at least one coefficient"));
-    Value expectedCoefficientLength = rewriter.create<arith::AddIOp>(loc, stateLength, one);
-    Value stateMatches = rewriter.create<arith::CmpIOp>(
-        loc, arith::CmpIPredicate::eq, expectedCoefficientLength, coefficientLength);
-    rewriter.create<cf::AssertOp>(
-        loc, stateMatches,
-        rewriter.getStringAttr("FIR stream state length must equal coefficient length minus one"));
-    Value extendedLength = rewriter.create<arith::AddIOp>(loc, stateLength, inputLength);
-    Value extendedLengthFits =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, extendedLength, inputLength);
-    rewriter.create<cf::AssertOp>(
-        loc, extendedLengthFits,
-        rewriter.getStringAttr("FIR stream history and input exceed the indexable extent range"));
-
-    RankedTensorType inputType = op.getInput().getType();
-    RankedTensorType outputType = op.getOutput().getType();
-    if (inputType.isDynamicDim(0) && !outputType.isDynamicDim(0)) {
-      Value expectedOutputLength =
-          rewriter.create<arith::ConstantIndexOp>(loc, outputType.getDimSize(0));
-      Value outputMatches = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
-                                                           inputLength, expectedOutputLength);
-      rewriter.create<cf::AssertOp>(
-          loc, outputMatches,
-          rewriter.getStringAttr("FIR stream output length must equal input chunk length"));
-    }
-
-    RankedTensorType stateType = op.getState().getType();
-    RankedTensorType nextStateType = op.getNextState().getType();
-    if (stateType.isDynamicDim(0) && !nextStateType.isDynamicDim(0)) {
-      Value expectedNextStateLength =
-          rewriter.create<arith::ConstantIndexOp>(loc, nextStateType.getDimSize(0));
-      Value nextStateMatches = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
-                                                              stateLength, expectedNextStateLength);
-      rewriter.create<cf::AssertOp>(
-          loc, nextStateMatches,
-          rewriter.getStringAttr("FIR stream next-state length must equal state length"));
-    }
+    ondrix::emitFirStreamRuntimeShapeAssertions(op, inputLength, coefficientLength, stateLength,
+                                                zero, one, rewriter);
 
     Value emptyOutput = createEmptyTensor(loc, op.getOutput().getType(), inputLength, rewriter);
     Value emptyNextState =

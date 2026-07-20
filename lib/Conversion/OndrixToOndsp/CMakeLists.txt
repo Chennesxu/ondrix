@@ -14,6 +14,7 @@ add_ondrix_library(OndrixToOndsp
   MLIRSCFDialect
   MLIRTensorDialect
   MLIRTransformUtils
+  OndrixFirStreamRuntimeShape
   OndrixIR
   OndspIR
 )

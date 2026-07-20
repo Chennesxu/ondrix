@@ -7,6 +7,18 @@ add_ondrix_library(OndrixFixedPointSemantics
   LLVMSupport
   )
 
+add_ondrix_library(OndrixFirStreamRuntimeShape
+  FirStreamRuntimeShape.cpp
+
+  PARTIAL_SOURCES_INTENDED
+
+  LINK_LIBS PUBLIC
+  MLIRArithDialect
+  MLIRControlFlowDialect
+  MLIRIR
+  OndrixIR
+  )
+
 add_ondrix_library(OndrixSupport
   InitAllDialects.cpp
   InitAllPasses.cpp
