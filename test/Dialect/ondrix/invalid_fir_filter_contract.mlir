@@ -198,3 +198,41 @@ func.func @full_requires_exact_output_length(
   } : (tensor<4xi16>, tensor<3xi16>, tensor<5xi16>) -> tensor<5xi16>
   return
 }
+
+// -----
+
+func.func @valid_rejects_output_origin(
+    %input: tensor<8xi16>, %coeffs: tensor<3xi16>, %init: tensor<4xi16>) {
+  %origin = arith.constant 1 : index
+  // expected-error @+1 {{output_origin is supported only for full FIR boundaries}}
+  %0 = ondrix.fir_filter %input, %coeffs, %init, %origin {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    boundary = #ondrix.fir_boundary<valid>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi16>, tensor<3xi16>, tensor<4xi16>, index) -> tensor<4xi16>
+  return
+}
+
+// -----
+
+func.func @full_rejects_out_of_range_output_tile(
+    %input: tensor<4xi16>, %coeffs: tensor<3xi16>, %init: tensor<3xi16>) {
+  %origin = arith.constant 4 : index
+  // expected-error @+1 {{full FIR output tile exceeds the complete output range}}
+  %0 = ondrix.fir_filter %input, %coeffs, %init, %origin {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    boundary = #ondrix.fir_boundary<full>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<4xi16>, tensor<3xi16>, tensor<3xi16>, index) -> tensor<3xi16>
+  return
+}

@@ -50,8 +50,11 @@ def Ondrix_FirFilterOp
     `n` pairs `input[n + k]` with `coeffs[k]` for `k = 0..K-1`.
 
     For `boundary = full`, both `N` and `K` are non-empty and the output length
-    is `N + K - 1`. Output sample `n` pairs `coeffs[k]` with
-    `input[n + k - (K - 1)]` only when that input index is in `[0, N)`;
+    is `N + K - 1`. An optional `output_origin` selects a contiguous subrange
+    of that complete output; when absent it is zero and `init` must cover the
+    complete output. Local output sample `n` has global index
+    `g = output_origin + n` and pairs `coeffs[k]` with
+    `input[g + k - (K - 1)]` only when that input index is in `[0, N)`;
     an out-of-range tap performs no accumulator update. This is equivalent to
     zero padding for fixed point, while deliberately avoiding evaluation of
     `0 * Inf` or `0 * NaN` for floating point. This convention makes the fully
@@ -63,11 +66,11 @@ def Ondrix_FirFilterOp
     no-alias promise. Streaming state, stride, dilation, and other padding
     policies require separate contracts.
 
-    For `valid`, the tiling interface exposes only the output dimension as
-    parallel. An output tile retains the complete coefficient tensor and reads
-    the required input halo. Tiling does not split or reassociate the ordered
-    tap updates. `Full` output tiling remains unsupported until tiled operations
-    can carry their global output origin.
+    The tiling interface exposes only the output dimension as parallel. A
+    valid-boundary tile reads its corresponding input halo. A full-boundary
+    tile retains the complete input and carries its global output origin. Both
+    retain the complete coefficient tensor. Tiling does not split or
+    reassociate the ordered tap updates.
 
     Dynamic extent relationships are execution preconditions. The generic
     lowering emits dominating assertions as diagnostic guards, but those
@@ -81,6 +84,7 @@ def Ondrix_FirFilterOp
       AnyRankedTensor:$input,
       AnyRankedTensor:$coeffs,
       AnyRankedTensor:$init,
+      Optional<Index>:$output_origin,
       Ondrix_FirBoundaryModeAttr:$boundary,
       Ondsp_NumericAttr:$numeric,
       OptionalAttr<Ondsp_ProductAttr>:$product,

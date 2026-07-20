@@ -6,8 +6,10 @@
 #include "ondrix/Support/DSPTypeUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/TilingInterface.h"
 
@@ -191,6 +193,8 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
   int64_t inputLength = inputType.getDimSize(0);
   int64_t coefficientLength = coeffType.getDimSize(0);
   int64_t outputLength = initType.getDimSize(0);
+  if (op.getOutputOrigin() && op.getBoundary() != FirBoundaryMode::Full)
+    return op.emitOpError("output_origin is supported only for full FIR boundaries");
   if (!ShapedType::isDynamic(coefficientLength) && coefficientLength == 0)
     return op.emitOpError() << stringifyFirBoundaryMode(op.getBoundary())
                             << " FIR requires at least one coefficient";
@@ -209,9 +213,19 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
     if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(coefficientLength)) {
       if (inputLength > std::numeric_limits<int64_t>::max() - coefficientLength + 1)
         return op.emitOpError("full FIR output length exceeds the indexable extent range");
-      int64_t expectedOutputLength = inputLength + coefficientLength - 1;
-      if (!ShapedType::isDynamic(outputLength) && outputLength != expectedOutputLength)
-        return op.emitOpError() << "full FIR output length must be " << expectedOutputLength;
+      int64_t completeOutputLength = inputLength + coefficientLength - 1;
+      if (!op.getOutputOrigin()) {
+        if (!ShapedType::isDynamic(outputLength) && outputLength != completeOutputLength)
+          return op.emitOpError() << "full FIR output length must be " << completeOutputLength;
+      } else if (!ShapedType::isDynamic(outputLength)) {
+        APInt outputOriginValue;
+        if (matchPattern(op.getOutputOrigin(), m_ConstantInt(&outputOriginValue))) {
+          int64_t outputOrigin = outputOriginValue.getSExtValue();
+          if (outputOrigin > completeOutputLength ||
+              outputLength > completeOutputLength - outputOrigin)
+            return op.emitOpError("full FIR output tile exceeds the complete output range");
+        }
+      }
     }
   }
 
@@ -374,19 +388,30 @@ SmallVector<Range> FirFilterOp::getIterationDomain(OpBuilder &builder) {
 FailureOr<TilingResult> FirFilterOp::getTiledImplementation(OpBuilder &builder,
                                                             ArrayRef<OpFoldResult> offsets,
                                                             ArrayRef<OpFoldResult> sizes) {
-  if (getBoundary() != FirBoundaryMode::Valid || offsets.size() != 1 || sizes.size() != 1)
+  if (offsets.size() != 1 || sizes.size() != 1)
     return failure();
 
   Location loc = getLoc();
   OpFoldResult one = builder.getIndexAttr(1);
-  OpFoldResult coefficientLength = getTensorDim(builder, loc, getCoeffs(), 0);
-  OpFoldResult inputTileSize = addFirInputHalo(builder, loc, sizes.front(), coefficientLength);
-  Value tiledInput = builder.create<tensor::ExtractSliceOp>(
-      loc, getInput(), offsets, ArrayRef<OpFoldResult>{inputTileSize}, ArrayRef<OpFoldResult>{one});
-  Value tiledInit = builder.create<tensor::ExtractSliceOp>(loc, getInit(), offsets, sizes,
-                                                           ArrayRef<OpFoldResult>{one});
-
-  SmallVector<Value> tiledOperands{tiledInput, getCoeffs(), tiledInit};
+  SmallVector<Value> tiledOperands;
+  Value tiledInit;
+  if (getBoundary() == FirBoundaryMode::Valid) {
+    OpFoldResult coefficientLength = getTensorDim(builder, loc, getCoeffs(), 0);
+    OpFoldResult inputTileSize = addFirInputHalo(builder, loc, sizes.front(), coefficientLength);
+    Value tiledInput = builder.create<tensor::ExtractSliceOp>(loc, getInput(), offsets,
+                                                              ArrayRef<OpFoldResult>{inputTileSize},
+                                                              ArrayRef<OpFoldResult>{one});
+    tiledInit = builder.create<tensor::ExtractSliceOp>(loc, getInit(), offsets, sizes,
+                                                       ArrayRef<OpFoldResult>{one});
+    tiledOperands = {tiledInput, getCoeffs(), tiledInit};
+  } else {
+    tiledInit = builder.create<tensor::ExtractSliceOp>(loc, getInit(), offsets, sizes,
+                                                       ArrayRef<OpFoldResult>{one});
+    Value outputOrigin = getValueOrCreateConstantIndexOp(builder, loc, offsets.front());
+    if (getOutputOrigin())
+      outputOrigin = builder.create<arith::AddIOp>(loc, getOutputOrigin(), outputOrigin);
+    tiledOperands = {getInput(), getCoeffs(), tiledInit, outputOrigin};
+  }
   Operation *tiledOp =
       mlir::clone(builder, getOperation(), TypeRange{tiledInit.getType()}, tiledOperands);
   return TilingResult{{tiledOp}, SmallVector<Value>(tiledOp->getResults())};

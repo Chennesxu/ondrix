@@ -39,15 +39,15 @@ reuse the existing fixed-width Q15/Q31 Vector tap-reduction passes. Padded full
 edges remain increasing-index guarded scalar updates. F32 keeps the ordered
 scalar reduction until an exact FP Vector policy is implemented.
 
-For `valid`, `ondrix.fir_filter` implements `TilingInterface` for its single
-parallel output axis. An output tile at `[offset, offset + size)` reads the input halo
-`[offset, offset + size + K - 1)`, retains the complete coefficient tensor, and
-uses the corresponding init slice. The ordered tap reduction remains inside
-each tiled operation. The opt-in `tile-ondrix-fir-filter` pass delegates SCF
-loop construction, tail sizes, and destination insertion to MLIR's interface
-tiler; it does not tile or reassociate the tap axis. Full-boundary output tiling
-is fail-closed because an arbitrary tile requires its global output origin to
-preserve the padding equation.
+`ondrix.fir_filter` implements `TilingInterface` for its single parallel output
+axis. A valid-boundary tile at `[offset, offset + size)` reads the input halo
+`[offset, offset + size + K - 1)`. A full-boundary tile retains the complete
+input and carries `offset` as its explicit global `output_origin`. Both retain
+the complete coefficient tensor and use the corresponding init slice. The
+ordered tap reduction remains inside each tiled operation. The opt-in
+`tile-ondrix-fir-filter` pass delegates SCF loop construction, tail sizes, and
+destination insertion to MLIR's interface tiler; it does not tile or
+reassociate the tap axis.
 
 ## Prototype Contracts
 
@@ -132,10 +132,11 @@ ordering or reassociation proof.
 
 A full-output Ondrix operation can expose destination style over every boundary
 mode and tiling where the tile contract is complete. `ondrix.fir_filter`
-establishes destination style for valid and full, while its current output-only
-`TilingInterface` implementation accepts valid mode only. Its external
-bufferization model forms fully overlapping windows and reuses the memref-only
-`ondsp.reduce_mac` consumer while preserving the same ordered tap semantics.
+establishes destination style and output-only tiling for valid and full. Full
+tiles carry the global output origin required to retain the padding equation.
+Its external bufferization model forms fully overlapping windows and reuses the
+memref-only `ondsp.reduce_mac` consumer while preserving the same ordered tap
+semantics.
 Linalg reduction lowering remains legal only after the concrete numeric policy
 proves that changing the update order is exact.
 

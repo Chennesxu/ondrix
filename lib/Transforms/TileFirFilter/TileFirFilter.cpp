@@ -23,7 +23,7 @@ using namespace mlir;
 
 namespace {
 
-void assertValidFirFilterShape(ondrix::ir::FirFilterOp op, OpBuilder &builder) {
+void assertFirFilterShape(ondrix::ir::FirFilterOp op, OpBuilder &builder) {
   Location loc = op.getLoc();
   Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
   Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
@@ -33,8 +33,27 @@ void assertValidFirFilterShape(ondrix::ir::FirFilterOp op, OpBuilder &builder) {
 
   Value hasCoefficients =
       builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientLength, zero);
-  builder.create<cf::AssertOp>(
-      loc, hasCoefficients, builder.getStringAttr("valid FIR requires at least one coefficient"));
+  builder.create<cf::AssertOp>(loc, hasCoefficients,
+                               builder.getStringAttr("FIR requires at least one coefficient"));
+  if (op.getBoundary() == ondrix::ir::FirBoundaryMode::Full) {
+    Value hasInput =
+        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, inputLength, zero);
+    builder.create<cf::AssertOp>(
+        loc, hasInput, builder.getStringAttr("full FIR requires at least one input sample"));
+    Value leftPadding = builder.create<arith::SubIOp>(loc, coefficientLength, one);
+    Value outputCoversPadding =
+        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, outputLength, leftPadding);
+    Value recoveredInput = builder.create<arith::SubIOp>(loc, outputLength, leftPadding);
+    Value outputMatches =
+        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, recoveredInput, inputLength);
+    Value validOutputShape = builder.create<arith::AndIOp>(loc, outputCoversPadding, outputMatches);
+    builder.create<cf::AssertOp>(
+        loc, validOutputShape,
+        builder.getStringAttr(
+            "full FIR output length must equal input length plus coefficient length minus one"));
+    return;
+  }
+
   Value inputCoversWindow =
       builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, inputLength, coefficientLength);
   builder.create<cf::AssertOp>(
@@ -70,13 +89,13 @@ public:
     SmallVector<int64_t> tileSizes{tileSize};
     options.setTileSizes(tileSizes);
     for (ondrix::ir::FirFilterOp filter : filters) {
-      if (filter.getBoundary() != ondrix::ir::FirBoundaryMode::Valid) {
-        filter.emitOpError("output tiling currently supports only valid FIR boundaries");
+      if (filter.getOutputOrigin()) {
+        filter.emitOpError("cannot retile an existing FIR output tile");
         signalPassFailure();
         return;
       }
       rewriter.setInsertionPoint(filter);
-      assertValidFirFilterShape(filter, rewriter);
+      assertFirFilterShape(filter, rewriter);
       FailureOr<scf::SCFTilingResult> tiled =
           scf::tileUsingSCFForOp(rewriter, cast<TilingInterface>(filter.getOperation()), options);
       if (failed(tiled)) {
