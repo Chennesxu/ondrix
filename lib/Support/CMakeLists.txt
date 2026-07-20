@@ -33,6 +33,7 @@ add_ondrix_library(OndrixSupport
   OndspVectorNormalization
   OndspVectorization
   OndspToOrtumCore
+  OndrixDecomposeFirStream
   OndrixSpecializeConstantFir
   OndrixTileFirFilter
   OrtumCoreIR

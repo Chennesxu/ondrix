@@ -50,7 +50,19 @@ indexable combined state/input extent. When a result carries a static extent
 but its corresponding input or state extent is dynamic, lowering also checks
 that the runtime extent matches before constructing or writing that result.
 
-Tracked object-and-C execution covers signed Q15, signed Q31, f32 FMA, and an
+The opt-in `decompose-ondrix-fir-stream` transform makes the same equation
+structural: it materializes `extended`, computes a non-empty chunk with
+`ondrix.fir_filter` in valid mode, and extracts the next-state suffix. Its empty
+branch returns the empty output and unchanged state. This route allows
+One-Shot Bufferize and the existing fixed-point `reduce_mac` Vector passes to
+consume stream chunks without changing the public stream contract. The direct
+ordered scalar lowering remains the default reference path. The first
+decomposition baseline materializes the concatenation and therefore relies on
+buffer copies; it demonstrates semantic and Vector reuse, not the final
+zero-copy streaming performance pipeline.
+
+Tracked object-and-C execution covers both the direct scalar lowering and the
+decomposed fixed-point Vector route for signed Q15, signed Q31, f32 FMA, and an
 f32 `off` case that distinguishes separate multiply/add from contraction. The
 same input is evaluated both as one chunk and as multiple consecutive chunks;
 all outputs and final state are compared against independent C references.

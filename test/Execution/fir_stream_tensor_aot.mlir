@@ -10,6 +10,18 @@
 // RUN: not --crash %t.mismatch state
 // RUN: not --crash %t.mismatch output
 // RUN: not --crash %t.mismatch next
+// RUN: ondrix-opt %s --decompose-ondrix-fir-stream --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --cse --canonicalize --vectorize-ondsp-fixed-memref-reduce="vector-width=2" --normalize-ondsp-fixed-vector-reduce --lower-ondsp-f32-reduce-to-scalar --canonicalize > %t.vector.mlir
+// RUN: FileCheck %s --check-prefix=STREAM-VECTOR < %t.vector.mlir
+// RUN: ondrix-opt %t.vector.mlir --lower-rank-one-memref-copy-to-scf --convert-ondsp-fixed-to-scalar --buffer-deallocation --expand-strided-metadata --lower-affine --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.vector.llvm.mlir
+// RUN: ondrix-translate %t.vector.llvm.mlir --mlir-to-llvmir > %t.vector.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.vector.ll -o %t.vector.o
+// RUN: cc -ffp-contract=off %S/Inputs/fir_stream_tensor_aot.c %t.vector.o -lm -o %t.vector
+// RUN: %t.vector
+// RUN: cc %S/Inputs/fir_stream_tensor_mismatch.c %t.vector.o -lm -o %t.vector.mismatch
+// RUN: not --crash %t.vector.mismatch coefficients
+// RUN: not --crash %t.vector.mismatch state
+// RUN: not --crash %t.vector.mismatch output
+// RUN: not --crash %t.vector.mismatch next
 
 // LOWERED-NOT: ondrix.
 // LOWERED-NOT: ondsp.
@@ -18,6 +30,27 @@
 // DEALLOC-LABEL: llvm.func @q15_stream_output_value
 // DEALLOC: llvm.call @malloc
 // DEALLOC: llvm.call @free
+
+// STREAM-VECTOR-LABEL: func.func @q15_stream_output_value
+// STREAM-VECTOR: scf.if
+// STREAM-VECTOR: vector.load {{.*}}vector<2xi16>
+// STREAM-VECTOR: arith.muli {{.*}} : vector<2xi32>
+// STREAM-VECTOR-NOT: ondrix.fir_stream
+
+// STREAM-VECTOR-LABEL: func.func @q31_stream_output_value
+// STREAM-VECTOR: scf.if
+// STREAM-VECTOR: vector.load {{.*}}vector<2xi32>
+// STREAM-VECTOR: arith.muli {{.*}} : vector<2xi64>
+// STREAM-VECTOR-NOT: ondrix.fir_stream
+
+// STREAM-VECTOR-LABEL: func.func @f32_stream_output_value
+// STREAM-VECTOR: math.fma
+// STREAM-VECTOR-NOT: ondrix.fir_stream
+
+// STREAM-VECTOR-LABEL: func.func @f32_stream_off_output_value
+// STREAM-VECTOR: arith.mulf
+// STREAM-VECTOR: arith.addf
+// STREAM-VECTOR-NOT: ondrix.fir_stream
 
 // DEALLOC-LABEL: llvm.func @q15_stream_state_value
 // DEALLOC: llvm.call @malloc

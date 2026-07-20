@@ -58,4 +58,26 @@ def TileOndrixFirFilter
   ];
 }
 
+def DecomposeOndrixFirStream
+    : Pass<"decompose-ondrix-fir-stream", "::mlir::ModuleOp"> {
+  let summary = "Decompose FIR stream chunks into tensor and full-output FIR operations";
+  let description = [{
+    Opt-in structural decomposition for tensor `ondrix.fir_stream`. The pass
+    materializes the chronological extended sequence `concat(state, input)`,
+    computes a non-empty chunk with a valid-boundary `ondrix.fir_filter`, and
+    extracts the suffix that becomes the next state. Empty chunks preserve
+    state without invoking a valid FIR filter. Numeric update and export
+    policies are copied unchanged, so later bufferization and fixed-point
+    Vector passes can reuse the existing full-output FIR implementation.
+  }];
+  let constructor = "ondrix::createDecomposeOndrixFirStreamPass()";
+  let dependentDialects = [
+    "ondrix::ir::OndrixDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::tensor::TensorDialect",
+  ];
+}
+
 #endif // ONDRIX_TRANSFORMS_PASSES
