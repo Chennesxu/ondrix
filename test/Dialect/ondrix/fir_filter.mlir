@@ -33,3 +33,23 @@ func.func @f32_dynamic_valid_filter(
   } : (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
   return %result : tensor<?xf32>
 }
+
+// CHECK-LABEL: func.func @q31_full_filter
+// CHECK: ondrix.fir_filter
+// CHECK-SAME: boundary = #ondrix.fir_boundary<full>
+// CHECK-SAME: product = #ondsp.product<full>
+func.func @q31_full_filter(
+    %input: tensor<4xi32>, %coeffs: tensor<3xi32>, %init: tensor<6xi32>)
+    -> tensor<6xi32> {
+  %result = ondrix.fir_filter %input, %coeffs, %init {
+    accumulator = !ondsp.acc<storage = i64, frac = 62, signed,
+                              update_overflow = saturate>,
+    boundary = #ondrix.fir_boundary<full>,
+    dst = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<4xi32>, tensor<3xi32>, tensor<6xi32>) -> tensor<6xi32>
+  return %result : tensor<6xi32>
+}

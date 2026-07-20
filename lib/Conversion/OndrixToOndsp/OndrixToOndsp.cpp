@@ -90,6 +90,30 @@ static void assertValidFirFilterShape(Location loc, Value inputLength, Value coe
           "valid FIR output length must equal input length minus coefficient length plus one"));
 }
 
+static void assertFullFirFilterShape(Location loc, Value inputLength, Value coefficientLength,
+                                     Value outputLength, Value zero, Value one,
+                                     OpBuilder &builder) {
+  Value hasInput = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, inputLength, zero);
+  builder.create<cf::AssertOp>(
+      loc, hasInput, builder.getStringAttr("full FIR requires at least one input sample"));
+  Value hasCoefficients =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientLength, zero);
+  builder.create<cf::AssertOp>(loc, hasCoefficients,
+                               builder.getStringAttr("full FIR requires at least one coefficient"));
+
+  Value leftPadding = builder.create<arith::SubIOp>(loc, coefficientLength, one);
+  Value outputCoversPadding =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, outputLength, leftPadding);
+  Value recoveredInput = builder.create<arith::SubIOp>(loc, outputLength, leftPadding);
+  Value outputMatches =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, recoveredInput, inputLength);
+  Value validOutputShape = builder.create<arith::AndIOp>(loc, outputCoversPadding, outputMatches);
+  builder.create<cf::AssertOp>(
+      loc, validOutputShape,
+      builder.getStringAttr(
+          "full FIR output length must equal input length plus coefficient length minus one"));
+}
+
 class FirOpLowering final : public OpConversionPattern<ondrix::ir::FirOp> {
 public:
   using OpConversionPattern<ondrix::ir::FirOp>::OpConversionPattern;
@@ -117,8 +141,16 @@ public:
     Value inputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInput(), zero);
     Value coefficientLength = rewriter.create<tensor::DimOp>(loc, adaptor.getCoeffs(), zero);
     Value outputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInit(), zero);
-    assertValidFirFilterShape(loc, inputLength, coefficientLength, outputLength, zero, one,
-                              rewriter);
+    if (op.getBoundary() == ondrix::ir::FirBoundaryMode::Valid)
+      assertValidFirFilterShape(loc, inputLength, coefficientLength, outputLength, zero, one,
+                                rewriter);
+    else
+      assertFullFirFilterShape(loc, inputLength, coefficientLength, outputLength, zero, one,
+                               rewriter);
+
+    Value leftPadding;
+    if (op.getBoundary() == ondrix::ir::FirBoundaryMode::Full)
+      leftPadding = rewriter.create<arith::SubIOp>(loc, coefficientLength, one);
 
     auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
@@ -135,19 +167,52 @@ public:
           auto tapLoop = builder.create<scf::ForOp>(
               bodyLoc, zero, coefficientLength, one, ValueRange{initial},
               [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange accumulatorArgs) {
-                Value inputIndex = tapBuilder.create<arith::AddIOp>(tapLoc, outputIndex, tap);
-                Value inputValue = tapBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getInput(),
-                                                                        ValueRange{inputIndex});
-                Value coefficient = tapBuilder.create<tensor::ExtractOp>(
-                    tapLoc, adaptor.getCoeffs(), ValueRange{tap});
                 Value next;
-                if (fixed) {
-                  next = tapBuilder.create<ondrix::ondsp::MacOp>(
-                      tapLoc, *op.getAccumulator(), accumulatorArgs.front(), inputValue,
-                      coefficient, fixed, *op.getProduct());
+                if (op.getBoundary() == ondrix::ir::FirBoundaryMode::Valid) {
+                  Value inputIndex = tapBuilder.create<arith::AddIOp>(tapLoc, outputIndex, tap);
+                  Value inputValue = tapBuilder.create<tensor::ExtractOp>(
+                      tapLoc, adaptor.getInput(), ValueRange{inputIndex});
+                  Value coefficient = tapBuilder.create<tensor::ExtractOp>(
+                      tapLoc, adaptor.getCoeffs(), ValueRange{tap});
+                  if (fixed) {
+                    next = tapBuilder.create<ondrix::ondsp::MacOp>(
+                        tapLoc, *op.getAccumulator(), accumulatorArgs.front(), inputValue,
+                        coefficient, fixed, *op.getProduct());
+                  } else {
+                    next = createFpAccumulatorUpdate(tapLoc, inputValue, coefficient,
+                                                     accumulatorArgs.front(), fp, tapBuilder);
+                  }
                 } else {
-                  next = createFpAccumulatorUpdate(tapLoc, inputValue, coefficient,
-                                                   accumulatorArgs.front(), fp, tapBuilder);
+                  Value paddedIndex = tapBuilder.create<arith::AddIOp>(tapLoc, outputIndex, tap);
+                  Value pastLeftPadding = tapBuilder.create<arith::CmpIOp>(
+                      tapLoc, arith::CmpIPredicate::uge, paddedIndex, leftPadding);
+                  Value inputIndex =
+                      tapBuilder.create<arith::SubIOp>(tapLoc, paddedIndex, leftPadding);
+                  Value beforeRightPadding = tapBuilder.create<arith::CmpIOp>(
+                      tapLoc, arith::CmpIPredicate::ult, inputIndex, inputLength);
+                  Value inBounds =
+                      tapBuilder.create<arith::AndIOp>(tapLoc, pastLeftPadding, beforeRightPadding);
+                  auto guarded = tapBuilder.create<scf::IfOp>(
+                      tapLoc, TypeRange{accumulatorArgs.front().getType()}, inBounds,
+                      /*withElseRegion=*/true);
+                  OpBuilder thenBuilder = guarded.getThenBodyBuilder();
+                  Value inputValue = thenBuilder.create<tensor::ExtractOp>(
+                      tapLoc, adaptor.getInput(), ValueRange{inputIndex});
+                  Value coefficient = thenBuilder.create<tensor::ExtractOp>(
+                      tapLoc, adaptor.getCoeffs(), ValueRange{tap});
+                  Value updated;
+                  if (fixed) {
+                    updated = thenBuilder.create<ondrix::ondsp::MacOp>(
+                        tapLoc, *op.getAccumulator(), accumulatorArgs.front(), inputValue,
+                        coefficient, fixed, *op.getProduct());
+                  } else {
+                    updated = createFpAccumulatorUpdate(tapLoc, inputValue, coefficient,
+                                                        accumulatorArgs.front(), fp, thenBuilder);
+                  }
+                  thenBuilder.create<scf::YieldOp>(tapLoc, updated);
+                  OpBuilder elseBuilder = guarded.getElseBodyBuilder();
+                  elseBuilder.create<scf::YieldOp>(tapLoc, accumulatorArgs.front());
+                  next = guarded.getResult(0);
                 }
                 tapBuilder.create<scf::YieldOp>(tapLoc, next);
               });

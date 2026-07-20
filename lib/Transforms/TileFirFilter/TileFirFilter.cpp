@@ -70,6 +70,11 @@ public:
     SmallVector<int64_t> tileSizes{tileSize};
     options.setTileSizes(tileSizes);
     for (ondrix::ir::FirFilterOp filter : filters) {
+      if (filter.getBoundary() != ondrix::ir::FirBoundaryMode::Valid) {
+        filter.emitOpError("output tiling currently supports only valid FIR boundaries");
+        signalPassFailure();
+        return;
+      }
       rewriter.setInsertionPoint(filter);
       assertValidFirFilterShape(filter, rewriter);
       FailureOr<scf::SCFTilingResult> tiled =

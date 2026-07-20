@@ -38,24 +38,34 @@ def Ondrix_FirFilterOp
         NoMemoryEffect,
         TypesMatchWith<"result type matches init type", "init", "result",
                        "$_self">]> {
-  let summary = "Compute a valid-boundary FIR output tensor";
+  let summary = "Compute a full FIR output tensor";
   let description = [{
-    `ondrix.fir_filter` computes every valid FIR output sample. For input
-    length `N` and non-empty coefficient length `K`, `N >= K` and the output
-    length is `N - K + 1`. Output sample `n` starts from numeric zero and
-    pairs `input[n + k]` with `coeffs[k]` for `k = 0..K-1` in increasing
-    order. The `init` tensor provides the destination shape and storage; its
-    element values are not part of the mathematical result.
+    `ondrix.fir_filter` computes a rank-1 FIR output. Every sample starts from
+    numeric zero and visits coefficients in increasing `k` order. The `init`
+    tensor provides the destination shape and storage; its element values are
+    not part of the mathematical result.
+
+    For `boundary = valid`, input length `N` and non-empty coefficient length
+    `K` require `N >= K`, the output length is `N - K + 1`, and output sample
+    `n` pairs `input[n + k]` with `coeffs[k]` for `k = 0..K-1`.
+
+    For `boundary = full`, both `N` and `K` are non-empty and the output length
+    is `N + K - 1`. Output sample `n` pairs `coeffs[k]` with
+    `input[n + k - (K - 1)]` only when that input index is in `[0, N)`;
+    out-of-range input values are mathematical zero. This convention makes
+    the fully overlapping outputs identical to the valid-boundary equation.
 
     The first contract accepts ranked one-dimensional tensors only and
-    requires `boundary = valid`. This tensor-only surface gives value
-    semantics and does not impose an unverifiable memref no-alias promise.
-    Other boundary modes, streaming state, stride, and dilation require
-    separate contracts.
+    supports explicit `valid` and `full` boundary modes. This tensor-only
+    surface gives value semantics and does not impose an unverifiable memref
+    no-alias promise. Streaming state, stride, dilation, and other padding
+    policies require separate contracts.
 
-    The tiling interface exposes only the output dimension as parallel. An
-    output tile retains the complete coefficient tensor and reads the required
-    input halo. Tiling does not split or reassociate the ordered tap updates.
+    For `valid`, the tiling interface exposes only the output dimension as
+    parallel. An output tile retains the complete coefficient tensor and reads
+    the required input halo. Tiling does not split or reassociate the ordered
+    tap updates. `Full` output tiling remains unsupported until tiled operations
+    can carry their global output origin.
 
     Dynamic extent relationships are execution preconditions. The generic
     lowering emits dominating assertions as diagnostic guards, but those

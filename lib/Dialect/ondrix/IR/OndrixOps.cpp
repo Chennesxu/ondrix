@@ -11,6 +11,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/TilingInterface.h"
 
+#include <limits>
 #include <optional>
 
 using namespace mlir;
@@ -178,9 +179,6 @@ static LogicalResult verifyFirWindow(FirOp op) {
 }
 
 static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
-  if (op.getBoundary() != FirBoundaryMode::Valid)
-    return op.emitOpError("currently supports only valid FIR boundaries");
-
   RankedTensorType inputType = op.getInput().getType();
   RankedTensorType coeffType = op.getCoeffs().getType();
   RankedTensorType initType = op.getInit().getType();
@@ -194,13 +192,27 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
   int64_t coefficientLength = coeffType.getDimSize(0);
   int64_t outputLength = initType.getDimSize(0);
   if (!ShapedType::isDynamic(coefficientLength) && coefficientLength == 0)
-    return op.emitOpError("valid FIR requires at least one coefficient");
-  if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(coefficientLength)) {
-    if (inputLength < coefficientLength)
-      return op.emitOpError("valid FIR input must cover one coefficient window");
-    int64_t expectedOutputLength = inputLength - coefficientLength + 1;
-    if (!ShapedType::isDynamic(outputLength) && outputLength != expectedOutputLength)
-      return op.emitOpError() << "valid FIR output length must be " << expectedOutputLength;
+    return op.emitOpError() << stringifyFirBoundaryMode(op.getBoundary())
+                            << " FIR requires at least one coefficient";
+
+  if (op.getBoundary() == FirBoundaryMode::Valid) {
+    if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(coefficientLength)) {
+      if (inputLength < coefficientLength)
+        return op.emitOpError("valid FIR input must cover one coefficient window");
+      int64_t expectedOutputLength = inputLength - coefficientLength + 1;
+      if (!ShapedType::isDynamic(outputLength) && outputLength != expectedOutputLength)
+        return op.emitOpError() << "valid FIR output length must be " << expectedOutputLength;
+    }
+  } else {
+    if (!ShapedType::isDynamic(inputLength) && inputLength == 0)
+      return op.emitOpError("full FIR requires at least one input sample");
+    if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(coefficientLength)) {
+      if (inputLength > std::numeric_limits<int64_t>::max() - coefficientLength + 1)
+        return op.emitOpError("full FIR output length exceeds the indexable extent range");
+      int64_t expectedOutputLength = inputLength + coefficientLength - 1;
+      if (!ShapedType::isDynamic(outputLength) && outputLength != expectedOutputLength)
+        return op.emitOpError() << "full FIR output length must be " << expectedOutputLength;
+    }
   }
 
   Type inputElement = inputType.getElementType();
@@ -362,7 +374,7 @@ SmallVector<Range> FirFilterOp::getIterationDomain(OpBuilder &builder) {
 FailureOr<TilingResult> FirFilterOp::getTiledImplementation(OpBuilder &builder,
                                                             ArrayRef<OpFoldResult> offsets,
                                                             ArrayRef<OpFoldResult> sizes) {
-  if (offsets.size() != 1 || sizes.size() != 1)
+  if (getBoundary() != FirBoundaryMode::Valid || offsets.size() != 1 || sizes.size() != 1)
     return failure();
 
   Location loc = getLoc();

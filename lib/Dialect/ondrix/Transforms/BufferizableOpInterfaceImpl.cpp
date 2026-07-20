@@ -30,6 +30,8 @@ struct FirFilterOpInterface
   LogicalResult bufferize(Operation *operation, RewriterBase &rewriter,
                           const BufferizationOptions &options) const {
     auto op = cast<FirFilterOp>(operation);
+    if (op.getBoundary() != FirBoundaryMode::Valid)
+      return op.emitOpError("full FIR bufferization is not implemented");
     FailureOr<Value> input = getBuffer(rewriter, op.getInput(), options);
     FailureOr<Value> coefficients = getBuffer(rewriter, op.getCoeffs(), options);
     FailureOr<Value> output = getBuffer(rewriter, op.getInit(), options);
