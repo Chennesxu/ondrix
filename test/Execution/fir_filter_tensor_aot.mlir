@@ -73,12 +73,14 @@
 // TILED-VECTOR-NOT: memref.copy
 
 // TILED-VECTOR-LABEL: func.func @q15_proven_fir_filter_value
-// TILED-VECTOR: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
-// TILED-VECTOR: ondsp.acc_add_term
+// TILED-VECTOR: %[[Q15_SUM:.*]] = vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// TILED-VECTOR: ondsp.acc_add_term {{.*}}, %[[Q15_SUM]]
+// TILED-VECTOR-NOT: vector.extract
 // TILED-VECTOR-NOT: ondsp.reduce_mac
 // TILED-VECTOR-LABEL: func.func @q31_proven_fir_filter_value
-// TILED-VECTOR: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
-// TILED-VECTOR: ondsp.acc_add_term
+// TILED-VECTOR: %[[Q31_SUM:.*]] = vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// TILED-VECTOR: ondsp.acc_add_term {{.*}}, %[[Q31_SUM]]
+// TILED-VECTOR-NOT: vector.extract
 // TILED-VECTOR-NOT: ondsp.reduce_mac
 
 // TILED-LOWERED-NOT: ondrix.

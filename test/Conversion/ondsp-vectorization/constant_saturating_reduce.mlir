@@ -30,6 +30,28 @@ func.func @safe_q15(%input: memref<8xi16>)
 // CHECK: ondsp.acc_add_term
 // CHECK-NOT: ondsp.reduce_mac
 
+func.func @safe_q15_dynamic_cast(%input_static: memref<8xi16>)
+    -> !ondsp.acc<storage = i40, frac = 30, signed,
+                  update_overflow = saturate> {
+  %input = memref.cast %input_static : memref<8xi16> to memref<?xi16>
+  %coefficients = memref.get_global @safe_q15_coefficients : memref<8xi16>
+  %coefficients_dynamic = memref.cast %coefficients
+      : memref<8xi16> to memref<?xi16>
+  %result = ondrix.fir %input, %coefficients_dynamic {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (memref<?xi16>, memref<?xi16>)
+      -> !ondsp.acc<storage = i40, frac = 30, signed,
+                    update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @safe_q15_dynamic_cast
+// CHECK: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// CHECK: ondsp.acc_add_term
+// CHECK-NOT: ondsp.reduce_mac
+
 func.func @safe_q15_full_subview(%input: memref<8xi16>)
     -> !ondsp.acc<storage = i40, frac = 30, signed,
                   update_overflow = saturate> {
@@ -68,6 +90,50 @@ func.func @partial_q15_subview(%input: memref<4xi16>)
 }
 
 // CHECK-LABEL: func.func @partial_q15_subview
+// CHECK: ondsp.reduce_mac
+// CHECK-NOT: vector.reduction
+
+func.func @partial_q15_dynamic_cast(%input_static: memref<4xi16>)
+    -> !ondsp.acc<storage = i40, frac = 30, signed,
+                  update_overflow = saturate> {
+  %input = memref.cast %input_static : memref<4xi16> to memref<?xi16>
+  %coefficients = memref.get_global @safe_q15_coefficients : memref<8xi16>
+  %partial = memref.subview %coefficients[1] [4] [1]
+      : memref<8xi16> to memref<4xi16, strided<[1], offset: 1>>
+  %coefficients_dynamic = memref.cast %partial
+      : memref<4xi16, strided<[1], offset: 1>>
+        to memref<?xi16, strided<[1], offset: ?>>
+  %result = ondrix.fir %input, %coefficients_dynamic {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (memref<?xi16>, memref<?xi16, strided<[1], offset: ?>>)
+      -> !ondsp.acc<storage = i40, frac = 30, signed,
+                    update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @partial_q15_dynamic_cast
+// CHECK: ondsp.reduce_mac
+// CHECK-NOT: vector.reduction
+
+func.func @unproven_q15_dynamic_subview(%input: memref<?xi16>, %size: index)
+    -> !ondsp.acc<storage = i40, frac = 30, signed,
+                  update_overflow = saturate> {
+  %coefficients = memref.get_global @safe_q15_coefficients : memref<8xi16>
+  %view = memref.subview %coefficients[0] [%size] [1]
+      : memref<8xi16> to memref<?xi16, strided<[1]>>
+  %result = ondrix.fir %input, %view {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (memref<?xi16>, memref<?xi16, strided<[1]>>)
+      -> !ondsp.acc<storage = i40, frac = 30, signed,
+                    update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @unproven_q15_dynamic_subview
 // CHECK: ondsp.reduce_mac
 // CHECK-NOT: vector.reduction
 
