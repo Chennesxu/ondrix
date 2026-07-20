@@ -38,7 +38,7 @@ def Ondrix_FirFilterOp
         NoMemoryEffect,
         TypesMatchWith<"result type matches init type", "init", "result",
                        "$_self">]> {
-  let summary = "Compute a full FIR output tensor";
+  let summary = "Compute a rank-one FIR output tensor";
   let description = [{
     `ondrix.fir_filter` computes a rank-1 FIR output. Every sample starts from
     numeric zero and visits coefficients in increasing `k` order. The `init`
