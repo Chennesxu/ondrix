@@ -10,6 +10,16 @@
 // RUN: not --crash %t.mismatch input
 // RUN: not --crash %t.mismatch coefficients
 // RUN: not --crash %t.mismatch output
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.generic.mlir
+// RUN: FileCheck %s --check-prefix=LOWERED < %t.generic.mlir
+// RUN: ondrix-translate %t.generic.mlir --mlir-to-llvmir > %t.generic.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.generic.ll -o %t.generic.o
+// RUN: cc %S/Inputs/fir_filter_full_tensor_aot.c %t.generic.o -lm -o %t.generic
+// RUN: %t.generic
+// RUN: cc %S/Inputs/fir_filter_full_tensor_mismatch.c %t.generic.o -lm -o %t.generic.mismatch
+// RUN: not --crash %t.generic.mismatch input
+// RUN: not --crash %t.generic.mismatch coefficients
+// RUN: not --crash %t.generic.mismatch output
 
 // VECTOR-LABEL: func.func @q15_full_filter_value
 // VECTOR-COUNT-3: cf.assert

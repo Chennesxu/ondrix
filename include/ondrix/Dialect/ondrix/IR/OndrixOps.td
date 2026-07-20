@@ -52,8 +52,10 @@ def Ondrix_FirFilterOp
     For `boundary = full`, both `N` and `K` are non-empty and the output length
     is `N + K - 1`. Output sample `n` pairs `coeffs[k]` with
     `input[n + k - (K - 1)]` only when that input index is in `[0, N)`;
-    out-of-range input values are mathematical zero. This convention makes
-    the fully overlapping outputs identical to the valid-boundary equation.
+    an out-of-range tap performs no accumulator update. This is equivalent to
+    zero padding for fixed point, while deliberately avoiding evaluation of
+    `0 * Inf` or `0 * NaN` for floating point. This convention makes the fully
+    overlapping outputs identical to the valid-boundary equation.
 
     The first contract accepts ranked one-dimensional tensors only and
     supports explicit `valid` and `full` boundary modes. This tensor-only

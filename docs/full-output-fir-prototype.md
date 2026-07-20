@@ -71,9 +71,11 @@ output[output_index] = ordered_sum(
   for taps whose input_index is in bounds)
 ```
 
-It requires nonempty input and coefficients. This indexing convention is part
-of the experimental Ondrix contract and makes outputs `K - 1` through `N - 1`
-identical to the valid-boundary equation when `N >= K`.
+It requires nonempty input and coefficients. An out-of-range tap performs no
+accumulator update. This is equivalent to zero padding for fixed point, while
+avoiding evaluation of `0 * Inf` or `0 * NaN` for floating point. This indexing
+convention is part of the experimental Ondrix contract and makes outputs
+`K - 1` through `N - 1` identical to the valid-boundary equation when `N >= K`.
 
 For both older memref prototype forms, output must not alias input or
 coefficients; the two read-only operands may alias each other. This restriction
@@ -97,7 +99,9 @@ dynamic extents, nonzero descriptor offsets, unit-stride fixed-point Vector
 chunking, dynamic-stride scalar fallback, accumulator overflow, and
 process-level rejection of invalid dynamic extents. Full-boundary execution
 also covers `K > N`, both padded edges, Vectorized interiors, and tensor alias
-conflicts.
+conflicts. Floating-point padded edges include infinity, NaN, and signed-zero
+cases that distinguish skipped updates from eagerly multiplying explicit zero
+padding.
 
 ## Architecture Result
 

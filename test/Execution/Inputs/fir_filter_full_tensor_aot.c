@@ -102,6 +102,18 @@ static uint32_t f32_bits(float value) {
   return bits;
 }
 
+static float f32_reference(const float *input, int64_t input_length, const float *coefficients,
+                           int64_t coefficient_length, int64_t output_index) {
+  float accumulator = 0.0f;
+  const int64_t left_padding = coefficient_length - 1;
+  for (int64_t tap = 0; tap < coefficient_length; ++tap) {
+    const int64_t input_index = output_index + tap - left_padding;
+    if (input_index >= 0 && input_index < input_length)
+      accumulator = fmaf(input[input_index], coefficients[tap], accumulator);
+  }
+  return accumulator;
+}
+
 int main(void) {
   int failed = 0;
 
@@ -154,12 +166,7 @@ int main(void) {
   float f32_coefficients[] = {1.0f, 0x1.fffffcp-1f, -0.5f};
   float f32_output[6] = {0.0f};
   for (int64_t output_index = 0; output_index < 6; ++output_index) {
-    float expected = 0.0f;
-    for (int64_t tap = 0; tap < 3; ++tap) {
-      int64_t input_index = output_index + tap - 2;
-      if (input_index >= 0 && input_index < 4)
-        expected = fmaf(f32_input[input_index], f32_coefficients[tap], expected);
-    }
+    float expected = f32_reference(f32_input, 4, f32_coefficients, 3, output_index);
     float actual =
         f32_full_filter_value(MEMREF_ARGS(f32_input, 4), MEMREF_ARGS(f32_coefficients, 3),
                               MEMREF_ARGS(f32_output, 6), output_index);
@@ -168,6 +175,35 @@ int main(void) {
               (long long)output_index, f32_bits(expected), f32_bits(actual));
       failed = 1;
     }
+  }
+
+  float exceptional_input[] = {1.0f};
+  float exceptional_coefficients[] = {NAN, INFINITY, 1.0f};
+  float exceptional_output[3] = {0.0f};
+  for (int64_t output_index = 0; output_index < 3; ++output_index) {
+    float expected = f32_reference(exceptional_input, 1, exceptional_coefficients, 3, output_index);
+    float actual = f32_full_filter_value(MEMREF_ARGS(exceptional_input, 1),
+                                         MEMREF_ARGS(exceptional_coefficients, 3),
+                                         MEMREF_ARGS(exceptional_output, 3), output_index);
+    int matches = isnan(expected) ? isnan(actual) : f32_bits(actual) == f32_bits(expected);
+    if (!matches) {
+      fprintf(stderr, "exceptional f32 full output %lld: expected 0x%08x, got 0x%08x\n",
+              (long long)output_index, f32_bits(expected), f32_bits(actual));
+      failed = 1;
+    }
+  }
+
+  float signed_zero_input[] = {-0.0f};
+  float signed_zero_coefficients[] = {1.0f};
+  float signed_zero_output[] = {0.0f};
+  float signed_zero_expected = f32_reference(signed_zero_input, 1, signed_zero_coefficients, 1, 0);
+  float signed_zero_actual = f32_full_filter_value(MEMREF_ARGS(signed_zero_input, 1),
+                                                   MEMREF_ARGS(signed_zero_coefficients, 1),
+                                                   MEMREF_ARGS(signed_zero_output, 1), 0);
+  if (f32_bits(signed_zero_actual) != f32_bits(signed_zero_expected)) {
+    fprintf(stderr, "signed-zero f32 full output: expected 0x%08x, got 0x%08x\n",
+            f32_bits(signed_zero_expected), f32_bits(signed_zero_actual));
+    failed = 1;
   }
 
   int16_t shared_coeff_init[] = {-32768, 16384, 8192, -4096, 2048};
