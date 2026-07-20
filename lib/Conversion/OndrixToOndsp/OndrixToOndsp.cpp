@@ -141,6 +141,32 @@ static void assertFullFirFilterTileShape(Location loc, Value inputLength, Value 
       builder.getStringAttr("full FIR output tile must lie within the complete output range"));
 }
 
+static Value createEmptyTensor(Location loc, RankedTensorType type, Value dynamicLength,
+                               OpBuilder &builder) {
+  SmallVector<Value> dynamicSizes;
+  if (type.isDynamicDim(0))
+    dynamicSizes.push_back(dynamicLength);
+  return builder.create<tensor::EmptyOp>(loc, type.getShape(), type.getElementType(), dynamicSizes);
+}
+
+static Value createFirStreamInitialAccumulator(ondrix::ir::FirStreamOp op, Location loc,
+                                               OpBuilder &builder) {
+  if (isa<ondrix::ondsp::FixedAttr>(op.getNumeric()))
+    return builder.create<ondrix::ondsp::AccZeroOp>(loc, *op.getAccumulator());
+  auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  return builder.create<arith::ConstantOp>(loc, fp.getFormat(),
+                                           builder.getZeroAttr(fp.getFormat()));
+}
+
+static Value exportFirStreamSample(ondrix::ir::FirStreamOp op, Value accumulator, Location loc,
+                                   OpBuilder &builder) {
+  if (!isa<ondrix::ondsp::FixedAttr>(op.getNumeric()))
+    return accumulator;
+  return builder.create<ondrix::ondsp::AccExportOp>(loc, op.getDst()->getStorage(), accumulator,
+                                                    *op.getDst(), *op.getRounding(),
+                                                    *op.getOverflow());
+}
+
 class FirOpLowering final : public OpConversionPattern<ondrix::ir::FirOp> {
 public:
   using OpConversionPattern<ondrix::ir::FirOp>::OpConversionPattern;
@@ -278,6 +304,115 @@ public:
   }
 };
 
+class FirStreamOpLowering final : public OpConversionPattern<ondrix::ir::FirStreamOp> {
+public:
+  using OpConversionPattern<ondrix::ir::FirStreamOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::FirStreamOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value inputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInput(), zero);
+    Value coefficientLength = rewriter.create<tensor::DimOp>(loc, adaptor.getCoeffs(), zero);
+    Value stateLength = rewriter.create<tensor::DimOp>(loc, adaptor.getState(), zero);
+
+    Value hasCoefficients =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientLength, zero);
+    rewriter.create<cf::AssertOp>(
+        loc, hasCoefficients,
+        rewriter.getStringAttr("FIR stream requires at least one coefficient"));
+    Value expectedCoefficientLength = rewriter.create<arith::AddIOp>(loc, stateLength, one);
+    Value stateMatches = rewriter.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::eq, expectedCoefficientLength, coefficientLength);
+    rewriter.create<cf::AssertOp>(
+        loc, stateMatches,
+        rewriter.getStringAttr("FIR stream state length must equal coefficient length minus one"));
+    Value extendedLength = rewriter.create<arith::AddIOp>(loc, stateLength, inputLength);
+    Value extendedLengthFits =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, extendedLength, inputLength);
+    rewriter.create<cf::AssertOp>(
+        loc, extendedLengthFits,
+        rewriter.getStringAttr("FIR stream history and input exceed the indexable extent range"));
+
+    Value emptyOutput = createEmptyTensor(loc, op.getOutput().getType(), inputLength, rewriter);
+    Value emptyNextState =
+        createEmptyTensor(loc, op.getNextState().getType(), stateLength, rewriter);
+    auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+
+    auto outputLoop = rewriter.create<scf::ForOp>(
+        loc, zero, inputLength, one, ValueRange{emptyOutput},
+        [&](OpBuilder &builder, Location bodyLoc, Value outputIndex, ValueRange outputArgs) {
+          Value initial = createFirStreamInitialAccumulator(op, bodyLoc, builder);
+          auto tapLoop = builder.create<scf::ForOp>(
+              bodyLoc, zero, coefficientLength, one, ValueRange{initial},
+              [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange accumulatorArgs) {
+                Value extendedIndex = tapBuilder.create<arith::AddIOp>(tapLoc, outputIndex, tap);
+                Value fromState = tapBuilder.create<arith::CmpIOp>(
+                    tapLoc, arith::CmpIPredicate::ult, extendedIndex, stateLength);
+                auto selected = tapBuilder.create<scf::IfOp>(
+                    tapLoc, TypeRange{op.getInput().getType().getElementType()}, fromState,
+                    /*withElseRegion=*/true);
+                OpBuilder stateBuilder = selected.getThenBodyBuilder();
+                Value stateValue = stateBuilder.create<tensor::ExtractOp>(
+                    tapLoc, adaptor.getState(), ValueRange{extendedIndex});
+                stateBuilder.create<scf::YieldOp>(tapLoc, stateValue);
+                OpBuilder inputBuilder = selected.getElseBodyBuilder();
+                Value inputIndex =
+                    inputBuilder.create<arith::SubIOp>(tapLoc, extendedIndex, stateLength);
+                Value inputValue = inputBuilder.create<tensor::ExtractOp>(
+                    tapLoc, adaptor.getInput(), ValueRange{inputIndex});
+                inputBuilder.create<scf::YieldOp>(tapLoc, inputValue);
+
+                Value coefficient = tapBuilder.create<tensor::ExtractOp>(
+                    tapLoc, adaptor.getCoeffs(), ValueRange{tap});
+                Value next;
+                if (fixed) {
+                  next = tapBuilder.create<ondrix::ondsp::MacOp>(
+                      tapLoc, *op.getAccumulator(), accumulatorArgs.front(), selected.getResult(0),
+                      coefficient, fixed, *op.getProduct());
+                } else {
+                  next = createFpAccumulatorUpdate(tapLoc, selected.getResult(0), coefficient,
+                                                   accumulatorArgs.front(), fp, tapBuilder);
+                }
+                tapBuilder.create<scf::YieldOp>(tapLoc, next);
+              });
+          Value sample = exportFirStreamSample(op, tapLoop.getResult(0), bodyLoc, builder);
+          Value updated = builder.create<tensor::InsertOp>(bodyLoc, sample, outputArgs.front(),
+                                                           ValueRange{outputIndex});
+          builder.create<scf::YieldOp>(bodyLoc, updated);
+        });
+
+    auto stateLoop = rewriter.create<scf::ForOp>(
+        loc, zero, stateLength, one, ValueRange{emptyNextState},
+        [&](OpBuilder &builder, Location bodyLoc, Value stateIndex, ValueRange stateArgs) {
+          Value extendedIndex = builder.create<arith::AddIOp>(bodyLoc, inputLength, stateIndex);
+          Value fromState = builder.create<arith::CmpIOp>(bodyLoc, arith::CmpIPredicate::ult,
+                                                          extendedIndex, stateLength);
+          auto selected = builder.create<scf::IfOp>(
+              bodyLoc, TypeRange{op.getInput().getType().getElementType()}, fromState,
+              /*withElseRegion=*/true);
+          OpBuilder historyBuilder = selected.getThenBodyBuilder();
+          Value historyValue = historyBuilder.create<tensor::ExtractOp>(bodyLoc, adaptor.getState(),
+                                                                        ValueRange{extendedIndex});
+          historyBuilder.create<scf::YieldOp>(bodyLoc, historyValue);
+          OpBuilder inputBuilder = selected.getElseBodyBuilder();
+          Value inputIndex =
+              inputBuilder.create<arith::SubIOp>(bodyLoc, extendedIndex, stateLength);
+          Value inputValue = inputBuilder.create<tensor::ExtractOp>(bodyLoc, adaptor.getInput(),
+                                                                    ValueRange{inputIndex});
+          inputBuilder.create<scf::YieldOp>(bodyLoc, inputValue);
+          Value updated = builder.create<tensor::InsertOp>(
+              bodyLoc, selected.getResult(0), stateArgs.front(), ValueRange{stateIndex});
+          builder.create<scf::YieldOp>(bodyLoc, updated);
+        });
+
+    rewriter.replaceOp(op, ValueRange{outputLoop.getResult(0), stateLoop.getResult(0)});
+    return success();
+  }
+};
+
 class DotOpLowering final : public OpConversionPattern<ondrix::ir::DotOp> {
 public:
   using OpConversionPattern<ondrix::ir::DotOp>::OpConversionPattern;
@@ -348,8 +483,8 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns.add<FirOpLowering, FirFilterOpLowering, DotOpLowering, ButterflyOpLowering,
-                 QuantizeOpLowering>(&getContext());
+    patterns.add<FirOpLowering, FirFilterOpLowering, FirStreamOpLowering, DotOpLowering,
+                 ButterflyOpLowering, QuantizeOpLowering>(&getContext());
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,
