@@ -9,6 +9,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/JSON.h"
 
 #include "mlir/Support/LLVM.h"
 
@@ -24,6 +25,33 @@ struct FixedPointRawInterval {
   llvm::APInt upper;
   unsigned frac;
 };
+
+/// Experimental, serializable evidence for one zero-seeded constant chunk
+/// reassociation. This is an audit artifact, not a legality authority: every
+/// consumer must revalidate it against the current IR and planner result.
+struct NoOverflowChunkReassociationTrace {
+  static constexpr int64_t schemaVersion = 1;
+
+  int64_t subjectOrdinal = -1;
+  unsigned numericStorageWidth = 0;
+  unsigned numericFrac = 0;
+  unsigned accumulatorStorageWidth = 0;
+  unsigned accumulatorFrac = 0;
+  unsigned productRawWidth = 0;
+  unsigned productFrac = 0;
+  int64_t chunkWidth = 0;
+  llvm::SmallVector<llvm::APInt> coefficients;
+  llvm::SmallVector<FixedPointRawInterval> originalPrefixes;
+  llvm::SmallVector<FixedPointRawInterval> reassociatedPrefixes;
+};
+
+llvm::json::Object toJSON(const NoOverflowChunkReassociationTrace &trace);
+mlir::FailureOr<NoOverflowChunkReassociationTrace>
+parseNoOverflowChunkReassociationTrace(const llvm::json::Value &value);
+mlir::LogicalResult
+verifyNoOverflowChunkReassociationTrace(const NoOverflowChunkReassociationTrace &trace);
+bool areEquivalent(const NoOverflowChunkReassociationTrace &lhs,
+                   const NoOverflowChunkReassociationTrace &rhs);
 
 /// Computes the exact raw interval of a signed full-width product between any
 /// value in `numeric`'s storage domain and one constant raw coefficient.
@@ -71,7 +99,8 @@ private:
 };
 
 using ChunkReassociationConsumer = llvm::function_ref<mlir::LogicalResult(
-    const ondsp::ProductSemantics &, llvm::ArrayRef<llvm::APInt>, int64_t)>;
+    const ondsp::ProductSemantics &, llvm::ArrayRef<llvm::APInt>, int64_t,
+    const NoOverflowChunkReassociationTrace &)>;
 
 /// A move-only decision authorizing fixed-width chunk reassociation for one
 /// zero-seeded constant reduction. The planner owns schedule construction;
@@ -92,10 +121,11 @@ private:
                                    ondsp::ProductSemantics productSemantics,
                                    ondsp::FixedAttr numeric, ondsp::ProductAttr product,
                                    ondsp::AccType accumulator,
-                                   llvm::ArrayRef<llvm::APInt> coefficients, int64_t chunkWidth)
+                                   llvm::ArrayRef<llvm::APInt> coefficients, int64_t chunkWidth,
+                                   NoOverflowChunkReassociationTrace trace)
       : subject(subject), coefficientSource(coefficientSource), productSemantics(productSemantics),
         numeric(numeric), product(product), accumulator(accumulator), coefficients(coefficients),
-        chunkWidth(chunkWidth) {}
+        chunkWidth(chunkWidth), trace(std::move(trace)) {}
 
   mlir::Operation *subject;
   mlir::Value coefficientSource;
@@ -105,6 +135,7 @@ private:
   ondsp::AccType accumulator;
   llvm::SmallVector<llvm::APInt> coefficients;
   int64_t chunkWidth;
+  NoOverflowChunkReassociationTrace trace;
   bool consumed = false;
 };
 

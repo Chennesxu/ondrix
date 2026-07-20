@@ -133,7 +133,8 @@ public:
     return std::move(*plan).consumeIfValid(
         op, vectorWidth,
         [&](const ondrix::ondsp::ProductSemantics &productSemantics,
-            llvm::ArrayRef<llvm::APInt> validatedCoefficients, int64_t validatedWidth) {
+            llvm::ArrayRef<llvm::APInt> validatedCoefficients, int64_t validatedWidth,
+            const ondrix::analysis::NoOverflowChunkReassociationTrace &) {
           if (productSemantics.selection != ondrix::ondsp::ProductSelection::Full ||
               validatedCoefficients.size() != static_cast<size_t>(facts.getElementCount()) ||
               validatedWidth != vectorWidth)

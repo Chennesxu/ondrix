@@ -1,6 +1,7 @@
 #include "ondrix/Analysis/FixedPointPrefixRangeAnalysis.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/MathExtras.h"
 
 #include "mlir/IR/BuiltinTypes.h"
@@ -9,6 +10,7 @@
 #include <limits>
 
 using namespace mlir;
+namespace json = llvm::json;
 
 namespace ondrix::analysis {
 namespace {
@@ -76,27 +78,141 @@ bool equalCoefficients(ArrayRef<APInt> lhs, ArrayRef<APInt> rhs) {
   return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin());
 }
 
+FailureOr<SmallVector<FixedPointRawInterval>>
+computePrefixIntervals(unsigned accumulatorWidth, const FixedPointRawInterval &initial,
+                       ArrayRef<FixedPointRawInterval> updates) {
+  if (accumulatorWidth == 0 || !isValidInterval(initial) ||
+      llvm::any_of(
+          updates,
+          [](const FixedPointRawInterval &interval) { return !isValidInterval(interval); }) ||
+      !hasFractionalPosition(updates, initial.frac))
+    return failure();
+  FailureOr<unsigned> analysisWidth = getAnalysisWidth(accumulatorWidth, initial, updates, {});
+  if (failed(analysisWidth))
+    return failure();
+
+  SmallVector<FixedPointRawInterval> prefixes;
+  prefixes.reserve(updates.size() + 1);
+  FixedPointRawInterval prefix = extendInterval(initial, *analysisWidth);
+  prefixes.push_back(prefix);
+  for (const FixedPointRawInterval &update : updates) {
+    FixedPointRawInterval extended = extendInterval(update, *analysisWidth);
+    prefix.lower += extended.lower;
+    prefix.upper += extended.upper;
+    prefixes.push_back(prefix);
+  }
+  return prefixes;
+}
+
+FailureOr<FixedPointRawInterval> computeSignedFullProductIntervalRaw(unsigned storageWidth,
+                                                                     unsigned frac,
+                                                                     const APInt &coefficient) {
+  if (storageWidth == 0 || coefficient.getBitWidth() != storageWidth ||
+      storageWidth > std::numeric_limits<unsigned>::max() / 2 ||
+      frac > std::numeric_limits<unsigned>::max() / 2)
+    return failure();
+  unsigned productWidth = storageWidth * 2;
+  unsigned productFrac = frac * 2;
+  APInt coefficientExtended = coefficient.sext(productWidth);
+  APInt first = APInt::getSignedMinValue(storageWidth).sext(productWidth) * coefficientExtended;
+  APInt second = APInt::getSignedMaxValue(storageWidth).sext(productWidth) * coefficientExtended;
+  if (first.sle(second))
+    return FixedPointRawInterval{std::move(first), std::move(second), productFrac};
+  return FixedPointRawInterval{std::move(second), std::move(first), productFrac};
+}
+
+bool equalIntervals(ArrayRef<FixedPointRawInterval> lhs, ArrayRef<FixedPointRawInterval> rhs) {
+  return lhs.size() == rhs.size() &&
+         std::equal(lhs.begin(), lhs.end(), rhs.begin(), [](const auto &left, const auto &right) {
+           return left.lower == right.lower && left.upper == right.upper && left.frac == right.frac;
+         });
+}
+
+json::Object apIntToJSON(const APInt &value) {
+  SmallString<64> text;
+  value.toStringSigned(text);
+  return json::Object{{"width", static_cast<int64_t>(value.getBitWidth())},
+                      {"value", text.str().str()}};
+}
+
+FailureOr<APInt> parseAPInt(const json::Value &value) {
+  const json::Object *object = value.getAsObject();
+  if (!object)
+    return failure();
+  std::optional<int64_t> width = object->getInteger("width");
+  std::optional<StringRef> text = object->getString("value");
+  if (!width || *width <= 0 || *width > std::numeric_limits<unsigned>::max() || !text ||
+      text->empty())
+    return failure();
+
+  StringRef magnitude = *text;
+  bool negative = magnitude.consume_front("-");
+  if (magnitude.empty() ||
+      llvm::any_of(magnitude, [](char character) { return character < '0' || character > '9'; }))
+    return failure();
+  APInt parsed(static_cast<unsigned>(*width), magnitude, 10);
+  if (negative)
+    parsed = -parsed;
+  SmallString<64> normalized;
+  parsed.toStringSigned(normalized);
+  if (normalized != *text)
+    return failure();
+  return parsed;
+}
+
+json::Object intervalToJSON(const FixedPointRawInterval &interval) {
+  return json::Object{{"lower", apIntToJSON(interval.lower)},
+                      {"upper", apIntToJSON(interval.upper)},
+                      {"frac", static_cast<int64_t>(interval.frac)}};
+}
+
+FailureOr<FixedPointRawInterval> parseInterval(const json::Value &value) {
+  const json::Object *object = value.getAsObject();
+  if (!object)
+    return failure();
+  const json::Value *lowerValue = object->get("lower");
+  const json::Value *upperValue = object->get("upper");
+  std::optional<int64_t> frac = object->getInteger("frac");
+  if (!lowerValue || !upperValue || !frac || *frac < 0 ||
+      *frac > std::numeric_limits<unsigned>::max())
+    return failure();
+  FailureOr<APInt> lower = parseAPInt(*lowerValue);
+  FailureOr<APInt> upper = parseAPInt(*upperValue);
+  if (failed(lower) || failed(upper))
+    return failure();
+  FixedPointRawInterval interval{std::move(*lower), std::move(*upper),
+                                 static_cast<unsigned>(*frac)};
+  if (!isValidInterval(interval))
+    return failure();
+  return interval;
+}
+
+template <typename Element, typename Parser>
+FailureOr<SmallVector<Element>> parseArray(const json::Object &object, StringRef name,
+                                           Parser parser) {
+  const json::Array *array = object.getArray(name);
+  if (!array)
+    return failure();
+  SmallVector<Element> result;
+  result.reserve(array->size());
+  for (const json::Value &entry : *array) {
+    FailureOr<Element> parsed = parser(entry);
+    if (failed(parsed))
+      return failure();
+    result.push_back(std::move(*parsed));
+  }
+  return result;
+}
+
 } // namespace
 
 FailureOr<FixedPointRawInterval> computeSignedFullProductInterval(ondsp::FixedAttr numeric,
                                                                   const APInt &coefficient) {
   auto storage = dyn_cast<IntegerType>(numeric.getStorage());
   if (!storage || !storage.isSignless() || numeric.getSignedness() != ondsp::Signedness::Signed ||
-      coefficient.getBitWidth() != storage.getWidth() ||
-      storage.getWidth() > std::numeric_limits<unsigned>::max() / 2 ||
-      numeric.getFrac() > std::numeric_limits<unsigned>::max() / 2)
+      coefficient.getBitWidth() != storage.getWidth())
     return failure();
-
-  unsigned productWidth = storage.getWidth() * 2;
-  unsigned productFrac = numeric.getFrac() * 2;
-  APInt coefficientExtended = coefficient.sext(productWidth);
-  APInt first =
-      APInt::getSignedMinValue(storage.getWidth()).sext(productWidth) * coefficientExtended;
-  APInt second =
-      APInt::getSignedMaxValue(storage.getWidth()).sext(productWidth) * coefficientExtended;
-  if (first.sle(second))
-    return FixedPointRawInterval{std::move(first), std::move(second), productFrac};
-  return FixedPointRawInterval{std::move(second), std::move(first), productFrac};
+  return computeSignedFullProductIntervalRaw(storage.getWidth(), numeric.getFrac(), coefficient);
 }
 
 FailureOr<FixedPointRawInterval> addFixedPointRawIntervals(const FixedPointRawInterval &lhs,
@@ -109,6 +225,163 @@ FailureOr<FixedPointRawInterval> addFixedPointRawIntervals(const FixedPointRawIn
   unsigned width = inputWidth + 1;
   return FixedPointRawInterval{lhs.lower.sext(width) + rhs.lower.sext(width),
                                lhs.upper.sext(width) + rhs.upper.sext(width), lhs.frac};
+}
+
+json::Object toJSON(const NoOverflowChunkReassociationTrace &trace) {
+  json::Array coefficientValues;
+  for (const APInt &coefficient : trace.coefficients)
+    coefficientValues.emplace_back(apIntToJSON(coefficient));
+  json::Array originalPrefixes;
+  for (const FixedPointRawInterval &prefix : trace.originalPrefixes)
+    originalPrefixes.emplace_back(intervalToJSON(prefix));
+  json::Array reassociatedPrefixes;
+  for (const FixedPointRawInterval &prefix : trace.reassociatedPrefixes)
+    reassociatedPrefixes.emplace_back(intervalToJSON(prefix));
+
+  return json::Object{
+      {"schema_version", NoOverflowChunkReassociationTrace::schemaVersion},
+      {"kind", "no_overflow_chunk_reassociation"},
+      {"subject_ordinal", trace.subjectOrdinal},
+      {"numeric_storage_width", static_cast<int64_t>(trace.numericStorageWidth)},
+      {"numeric_frac", static_cast<int64_t>(trace.numericFrac)},
+      {"numeric_signedness", "signed"},
+      {"accumulator_storage_width", static_cast<int64_t>(trace.accumulatorStorageWidth)},
+      {"accumulator_frac", static_cast<int64_t>(trace.accumulatorFrac)},
+      {"accumulator_signedness", "signed"},
+      {"accumulator_update_overflow", "saturate"},
+      {"product_selection", "full"},
+      {"product_raw_width", static_cast<int64_t>(trace.productRawWidth)},
+      {"product_frac", static_cast<int64_t>(trace.productFrac)},
+      {"chunk_width", trace.chunkWidth},
+      {"coefficients", std::move(coefficientValues)},
+      {"original_prefixes", std::move(originalPrefixes)},
+      {"reassociated_prefixes", std::move(reassociatedPrefixes)},
+  };
+}
+
+FailureOr<NoOverflowChunkReassociationTrace>
+parseNoOverflowChunkReassociationTrace(const json::Value &value) {
+  const json::Object *object = value.getAsObject();
+  if (!object)
+    return failure();
+  std::optional<int64_t> schema = object->getInteger("schema_version");
+  std::optional<StringRef> kind = object->getString("kind");
+  std::optional<int64_t> subjectOrdinal = object->getInteger("subject_ordinal");
+  std::optional<int64_t> numericStorageWidth = object->getInteger("numeric_storage_width");
+  std::optional<int64_t> numericFrac = object->getInteger("numeric_frac");
+  std::optional<StringRef> numericSignedness = object->getString("numeric_signedness");
+  std::optional<int64_t> accumulatorStorageWidth = object->getInteger("accumulator_storage_width");
+  std::optional<int64_t> accumulatorFrac = object->getInteger("accumulator_frac");
+  std::optional<StringRef> accumulatorSignedness = object->getString("accumulator_signedness");
+  std::optional<StringRef> accumulatorOverflow = object->getString("accumulator_update_overflow");
+  std::optional<StringRef> productSelection = object->getString("product_selection");
+  std::optional<int64_t> productRawWidth = object->getInteger("product_raw_width");
+  std::optional<int64_t> productFrac = object->getInteger("product_frac");
+  std::optional<int64_t> chunkWidth = object->getInteger("chunk_width");
+  auto isUnsignedField = [](std::optional<int64_t> field) {
+    return field && *field >= 0 && *field <= std::numeric_limits<unsigned>::max();
+  };
+  if (!schema || *schema != NoOverflowChunkReassociationTrace::schemaVersion || !kind ||
+      *kind != "no_overflow_chunk_reassociation" || !subjectOrdinal || *subjectOrdinal < 0 ||
+      !isUnsignedField(numericStorageWidth) || !isUnsignedField(numericFrac) ||
+      !numericSignedness || *numericSignedness != "signed" ||
+      !isUnsignedField(accumulatorStorageWidth) || !isUnsignedField(accumulatorFrac) ||
+      !accumulatorSignedness || *accumulatorSignedness != "signed" || !accumulatorOverflow ||
+      *accumulatorOverflow != "saturate" || !productSelection || *productSelection != "full" ||
+      !isUnsignedField(productRawWidth) || !isUnsignedField(productFrac) || !chunkWidth ||
+      *chunkWidth <= 1)
+    return failure();
+
+  FailureOr<SmallVector<APInt>> coefficients =
+      parseArray<APInt>(*object, "coefficients", parseAPInt);
+  FailureOr<SmallVector<FixedPointRawInterval>> originalPrefixes =
+      parseArray<FixedPointRawInterval>(*object, "original_prefixes", parseInterval);
+  FailureOr<SmallVector<FixedPointRawInterval>> reassociatedPrefixes =
+      parseArray<FixedPointRawInterval>(*object, "reassociated_prefixes", parseInterval);
+  if (failed(coefficients) || failed(originalPrefixes) || failed(reassociatedPrefixes))
+    return failure();
+
+  NoOverflowChunkReassociationTrace trace;
+  trace.subjectOrdinal = *subjectOrdinal;
+  trace.numericStorageWidth = static_cast<unsigned>(*numericStorageWidth);
+  trace.numericFrac = static_cast<unsigned>(*numericFrac);
+  trace.accumulatorStorageWidth = static_cast<unsigned>(*accumulatorStorageWidth);
+  trace.accumulatorFrac = static_cast<unsigned>(*accumulatorFrac);
+  trace.productRawWidth = static_cast<unsigned>(*productRawWidth);
+  trace.productFrac = static_cast<unsigned>(*productFrac);
+  trace.chunkWidth = *chunkWidth;
+  trace.coefficients = std::move(*coefficients);
+  trace.originalPrefixes = std::move(*originalPrefixes);
+  trace.reassociatedPrefixes = std::move(*reassociatedPrefixes);
+  return trace;
+}
+
+bool areEquivalent(const NoOverflowChunkReassociationTrace &lhs,
+                   const NoOverflowChunkReassociationTrace &rhs) {
+  return lhs.subjectOrdinal == rhs.subjectOrdinal &&
+         lhs.numericStorageWidth == rhs.numericStorageWidth && lhs.numericFrac == rhs.numericFrac &&
+         lhs.accumulatorStorageWidth == rhs.accumulatorStorageWidth &&
+         lhs.accumulatorFrac == rhs.accumulatorFrac && lhs.productRawWidth == rhs.productRawWidth &&
+         lhs.productFrac == rhs.productFrac && lhs.chunkWidth == rhs.chunkWidth &&
+         equalCoefficients(lhs.coefficients, rhs.coefficients) &&
+         equalIntervals(lhs.originalPrefixes, rhs.originalPrefixes) &&
+         equalIntervals(lhs.reassociatedPrefixes, rhs.reassociatedPrefixes);
+}
+
+LogicalResult
+verifyNoOverflowChunkReassociationTrace(const NoOverflowChunkReassociationTrace &trace) {
+  if (trace.subjectOrdinal < 0 || trace.numericStorageWidth == 0 ||
+      trace.accumulatorStorageWidth == 0 || trace.chunkWidth <= 1 ||
+      trace.numericStorageWidth > std::numeric_limits<unsigned>::max() / 2 ||
+      trace.numericFrac > std::numeric_limits<unsigned>::max() / 2 ||
+      trace.productRawWidth != trace.numericStorageWidth * 2 ||
+      trace.productFrac != trace.numericFrac * 2 || trace.accumulatorFrac != trace.productFrac ||
+      trace.coefficients.size() < static_cast<size_t>(trace.chunkWidth))
+    return failure();
+
+  SmallVector<FixedPointRawInterval> originalUpdates;
+  originalUpdates.reserve(trace.coefficients.size());
+  for (const APInt &coefficient : trace.coefficients) {
+    FailureOr<FixedPointRawInterval> interval = computeSignedFullProductIntervalRaw(
+        trace.numericStorageWidth, trace.numericFrac, coefficient);
+    if (failed(interval))
+      return failure();
+    originalUpdates.push_back(std::move(*interval));
+  }
+
+  SmallVector<FixedPointRawInterval> reassociatedUpdates;
+  size_t fullChunkCount = trace.coefficients.size() / static_cast<size_t>(trace.chunkWidth);
+  reassociatedUpdates.reserve(fullChunkCount +
+                              trace.coefficients.size() % static_cast<size_t>(trace.chunkWidth));
+  for (size_t chunk = 0; chunk < fullChunkCount; ++chunk) {
+    size_t first = chunk * static_cast<size_t>(trace.chunkWidth);
+    FixedPointRawInterval partial = originalUpdates[first];
+    for (int64_t lane = 1; lane < trace.chunkWidth; ++lane) {
+      FailureOr<FixedPointRawInterval> sum =
+          addFixedPointRawIntervals(partial, originalUpdates[first + static_cast<size_t>(lane)]);
+      if (failed(sum))
+        return failure();
+      partial = std::move(*sum);
+    }
+    reassociatedUpdates.push_back(std::move(partial));
+  }
+  for (size_t index = fullChunkCount * static_cast<size_t>(trace.chunkWidth);
+       index < originalUpdates.size(); ++index)
+    reassociatedUpdates.push_back(originalUpdates[index]);
+
+  FixedPointRawInterval initial{APInt(trace.accumulatorStorageWidth, 0),
+                                APInt(trace.accumulatorStorageWidth, 0), trace.accumulatorFrac};
+  FailureOr<SmallVector<FixedPointRawInterval>> originalPrefixes =
+      computePrefixIntervals(trace.accumulatorStorageWidth, initial, originalUpdates);
+  FailureOr<SmallVector<FixedPointRawInterval>> reassociatedPrefixes =
+      computePrefixIntervals(trace.accumulatorStorageWidth, initial, reassociatedUpdates);
+  return succeeded(originalPrefixes) && succeeded(reassociatedPrefixes) &&
+                 equalIntervals(*originalPrefixes, trace.originalPrefixes) &&
+                 equalIntervals(*reassociatedPrefixes, trace.reassociatedPrefixes) &&
+                 succeeded(FixedPointPrefixRangePlanner::proveAllPrefixesFit(
+                     trace.accumulatorStorageWidth, initial, originalUpdates, reassociatedUpdates))
+             ? success()
+             : failure();
 }
 
 DistributivePairingPlan::DistributivePairingPlan(DistributivePairingPlan &&other)
@@ -139,7 +412,7 @@ NoOverflowChunkReassociationPlan::NoOverflowChunkReassociationPlan(
     : subject(other.subject), coefficientSource(other.coefficientSource),
       productSemantics(other.productSemantics), numeric(other.numeric), product(other.product),
       accumulator(other.accumulator), coefficients(std::move(other.coefficients)),
-      chunkWidth(other.chunkWidth), consumed(other.consumed) {
+      chunkWidth(other.chunkWidth), trace(std::move(other.trace)), consumed(other.consumed) {
   other.subject = nullptr;
   other.coefficientSource = {};
   other.consumed = true;
@@ -157,6 +430,7 @@ NoOverflowChunkReassociationPlan::operator=(NoOverflowChunkReassociationPlan &&o
   accumulator = other.accumulator;
   coefficients = std::move(other.coefficients);
   chunkWidth = other.chunkWidth;
+  trace = std::move(other.trace);
   consumed = other.consumed;
   other.subject = nullptr;
   other.coefficientSource = {};
@@ -195,7 +469,7 @@ NoOverflowChunkReassociationPlan::consumeIfValid(ondsp::ReduceMacOp reduction,
       !reduction.getInitial().getDefiningOp<ondsp::AccZeroOp>() ||
       chunkWidth != candidateChunkWidth)
     return failure();
-  return consumer(productSemantics, coefficients, chunkWidth);
+  return consumer(productSemantics, coefficients, chunkWidth, trace);
 }
 
 LogicalResult FixedPointPrefixRangePlanner::proveAllPrefixesFit(
@@ -340,8 +614,28 @@ FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
   if (failed(proveAllPrefixesFit(accumulatorStorage.getWidth(), initial, originalUpdates,
                                  chunkedUpdates)))
     return failure();
+  FailureOr<SmallVector<FixedPointRawInterval>> originalPrefixes =
+      computePrefixIntervals(accumulatorStorage.getWidth(), initial, originalUpdates);
+  FailureOr<SmallVector<FixedPointRawInterval>> reassociatedPrefixes =
+      computePrefixIntervals(accumulatorStorage.getWidth(), initial, chunkedUpdates);
+  if (failed(originalPrefixes) || failed(reassociatedPrefixes))
+    return failure();
+
+  auto numericStorage = cast<IntegerType>(numeric.getStorage());
+  NoOverflowChunkReassociationTrace trace;
+  trace.numericStorageWidth = numericStorage.getWidth();
+  trace.numericFrac = numeric.getFrac();
+  trace.accumulatorStorageWidth = accumulatorStorage.getWidth();
+  trace.accumulatorFrac = accumulator.getFrac();
+  trace.productRawWidth = productSemantics->rawWidth;
+  trace.productFrac = productSemantics->frac;
+  trace.chunkWidth = chunkWidth;
+  trace.coefficients.assign(coefficients.begin(), coefficients.end());
+  trace.originalPrefixes = std::move(*originalPrefixes);
+  trace.reassociatedPrefixes = std::move(*reassociatedPrefixes);
   return NoOverflowChunkReassociationPlan(reduction, constant.getSource(), *productSemantics,
-                                          numeric, product, accumulator, coefficients, chunkWidth);
+                                          numeric, product, accumulator, coefficients, chunkWidth,
+                                          std::move(trace));
 }
 
 } // namespace ondrix::analysis

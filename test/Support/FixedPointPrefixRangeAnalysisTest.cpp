@@ -15,11 +15,16 @@
 #include <type_traits>
 
 using ondrix::analysis::addFixedPointRawIntervals;
+using ondrix::analysis::areEquivalent;
 using ondrix::analysis::computeSignedFullProductInterval;
 using ondrix::analysis::DistributivePairingPlan;
 using ondrix::analysis::FixedPointPrefixRangePlanner;
 using ondrix::analysis::FixedPointRawInterval;
 using ondrix::analysis::NoOverflowChunkReassociationPlan;
+using ondrix::analysis::NoOverflowChunkReassociationTrace;
+using ondrix::analysis::parseNoOverflowChunkReassociationTrace;
+using ondrix::analysis::toJSON;
+using ondrix::analysis::verifyNoOverflowChunkReassociationTrace;
 using ondrix::ondsp::AccType;
 using ondrix::ondsp::FixedAttr;
 using ondrix::ondsp::OverflowMode;
@@ -393,7 +398,7 @@ bool testConstantChunkReductionPlan() {
   if (mlir::failed(std::move(*plan).consumeIfValid(
           q15Reduction, 8,
           [&](const ondrix::ondsp::ProductSemantics &semantics,
-              llvm::ArrayRef<llvm::APInt> coefficients, int64_t chunkWidth) {
+              llvm::ArrayRef<llvm::APInt> coefficients, int64_t chunkWidth, const auto &) {
             consumed = semantics.rawWidth == 32 && semantics.frac == 30 &&
                        coefficients.size() == q15Safe.size() && chunkWidth == 8;
             return consumed ? mlir::success() : mlir::failure();
@@ -401,24 +406,49 @@ bool testConstantChunkReductionPlan() {
       !consumed)
     return false;
 
+  NoOverflowChunkReassociationTrace q31Trace;
+  if (mlir::failed(std::move(*q31Plan).consumeIfValid(
+          q31Reduction, 4,
+          [&](const auto &, const auto &, int64_t, const NoOverflowChunkReassociationTrace &trace) {
+            q31Trace = trace;
+            q31Trace.subjectOrdinal = 7;
+            return mlir::success();
+          })) ||
+      mlir::failed(verifyNoOverflowChunkReassociationTrace(q31Trace)))
+    return false;
+
+  llvm::json::Value serialized(toJSON(q31Trace));
+  auto parsed = parseNoOverflowChunkReassociationTrace(serialized);
+  if (mlir::failed(parsed) || !areEquivalent(q31Trace, *parsed))
+    return false;
+  llvm::json::Object malformed = toJSON(q31Trace);
+  malformed["numeric_signedness"] = "unsigned";
+  if (mlir::succeeded(
+          parseNoOverflowChunkReassociationTrace(llvm::json::Value(std::move(malformed)))))
+    return false;
+  NoOverflowChunkReassociationTrace mutated = *parsed;
+  mutated.coefficients.front() += 1;
+  if (mlir::succeeded(verifyNoOverflowChunkReassociationTrace(mutated)))
+    return false;
+
   auto changedWidthPlan = FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
       q15Reduction, *q15Constant, 8);
   if (mlir::failed(changedWidthPlan) ||
-      mlir::succeeded(
-          std::move(*changedWidthPlan)
-              .consumeIfValid(q15Reduction, 4, [&](const auto &, const auto &, int64_t) {
-                return mlir::success();
-              })))
+      mlir::succeeded(std::move(*changedWidthPlan)
+                          .consumeIfValid(q15Reduction, 4,
+                                          [&](const auto &, const auto &, int64_t, const auto &) {
+                                            return mlir::success();
+                                          })))
     return false;
 
   auto changedSourcePlan = FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
       q15Reduction, *q15Constant, 8);
   if (mlir::failed(changedSourcePlan) ||
-      mlir::succeeded(
-          std::move(*changedSourcePlan)
-              .consumeIfValid(q15OtherReduction, 8, [&](const auto &, const auto &, int64_t) {
-                return mlir::success();
-              })))
+      mlir::succeeded(std::move(*changedSourcePlan)
+                          .consumeIfValid(q15OtherReduction, 8,
+                                          [&](const auto &, const auto &, int64_t, const auto &) {
+                                            return mlir::success();
+                                          })))
     return false;
 
   return mlir::failed(FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
