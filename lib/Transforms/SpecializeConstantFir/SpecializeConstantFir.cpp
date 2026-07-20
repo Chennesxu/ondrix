@@ -31,8 +31,8 @@ namespace {
 
 FailureOr<ondrix::ConstantSequenceFacts> getConstantCoefficientFacts(ondrix::ir::FirOp op,
                                                                      int64_t maxTaps) {
-  FailureOr<ondrix::DirectConstantIntegerMemRefFacts> facts =
-      ondrix::analyzeDirectConstantIntegerMemRefGlobal(op.getCoeffs(), maxTaps);
+  FailureOr<ondrix::ConstantIntegerMemRefFacts> facts =
+      ondrix::analyzeConstantIntegerMemRef(op.getCoeffs(), maxTaps);
   if (failed(facts))
     return failure();
   return facts->getSequence();

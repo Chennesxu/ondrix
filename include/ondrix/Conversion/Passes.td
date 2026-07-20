@@ -168,10 +168,11 @@ def VectorizeOndspConstantSaturatingMemRefReduce
   let description = [{
     Replace supported zero-seeded saturating Q15 and Q31 full-product memref
     reductions with fixed-width Vector product chunks and horizontal sums only
-    when immutable coefficients and complete prefix-range analysis prove that
-    neither the source nor transformed schedule can overflow. Unsupported,
-    mutable, seeded, raw-high, and unproven reductions remain unchanged for
-    the ordered Vector or scalar fallback.
+    when immutable coefficients, resolved through safe complete memref views,
+    and complete prefix-range analysis prove that neither the source nor
+    transformed schedule can overflow. Unsupported, mutable, partial-view,
+    seeded, raw-high, and unproven reductions remain unchanged for the ordered
+    Vector or scalar fallback.
   }];
   let constructor = "ondrix::createVectorizeOndspConstantSaturatingMemRefReducePass()";
   let dependentDialects = [

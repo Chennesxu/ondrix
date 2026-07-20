@@ -130,7 +130,7 @@ public:
   /// accumulator for the complete signed input domain.
   static mlir::FailureOr<NoOverflowChunkReassociationPlan>
   planZeroSeededConstantChunkReduction(ondsp::ReduceMacOp reduction,
-                                       const ondrix::DirectConstantIntegerMemRefFacts &coefficients,
+                                       const ondrix::ConstantIntegerMemRefFacts &coefficients,
                                        int64_t chunkWidth);
 };
 

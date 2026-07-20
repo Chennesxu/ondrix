@@ -309,7 +309,7 @@ bool testPlannerDerivesTrustedSchedules() {
          mlir::succeeded(plan(wrapping, overflowing));
 }
 
-mlir::FailureOr<ondrix::DirectConstantIntegerMemRefFacts>
+mlir::FailureOr<ondrix::ConstantIntegerMemRefFacts>
 createConstantMemRefFacts(mlir::ModuleOp module, llvm::StringRef name,
                           mlir::IntegerType elementType, llvm::ArrayRef<llvm::APInt> values) {
   mlir::OpBuilder builder(module.getContext());
@@ -322,13 +322,11 @@ createConstantMemRefFacts(mlir::ModuleOp module, llvm::StringRef name,
                                          initializer, true, mlir::IntegerAttr());
   builder.setInsertionPointToEnd(module.getBody());
   mlir::Value source = builder.create<mlir::memref::GetGlobalOp>(loc, memrefType, name);
-  return ondrix::analyzeDirectConstantIntegerMemRefGlobal(source,
-                                                          static_cast<int64_t>(values.size()));
+  return ondrix::analyzeConstantIntegerMemRef(source, static_cast<int64_t>(values.size()));
 }
 
 ondrix::ondsp::ReduceMacOp
-createZeroSeededReduction(mlir::ModuleOp module,
-                          const ondrix::DirectConstantIntegerMemRefFacts &constant,
+createZeroSeededReduction(mlir::ModuleOp module, const ondrix::ConstantIntegerMemRefFacts &constant,
                           FixedAttr numeric, ProductAttr product, AccType accumulator) {
   mlir::OpBuilder builder(module.getContext());
   builder.setInsertionPointToEnd(module.getBody());

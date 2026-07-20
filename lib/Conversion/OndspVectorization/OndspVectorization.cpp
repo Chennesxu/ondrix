@@ -115,13 +115,13 @@ public:
     if (domain->termStorage.getWidth() > 64)
       return failure();
 
-    FailureOr<ondrix::DirectConstantIntegerMemRefFacts> constant =
-        ondrix::analyzeDirectConstantIntegerMemRefGlobal(op.getRhs(), maxElements);
+    FailureOr<ondrix::ConstantIntegerMemRefFacts> constant =
+        ondrix::analyzeConstantIntegerMemRef(op.getRhs(), maxElements);
     if (failed(constant))
       return failure();
     const ondrix::ConstantSequenceFacts &facts = constant->getSequence();
     auto rhsType = cast<MemRefType>(op.getRhs().getType());
-    if (rhsType.isDynamicDim(0) || facts.getElementCount() != rhsType.getDimSize(0))
+    if (!rhsType.isDynamicDim(0) && facts.getElementCount() != rhsType.getDimSize(0))
       return failure();
 
     FailureOr<ondrix::analysis::NoOverflowChunkReassociationPlan> plan =

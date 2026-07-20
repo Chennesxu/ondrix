@@ -8,8 +8,9 @@ def SpecializeOndrixConstantFir
   let summary = "Specialize fixed-point FIR samples with immutable coefficients";
   let description = [{
     Opt-in specialization for fixed-point `ondrix.fir` operations whose
-    coefficient windows come directly from constant memref globals. Zero taps
-    are removed while retaining the source update order. Symmetric
+    coefficient windows resolve to complete constant memref globals through
+    direct handles or proven full-range unit-stride views. Zero taps are
+    removed while retaining the source update order. Symmetric
     full-product taps may be paired for wrapping accumulators, where
     reassociation is exact modulo the accumulator width. Saturating
     accumulators may be paired only when complete prefix-range analysis proves

@@ -32,21 +32,24 @@ private:
   bool symmetric = true;
 };
 
-/// Integer sequence facts bound to one direct constant memref global value.
-/// Only the corresponding analysis entry point can construct this evidence.
-class DirectConstantIntegerMemRefFacts final {
+/// Integer sequence facts bound to one memref value proven to cover an entire
+/// constant rank-one global. Only the corresponding analysis entry point can
+/// construct this evidence.
+class ConstantIntegerMemRefFacts final {
 public:
   mlir::Value getSource() const { return source; }
+  mlir::Value getRoot() const { return root; }
   const ConstantSequenceFacts &getSequence() const { return sequence; }
 
 private:
-  friend mlir::FailureOr<DirectConstantIntegerMemRefFacts>
-  analyzeDirectConstantIntegerMemRefGlobal(mlir::Value value, int64_t maxElements);
+  friend mlir::FailureOr<ConstantIntegerMemRefFacts>
+  analyzeConstantIntegerMemRef(mlir::Value value, int64_t maxElements);
 
-  DirectConstantIntegerMemRefFacts(mlir::Value source, ConstantSequenceFacts sequence)
-      : source(source), sequence(std::move(sequence)) {}
+  ConstantIntegerMemRefFacts(mlir::Value source, mlir::Value root, ConstantSequenceFacts sequence)
+      : source(source), root(root), sequence(std::move(sequence)) {}
 
   mlir::Value source;
+  mlir::Value root;
   ConstantSequenceFacts sequence;
 };
 
@@ -55,11 +58,12 @@ private:
 mlir::FailureOr<ConstantSequenceFacts>
 analyzeConstantIntegerSequence(mlir::DenseIntElementsAttr elements, int64_t maxElements);
 
-/// Resolves a direct `memref.get_global` of a constant rank-one integer global
-/// and infers its sequence properties. Views and casts are intentionally not
-/// followed until their immutability and indexing semantics are modeled.
-mlir::FailureOr<DirectConstantIntegerMemRefFacts>
-analyzeDirectConstantIntegerMemRefGlobal(mlir::Value value, int64_t maxElements);
+/// Resolves a constant rank-one integer `memref.global` through either a
+/// direct `memref.get_global`, proven full-range unit-stride subviews, or
+/// metadata-only `memref.cast` operations. Partial, strided, rank-changing,
+/// memory-space-changing, and unprovably dynamic views fail closed.
+mlir::FailureOr<ConstantIntegerMemRefFacts> analyzeConstantIntegerMemRef(mlir::Value value,
+                                                                         int64_t maxElements);
 
 } // namespace ondrix
 

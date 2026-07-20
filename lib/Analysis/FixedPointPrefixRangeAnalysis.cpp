@@ -282,7 +282,7 @@ FailureOr<DistributivePairingPlan> FixedPointPrefixRangePlanner::planZeroSeededS
 
 FailureOr<NoOverflowChunkReassociationPlan>
 FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
-    ondsp::ReduceMacOp reduction, const ondrix::DirectConstantIntegerMemRefFacts &constant,
+    ondsp::ReduceMacOp reduction, const ondrix::ConstantIntegerMemRefFacts &constant,
     int64_t chunkWidth) {
   auto numeric = dyn_cast<ondsp::FixedAttr>(reduction.getNumeric());
   auto accumulator = dyn_cast<ondsp::AccType>(reduction.getInitial().getType());
