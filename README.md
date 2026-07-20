@@ -32,10 +32,12 @@ The three project dialects have distinct responsibilities:
 
 Textual MLIR is currently the supported development entry point. The repository
 includes executable signed-Q15 and signed-Q31 scalar/fixed-width Vector AOT
-paths for single-output FIR and dot-product kernels, plus public emulation of
-the OrtumCore signed i40/frac30 saturating accumulator with Q15 full-product
-MAC. The source language and additional target consumers remain under
-development.
+paths for FIR samples, full-output FIR, explicit-state streaming FIR, and dot
+products. Full-output and streaming contracts remain experimental; the
+streaming Vector-reuse path materializes state/input concatenation and is not
+a zero-copy implementation. Public emulation covers the OrtumCore signed
+i40/frac30 saturating accumulator with Q15 full-product MAC. The source
+language and additional target consumers remain under development.
 
 ## Documentation
 
