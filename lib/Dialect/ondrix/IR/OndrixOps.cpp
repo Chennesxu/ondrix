@@ -221,7 +221,7 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
         APInt outputOriginValue;
         if (matchPattern(op.getOutputOrigin(), m_ConstantInt(&outputOriginValue))) {
           int64_t outputOrigin = outputOriginValue.getSExtValue();
-          if (outputOrigin > completeOutputLength ||
+          if (outputOrigin < 0 || outputOrigin > completeOutputLength ||
               outputLength > completeOutputLength - outputOrigin)
             return op.emitOpError("full FIR output tile exceeds the complete output range");
         }
@@ -281,6 +281,9 @@ static LogicalResult verifyFirStreamDomain(FirStreamOp op) {
     if (!ShapedType::isDynamic(nextStateLength) && nextStateLength != expectedStateLength)
       return op.emitOpError() << "next-state length must be " << expectedStateLength;
   }
+  if (!ShapedType::isDynamic(stateLength) && !ShapedType::isDynamic(nextStateLength) &&
+      stateLength != nextStateLength)
+    return op.emitOpError("next-state length must equal state length");
   if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(outputLength) &&
       inputLength != outputLength)
     return op.emitOpError("output length must equal input chunk length");
@@ -423,7 +426,7 @@ LogicalResult FirOp::verify() {
 }
 
 Speculation::Speculatability FirFilterOp::getSpeculatability() {
-  return (ondrix::requiresConservativeDSPSpeculation(getInput().getType()) ||
+  return (getOutputOrigin() || ondrix::requiresConservativeDSPSpeculation(getInput().getType()) ||
           ondrix::requiresConservativeDSPSpeculation(getCoeffs().getType()) ||
           ondrix::requiresConservativeDSPSpeculation(getInit().getType()))
              ? Speculation::NotSpeculatable

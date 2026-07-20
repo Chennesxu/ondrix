@@ -119,11 +119,13 @@ left edge, a fully overlapping `reduce_mac` interior, and a guarded right edge.
 If `K > N`, the interior is empty and the two edge ranges still cover every
 output exactly once. All forms consume the same numeric update semantics.
 
-The output-tiling pass emits the three dynamic valid-boundary shape checks once
-before the outer tile loop. Full-boundary tiles rely on the same dominating
-shape proof and use their explicit output origin only for local-to-global index
-mapping. Bufferization derives each window and coefficient subview from the
-same coefficient-length SSA value.
+The output-tiling pass emits the three complete-output dynamic shape checks
+once before the outer tile loop. Each public full-boundary tile also validates
+that its explicit output origin and local extent lie within that complete
+output before using the origin for local-to-global index mapping. Bufferization
+derives each window and coefficient subview from the same coefficient-length
+SSA value. A future internal witness may let compiler-generated tiles reuse
+the dominating proof without repeating the tile-containment check.
 
 The current scalar-result `ondsp.reduce_mac` is not a suitable destination-
 style tiled operation: a tap tile has no independently insertable result, and
@@ -159,15 +161,15 @@ The following remain outside the first tensor contract:
 
 - equations and verification for same boundary mode;
 - stride and dilation;
-- a global-output-origin contract for tiling full boundaries;
 - a public buffer-semantics form with explicit alias and in-place legality;
 - state ownership for streaming execution;
 - fusion behavior and target-aware output tile selection.
 
 Dynamic extent relationships are execution preconditions. Generic lowering and
-full-boundary bufferization keep all three checks in a dominating position
-before output loops and abort when an observed execution violates them. Valid
-output tiling establishes its checks once before the outer tile loop.
+full-boundary bufferization validate them before computing output samples and
+abort when an observed execution violates them. Output tiling establishes the
+complete-output checks once before the outer tile loop; public tile operations
+independently validate their subrange.
 Because the source operation is pure, diagnostic checks need not survive when
 the operation and its result are dead. Extent arithmetic is overflow-safe under
 the verified `K > 0` and `N >= K` valid preconditions because `N - K + 1 <= N`.

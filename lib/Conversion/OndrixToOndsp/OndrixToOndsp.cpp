@@ -335,6 +335,30 @@ public:
         loc, extendedLengthFits,
         rewriter.getStringAttr("FIR stream history and input exceed the indexable extent range"));
 
+    RankedTensorType inputType = op.getInput().getType();
+    RankedTensorType outputType = op.getOutput().getType();
+    if (inputType.isDynamicDim(0) && !outputType.isDynamicDim(0)) {
+      Value expectedOutputLength =
+          rewriter.create<arith::ConstantIndexOp>(loc, outputType.getDimSize(0));
+      Value outputMatches = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                                           inputLength, expectedOutputLength);
+      rewriter.create<cf::AssertOp>(
+          loc, outputMatches,
+          rewriter.getStringAttr("FIR stream output length must equal input chunk length"));
+    }
+
+    RankedTensorType stateType = op.getState().getType();
+    RankedTensorType nextStateType = op.getNextState().getType();
+    if (stateType.isDynamicDim(0) && !nextStateType.isDynamicDim(0)) {
+      Value expectedNextStateLength =
+          rewriter.create<arith::ConstantIndexOp>(loc, nextStateType.getDimSize(0));
+      Value nextStateMatches = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                                              stateLength, expectedNextStateLength);
+      rewriter.create<cf::AssertOp>(
+          loc, nextStateMatches,
+          rewriter.getStringAttr("FIR stream next-state length must equal state length"));
+    }
+
     Value emptyOutput = createEmptyTensor(loc, op.getOutput().getType(), inputLength, rewriter);
     Value emptyNextState =
         createEmptyTensor(loc, op.getNextState().getType(), stateLength, rewriter);

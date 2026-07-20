@@ -1,16 +1,27 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --buffer-deallocation --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
 // RUN: FileCheck %s --check-prefix=LOWERED < %t.mlir
+// RUN: FileCheck %s --check-prefix=DEALLOC < %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
-// RUN: cc %S/Inputs/fir_stream_tensor_aot.c %t.o -lm -o %t
+// RUN: cc -ffp-contract=off %S/Inputs/fir_stream_tensor_aot.c %t.o -lm -o %t
 // RUN: %t
 // RUN: cc %S/Inputs/fir_stream_tensor_mismatch.c %t.o -lm -o %t.mismatch
 // RUN: not --crash %t.mismatch coefficients
 // RUN: not --crash %t.mismatch state
+// RUN: not --crash %t.mismatch output
+// RUN: not --crash %t.mismatch next
 
 // LOWERED-NOT: ondrix.
 // LOWERED-NOT: ondsp.
 // LOWERED-NOT: tensor.
+
+// DEALLOC-LABEL: llvm.func @q15_stream_output_value
+// DEALLOC: llvm.call @malloc
+// DEALLOC: llvm.call @free
+
+// DEALLOC-LABEL: llvm.func @q15_stream_state_value
+// DEALLOC: llvm.call @malloc
+// DEALLOC: llvm.call @free
 
 func.func @q15_stream_output_value(
     %input: tensor<?xi16>, %coeffs: tensor<?xi16>, %state: tensor<?xi16>,
@@ -100,4 +111,49 @@ func.func @f32_stream_state_value(
       -> (tensor<?xf32>, tensor<?xf32>)
   %value = tensor.extract %next[%index] : tensor<?xf32>
   return %value : f32
+}
+
+func.func @f32_stream_off_output_value(
+    %input: tensor<?xf32>, %coeffs: tensor<?xf32>, %state: tensor<?xf32>,
+    %index: index) -> f32 {
+  %output, %next = ondrix.fir_stream %input, %coeffs, %state {
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>)
+      -> (tensor<?xf32>, tensor<?xf32>)
+  %value = tensor.extract %output[%index] : tensor<?xf32>
+  return %value : f32
+}
+
+func.func @q15_stream_static_output_value(
+    %input: tensor<?xi16>, %coeffs: tensor<?xi16>, %state: tensor<?xi16>,
+    %index: index) -> i16 {
+  %output, %next = ondrix.fir_stream %input, %coeffs, %state {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<?xi16>, tensor<?xi16>, tensor<?xi16>)
+      -> (tensor<4xi16>, tensor<?xi16>)
+  %value = tensor.extract %output[%index] : tensor<4xi16>
+  return %value : i16
+}
+
+func.func @q15_stream_static_state_value(
+    %input: tensor<?xi16>, %coeffs: tensor<?xi16>, %state: tensor<?xi16>,
+    %index: index) -> i16 {
+  %output, %next = ondrix.fir_stream %input, %coeffs, %state {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<?xi16>, tensor<?xi16>, tensor<?xi16>)
+      -> (tensor<?xi16>, tensor<2xi16>)
+  %value = tensor.extract %next[%index] : tensor<2xi16>
+  return %value : i16
 }

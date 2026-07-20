@@ -236,3 +236,22 @@ func.func @full_rejects_out_of_range_output_tile(
   } : (tensor<4xi16>, tensor<3xi16>, tensor<3xi16>, index) -> tensor<3xi16>
   return
 }
+
+// -----
+
+func.func @full_rejects_negative_output_origin(
+    %input: tensor<4xi16>, %coeffs: tensor<3xi16>, %init: tensor<1xi16>) {
+  %origin = arith.constant -1 : index
+  // expected-error @+1 {{full FIR output tile exceeds the complete output range}}
+  %0 = ondrix.fir_filter %input, %coeffs, %init, %origin {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    boundary = #ondrix.fir_boundary<full>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<4xi16>, tensor<3xi16>, tensor<1xi16>, index) -> tensor<1xi16>
+  return
+}

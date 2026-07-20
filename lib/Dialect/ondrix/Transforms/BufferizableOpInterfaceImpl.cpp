@@ -133,6 +133,33 @@ static void assertFullFirFilterShape(Location loc, Value inputLength, Value coef
           "full FIR output length must equal input length plus coefficient length minus one"));
 }
 
+static void assertFullFirFilterTileShape(Location loc, Value inputLength, Value coefficientLength,
+                                         Value outputLength, Value outputOrigin, Value zero,
+                                         Value one, OpBuilder &builder) {
+  Value hasInput = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, inputLength, zero);
+  builder.create<cf::AssertOp>(
+      loc, hasInput, builder.getStringAttr("full FIR requires at least one input sample"));
+  Value hasCoefficients =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientLength, zero);
+  builder.create<cf::AssertOp>(loc, hasCoefficients,
+                               builder.getStringAttr("full FIR requires at least one coefficient"));
+
+  Value leftPadding = builder.create<arith::SubIOp>(loc, coefficientLength, one);
+  Value completeOutputLength = builder.create<arith::AddIOp>(loc, inputLength, leftPadding);
+  Value extentDidNotOverflow = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge,
+                                                             completeOutputLength, inputLength);
+  Value originInRange = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ule, outputOrigin,
+                                                      completeOutputLength);
+  Value remaining = builder.create<arith::SubIOp>(loc, completeOutputLength, outputOrigin);
+  Value tileInRange =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ule, outputLength, remaining);
+  Value validRange = builder.create<arith::AndIOp>(loc, extentDidNotOverflow, originInRange);
+  validRange = builder.create<arith::AndIOp>(loc, validRange, tileInRange);
+  builder.create<cf::AssertOp>(
+      loc, validRange,
+      builder.getStringAttr("full FIR output tile must lie within the complete output range"));
+}
+
 struct FirFilterOpInterface
     : public DstBufferizableOpInterfaceExternalModel<FirFilterOpInterface, FirFilterOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand, const AnalysisState &) const {
@@ -190,9 +217,10 @@ struct FirFilterOpInterface
     if (op.getBoundary() == FirBoundaryMode::Valid) {
       createValidRange(zero, outputLength);
     } else {
-      // The output tiler proves the complete dynamic shape once before its
-      // loop. Untiled operations still need the standalone diagnostic guard.
-      if (!op.getOutputOrigin())
+      if (op.getOutputOrigin())
+        assertFullFirFilterTileShape(loc, inputLength, coefficientLength, outputLength,
+                                     globalOutputOrigin, zero, one, rewriter);
+      else
         assertFullFirFilterShape(loc, inputLength, coefficientLength, outputLength, zero, one,
                                  rewriter);
       Value leftPadding = rewriter.create<arith::SubIOp>(loc, coefficientLength, one);

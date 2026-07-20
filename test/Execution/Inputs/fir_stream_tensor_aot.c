@@ -27,6 +27,9 @@ extern float f32_stream_output_value(float *, float *, int64_t, int64_t, int64_t
 extern float f32_stream_state_value(float *, float *, int64_t, int64_t, int64_t, float *, float *,
                                     int64_t, int64_t, int64_t, float *, float *, int64_t, int64_t,
                                     int64_t, int64_t);
+extern float f32_stream_off_output_value(float *, float *, int64_t, int64_t, int64_t, float *,
+                                         float *, int64_t, int64_t, int64_t, float *, float *,
+                                         int64_t, int64_t, int64_t, int64_t);
 
 static int64_t clamp_i40(__int128 value) {
   const __int128 minimum = -((__int128)1 << 39);
@@ -130,6 +133,22 @@ static void f32_reference(const float *input, int64_t input_length, const float 
     int64_t extended_index = input_length + index;
     next_state[index] = extended_index < history_length ? state[extended_index]
                                                         : input[extended_index - history_length];
+  }
+}
+
+static void f32_off_reference(const float *input, int64_t input_length, const float *coefficients,
+                              int64_t coefficient_length, const float *state, float *output) {
+  const int64_t history_length = coefficient_length - 1;
+  for (int64_t sample = 0; sample < input_length; ++sample) {
+    float accumulator = 0.0f;
+    for (int64_t tap = 0; tap < coefficient_length; ++tap) {
+      int64_t extended_index = sample + tap;
+      float value = extended_index < history_length ? state[extended_index]
+                                                    : input[extended_index - history_length];
+      float product = value * coefficients[tap];
+      accumulator = accumulator + product;
+    }
+    output[sample] = accumulator;
   }
 }
 
@@ -304,7 +323,21 @@ static int check_f32(void) {
     if (f32_bits(actual) != f32_bits(expected_state[index]))
       failed = 1;
   }
+
+  float off_input[] = {0x1.000002p+0f};
+  float off_coefficients[] = {1.0f, 0x1.fffffcp-1f};
+  float off_state[] = {-1.0f};
+  float off_expected[1];
+  f32_off_reference(off_input, 1, off_coefficients, 2, off_state, off_expected);
+  float off_actual =
+      CALL_STREAM(f32_stream_off_output_value, off_input, 1, off_coefficients, 2, off_state, 1, 0);
+  if (f32_bits(off_expected[0]) != UINT32_C(0) ||
+      f32_bits(off_actual) != f32_bits(off_expected[0])) {
+    fprintf(stderr, "F32 off contract: expected 0x%08x, got 0x%08x\n", f32_bits(off_expected[0]),
+            f32_bits(off_actual));
+    failed = 1;
+  }
   return failed;
 }
 
-int main(void) { return check_q15() || check_q31() || check_f32(); }
+int main(void) { return check_q15() | check_q31() | check_f32(); }

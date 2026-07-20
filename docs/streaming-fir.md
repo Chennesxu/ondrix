@@ -46,14 +46,17 @@ The generic lowering creates ordered SCF loops over output samples and taps,
 selecting each sample from state or input according to its index in
 `extended`. A second loop constructs the next state suffix. Dynamic execution
 checks require non-empty coefficients, `state_length + 1 == K`, and an
-indexable combined state/input extent.
+indexable combined state/input extent. When a result carries a static extent
+but its corresponding input or state extent is dynamic, lowering also checks
+that the runtime extent matches before constructing or writing that result.
 
-Tracked object-and-C execution covers signed Q15, signed Q31, and f32 FMA. The
+Tracked object-and-C execution covers signed Q15, signed Q31, f32 FMA, and an
+f32 `off` case that distinguishes separate multiply/add from contraction. The
 same input is evaluated both as one chunk and as multiple consecutive chunks;
 all outputs and final state are compared against independent C references.
 Tests also cover an initial chunk shorter than state, an empty chunk, `K = 1`,
-dynamic extents, accumulator/export behavior, and process-level rejection of
-invalid state or coefficient lengths.
+dynamic extents, accumulator/export behavior, allocation release, and
+process-level rejection of invalid state, coefficient, and result extents.
 
 ## Deliberate Limits
 

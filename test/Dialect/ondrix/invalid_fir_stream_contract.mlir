@@ -42,6 +42,18 @@ func.func @rejects_wrong_next_state_length(
 
 // -----
 
+func.func @rejects_state_result_mismatch_with_dynamic_coefficients(
+    %input: tensor<4xf32>, %coeffs: tensor<?xf32>, %state: tensor<2xf32>) {
+  // expected-error @+1 {{next-state length must equal state length}}
+  %output, %next = ondrix.fir_stream %input, %coeffs, %state {
+    numeric = #ondsp.fp<format = f32, contract = fma>
+  } : (tensor<4xf32>, tensor<?xf32>, tensor<2xf32>)
+      -> (tensor<4xf32>, tensor<1xf32>)
+  return
+}
+
+// -----
+
 func.func @rejects_empty_coefficients(
     %input: tensor<4xf32>, %coeffs: tensor<0xf32>, %state: tensor<0xf32>) {
   // expected-error @+1 {{requires at least one coefficient}}

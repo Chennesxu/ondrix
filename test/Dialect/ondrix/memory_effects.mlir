@@ -162,3 +162,24 @@ func.func @dynamic_tensor_fir_filter_remains_in_loop(
 // LICM-LABEL: func.func @dynamic_tensor_fir_filter_remains_in_loop
 // LICM: scf.for
 // LICM: ondrix.fir_filter
+
+func.func @origin_fir_filter_remains_in_loop(
+    %input: tensor<4xf32>, %coeffs: tensor<3xf32>, %init: tensor<1xf32>,
+    %upper: index) -> tensor<1xf32> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %origin = arith.constant 2 : index
+  %result = scf.for %i = %c0 to %upper step %c1
+      iter_args(%current = %init) -> tensor<1xf32> {
+    %filtered = ondrix.fir_filter %input, %coeffs, %init, %origin {
+      boundary = #ondrix.fir_boundary<full>,
+      numeric = #ondsp.fp<format = f32, contract = off>
+    } : (tensor<4xf32>, tensor<3xf32>, tensor<1xf32>, index) -> tensor<1xf32>
+    scf.yield %filtered : tensor<1xf32>
+  }
+  return %result : tensor<1xf32>
+}
+
+// LICM-LABEL: func.func @origin_fir_filter_remains_in_loop
+// LICM: scf.for
+// LICM: ondrix.fir_filter

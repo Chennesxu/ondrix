@@ -70,3 +70,32 @@ func.func @unit_tap_empty_state(
       -> (tensor<3xi16>, tensor<0xi16>)
   return %output, %next : tensor<3xi16>, tensor<0xi16>
 }
+
+// CHECK-LABEL: func.func @mixed_static_results
+// CHECK: cf.assert {{.*}}, "FIR stream output length must equal input chunk length"
+// CHECK: cf.assert {{.*}}, "FIR stream next-state length must equal state length"
+// CHECK: tensor.empty() : tensor<4xf32>
+// CHECK: tensor.empty() : tensor<2xf32>
+// CHECK-NOT: ondrix.fir_stream
+func.func @mixed_static_results(
+    %input: tensor<?xf32>, %coeffs: tensor<?xf32>, %state: tensor<?xf32>)
+    -> (tensor<4xf32>, tensor<2xf32>) {
+  %output, %next = ondrix.fir_stream %input, %coeffs, %state {
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>)
+      -> (tensor<4xf32>, tensor<2xf32>)
+  return %output, %next : tensor<4xf32>, tensor<2xf32>
+}
+
+// CHECK-LABEL: func.func @f32_stream_fast
+// CHECK: math.fma {{.*}} fastmath<fast> : f32
+// CHECK-NOT: ondrix.fir_stream
+func.func @f32_stream_fast(
+    %input: tensor<4xf32>, %coeffs: tensor<3xf32>, %state: tensor<2xf32>)
+    -> (tensor<4xf32>, tensor<2xf32>) {
+  %output, %next = ondrix.fir_stream %input, %coeffs, %state {
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (tensor<4xf32>, tensor<3xf32>, tensor<2xf32>)
+      -> (tensor<4xf32>, tensor<2xf32>)
+  return %output, %next : tensor<4xf32>, tensor<2xf32>
+}
