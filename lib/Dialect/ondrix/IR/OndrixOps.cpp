@@ -323,6 +323,43 @@ static LogicalResult verifyFirStreamDomain(FirStreamOp op) {
   return success();
 }
 
+static LogicalResult verifySosFilterTdf2Domain(SosFilterTdf2Op op) {
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType coefficientType = op.getCoeffs().getType();
+  RankedTensorType scaleType = op.getScales().getType();
+  RankedTensorType stateType = op.getState().getType();
+
+  if (inputType.getRank() != 1 || coefficientType.getRank() != 2 || scaleType.getRank() != 1 ||
+      stateType.getRank() != 2)
+    return op.emitOpError("requires rank-1 input/scales and rank-2 coefficients/state tensors");
+  if (coefficientType.getDimSize(1) != 5)
+    return op.emitOpError("coefficient trailing dimension must be statically 5");
+  if (stateType.getDimSize(1) != 2)
+    return op.emitOpError("state trailing dimension must be statically 2");
+
+  int64_t coefficientSections = coefficientType.getDimSize(0);
+  int64_t scaleSections = scaleType.getDimSize(0);
+  int64_t stateSections = stateType.getDimSize(0);
+  if (!ShapedType::isDynamic(coefficientSections) && coefficientSections == 0)
+    return op.emitOpError("requires at least one second-order section");
+  auto staticallyDisagree = [](int64_t lhs, int64_t rhs) {
+    return !ShapedType::isDynamic(lhs) && !ShapedType::isDynamic(rhs) && lhs != rhs;
+  };
+  if (staticallyDisagree(coefficientSections, scaleSections) ||
+      staticallyDisagree(coefficientSections, stateSections) ||
+      staticallyDisagree(scaleSections, stateSections))
+    return op.emitOpError("coefficient, scale, and state section counts must match");
+
+  auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  if (!fp || !fp.getFormat().isF32())
+    return op.emitOpError("currently requires an f32 numeric policy");
+  if (inputType.getElementType() != fp.getFormat() ||
+      coefficientType.getElementType() != fp.getFormat() ||
+      scaleType.getElementType() != fp.getFormat() || stateType.getElementType() != fp.getFormat())
+    return op.emitOpError("input, coefficients, scales, state, and results must use f32");
+  return success();
+}
+
 static OpFoldResult getTensorDim(OpBuilder &builder, Location loc, Value tensor, int64_t dim) {
   auto type = cast<RankedTensorType>(tensor.getType());
   if (!type.isDynamicDim(dim))
@@ -456,6 +493,17 @@ LogicalResult FirStreamOp::verify() {
     return failure();
   return verifyFirStreamDomain(*this);
 }
+
+Speculation::Speculatability SosFilterTdf2Op::getSpeculatability() {
+  return (ondrix::requiresConservativeDSPSpeculation(getInput().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getCoeffs().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getScales().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getState().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
+
+LogicalResult SosFilterTdf2Op::verify() { return verifySosFilterTdf2Domain(*this); }
 
 SmallVector<utils::IteratorType> FirFilterOp::getLoopIteratorTypes() {
   return {utils::IteratorType::parallel};

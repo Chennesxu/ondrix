@@ -67,6 +67,20 @@ static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value
   llvm_unreachable("unknown floating-point contract mode");
 }
 
+static Value createFpMultiply(Location loc, Value lhs, Value rhs, ondrix::ondsp::FpAttr numeric,
+                              OpBuilder &builder) {
+  if (numeric.getContract() == ondrix::ondsp::FpContractMode::Fast)
+    return builder.create<arith::MulFOp>(loc, lhs, rhs, arith::FastMathFlags::fast);
+  return builder.create<arith::MulFOp>(loc, lhs, rhs);
+}
+
+static Value createFpAdd(Location loc, Value lhs, Value rhs, ondrix::ondsp::FpAttr numeric,
+                         OpBuilder &builder) {
+  if (numeric.getContract() == ondrix::ondsp::FpContractMode::Fast)
+    return builder.create<arith::AddFOp>(loc, lhs, rhs, arith::FastMathFlags::fast);
+  return builder.create<arith::AddFOp>(loc, lhs, rhs);
+}
+
 static void assertValidFirFilterShape(Location loc, Value inputLength, Value coefficientLength,
                                       Value outputLength, Value zero, Value one,
                                       OpBuilder &builder) {
@@ -399,6 +413,93 @@ public:
   }
 };
 
+class SosFilterTdf2OpLowering final : public OpConversionPattern<ondrix::ir::SosFilterTdf2Op> {
+public:
+  using OpConversionPattern<ondrix::ir::SosFilterTdf2Op>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::SosFilterTdf2Op op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value inputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInput(), zero);
+    Value coefficientSections = rewriter.create<tensor::DimOp>(loc, adaptor.getCoeffs(), zero);
+    Value scaleSections = rewriter.create<tensor::DimOp>(loc, adaptor.getScales(), zero);
+    Value stateSections = rewriter.create<tensor::DimOp>(loc, adaptor.getState(), zero);
+
+    Value hasSections =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientSections, zero);
+    rewriter.create<cf::AssertOp>(
+        loc, hasSections, rewriter.getStringAttr("SOS filter requires at least one section"));
+    Value scalesMatch = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                                       coefficientSections, scaleSections);
+    Value stateMatches = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                                        coefficientSections, stateSections);
+    Value sectionsMatch = rewriter.create<arith::AndIOp>(loc, scalesMatch, stateMatches);
+    rewriter.create<cf::AssertOp>(
+        loc, sectionsMatch,
+        rewriter.getStringAttr("SOS coefficient, scale, and state section counts must match"));
+
+    Value emptyOutput = createEmptyTensor(loc, op.getOutput().getType(), inputLength, rewriter);
+    auto numeric = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+    Value coefficientZero = zero;
+    Value coefficientOne = one;
+    Value coefficientTwo = rewriter.create<arith::ConstantIndexOp>(loc, 2);
+    Value coefficientThree = rewriter.create<arith::ConstantIndexOp>(loc, 3);
+    Value coefficientFour = rewriter.create<arith::ConstantIndexOp>(loc, 4);
+
+    auto sampleLoop = rewriter.create<scf::ForOp>(
+        loc, zero, inputLength, one, ValueRange{emptyOutput, adaptor.getState()},
+        [&](OpBuilder &builder, Location sampleLoc, Value sampleIndex, ValueRange sampleArgs) {
+          Value sample = builder.create<tensor::ExtractOp>(sampleLoc, adaptor.getInput(),
+                                                           ValueRange{sampleIndex});
+          auto sectionLoop = builder.create<scf::ForOp>(
+              sampleLoc, zero, coefficientSections, one, ValueRange{sample, sampleArgs[1]},
+              [&](OpBuilder &sectionBuilder, Location sectionLoc, Value section,
+                  ValueRange sectionArgs) {
+                auto extractCoefficient = [&](Value column) {
+                  return sectionBuilder.create<tensor::ExtractOp>(sectionLoc, adaptor.getCoeffs(),
+                                                                  ValueRange{section, column});
+                };
+                Value scale = sectionBuilder.create<tensor::ExtractOp>(
+                    sectionLoc, adaptor.getScales(), ValueRange{section});
+                Value b0 = extractCoefficient(coefficientZero);
+                Value b1 = extractCoefficient(coefficientOne);
+                Value b2 = extractCoefficient(coefficientTwo);
+                Value a1 = extractCoefficient(coefficientThree);
+                Value a2 = extractCoefficient(coefficientFour);
+                Value z1 = sectionBuilder.create<tensor::ExtractOp>(
+                    sectionLoc, sectionArgs[1], ValueRange{section, coefficientZero});
+                Value z2 = sectionBuilder.create<tensor::ExtractOp>(
+                    sectionLoc, sectionArgs[1], ValueRange{section, coefficientOne});
+
+                Value scaled =
+                    createFpMultiply(sectionLoc, sectionArgs[0], scale, numeric, sectionBuilder);
+                Value output =
+                    createFpAccumulatorUpdate(sectionLoc, scaled, b0, z1, numeric, sectionBuilder);
+                Value feedback1 = createFpMultiply(sectionLoc, output, a1, numeric, sectionBuilder);
+                Value firstTerm = createFpAccumulatorUpdate(sectionLoc, scaled, b1, feedback1,
+                                                            numeric, sectionBuilder);
+                Value nextZ1 = createFpAdd(sectionLoc, z2, firstTerm, numeric, sectionBuilder);
+                Value feedback2 = createFpMultiply(sectionLoc, output, a2, numeric, sectionBuilder);
+                Value nextZ2 = createFpAccumulatorUpdate(sectionLoc, scaled, b2, feedback2, numeric,
+                                                         sectionBuilder);
+                Value stateWithZ1 = sectionBuilder.create<tensor::InsertOp>(
+                    sectionLoc, nextZ1, sectionArgs[1], ValueRange{section, coefficientZero});
+                Value nextState = sectionBuilder.create<tensor::InsertOp>(
+                    sectionLoc, nextZ2, stateWithZ1, ValueRange{section, coefficientOne});
+                sectionBuilder.create<scf::YieldOp>(sectionLoc, ValueRange{output, nextState});
+              });
+          Value nextOutput = builder.create<tensor::InsertOp>(
+              sampleLoc, sectionLoop.getResult(0), sampleArgs[0], ValueRange{sampleIndex});
+          builder.create<scf::YieldOp>(sampleLoc, ValueRange{nextOutput, sectionLoop.getResult(1)});
+        });
+
+    rewriter.replaceOp(op, sampleLoop.getResults());
+    return success();
+  }
+};
+
 class DotOpLowering final : public OpConversionPattern<ondrix::ir::DotOp> {
 public:
   using OpConversionPattern<ondrix::ir::DotOp>::OpConversionPattern;
@@ -469,8 +570,8 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns.add<FirOpLowering, FirFilterOpLowering, FirStreamOpLowering, DotOpLowering,
-                 ButterflyOpLowering, QuantizeOpLowering>(&getContext());
+    patterns.add<FirOpLowering, FirFilterOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
+                 DotOpLowering, ButterflyOpLowering, QuantizeOpLowering>(&getContext());
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,

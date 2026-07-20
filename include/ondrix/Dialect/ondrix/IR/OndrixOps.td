@@ -158,6 +158,61 @@ def Ondrix_FirStreamOp
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_SosFilterTdf2Op
+    : Ondrix_Op<"sos_filter_tdf2", [
+        DeclareOpInterfaceMethods<ConditionallySpeculatable>,
+        NoMemoryEffect,
+        TypesMatchWith<"output type matches input type", "input", "output",
+                       "$_self">,
+        TypesMatchWith<"next-state type matches state type", "state",
+                       "next_state", "$_self">]> {
+  let summary = "Process an f32 chunk through a cascade of TDF-II sections";
+  let description = [{
+    `ondrix.sos_filter_tdf2` is an experimental, value-semantics cascade of
+    second-order sections in transposed direct form II. The input and output
+    are rank-1 tensors. `coeffs` has shape `[sections, 5]` in the explicit
+    order `[b0, b1, b2, a1, a2]`, `scales` has shape `[sections]`, and
+    `state` has shape `[sections, 2]` in the order `[z1, z2]`. At least one
+    section is required.
+
+    For every input sample, sections are visited in increasing index order.
+    Given section input `x`, its scale `s`, coefficients, and current state,
+    the operation sequence is:
+
+    ```
+    u        = mul(x, s)
+    y        = mul_add(u, b0, z1)
+    feedback = mul(y, a1)
+    z1_next  = add(z2, mul_add(u, b1, feedback))
+    z2_next  = mul_add(u, b2, mul(y, a2))
+    ```
+
+    `y` becomes the input to the next section. The final section output is
+    written to the output chunk. Denominator feedback is added exactly as
+    written; a source convention using subtraction must provide negated
+    `a1` and `a2` coefficients.
+
+    `mul_add` follows the `numeric` contraction policy: `off` emits separate
+    multiply and add operations, `fma` requires one fused multiply-add, and
+    `fast` permits fast-math transformations. The standalone `mul` and `add`
+    steps remain distinct operations except that `fast` attaches fast-math
+    flags. Empty input returns an empty output and the unchanged state.
+
+    This first contract supports `f32` only. Fixed-point SOS requires an
+    independent contract because feedback-state quantization and scaling
+    points are part of its observable semantics.
+  }];
+  let arguments = (ins
+      AnyRankedTensor:$input,
+      AnyRankedTensor:$coeffs,
+      AnyRankedTensor:$scales,
+      AnyRankedTensor:$state,
+      Ondsp_NumericAttr:$numeric);
+  let results = (outs AnyRankedTensor:$output, AnyRankedTensor:$next_state);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_DotOp
     : Ondrix_Op<"dot", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
                         DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
