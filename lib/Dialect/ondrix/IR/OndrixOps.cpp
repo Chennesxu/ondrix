@@ -257,6 +257,67 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
   return success();
 }
 
+static LogicalResult verifyFirStreamDomain(FirStreamOp op) {
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType coefficientType = op.getCoeffs().getType();
+  RankedTensorType stateType = op.getState().getType();
+  RankedTensorType outputType = op.getOutput().getType();
+  RankedTensorType nextStateType = op.getNextState().getType();
+  if (inputType.getRank() != 1 || coefficientType.getRank() != 1 || stateType.getRank() != 1 ||
+      outputType.getRank() != 1 || nextStateType.getRank() != 1)
+    return op.emitOpError("requires rank-1 input, coefficients, state, and results");
+
+  int64_t inputLength = inputType.getDimSize(0);
+  int64_t coefficientLength = coefficientType.getDimSize(0);
+  int64_t stateLength = stateType.getDimSize(0);
+  int64_t outputLength = outputType.getDimSize(0);
+  int64_t nextStateLength = nextStateType.getDimSize(0);
+  if (!ShapedType::isDynamic(coefficientLength) && coefficientLength == 0)
+    return op.emitOpError("requires at least one coefficient");
+  if (!ShapedType::isDynamic(coefficientLength)) {
+    int64_t expectedStateLength = coefficientLength - 1;
+    if (!ShapedType::isDynamic(stateLength) && stateLength != expectedStateLength)
+      return op.emitOpError() << "state length must be " << expectedStateLength;
+    if (!ShapedType::isDynamic(nextStateLength) && nextStateLength != expectedStateLength)
+      return op.emitOpError() << "next-state length must be " << expectedStateLength;
+  }
+  if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(outputLength) &&
+      inputLength != outputLength)
+    return op.emitOpError("output length must equal input chunk length");
+
+  Type inputElement = inputType.getElementType();
+  if (coefficientType.getElementType() != inputElement ||
+      stateType.getElementType() != inputElement || nextStateType.getElementType() != inputElement)
+    return op.emitOpError(
+        "input, coefficients, state, and next state must have matching element types");
+
+  Type outputElement = outputType.getElementType();
+  if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric())) {
+    if (inputElement != fixed.getStorage())
+      return op.emitOpError("stream sample element type must match fixed numeric storage");
+    if (!op.getAccumulator() || !op.getDst() || !op.getRounding() || !op.getOverflow())
+      return op.emitOpError(
+          "fixed FIR stream requires accumulator, dst, rounding, and overflow attributes");
+    if (failed(verifyFixedReductionResult(op, *op.getAccumulator(), fixed, *op.getProduct())))
+      return failure();
+    if (op.getAccumulator()->getSignedness() != op.getDst()->getSignedness())
+      return op.emitOpError("accumulator and destination signedness must match");
+    if (op.getAccumulator()->getFrac() < op.getDst()->getFrac())
+      return op.emitOpError("destination frac must not exceed accumulator frac");
+    if (outputElement != op.getDst()->getStorage())
+      return op.emitOpError("output element type must match destination storage");
+    return success();
+  }
+
+  if (op.getAccumulator() || op.getDst() || op.getRounding() || op.getOverflow())
+    return op.emitOpError(
+        "floating-point FIR stream must not specify fixed-point accumulator or export policy");
+  auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  if (inputElement != fp.getFormat() || outputElement != fp.getFormat())
+    return op.emitOpError("floating-point stream values must match numeric format");
+  return success();
+}
+
 static OpFoldResult getTensorDim(OpBuilder &builder, Location loc, Value tensor, int64_t dim) {
   auto type = cast<RankedTensorType>(tensor.getType());
   if (!type.isDynamicDim(dim))
@@ -373,6 +434,22 @@ LogicalResult FirFilterOp::verify() {
   if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
   return verifyFirFilterDomain(*this);
+}
+
+Speculation::Speculatability FirStreamOp::getSpeculatability() {
+  return (ondrix::requiresConservativeDSPSpeculation(getInput().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getCoeffs().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getState().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getOutput().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getNextState().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
+
+LogicalResult FirStreamOp::verify() {
+  if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
+    return failure();
+  return verifyFirStreamDomain(*this);
 }
 
 SmallVector<utils::IteratorType> FirFilterOp::getLoopIteratorTypes() {

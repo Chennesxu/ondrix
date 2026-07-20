@@ -120,6 +120,44 @@ def Ondrix_FirFilterOp
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_FirStreamOp
+    : Ondrix_Op<"fir_stream", [
+        DeclareOpInterfaceMethods<ConditionallySpeculatable>,
+        NoMemoryEffect]> {
+  let summary = "Process one causal FIR stream chunk with explicit history";
+  let description = [{
+    `ondrix.fir_stream` processes one rank-1 input chunk and returns an
+    equal-length output chunk plus the history for the next invocation.
+    Coefficient length `K` is non-zero. The input history has length `K - 1`
+    and stores samples from oldest to newest.
+
+    Let `extended = concat(state, input)`. Output sample `n` is the ordered FIR
+    sample over `extended[n : n + K]`, pairing increasing `k` with
+    `coeffs[k]` and starting each accumulation from numeric zero. The next
+    state is the final `K - 1` samples of `extended`. This definition covers
+    empty chunks and chunks shorter than the history without hidden mutable
+    state or an aliasing contract.
+
+    Fixed-point execution explicitly names the accumulator domain and export
+    policy. Floating-point execution uses the policy in `numeric` and must not
+    carry fixed-point accumulator or export attributes. Stream chunking does
+    not authorize reassociation of tap updates.
+  }];
+  let arguments = (ins
+      AnyRankedTensor:$input,
+      AnyRankedTensor:$coeffs,
+      AnyRankedTensor:$state,
+      Ondsp_NumericAttr:$numeric,
+      OptionalAttr<Ondsp_ProductAttr>:$product,
+      OptionalAttr<TypeAttrOf<Ondsp_Acc>>:$accumulator,
+      OptionalAttr<Ondsp_FixedAttr>:$dst,
+      OptionalAttr<Ondsp_RoundingModeAttr>:$rounding,
+      OptionalAttr<Ondsp_OverflowModeAttr>:$overflow);
+  let results = (outs AnyRankedTensor:$output, AnyRankedTensor:$next_state);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_DotOp
     : Ondrix_Op<"dot", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
                         DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
