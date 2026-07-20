@@ -164,6 +164,17 @@ public:
             initial = builder.create<arith::ConstantOp>(bodyLoc, fp.getFormat(),
                                                         builder.getZeroAttr(fp.getFormat()));
 
+          Value firstValidTap;
+          Value inputBase;
+          if (op.getBoundary() == ondrix::ir::FirBoundaryMode::Full) {
+            Value outputBeforeLeft = builder.create<arith::CmpIOp>(
+                bodyLoc, arith::CmpIPredicate::ult, outputIndex, leftPadding);
+            Value leftDeficit = builder.create<arith::SubIOp>(bodyLoc, leftPadding, outputIndex);
+            firstValidTap =
+                builder.create<arith::SelectOp>(bodyLoc, outputBeforeLeft, leftDeficit, zero);
+            inputBase = builder.create<arith::SubIOp>(bodyLoc, outputIndex, leftPadding);
+          }
+
           auto tapLoop = builder.create<scf::ForOp>(
               bodyLoc, zero, coefficientLength, one, ValueRange{initial},
               [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange accumulatorArgs) {
@@ -183,11 +194,9 @@ public:
                                                      accumulatorArgs.front(), fp, tapBuilder);
                   }
                 } else {
-                  Value paddedIndex = tapBuilder.create<arith::AddIOp>(tapLoc, outputIndex, tap);
                   Value pastLeftPadding = tapBuilder.create<arith::CmpIOp>(
-                      tapLoc, arith::CmpIPredicate::uge, paddedIndex, leftPadding);
-                  Value inputIndex =
-                      tapBuilder.create<arith::SubIOp>(tapLoc, paddedIndex, leftPadding);
+                      tapLoc, arith::CmpIPredicate::uge, tap, firstValidTap);
+                  Value inputIndex = tapBuilder.create<arith::AddIOp>(tapLoc, inputBase, tap);
                   Value beforeRightPadding = tapBuilder.create<arith::CmpIOp>(
                       tapLoc, arith::CmpIPredicate::ult, inputIndex, inputLength);
                   Value inBounds =

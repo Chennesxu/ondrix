@@ -5,7 +5,9 @@ add_ondrix_library(OndrixBufferizationInterfaces
   MLIRArithDialect
   MLIRBufferizationDialect
   MLIRBufferizationTransforms
+  MLIRControlFlowDialect
   MLIRIR
+  MLIRMathDialect
   MLIRMemRefDialect
   MLIRSCFDialect
   OndrixIR
