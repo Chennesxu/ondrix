@@ -6,8 +6,9 @@
 // RUN: %t
 
 // This test-only ABI returns output, next d1, or next d2 for part 0, 1, or 2.
-// It composes the candidate DF-II equation from existing Ondsp numeric ops;
-// there is intentionally no public fixed recursive-filter operation yet.
+// It composes the DF-II equation directly from existing Ondsp numeric ops as
+// an independent low-level gate for the public chunk operation tested
+// separately.
 
 // CHECK-NOT: ondsp.
 
