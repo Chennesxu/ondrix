@@ -213,6 +213,63 @@ def Ondrix_SosFilterTdf2Op
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_SosFilterDf2FixedOp
+    : Ondrix_Op<"sos_filter_df2_fixed", [
+        DeclareOpInterfaceMethods<ConditionallySpeculatable>,
+        NoMemoryEffect,
+        TypesMatchWith<"output type matches input type", "input", "output",
+                       "$_self">,
+        TypesMatchWith<"next-state type matches state type", "state",
+                       "next_state", "$_self">]> {
+  let summary = "Process a fixed-point chunk through uniform-Q DF-II sections";
+  let description = [{
+    `ondrix.sos_filter_df2_fixed` is an experimental, value-semantics cascade
+    of signed uniform-Q-format second-order sections in direct form II. The
+    input and output are rank-1 tensors. `coeffs` has shape `[sections, 5]` in
+    the explicit order `[b0, b1, b2, a1, a2]`, `scales` has shape
+    `[sections]`, and `state` has shape `[sections, 2]` in `[d1, d2]` order.
+    Coefficients are pre-normalized to `a0 = 1`; normalization is outside the
+    operation. At least one section is required.
+
+    For section input `x`, scale `s`, and current state, the exact ordered
+    recurrence is:
+
+    ```
+    state_acc = mac(mac(mac(0, x, s), d1, a1), d2, a2)
+    next_d1   = export(state_acc, state_rounding, state_overflow)
+    output_acc = mac(mac(mac(0, next_d1, b0), d1, b1), d2, b2)
+    y         = export(output_acc, output_rounding, output_overflow)
+    next_d2   = d1
+    ```
+
+    Every MAC applies `accumulator.update_overflow`. Both exports return to
+    `numeric`; state and output quantization policies are independent.
+    Denominator feedback is additive, so subtractive source conventions must
+    provide negated `a1/a2`. Samples and sections execute in increasing order;
+    `y` feeds the next section. Empty input returns unchanged state.
+
+    The initial executable profiles are exactly signed Q15/full with an
+    i40/frac30 accumulator and signed Q31/full with an i64/frac62 accumulator.
+    Raw-high products, nonuniform formats, target selection, and compatibility
+    with an external kernel ABI are outside this contract.
+  }];
+  let arguments = (ins
+      AnyRankedTensor:$input,
+      AnyRankedTensor:$coeffs,
+      AnyRankedTensor:$scales,
+      AnyRankedTensor:$state,
+      Ondsp_FixedAttr:$numeric,
+      Ondsp_ProductAttr:$product,
+      TypeAttrOf<Ondsp_Acc>:$accumulator,
+      Ondsp_RoundingModeAttr:$state_rounding,
+      Ondsp_OverflowModeAttr:$state_overflow,
+      Ondsp_RoundingModeAttr:$output_rounding,
+      Ondsp_OverflowModeAttr:$output_overflow);
+  let results = (outs AnyRankedTensor:$output, AnyRankedTensor:$next_state);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_DotOp
     : Ondrix_Op<"dot", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
                         DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {

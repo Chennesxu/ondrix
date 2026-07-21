@@ -164,6 +164,22 @@ static Value createEmptyTensor(Location loc, RankedTensorType type, Value dynami
   return builder.create<tensor::EmptyOp>(loc, type.getShape(), type.getElementType(), dynamicSizes);
 }
 
+static void assertValidSosSectionShape(Location loc, Value coefficientSections, Value scaleSections,
+                                       Value stateSections, Value zero, OpBuilder &builder) {
+  Value hasSections =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientSections, zero);
+  builder.create<cf::AssertOp>(loc, hasSections,
+                               builder.getStringAttr("SOS filter requires at least one section"));
+  Value scalesMatch = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                                    coefficientSections, scaleSections);
+  Value stateMatches = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                                     coefficientSections, stateSections);
+  Value sectionsMatch = builder.create<arith::AndIOp>(loc, scalesMatch, stateMatches);
+  builder.create<cf::AssertOp>(
+      loc, sectionsMatch,
+      builder.getStringAttr("SOS coefficient, scale, and state section counts must match"));
+}
+
 static Value createFirStreamInitialAccumulator(ondrix::ir::FirStreamOp op, Location loc,
                                                OpBuilder &builder) {
   if (isa<ondrix::ondsp::FixedAttr>(op.getNumeric()))
@@ -427,18 +443,8 @@ public:
     Value scaleSections = rewriter.create<tensor::DimOp>(loc, adaptor.getScales(), zero);
     Value stateSections = rewriter.create<tensor::DimOp>(loc, adaptor.getState(), zero);
 
-    Value hasSections =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientSections, zero);
-    rewriter.create<cf::AssertOp>(
-        loc, hasSections, rewriter.getStringAttr("SOS filter requires at least one section"));
-    Value scalesMatch = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
-                                                       coefficientSections, scaleSections);
-    Value stateMatches = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
-                                                        coefficientSections, stateSections);
-    Value sectionsMatch = rewriter.create<arith::AndIOp>(loc, scalesMatch, stateMatches);
-    rewriter.create<cf::AssertOp>(
-        loc, sectionsMatch,
-        rewriter.getStringAttr("SOS coefficient, scale, and state section counts must match"));
+    assertValidSosSectionShape(loc, coefficientSections, scaleSections, stateSections, zero,
+                               rewriter);
 
     Value emptyOutput = createEmptyTensor(loc, op.getOutput().getType(), inputLength, rewriter);
     auto numeric = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
@@ -488,6 +494,97 @@ public:
                     sectionLoc, nextZ1, sectionArgs[1], ValueRange{section, coefficientZero});
                 Value nextState = sectionBuilder.create<tensor::InsertOp>(
                     sectionLoc, nextZ2, stateWithZ1, ValueRange{section, coefficientOne});
+                sectionBuilder.create<scf::YieldOp>(sectionLoc, ValueRange{output, nextState});
+              });
+          Value nextOutput = builder.create<tensor::InsertOp>(
+              sampleLoc, sectionLoop.getResult(0), sampleArgs[0], ValueRange{sampleIndex});
+          builder.create<scf::YieldOp>(sampleLoc, ValueRange{nextOutput, sectionLoop.getResult(1)});
+        });
+
+    rewriter.replaceOp(op, sampleLoop.getResults());
+    return success();
+  }
+};
+
+class SosFilterDf2FixedOpLowering final
+    : public OpConversionPattern<ondrix::ir::SosFilterDf2FixedOp> {
+public:
+  using OpConversionPattern<ondrix::ir::SosFilterDf2FixedOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::SosFilterDf2FixedOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value two = rewriter.create<arith::ConstantIndexOp>(loc, 2);
+    Value three = rewriter.create<arith::ConstantIndexOp>(loc, 3);
+    Value four = rewriter.create<arith::ConstantIndexOp>(loc, 4);
+    Value inputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInput(), zero);
+    Value coefficientSections = rewriter.create<tensor::DimOp>(loc, adaptor.getCoeffs(), zero);
+    Value scaleSections = rewriter.create<tensor::DimOp>(loc, adaptor.getScales(), zero);
+    Value stateSections = rewriter.create<tensor::DimOp>(loc, adaptor.getState(), zero);
+
+    assertValidSosSectionShape(loc, coefficientSections, scaleSections, stateSections, zero,
+                               rewriter);
+
+    Value emptyOutput = createEmptyTensor(loc, op.getOutput().getType(), inputLength, rewriter);
+    auto createMac = [&](OpBuilder &builder, Location updateLoc, Value accumulator, Value lhs,
+                         Value rhs) {
+      return builder.create<ondrix::ondsp::MacOp>(updateLoc, op.getAccumulator(), accumulator, lhs,
+                                                  rhs, op.getNumeric(), op.getProduct());
+    };
+
+    auto sampleLoop = rewriter.create<scf::ForOp>(
+        loc, zero, inputLength, one, ValueRange{emptyOutput, adaptor.getState()},
+        [&](OpBuilder &builder, Location sampleLoc, Value sampleIndex, ValueRange sampleArgs) {
+          Value sample = builder.create<tensor::ExtractOp>(sampleLoc, adaptor.getInput(),
+                                                           ValueRange{sampleIndex});
+          auto sectionLoop = builder.create<scf::ForOp>(
+              sampleLoc, zero, coefficientSections, one, ValueRange{sample, sampleArgs[1]},
+              [&](OpBuilder &sectionBuilder, Location sectionLoc, Value section,
+                  ValueRange sectionArgs) {
+                auto extractCoefficient = [&](Value column) {
+                  return sectionBuilder.create<tensor::ExtractOp>(sectionLoc, adaptor.getCoeffs(),
+                                                                  ValueRange{section, column});
+                };
+                Value scale = sectionBuilder.create<tensor::ExtractOp>(
+                    sectionLoc, adaptor.getScales(), ValueRange{section});
+                Value b0 = extractCoefficient(zero);
+                Value b1 = extractCoefficient(one);
+                Value b2 = extractCoefficient(two);
+                Value a1 = extractCoefficient(three);
+                Value a2 = extractCoefficient(four);
+                Value d1 = sectionBuilder.create<tensor::ExtractOp>(sectionLoc, sectionArgs[1],
+                                                                    ValueRange{section, zero});
+                Value d2 = sectionBuilder.create<tensor::ExtractOp>(sectionLoc, sectionArgs[1],
+                                                                    ValueRange{section, one});
+
+                Value stateAccumulator = sectionBuilder.create<ondrix::ondsp::AccZeroOp>(
+                    sectionLoc, op.getAccumulator());
+                stateAccumulator =
+                    createMac(sectionBuilder, sectionLoc, stateAccumulator, sectionArgs[0], scale);
+                stateAccumulator = createMac(sectionBuilder, sectionLoc, stateAccumulator, d1, a1);
+                stateAccumulator = createMac(sectionBuilder, sectionLoc, stateAccumulator, d2, a2);
+                Value nextD1 = sectionBuilder.create<ondrix::ondsp::AccExportOp>(
+                    sectionLoc, op.getNumeric().getStorage(), stateAccumulator, op.getNumeric(),
+                    op.getStateRounding(), op.getStateOverflow());
+
+                Value outputAccumulator = sectionBuilder.create<ondrix::ondsp::AccZeroOp>(
+                    sectionLoc, op.getAccumulator());
+                outputAccumulator =
+                    createMac(sectionBuilder, sectionLoc, outputAccumulator, nextD1, b0);
+                outputAccumulator =
+                    createMac(sectionBuilder, sectionLoc, outputAccumulator, d1, b1);
+                outputAccumulator =
+                    createMac(sectionBuilder, sectionLoc, outputAccumulator, d2, b2);
+                Value output = sectionBuilder.create<ondrix::ondsp::AccExportOp>(
+                    sectionLoc, op.getNumeric().getStorage(), outputAccumulator, op.getNumeric(),
+                    op.getOutputRounding(), op.getOutputOverflow());
+
+                Value stateWithD1 = sectionBuilder.create<tensor::InsertOp>(
+                    sectionLoc, nextD1, sectionArgs[1], ValueRange{section, zero});
+                Value nextState = sectionBuilder.create<tensor::InsertOp>(
+                    sectionLoc, d1, stateWithD1, ValueRange{section, one});
                 sectionBuilder.create<scf::YieldOp>(sectionLoc, ValueRange{output, nextState});
               });
           Value nextOutput = builder.create<tensor::InsertOp>(
@@ -570,8 +667,10 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns.add<FirOpLowering, FirFilterOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
-                 DotOpLowering, ButterflyOpLowering, QuantizeOpLowering>(&getContext());
+    patterns
+        .add<FirOpLowering, FirFilterOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
+             SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering>(
+            &getContext());
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,

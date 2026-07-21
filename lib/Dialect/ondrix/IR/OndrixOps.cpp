@@ -323,32 +323,39 @@ static LogicalResult verifyFirStreamDomain(FirStreamOp op) {
   return success();
 }
 
-static LogicalResult verifySosFilterTdf2Domain(SosFilterTdf2Op op) {
-  RankedTensorType inputType = op.getInput().getType();
-  RankedTensorType coefficientType = op.getCoeffs().getType();
-  RankedTensorType scaleType = op.getScales().getType();
-  RankedTensorType stateType = op.getState().getType();
-
+static LogicalResult verifySosTensorLayout(Operation *op, RankedTensorType inputType,
+                                           RankedTensorType coefficientType,
+                                           RankedTensorType scaleType, RankedTensorType stateType) {
   if (inputType.getRank() != 1 || coefficientType.getRank() != 2 || scaleType.getRank() != 1 ||
       stateType.getRank() != 2)
-    return op.emitOpError("requires rank-1 input/scales and rank-2 coefficients/state tensors");
+    return op->emitOpError("requires rank-1 input/scales and rank-2 coefficients/state tensors");
   if (coefficientType.getDimSize(1) != 5)
-    return op.emitOpError("coefficient trailing dimension must be statically 5");
+    return op->emitOpError("coefficient trailing dimension must be statically 5");
   if (stateType.getDimSize(1) != 2)
-    return op.emitOpError("state trailing dimension must be statically 2");
+    return op->emitOpError("state trailing dimension must be statically 2");
 
   int64_t coefficientSections = coefficientType.getDimSize(0);
   int64_t scaleSections = scaleType.getDimSize(0);
   int64_t stateSections = stateType.getDimSize(0);
   if (!ShapedType::isDynamic(coefficientSections) && coefficientSections == 0)
-    return op.emitOpError("requires at least one second-order section");
+    return op->emitOpError("requires at least one second-order section");
   auto staticallyDisagree = [](int64_t lhs, int64_t rhs) {
     return !ShapedType::isDynamic(lhs) && !ShapedType::isDynamic(rhs) && lhs != rhs;
   };
   if (staticallyDisagree(coefficientSections, scaleSections) ||
       staticallyDisagree(coefficientSections, stateSections) ||
       staticallyDisagree(scaleSections, stateSections))
-    return op.emitOpError("coefficient, scale, and state section counts must match");
+    return op->emitOpError("coefficient, scale, and state section counts must match");
+  return success();
+}
+
+static LogicalResult verifySosFilterTdf2Domain(SosFilterTdf2Op op) {
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType coefficientType = op.getCoeffs().getType();
+  RankedTensorType scaleType = op.getScales().getType();
+  RankedTensorType stateType = op.getState().getType();
+  if (failed(verifySosTensorLayout(op, inputType, coefficientType, scaleType, stateType)))
+    return failure();
 
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
   if (!fp || !fp.getFormat().isF32())
@@ -357,6 +364,35 @@ static LogicalResult verifySosFilterTdf2Domain(SosFilterTdf2Op op) {
       coefficientType.getElementType() != fp.getFormat() ||
       scaleType.getElementType() != fp.getFormat() || stateType.getElementType() != fp.getFormat())
     return op.emitOpError("input, coefficients, scales, state, and results must use f32");
+  return success();
+}
+
+static LogicalResult verifySosFilterDf2FixedDomain(SosFilterDf2FixedOp op) {
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType coefficientType = op.getCoeffs().getType();
+  RankedTensorType scaleType = op.getScales().getType();
+  RankedTensorType stateType = op.getState().getType();
+  if (failed(verifySosTensorLayout(op, inputType, coefficientType, scaleType, stateType)))
+    return failure();
+
+  ondrix::ondsp::FixedAttr numeric = op.getNumeric();
+  Type storage = numeric.getStorage();
+  if (inputType.getElementType() != storage || coefficientType.getElementType() != storage ||
+      scaleType.getElementType() != storage || stateType.getElementType() != storage)
+    return op.emitOpError(
+        "input, coefficients, scales, state, and results must match numeric storage");
+  if (!ondrix::ondsp::isFullProduct(op.getProduct()))
+    return op.emitOpError("supports only exact full products");
+
+  ondrix::ondsp::AccType accumulator = op.getAccumulator();
+  bool isQ15 = ondrix::ondsp::isSignedQ15(numeric) &&
+               ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator);
+  bool isQ31 = ondrix::ondsp::isSignedQ31(numeric) &&
+               ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator);
+  if (!isQ15 && !isQ31)
+    return op.emitOpError(
+        "supports only signed Q15/full with i40/frac30 accumulator or signed Q31/full with "
+        "i64/frac62 accumulator");
   return success();
 }
 
@@ -504,6 +540,21 @@ Speculation::Speculatability SosFilterTdf2Op::getSpeculatability() {
 }
 
 LogicalResult SosFilterTdf2Op::verify() { return verifySosFilterTdf2Domain(*this); }
+
+Speculation::Speculatability SosFilterDf2FixedOp::getSpeculatability() {
+  return (ondrix::requiresConservativeDSPSpeculation(getInput().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getCoeffs().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getScales().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getState().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
+
+LogicalResult SosFilterDf2FixedOp::verify() {
+  if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
+    return failure();
+  return verifySosFilterDf2FixedDomain(*this);
+}
 
 SmallVector<utils::IteratorType> FirFilterOp::getLoopIteratorTypes() {
   return {utils::IteratorType::parallel};
