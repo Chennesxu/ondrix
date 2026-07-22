@@ -9,14 +9,19 @@
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Verifier.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
 
 #include <cctype>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -76,6 +81,7 @@ enum class TokenKind {
   Comma,
   Colon,
   Equal,
+  Minus,
   Arrow,
   Invalid,
 };
@@ -112,10 +118,13 @@ public:
       } while (offset < source.size() && std::isdigit(static_cast<unsigned char>(source[offset])));
       return {TokenKind::Integer, source.slice(begin, offset), start};
     }
-    if (current == '-' && offset + 1 < source.size() && source[offset + 1] == '>') {
+    if (current == '-') {
       advance();
-      advance();
-      return {TokenKind::Arrow, "->", start};
+      if (offset < source.size() && source[offset] == '>') {
+        advance();
+        return {TokenKind::Arrow, "->", start};
+      }
+      return {TokenKind::Minus, "-", start};
     }
 
     advance();
@@ -188,7 +197,12 @@ enum class ReductionKind { Dot, Fir };
 struct ParameterAst {
   std::string name;
   SourceType type;
+  std::optional<int64_t> extent;
+  bool compileTime = false;
+  std::vector<int64_t> constantValues;
   SourcePosition position;
+
+  bool isConstexpr() const { return compileTime; }
 };
 
 struct ReductionAst {
@@ -237,18 +251,10 @@ public:
     if (!expect(TokenKind::LeftParen, "expected '(' after kernel name"))
       return std::nullopt;
     do {
-      auto parameterName = parseIdentifier("expected parameter name");
-      if (!parameterName)
+      std::optional<ParameterAst> parameter = parseParameter();
+      if (!parameter)
         return std::nullopt;
-      if (!expect(TokenKind::Colon, "expected ':' after parameter name") ||
-          !expectIdentifier("buffer", "expected parameter type 'buffer[q15]' or 'buffer[f32]'") ||
-          !expect(TokenKind::LeftBracket, "expected '[' in buffer type"))
-        return std::nullopt;
-      auto parameterType = parseSourceType("expected buffer element type 'q15' or 'f32'");
-      if (!parameterType || !expect(TokenKind::RightBracket, "expected ']' in buffer type"))
-        return std::nullopt;
-      kernel.parameters.push_back(
-          {parameterName->spelling.str(), *parameterType, parameterName->position});
+      kernel.parameters.push_back(std::move(*parameter));
       if (current.kind != TokenKind::Comma)
         break;
       advance();
@@ -362,6 +368,91 @@ private:
     return std::nullopt;
   }
 
+  std::optional<int64_t> parseSignedInteger(const llvm::Twine &message) {
+    bool negative = current.kind == TokenKind::Minus;
+    if (negative)
+      advance();
+    auto value = parseInteger(message);
+    if (!value)
+      return std::nullopt;
+
+    uint64_t magnitude = 0;
+    if (value->spelling.getAsInteger(10, magnitude) ||
+        magnitude > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + negative) {
+      diagnostics.error(value->position, "integer literal is out of range");
+      return std::nullopt;
+    }
+    if (negative && magnitude == static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1)
+      return std::numeric_limits<int64_t>::min();
+    int64_t signedValue = static_cast<int64_t>(magnitude);
+    return negative ? -signedValue : signedValue;
+  }
+
+  std::optional<ParameterAst> parseParameter() {
+    auto name = parseIdentifier("expected parameter name");
+    if (!name || !expect(TokenKind::Colon, "expected ':' after parameter name"))
+      return std::nullopt;
+
+    ParameterAst parameter;
+    parameter.name = name->spelling.str();
+    parameter.position = name->position;
+    if (isIdentifier("buffer")) {
+      advance();
+      if (!expect(TokenKind::LeftBracket, "expected '[' in buffer type"))
+        return std::nullopt;
+      auto type = parseSourceType("expected buffer element type 'q15' or 'f32'");
+      if (!type)
+        return std::nullopt;
+      parameter.type = *type;
+      if (current.kind == TokenKind::Comma) {
+        advance();
+        auto extent = parseInteger("expected static buffer extent");
+        uint64_t parsedExtent = 0;
+        if (!extent)
+          return std::nullopt;
+        if (extent->spelling.getAsInteger(10, parsedExtent) ||
+            parsedExtent > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+          diagnostics.error(extent->position, "buffer extent is out of range");
+          return std::nullopt;
+        }
+        parameter.extent = static_cast<int64_t>(parsedExtent);
+      }
+      if (!expect(TokenKind::RightBracket, "expected ']' in buffer type"))
+        return std::nullopt;
+      return parameter;
+    }
+
+    if (!isIdentifier("constexpr")) {
+      diagnostics.error(current.position,
+                        "expected parameter type 'buffer[...]' or 'constexpr[q15]'");
+      return std::nullopt;
+    }
+    advance();
+    parameter.compileTime = true;
+    if (!expect(TokenKind::LeftBracket, "expected '[' in constexpr type"))
+      return std::nullopt;
+    auto type = parseSourceType("expected constexpr element type 'q15'");
+    if (!type || !expect(TokenKind::RightBracket, "expected ']' in constexpr type") ||
+        !expect(TokenKind::Equal, "expected '=' after constexpr type") ||
+        !expect(TokenKind::LeftBracket, "expected '[' before constexpr values"))
+      return std::nullopt;
+    parameter.type = *type;
+    if (current.kind != TokenKind::RightBracket) {
+      do {
+        auto value = parseSignedInteger("expected integer constexpr value");
+        if (!value)
+          return std::nullopt;
+        parameter.constantValues.push_back(*value);
+        if (current.kind != TokenKind::Comma)
+          break;
+        advance();
+      } while (true);
+    }
+    if (!expect(TokenKind::RightBracket, "expected ']' after constexpr values"))
+      return std::nullopt;
+    return parameter;
+  }
+
   bool parseFixedPolicy(ReductionAst &result) {
     if (!expectIdentifier("accumulator", "expected accumulator policy") ||
         !expect(TokenKind::Equal, "expected '=' after accumulator") ||
@@ -444,6 +535,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   }
 
   llvm::StringSet<> parameterNames;
+  const ParameterAst *lhsParameter = nullptr;
+  const ParameterAst *rhsParameter = nullptr;
   for (const ParameterAst &parameter : ast.parameters) {
     if (!parameterNames.insert(parameter.name).second) {
       diagnostics.error(parameter.position,
@@ -455,6 +548,14 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         "parameter element types must match the kernel result type");
       return std::nullopt;
     }
+    if (parameter.extent && *parameter.extent <= 0) {
+      diagnostics.error(parameter.position, "static buffer extent must be positive");
+      return std::nullopt;
+    }
+    if (parameter.name == ast.result.lhs)
+      lhsParameter = &parameter;
+    if (parameter.name == ast.result.rhs)
+      rhsParameter = &parameter;
   }
   if (!parameterNames.contains(ast.result.lhs)) {
     diagnostics.error(ast.result.position,
@@ -468,6 +569,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   }
 
   if (ast.resultType == SourceType::F32) {
+    if (llvm::any_of(ast.parameters,
+                     [](const ParameterAst &parameter) { return parameter.isConstexpr(); })) {
+      diagnostics.error(ast.result.position,
+                        "constexpr parameters are currently restricted to Q15 FIR coefficients");
+      return std::nullopt;
+    }
     if (ast.result.kind != ReductionKind::Dot) {
       diagnostics.error(ast.result.position,
                         "the current f32 frontend slice supports dot but not FIR");
@@ -480,6 +587,39 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       return std::nullopt;
     }
     return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, *contract};
+  }
+
+  unsigned constexprCount = llvm::count_if(
+      ast.parameters, [](const ParameterAst &parameter) { return parameter.isConstexpr(); });
+  if (constexprCount != 0) {
+    if (ast.result.kind != ReductionKind::Fir || constexprCount != 1 || !rhsParameter ||
+        !rhsParameter->isConstexpr() || !lhsParameter || lhsParameter->isConstexpr()) {
+      diagnostics.error(ast.result.position,
+                        "constexpr is supported only for the coefficient operand of a Q15 FIR");
+      return std::nullopt;
+    }
+    if (rhsParameter->constantValues.empty()) {
+      diagnostics.error(rhsParameter->position, "constexpr coefficients cannot be empty");
+      return std::nullopt;
+    }
+    for (int64_t value : rhsParameter->constantValues) {
+      if (value < std::numeric_limits<int16_t>::min() ||
+          value > std::numeric_limits<int16_t>::max()) {
+        diagnostics.error(rhsParameter->position,
+                          "Q15 constexpr coefficient is outside signed i16 storage range");
+        return std::nullopt;
+      }
+    }
+    if (!lhsParameter->extent) {
+      diagnostics.error(lhsParameter->position,
+                        "constexpr FIR coefficients require a static input extent");
+      return std::nullopt;
+    }
+    if (*lhsParameter->extent != static_cast<int64_t>(rhsParameter->constantValues.size())) {
+      diagnostics.error(lhsParameter->position,
+                        "static input extent must equal the constexpr coefficient count");
+      return std::nullopt;
+    }
   }
 
   if (ast.result.accumulatorWidth != 40) {
@@ -518,7 +658,8 @@ static Location getLocation(MLIRContext &context, llvm::StringRef sourceName,
 
 static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::StringRef sourceName,
                                             MLIRContext &context) {
-  context.loadDialect<func::FuncDialect, ir::OndrixDialect, ondsp::OndspDialect>();
+  context.loadDialect<func::FuncDialect, memref::MemRefDialect, ir::OndrixDialect,
+                      ondsp::OndspDialect>();
   OpBuilder builder(&context);
   Location kernelLocation = getLocation(context, sourceName, kernel.ast.position);
   OwningOpRef<ModuleOp> module = ModuleOp::create(kernelLocation);
@@ -526,16 +667,47 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   Type elementType = kernel.ast.resultType == SourceType::Q15
                          ? static_cast<Type>(builder.getI16Type())
                          : static_cast<Type>(builder.getF32Type());
-  MemRefType bufferType = MemRefType::get({ShapedType::kDynamic}, elementType);
-  FunctionType functionType = builder.getFunctionType({bufferType, bufferType}, {elementType});
+  SmallVector<Type> inputTypes;
+  for (const ParameterAst &parameter : kernel.ast.parameters) {
+    if (parameter.isConstexpr())
+      continue;
+    int64_t extent = parameter.extent.value_or(ShapedType::kDynamic);
+    inputTypes.push_back(MemRefType::get({extent}, elementType));
+  }
+  FunctionType functionType = builder.getFunctionType(inputTypes, {elementType});
   auto function = func::FuncOp::create(kernelLocation, kernel.ast.name, functionType);
   function->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
   Block *entry = function.addEntryBlock();
   builder.setInsertionPointToStart(entry);
 
   llvm::DenseMap<llvm::StringRef, Value> arguments;
-  for (auto [parameter, argument] : llvm::zip(kernel.ast.parameters, entry->getArguments()))
-    arguments.insert({parameter.name, argument});
+  unsigned argumentIndex = 0;
+  for (const ParameterAst &parameter : kernel.ast.parameters) {
+    if (!parameter.isConstexpr()) {
+      arguments.insert({parameter.name, entry->getArgument(argumentIndex++)});
+      continue;
+    }
+
+    int64_t extent = static_cast<int64_t>(parameter.constantValues.size());
+    MemRefType coefficientType = MemRefType::get({extent}, elementType);
+    RankedTensorType initializerType = RankedTensorType::get({extent}, elementType);
+    SmallVector<llvm::APInt> values;
+    values.reserve(parameter.constantValues.size());
+    for (int64_t value : parameter.constantValues)
+      values.emplace_back(16, static_cast<uint64_t>(value), true);
+    auto initializer = DenseIntElementsAttr::get(initializerType, values);
+    std::string symbolName = "__ox_" + kernel.ast.name + "_" + parameter.name;
+
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToStart(module->getBody());
+    builder.create<memref::GlobalOp>(getLocation(context, sourceName, parameter.position),
+                                     symbolName, builder.getStringAttr("private"), coefficientType,
+                                     initializer, true, IntegerAttr());
+    builder.setInsertionPointToStart(entry);
+    Value coefficients = builder.create<memref::GetGlobalOp>(
+        getLocation(context, sourceName, parameter.position), coefficientType, symbolName);
+    arguments.insert({parameter.name, coefficients});
+  }
 
   Location expressionLocation = getLocation(context, sourceName, kernel.ast.result.position);
   Value lhs = arguments.lookup(kernel.ast.result.lhs);

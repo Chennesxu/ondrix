@@ -21,6 +21,25 @@ kernel q15_fir(window: buffer[q15], coefficients: buffer[q15]) -> q15:
              overflow=saturate)
 ```
 
+FIR coefficients may instead be embedded as compile-time Q15 raw values. A
+static input extent is required so the frontend can prove the window and
+coefficient lengths agree:
+
+```python
+kernel q15_fir_constexpr(
+    window: buffer[q15, 5],
+    coefficients: constexpr[q15] = [16384, -8192, 4096, -8192, 16384]) -> q15:
+  return fir(window, coefficients,
+             accumulator=exact[40, wrap],
+             rounding=nearest_even,
+             overflow=saturate)
+```
+
+The constexpr parameter is not a runtime ABI argument. It lowers to a private
+constant memref global, preserving immutable coefficient provenance for the
+existing constant FIR analysis and opt-in specialization pass. Values must fit
+signed i16 storage; constexpr is not yet a general expression facility.
+
 An ordered f32 dot names its contraction policy instead of a fixed-point
 accumulator and export policy:
 
@@ -52,6 +71,6 @@ pipeline, but the resulting C ABI is not stable.
 
 This is not a general Python parser. Functions declared with `def`, imports,
 classes, heap objects, arbitrary expressions, and dynamic Python behavior are
-rejected. f32 FIR, constants, indexing, loops, output buffers, multiple kernels,
-and inferred accumulators remain unimplemented. Textual MLIR remains an
-independent and more complete compiler entry point.
+rejected. f32 FIR, scalar constants, indexing, loops, output buffers, multiple
+kernels, and inferred accumulators remain unimplemented. Textual MLIR remains
+an independent and more complete compiler entry point.

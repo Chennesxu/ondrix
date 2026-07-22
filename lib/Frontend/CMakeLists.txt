@@ -6,6 +6,7 @@ add_ondrix_library(OndrixFrontend
   LINK_LIBS PUBLIC
   MLIRFuncDialect
   MLIRIR
+  MLIRMemRefDialect
   MLIRSupport
   OndrixIR
   OndspIR

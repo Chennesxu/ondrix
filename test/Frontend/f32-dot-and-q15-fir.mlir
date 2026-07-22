@@ -3,6 +3,8 @@
 // RUN: ondrix-compile %S/Inputs/f32_dot_fma.ox | ondrix-opt --convert-ondrix-to-ondsp --lower-ondsp-f32-reduce-to-scalar | FileCheck %s --check-prefix=F32-SCALAR
 // RUN: ondrix-compile %S/Inputs/q15_fir.ox | FileCheck %s --check-prefix=FIR
 // RUN: ondrix-compile %S/Inputs/q15_fir.ox | ondrix-opt --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar | FileCheck %s --check-prefix=FIR-SCALAR
+// RUN: ondrix-compile %S/Inputs/q15_fir_constexpr.ox | FileCheck %s --check-prefix=CONSTEXPR
+// RUN: ondrix-compile %S/Inputs/q15_fir_constexpr.ox | ondrix-opt --specialize-ondrix-constant-fir | FileCheck %s --check-prefix=SPECIALIZED
 
 // F32-LABEL: func.func @f32_dot_fma
 // F32-SAME: memref<?xf32>
@@ -33,3 +35,14 @@
 // FIR-SCALAR: arith.muli
 // FIR-SCALAR-NOT: ondrix.
 // FIR-SCALAR-NOT: ondsp.
+
+// CONSTEXPR: memref.global "private" constant @__ox_q15_fir_constexpr_coefficients
+// CONSTEXPR-SAME: : memref<5xi16> = dense<[16384, -8192, 4096, -8192, 16384]>
+// CONSTEXPR-LABEL: func.func @q15_fir_constexpr(
+// CONSTEXPR-SAME: %[[WINDOW:.*]]: memref<5xi16>) -> i16
+// CONSTEXPR: %[[COEFFS:.*]] = memref.get_global @__ox_q15_fir_constexpr_coefficients
+// CONSTEXPR: ondrix.fir %[[WINDOW]], %[[COEFFS]]
+
+// SPECIALIZED-LABEL: func.func @q15_fir_constexpr(
+// SPECIALIZED-NOT: ondrix.fir
+// SPECIALIZED: ondsp.acc_add_term
