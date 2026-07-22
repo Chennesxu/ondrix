@@ -181,25 +181,33 @@ private:
   unsigned column = 1;
 };
 
+enum class SourceType { Q15, F32 };
+
+enum class ReductionKind { Dot, Fir };
+
 struct ParameterAst {
   std::string name;
+  SourceType type;
   SourcePosition position;
 };
 
-struct DotAst {
+struct ReductionAst {
+  ReductionKind kind;
   std::string lhs;
   std::string rhs;
   uint64_t accumulatorWidth = 0;
   std::string updateOverflow;
   std::string rounding;
   std::string destinationOverflow;
+  std::string fpContract;
   SourcePosition position;
 };
 
 struct KernelAst {
   std::string name;
   std::vector<ParameterAst> parameters;
-  DotAst result;
+  SourceType resultType;
+  ReductionAst result;
   SourcePosition position;
 };
 
@@ -233,71 +241,61 @@ public:
       if (!parameterName)
         return std::nullopt;
       if (!expect(TokenKind::Colon, "expected ':' after parameter name") ||
-          !expectIdentifier("buffer", "expected parameter type 'buffer[q15]'") ||
-          !expect(TokenKind::LeftBracket, "expected '[' in buffer type") ||
-          !expectIdentifier("q15", "only buffer[q15] is supported in this frontend slice") ||
-          !expect(TokenKind::RightBracket, "expected ']' in buffer type"))
+          !expectIdentifier("buffer", "expected parameter type 'buffer[q15]' or 'buffer[f32]'") ||
+          !expect(TokenKind::LeftBracket, "expected '[' in buffer type"))
         return std::nullopt;
-      kernel.parameters.push_back({parameterName->spelling.str(), parameterName->position});
+      auto parameterType = parseSourceType("expected buffer element type 'q15' or 'f32'");
+      if (!parameterType || !expect(TokenKind::RightBracket, "expected ']' in buffer type"))
+        return std::nullopt;
+      kernel.parameters.push_back(
+          {parameterName->spelling.str(), *parameterType, parameterName->position});
       if (current.kind != TokenKind::Comma)
         break;
       advance();
     } while (true);
 
     if (!expect(TokenKind::RightParen, "expected ')' after parameters") ||
-        !expect(TokenKind::Arrow, "expected '->' after parameters") ||
-        !expectIdentifier("q15", "only q15 return values are supported in this frontend slice") ||
-        !expect(TokenKind::Colon, "expected ':' before kernel body") ||
+        !expect(TokenKind::Arrow, "expected '->' after parameters"))
+      return std::nullopt;
+    auto resultType = parseSourceType("expected kernel result type 'q15' or 'f32'");
+    if (!resultType || !expect(TokenKind::Colon, "expected ':' before kernel body") ||
         !expectIdentifier("return", "expected a single return statement"))
       return std::nullopt;
+    kernel.resultType = *resultType;
 
-    if (!isIdentifier("dot")) {
-      diagnostics.error(current.position, "expected dot(...) return expression");
+    if (!isIdentifier("dot") && !isIdentifier("fir")) {
+      diagnostics.error(current.position, "expected dot(...) or fir(...) return expression");
       return std::nullopt;
     }
+    kernel.result.kind = isIdentifier("dot") ? ReductionKind::Dot : ReductionKind::Fir;
     kernel.result.position = current.position;
     advance();
-    if (!expect(TokenKind::LeftParen, "expected '(' after dot"))
+    if (!expect(TokenKind::LeftParen, "expected '(' after reduction builtin"))
       return std::nullopt;
-    auto lhs = parseIdentifier("expected dot left operand");
-    if (!lhs || !expect(TokenKind::Comma, "expected ',' after dot left operand"))
+    auto lhs = parseIdentifier("expected reduction left operand");
+    if (!lhs || !expect(TokenKind::Comma, "expected ',' after reduction left operand"))
       return std::nullopt;
-    auto rhs = parseIdentifier("expected dot right operand");
-    if (!rhs || !expect(TokenKind::Comma, "expected ',' before accumulator policy"))
+    auto rhs = parseIdentifier("expected reduction right operand");
+    if (!rhs || !expect(TokenKind::Comma, "expected ',' before numeric policy"))
       return std::nullopt;
     kernel.result.lhs = lhs->spelling.str();
     kernel.result.rhs = rhs->spelling.str();
 
-    if (!expectIdentifier("accumulator", "expected accumulator policy") ||
-        !expect(TokenKind::Equal, "expected '=' after accumulator") ||
-        !expectIdentifier("exact", "only exact accumulator semantics are currently supported") ||
-        !expect(TokenKind::LeftBracket, "expected '[' after exact"))
-      return std::nullopt;
-    auto width = parseInteger("expected exact accumulator width");
-    if (!width || !expect(TokenKind::Comma, "expected ',' after accumulator width"))
-      return std::nullopt;
-    if (width->spelling.getAsInteger(10, kernel.result.accumulatorWidth)) {
-      diagnostics.error(width->position, "accumulator width is out of range");
-      return std::nullopt;
+    if (kernel.resultType == SourceType::Q15) {
+      if (!parseFixedPolicy(kernel.result))
+        return std::nullopt;
+    } else {
+      if (!expectIdentifier("contract", "expected floating-point contract policy") ||
+          !expect(TokenKind::Equal, "expected '=' after contract"))
+        return std::nullopt;
+      auto contract = parseIdentifier("expected floating-point contract mode");
+      if (!contract)
+        return std::nullopt;
+      kernel.result.fpContract = contract->spelling.str();
     }
-    auto updateOverflow = parseIdentifier("expected accumulator update overflow policy");
-    if (!updateOverflow ||
-        !expect(TokenKind::RightBracket, "expected ']' after accumulator policy") ||
-        !expect(TokenKind::Comma, "expected ',' before rounding policy") ||
-        !expectIdentifier("rounding", "expected rounding policy") ||
-        !expect(TokenKind::Equal, "expected '=' after rounding"))
+
+    if (!expect(TokenKind::RightParen, "expected ')' after reduction expression"))
       return std::nullopt;
-    kernel.result.updateOverflow = updateOverflow->spelling.str();
-    auto rounding = parseIdentifier("expected rounding mode");
-    if (!rounding || !expect(TokenKind::Comma, "expected ',' before destination overflow policy") ||
-        !expectIdentifier("overflow", "expected destination overflow policy") ||
-        !expect(TokenKind::Equal, "expected '=' after overflow"))
-      return std::nullopt;
-    kernel.result.rounding = rounding->spelling.str();
-    auto destinationOverflow = parseIdentifier("expected destination overflow mode");
-    if (!destinationOverflow || !expect(TokenKind::RightParen, "expected ')' after dot expression"))
-      return std::nullopt;
-    kernel.result.destinationOverflow = destinationOverflow->spelling.str();
 
     if (current.kind != TokenKind::Eof) {
       diagnostics.error(current.position, "only one kernel is supported per file in this slice");
@@ -351,6 +349,53 @@ private:
     return result;
   }
 
+  std::optional<SourceType> parseSourceType(const llvm::Twine &message) {
+    if (isIdentifier("q15")) {
+      advance();
+      return SourceType::Q15;
+    }
+    if (isIdentifier("f32")) {
+      advance();
+      return SourceType::F32;
+    }
+    diagnostics.error(current.position, message);
+    return std::nullopt;
+  }
+
+  bool parseFixedPolicy(ReductionAst &result) {
+    if (!expectIdentifier("accumulator", "expected accumulator policy") ||
+        !expect(TokenKind::Equal, "expected '=' after accumulator") ||
+        !expectIdentifier("exact", "only exact accumulator semantics are currently supported") ||
+        !expect(TokenKind::LeftBracket, "expected '[' after exact"))
+      return false;
+    auto width = parseInteger("expected exact accumulator width");
+    if (!width || !expect(TokenKind::Comma, "expected ',' after accumulator width"))
+      return false;
+    if (width->spelling.getAsInteger(10, result.accumulatorWidth)) {
+      diagnostics.error(width->position, "accumulator width is out of range");
+      return false;
+    }
+    auto updateOverflow = parseIdentifier("expected accumulator update overflow policy");
+    if (!updateOverflow ||
+        !expect(TokenKind::RightBracket, "expected ']' after accumulator policy") ||
+        !expect(TokenKind::Comma, "expected ',' before rounding policy") ||
+        !expectIdentifier("rounding", "expected rounding policy") ||
+        !expect(TokenKind::Equal, "expected '=' after rounding"))
+      return false;
+    result.updateOverflow = updateOverflow->spelling.str();
+    auto rounding = parseIdentifier("expected rounding mode");
+    if (!rounding || !expect(TokenKind::Comma, "expected ',' before destination overflow policy") ||
+        !expectIdentifier("overflow", "expected destination overflow policy") ||
+        !expect(TokenKind::Equal, "expected '=' after overflow"))
+      return false;
+    result.rounding = rounding->spelling.str();
+    auto destinationOverflow = parseIdentifier("expected destination overflow mode");
+    if (!destinationOverflow)
+      return false;
+    result.destinationOverflow = destinationOverflow->spelling.str();
+    return true;
+  }
+
   Lexer &lexer;
   Diagnostics &diagnostics;
   Token current;
@@ -358,9 +403,10 @@ private:
 
 struct CheckedKernel {
   KernelAst ast;
-  ondsp::OverflowMode updateOverflow;
-  ondsp::RoundingMode rounding;
-  ondsp::OverflowMode destinationOverflow;
+  std::optional<ondsp::OverflowMode> updateOverflow;
+  std::optional<ondsp::RoundingMode> rounding;
+  std::optional<ondsp::OverflowMode> destinationOverflow;
+  std::optional<ondsp::FpContractMode> fpContract;
 };
 
 static std::optional<ondsp::OverflowMode> parseOverflow(llvm::StringRef value) {
@@ -381,9 +427,19 @@ static std::optional<ondsp::RoundingMode> parseRounding(llvm::StringRef value) {
   return std::nullopt;
 }
 
+static std::optional<ondsp::FpContractMode> parseFpContract(llvm::StringRef value) {
+  if (value == "off")
+    return ondsp::FpContractMode::Off;
+  if (value == "fma")
+    return ondsp::FpContractMode::Fma;
+  if (value == "fast")
+    return ondsp::FpContractMode::Fast;
+  return std::nullopt;
+}
+
 static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diagnostics) {
   if (ast.parameters.size() != 2) {
-    diagnostics.error(ast.position, "q15 dot kernels require exactly two parameters");
+    diagnostics.error(ast.position, "dot and FIR kernels require exactly two parameters");
     return std::nullopt;
   }
 
@@ -394,17 +450,38 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         llvm::Twine("duplicate parameter '") + parameter.name + "'");
       return std::nullopt;
     }
+    if (parameter.type != ast.resultType) {
+      diagnostics.error(parameter.position,
+                        "parameter element types must match the kernel result type");
+      return std::nullopt;
+    }
   }
   if (!parameterNames.contains(ast.result.lhs)) {
     diagnostics.error(ast.result.position,
-                      llvm::Twine("unknown dot operand '") + ast.result.lhs + "'");
+                      llvm::Twine("unknown reduction operand '") + ast.result.lhs + "'");
     return std::nullopt;
   }
   if (!parameterNames.contains(ast.result.rhs)) {
     diagnostics.error(ast.result.position,
-                      llvm::Twine("unknown dot operand '") + ast.result.rhs + "'");
+                      llvm::Twine("unknown reduction operand '") + ast.result.rhs + "'");
     return std::nullopt;
   }
+
+  if (ast.resultType == SourceType::F32) {
+    if (ast.result.kind != ReductionKind::Dot) {
+      diagnostics.error(ast.result.position,
+                        "the current f32 frontend slice supports dot but not FIR");
+      return std::nullopt;
+    }
+    auto contract = parseFpContract(ast.result.fpContract);
+    if (!contract) {
+      diagnostics.error(ast.result.position, llvm::Twine("unsupported floating-point contract '") +
+                                                 ast.result.fpContract + "'");
+      return std::nullopt;
+    }
+    return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, *contract};
+  }
+
   if (ast.result.accumulatorWidth != 40) {
     diagnostics.error(ast.result.position,
                       "the executable Q15 profile requires exact accumulator width 40");
@@ -430,7 +507,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     return std::nullopt;
   }
 
-  return CheckedKernel{std::move(ast), *updateOverflow, *rounding, *destinationOverflow};
+  return CheckedKernel{std::move(ast), *updateOverflow, *rounding, *destinationOverflow,
+                       std::nullopt};
 }
 
 static Location getLocation(MLIRContext &context, llvm::StringRef sourceName,
@@ -445,9 +523,11 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   Location kernelLocation = getLocation(context, sourceName, kernel.ast.position);
   OwningOpRef<ModuleOp> module = ModuleOp::create(kernelLocation);
 
-  IntegerType i16 = builder.getI16Type();
-  MemRefType bufferType = MemRefType::get({ShapedType::kDynamic}, i16);
-  FunctionType functionType = builder.getFunctionType({bufferType, bufferType}, {i16});
+  Type elementType = kernel.ast.resultType == SourceType::Q15
+                         ? static_cast<Type>(builder.getI16Type())
+                         : static_cast<Type>(builder.getF32Type());
+  MemRefType bufferType = MemRefType::get({ShapedType::kDynamic}, elementType);
+  FunctionType functionType = builder.getFunctionType({bufferType, bufferType}, {elementType});
   auto function = func::FuncOp::create(kernelLocation, kernel.ast.name, functionType);
   function->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
   Block *entry = function.addEntryBlock();
@@ -458,17 +538,32 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     arguments.insert({parameter.name, argument});
 
   Location expressionLocation = getLocation(context, sourceName, kernel.ast.result.position);
-  auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, i16, 15);
-  auto product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::Full);
-  auto accumulatorType = ondsp::AccType::get(&context, builder.getIntegerType(40), 30,
-                                             ondsp::Signedness::Signed, kernel.updateOverflow);
-  auto dot = builder.create<ir::DotOp>(expressionLocation, accumulatorType,
-                                       arguments.lookup(kernel.ast.result.lhs),
-                                       arguments.lookup(kernel.ast.result.rhs), numeric, product);
-  auto result =
-      builder.create<ondsp::AccExportOp>(expressionLocation, i16, dot.getResult(), numeric,
-                                         kernel.rounding, kernel.destinationOverflow);
-  builder.create<func::ReturnOp>(expressionLocation, result.getResult());
+  Value lhs = arguments.lookup(kernel.ast.result.lhs);
+  Value rhs = arguments.lookup(kernel.ast.result.rhs);
+  if (kernel.ast.resultType == SourceType::Q15) {
+    auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
+    auto product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::Full);
+    auto accumulatorType = ondsp::AccType::get(&context, builder.getIntegerType(40), 30,
+                                               ondsp::Signedness::Signed, *kernel.updateOverflow);
+    Value accumulator;
+    if (kernel.ast.result.kind == ReductionKind::Dot)
+      accumulator =
+          builder.create<ir::DotOp>(expressionLocation, accumulatorType, lhs, rhs, numeric, product)
+              .getResult();
+    else
+      accumulator =
+          builder.create<ir::FirOp>(expressionLocation, accumulatorType, lhs, rhs, numeric, product)
+              .getResult();
+    auto result =
+        builder.create<ondsp::AccExportOp>(expressionLocation, elementType, accumulator, numeric,
+                                           *kernel.rounding, *kernel.destinationOverflow);
+    builder.create<func::ReturnOp>(expressionLocation, result.getResult());
+  } else {
+    auto numeric = ondsp::FpAttr::get(&context, elementType, *kernel.fpContract);
+    auto result = builder.create<ir::DotOp>(expressionLocation, elementType, lhs, rhs, numeric,
+                                            ondsp::ProductAttr());
+    builder.create<func::ReturnOp>(expressionLocation, result.getResult());
+  }
 
   module->push_back(function);
   if (failed(verify(*module)))

@@ -1,7 +1,7 @@
 # Implementation Status
 
 Textual MLIR remains the complete development and testing entry point. The
-experimental `.ox` frontend currently covers one explicit Q15 dot form only.
+experimental `.ox` frontend currently covers Q15 dot/FIR-sample and f32 dot.
 Dialect and source contracts may change while the numeric model is stabilized.
 
 | Capability | Status |
@@ -16,9 +16,9 @@ Dialect and source contracts may change while the numeric model is stabilized.
 | Streaming FIR | Experimental tensor-only `ondrix.fir_stream` with explicit chronological `K-1` history; ordered Q15/Q31/f32 generic scalar lowering, empty and short chunks, `K=1`, dynamic shape guards, multi-chunk state equivalence, and object+C execution are covered; an opt-in materialized concat decomposition reuses the existing Q15/Q31 Vector path; zero-copy buffer scheduling, public buffer semantics, reset/resampling policies, circular-buffer capabilities, and stable frontend binding remain open |
 | Recursive filters | Experimental tensor-only `ondrix.sos_filter_tdf2` defines an explicit f32 transposed-direct-form-II cascade; experimental `ondrix.sos_filter_df2_fixed` separately defines a signed uniform-Q DF-II cascade for Q15/full+i40/frac30 and Q31/full+i64/frac62 with independent state/output export policies; both have dynamic section guards, split/empty-chunk state equivalence, generic lowering, and object+C differential execution; nonuniform fixed scaling, raw-high products, Vector lowering, public buffer semantics, target selection, and stable frontend binding remain unsupported |
 | Packed Q15 butterfly lowering | Experimental instruction selection only; no public emulator or ABI correctness claim |
-| Object generation and C execution | Implemented for scalar and fixed-width Vector Q15/Q31 FIR-sample/full-output paths, ordered scalar Q15/Q31/f32 streaming chunks, opt-in materialized Q15/Q31 streaming Vector reuse, and the experimental f32 TDF-II plus uniform-Q fixed DF-II SOS cascades |
+| Object generation and C execution | Implemented for scalar and fixed-width Vector Q15/Q31 FIR-sample/full-output paths, ordered scalar Q15/Q31/f32 streaming chunks, opt-in materialized Q15/Q31 streaming Vector reuse, the experimental f32 TDF-II plus uniform-Q fixed DF-II SOS cascades, and the `.ox` Q15 dot/FIR plus f32 dot source slices |
 | Public OrtumCore emulation | Signed i40/frac30 saturating accumulator init and Q15 full-product MAC add/sub implemented through exact Ondsp expansion |
-| Python-like `.ox` frontend | Experimental standalone Lexer/Parser/AST/Sema/MLIRGen pipeline for one dynamic rank-1 signed-Q15 dot kernel form; exact i40 update overflow plus destination rounding/overflow are explicit, source locations reach MLIR, diagnostics are source-aware, and object+C execution is covered; f32, FIR, constexpr, indexing, loops, multiple kernels, output buffers, and stable source/ABI contracts remain planned |
+| Python-like `.ox` frontend | Experimental standalone Lexer/Parser/AST/Sema/MLIRGen pipeline for dynamic rank-1 signed-Q15 dot/FIR-sample kernels and f32 dot kernels; Q15 exact i40 update overflow plus destination rounding/overflow and f32 contraction are explicit, source locations reach MLIR, diagnostics are source-aware, and object+C execution is covered; constexpr, indexing, loops, multiple kernels, output buffers, inferred accumulators, and stable source/ABI contracts remain planned |
 | Stable public kernel ABI | Planned |
 
 ## Supported Q15 Slice
@@ -36,8 +36,8 @@ The executable path currently covers:
 The sample, full-output, and explicit-state streaming forms remain separate
 algorithm contracts. Same-boundary FIR, streaming Vector scheduling, Q31 target
 lowering, scalable Vector, and a stable C ABI remain outside this supported Q15
-slice. The experimental `.ox` Q15 dot form is a narrow source entry into the
-same scalar contract, not a stable language surface.
+slice. The experimental `.ox` Q15 dot and FIR-sample forms are narrow source
+entries into the same scalar contract, not a stable language surface.
 
 ## Supported Q31 Slice
 
