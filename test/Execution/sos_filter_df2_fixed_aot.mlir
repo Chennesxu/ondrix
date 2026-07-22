@@ -19,6 +19,16 @@
 // LOWERED-COUNT-6: ondsp.mac
 // LOWERED-COUNT-2: ondsp.acc_export
 // LOWERED-NOT: ondrix.sos_filter_df2_fixed
+// LOWERED-LABEL: func.func @sos_fixed_q15_wrap_output_value
+// LOWERED-COUNT-2: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = wrap>
+// LOWERED: ondsp.acc_export
+// LOWERED-SAME: overflow = #ondsp.overflow<saturate>
+// LOWERED-SAME: rounding = #ondsp.rounding<nearest_even>
+// LOWERED-LABEL: func.func @sos_fixed_q31_saturate_output_value
+// LOWERED-COUNT-2: ondsp.acc_zero : <storage = i64, frac = 62, signed, update_overflow = saturate>
+// LOWERED: ondsp.acc_export
+// LOWERED-SAME: overflow = #ondsp.overflow<wrap>
+// LOWERED-SAME: rounding = #ondsp.rounding<toward_zero>
 // FINAL-NOT: ondrix.
 // FINAL-NOT: ondsp.
 
@@ -83,5 +93,37 @@ func.func @sos_fixed_q31_state_value(
   } : (tensor<?xi32>, tensor<?x5xi32>, tensor<?xi32>, tensor<?x2xi32>)
       -> (tensor<?xi32>, tensor<?x2xi32>)
   %value = tensor.extract %next[%section, %slot] : tensor<?x2xi32>
+  return %value : i32
+}
+
+func.func @sos_fixed_q15_wrap_output_value(
+    %input: tensor<?xi16>, %coeffs: tensor<?x5xi16>,
+    %scales: tensor<?xi16>, %state: tensor<?x2xi16>, %index: index) -> i32 {
+  %output, %next = ondrix.sos_filter_df2_fixed %input, %coeffs, %scales, %state {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_overflow = #ondsp.overflow<saturate>,
+    output_rounding = #ondsp.rounding<nearest_even>, product = #ondsp.product<full>,
+    state_overflow = #ondsp.overflow<wrap>,
+    state_rounding = #ondsp.rounding<toward_negative>
+  } : (tensor<?xi16>, tensor<?x5xi16>, tensor<?xi16>, tensor<?x2xi16>)
+      -> (tensor<?xi16>, tensor<?x2xi16>)
+  %value = tensor.extract %output[%index] : tensor<?xi16>
+  %extended = arith.extsi %value : i16 to i32
+  return %extended : i32
+}
+
+func.func @sos_fixed_q31_saturate_output_value(
+    %input: tensor<?xi32>, %coeffs: tensor<?x5xi32>,
+    %scales: tensor<?xi32>, %state: tensor<?x2xi32>, %index: index) -> i32 {
+  %output, %next = ondrix.sos_filter_df2_fixed %input, %coeffs, %scales, %state {
+    accumulator = !ondsp.acc<storage = i64, frac = 62, signed, update_overflow = saturate>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    output_overflow = #ondsp.overflow<wrap>, output_rounding = #ondsp.rounding<toward_zero>,
+    product = #ondsp.product<full>, state_overflow = #ondsp.overflow<saturate>,
+    state_rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<?xi32>, tensor<?x5xi32>, tensor<?xi32>, tensor<?x2xi32>)
+      -> (tensor<?xi32>, tensor<?x2xi32>)
+  %value = tensor.extract %output[%index] : tensor<?xi32>
   return %value : i32
 }

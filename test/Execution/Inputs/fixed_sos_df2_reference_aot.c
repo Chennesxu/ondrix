@@ -1,6 +1,7 @@
 #include <limits.h>
-#include <stdint.h>
 #include <stdio.h>
+
+#include "fixed_point_reference.h"
 
 typedef int32_t (*Q15Kernel)(int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t,
                              int32_t, int32_t);
@@ -17,76 +18,11 @@ extern int32_t fixed_sos_df2_q31_wrap(int32_t, int32_t, int32_t, int32_t, int32_
 extern int64_t fixed_sos_df2_q31_sat_update_raw(int32_t, int32_t, int32_t, int32_t, int32_t,
                                                 int32_t);
 
-enum OverflowMode { WRAP, SATURATE };
-enum RoundingMode { TOWARD_NEGATIVE, NEAREST_EVEN, TOWARD_ZERO };
-
-struct Policy {
-  unsigned width;
-  unsigned fractional_bits;
-  unsigned accumulator_width;
-  enum OverflowMode update_overflow;
-  enum RoundingMode state_rounding;
-  enum OverflowMode state_overflow;
-  enum RoundingMode output_rounding;
-  enum OverflowMode output_overflow;
-};
-
 struct Step {
   int64_t output;
   int64_t d1;
   int64_t d2;
 };
-
-static int64_t wrap_signed(__int128 value, unsigned width) {
-  __int128 modulus = (__int128)1 << width;
-  __int128 bits = value % modulus;
-  if (bits < 0)
-    bits += modulus;
-  if (bits >= modulus / 2)
-    bits -= modulus;
-  return (int64_t)bits;
-}
-
-static int64_t clamp_signed(__int128 value, unsigned width) {
-  __int128 minimum = -((__int128)1 << (width - 1));
-  __int128 maximum = ((__int128)1 << (width - 1)) - 1;
-  if (value < minimum)
-    return (int64_t)minimum;
-  if (value > maximum)
-    return (int64_t)maximum;
-  return (int64_t)value;
-}
-
-static int64_t update_reference(int64_t accumulator, int64_t lhs, int64_t rhs,
-                                const struct Policy *policy) {
-  __int128 updated = (__int128)accumulator + (__int128)lhs * (__int128)rhs;
-  return policy->update_overflow == WRAP ? wrap_signed(updated, policy->accumulator_width)
-                                         : clamp_signed(updated, policy->accumulator_width);
-}
-
-static __int128 floor_divide_by_power_of_two(__int128 value, unsigned shift) {
-  __int128 divisor = (__int128)1 << shift;
-  __int128 quotient = value / divisor;
-  if (value < 0 && value % divisor != 0)
-    --quotient;
-  return quotient;
-}
-
-static int64_t export_reference(int64_t accumulator, enum RoundingMode rounding,
-                                enum OverflowMode overflow, const struct Policy *policy) {
-  __int128 quotient = floor_divide_by_power_of_two(accumulator, policy->fractional_bits);
-  __int128 divisor = (__int128)1 << policy->fractional_bits;
-  __int128 remainder = (__int128)accumulator - quotient * divisor;
-  if (rounding == TOWARD_ZERO && accumulator < 0 && remainder != 0)
-    ++quotient;
-  if (rounding == NEAREST_EVEN) {
-    __int128 half = divisor / 2;
-    if (remainder > half || (remainder == half && quotient % 2 != 0))
-      ++quotient;
-  }
-  return overflow == WRAP ? wrap_signed(quotient, policy->width)
-                          : clamp_signed(quotient, policy->width);
-}
 
 static struct Step step_reference(int64_t input, int64_t scale, int64_t b0, int64_t b1, int64_t b2,
                                   int64_t a1, int64_t a2, int64_t d1, int64_t d2,
@@ -138,7 +74,8 @@ static int check_q15_sequence(void) {
   const int16_t b2 = 4096;
   const int16_t a1 = 8192;
   const int16_t a2 = -4096;
-  const struct Policy policy = {16, 15, 40, SATURATE, NEAREST_EVEN, SATURATE, TOWARD_ZERO, WRAP};
+  const struct Policy policy = {16,           15,       40,          30,  SATURATE,
+                                NEAREST_EVEN, SATURATE, TOWARD_ZERO, WRAP};
   int64_t reference_d1 = 3000;
   int64_t reference_d2 = -5000;
   int16_t object_d1 = (int16_t)reference_d1;
@@ -215,9 +152,9 @@ static int check_output_overflow(void) {
 }
 
 static int check_q31_boundary(void) {
-  const struct Policy saturating = {32,       31,           64,      SATURATE, TOWARD_NEGATIVE,
+  const struct Policy saturating = {32,       31,           64,      62, SATURATE, TOWARD_NEGATIVE,
                                     SATURATE, NEAREST_EVEN, SATURATE};
-  const struct Policy wrapping = {32, 31, 64, WRAP, TOWARD_ZERO, WRAP, TOWARD_NEGATIVE, WRAP};
+  const struct Policy wrapping = {32, 31, 64, 62, WRAP, TOWARD_ZERO, WRAP, TOWARD_NEGATIVE, WRAP};
   int failed = 0;
   struct Step expected_saturating =
       step_reference(INT32_MIN, INT32_MIN, 0, 0, 0, INT32_MIN, 0, INT32_MIN, 0, &saturating);
@@ -272,9 +209,10 @@ static int check_q31_sequence(const char *name, Q31Kernel kernel, const struct P
 }
 
 int main(void) {
-  const struct Policy q31_saturating = {32,       31,           64,      SATURATE, TOWARD_NEGATIVE,
-                                        SATURATE, NEAREST_EVEN, SATURATE};
-  const struct Policy q31_wrapping = {32, 31, 64, WRAP, TOWARD_ZERO, WRAP, TOWARD_NEGATIVE, WRAP};
+  const struct Policy q31_saturating = {
+      32, 31, 64, 62, SATURATE, TOWARD_NEGATIVE, SATURATE, NEAREST_EVEN, SATURATE};
+  const struct Policy q31_wrapping = {32,  31, 64, 62, WRAP, TOWARD_ZERO, WRAP, TOWARD_NEGATIVE,
+                                      WRAP};
   int failed = 0;
   failed |= check_q15_sequence();
   failed |= check_q15_impulse_convention();

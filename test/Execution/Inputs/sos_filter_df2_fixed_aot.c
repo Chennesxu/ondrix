@@ -1,7 +1,8 @@
 #include <limits.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "fixed_point_reference.h"
 
 #define MEMREF1(T) T *, T *, int64_t, int64_t, int64_t
 #define MEMREF2(T) T *, T *, int64_t, int64_t, int64_t, int64_t, int64_t
@@ -26,73 +27,10 @@ extern int32_t sos_fixed_q31_output_value(MEMREF1(int32_t), MEMREF2(int32_t), ME
                                           MEMREF2(int32_t), int64_t);
 extern int32_t sos_fixed_q31_state_value(MEMREF1(int32_t), MEMREF2(int32_t), MEMREF1(int32_t),
                                          MEMREF2(int32_t), int64_t, int64_t);
-
-enum OverflowMode { WRAP, SATURATE };
-enum RoundingMode { TOWARD_NEGATIVE, NEAREST_EVEN, TOWARD_ZERO };
-
-struct Policy {
-  unsigned width;
-  unsigned frac;
-  unsigned accumulator_width;
-  unsigned accumulator_frac;
-  enum OverflowMode update_overflow;
-  enum RoundingMode state_rounding;
-  enum OverflowMode state_overflow;
-  enum RoundingMode output_rounding;
-  enum OverflowMode output_overflow;
-};
-
-static int64_t wrap_signed(__int128 value, unsigned width) {
-  __int128 modulus = (__int128)1 << width;
-  __int128 bits = value % modulus;
-  if (bits < 0)
-    bits += modulus;
-  if (bits >= modulus / 2)
-    bits -= modulus;
-  return (int64_t)bits;
-}
-
-static int64_t clamp_signed(__int128 value, unsigned width) {
-  __int128 minimum = -((__int128)1 << (width - 1));
-  __int128 maximum = ((__int128)1 << (width - 1)) - 1;
-  if (value < minimum)
-    return (int64_t)minimum;
-  if (value > maximum)
-    return (int64_t)maximum;
-  return (int64_t)value;
-}
-
-static int64_t update_reference(int64_t accumulator, int64_t lhs, int64_t rhs,
-                                const struct Policy *policy) {
-  __int128 updated = (__int128)accumulator + (__int128)lhs * (__int128)rhs;
-  return policy->update_overflow == WRAP ? wrap_signed(updated, policy->accumulator_width)
-                                         : clamp_signed(updated, policy->accumulator_width);
-}
-
-static __int128 floor_divide_by_power_of_two(__int128 value, unsigned shift) {
-  __int128 divisor = (__int128)1 << shift;
-  __int128 quotient = value / divisor;
-  if (value < 0 && value % divisor != 0)
-    --quotient;
-  return quotient;
-}
-
-static int64_t export_reference(int64_t accumulator, enum RoundingMode rounding,
-                                enum OverflowMode overflow, const struct Policy *policy) {
-  unsigned shift = policy->accumulator_frac - policy->frac;
-  __int128 quotient = floor_divide_by_power_of_two(accumulator, shift);
-  __int128 divisor = (__int128)1 << shift;
-  __int128 remainder = (__int128)accumulator - quotient * divisor;
-  if (rounding == TOWARD_ZERO && accumulator < 0 && remainder != 0)
-    ++quotient;
-  if (rounding == NEAREST_EVEN) {
-    __int128 half = divisor / 2;
-    if (remainder > half || (remainder == half && quotient % 2 != 0))
-      ++quotient;
-  }
-  return overflow == WRAP ? wrap_signed(quotient, policy->width)
-                          : clamp_signed(quotient, policy->width);
-}
+extern int32_t sos_fixed_q15_wrap_output_value(MEMREF1(int16_t), MEMREF2(int16_t), MEMREF1(int16_t),
+                                               MEMREF2(int16_t), int64_t);
+extern int32_t sos_fixed_q31_saturate_output_value(MEMREF1(int32_t), MEMREF2(int32_t),
+                                                   MEMREF1(int32_t), MEMREF2(int32_t), int64_t);
 
 static int64_t section_reference(int64_t input, const int64_t *coefficient, int64_t scale,
                                  int64_t *state, const struct Policy *policy) {
@@ -338,4 +276,65 @@ static int check_q15_impulse_golden(void) {
   return failed;
 }
 
-int main(void) { return check_q15() | check_q31() | check_q15_impulse_golden(); }
+static int check_complementary_policies(void) {
+  int16_t q15_input[] = {INT16_MIN, INT16_MAX, -3};
+  int16_t q15_coefficients[] = {INT16_MAX, INT16_MAX, INT16_MAX, INT16_MAX, INT16_MIN,
+                                INT16_MAX, INT16_MIN, INT16_MAX, INT16_MIN, INT16_MAX};
+  int16_t q15_scales[] = {INT16_MIN, INT16_MAX};
+  int16_t q15_state[] = {INT16_MAX, INT16_MIN, -12345, 23456};
+  int64_t q15_wide_input[3], q15_wide_coefficients[10], q15_wide_scales[2], q15_wide_state[4];
+  for (int i = 0; i < 3; ++i)
+    q15_wide_input[i] = q15_input[i];
+  for (int i = 0; i < 10; ++i)
+    q15_wide_coefficients[i] = q15_coefficients[i];
+  for (int i = 0; i < 2; ++i)
+    q15_wide_scales[i] = q15_scales[i];
+  for (int i = 0; i < 4; ++i)
+    q15_wide_state[i] = q15_state[i];
+  const struct Policy q15_policy = {16,   15,           40,      30, WRAP, TOWARD_NEGATIVE,
+                                    WRAP, NEAREST_EVEN, SATURATE};
+  int64_t q15_expected[3], q15_next_state[4];
+  sos_reference(q15_wide_input, 3, q15_wide_coefficients, 2, q15_wide_scales, q15_wide_state,
+                q15_expected, q15_next_state, &q15_policy);
+
+  int32_t q31_input[] = {INT32_MIN, INT32_MAX, -3};
+  int32_t q31_coefficients[] = {INT32_MAX, INT32_MAX, INT32_MIN, INT32_MIN, INT32_MIN,
+                                INT32_MAX, INT32_MIN, INT32_MAX, INT32_MIN, INT32_MAX};
+  int32_t q31_scales[] = {INT32_MIN, INT32_MAX};
+  int32_t q31_state[] = {INT32_MIN, INT32_MIN, -123456789, 987654321};
+  int64_t q31_wide_input[3], q31_wide_coefficients[10], q31_wide_scales[2], q31_wide_state[4];
+  for (int i = 0; i < 3; ++i)
+    q31_wide_input[i] = q31_input[i];
+  for (int i = 0; i < 10; ++i)
+    q31_wide_coefficients[i] = q31_coefficients[i];
+  for (int i = 0; i < 2; ++i)
+    q31_wide_scales[i] = q31_scales[i];
+  for (int i = 0; i < 4; ++i)
+    q31_wide_state[i] = q31_state[i];
+  const struct Policy q31_policy = {32,           31,       64,          62,  SATURATE,
+                                    NEAREST_EVEN, SATURATE, TOWARD_ZERO, WRAP};
+  int64_t q31_expected[3], q31_next_state[4];
+  sos_reference(q31_wide_input, 3, q31_wide_coefficients, 2, q31_wide_scales, q31_wide_state,
+                q31_expected, q31_next_state, &q31_policy);
+
+  int failed = 0;
+  for (int64_t i = 0; i < 3; ++i) {
+    int32_t q15_actual = invoke_output16(sos_fixed_q15_wrap_output_value, q15_input, 3,
+                                         q15_coefficients, q15_scales, q15_state, i);
+    int32_t q31_actual = invoke_output32(sos_fixed_q31_saturate_output_value, q31_input, 3,
+                                         q31_coefficients, q31_scales, q31_state, i);
+    if (q15_actual != q15_expected[i]) {
+      fprintf(stderr, "Q15 complementary policy output %lld mismatch\n", (long long)i);
+      failed = 1;
+    }
+    if (q31_actual != q31_expected[i]) {
+      fprintf(stderr, "Q31 complementary policy output %lld mismatch\n", (long long)i);
+      failed = 1;
+    }
+  }
+  return failed;
+}
+
+int main(void) {
+  return check_q15() | check_q31() | check_q15_impulse_golden() | check_complementary_policies();
+}
