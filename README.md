@@ -31,9 +31,9 @@ The three project dialects have distinct responsibilities:
   private instruction encodings or physical registers.
 
 Textual MLIR remains the complete development and debugging entry point. An
-experimental standalone `.ox` frontend now supports signed-Q15 dot/FIR-sample
-kernels, immutable inline Q15 FIR coefficients, and f32 dot kernels through
-scalar AOT execution. The repository also
+experimental standalone `.ox` frontend now supports signed-Q15/Q31
+dot/FIR-sample kernels, immutable inline fixed-point FIR coefficients, and f32
+dot kernels through scalar AOT execution. The repository also
 includes executable signed-Q15 and signed-Q31 scalar/fixed-width Vector AOT
 paths for FIR samples, full-output FIR, explicit-state streaming FIR, and dot
 products. Full-output and streaming contracts remain experimental; the

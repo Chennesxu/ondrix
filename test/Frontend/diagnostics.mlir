@@ -6,6 +6,8 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_constexpr_dynamic_window.ox 2>&1 | FileCheck %s --check-prefix=CONSTEXPR-DYNAMIC
 // RUN: not ondrix-compile %S/Inputs/invalid_constexpr_dot.ox 2>&1 | FileCheck %s --check-prefix=CONSTEXPR-DOT
 // RUN: not ondrix-compile %S/Inputs/invalid_constexpr_q15_range.ox 2>&1 | FileCheck %s --check-prefix=CONSTEXPR-RANGE
+// RUN: not ondrix-compile %S/Inputs/invalid_q31_accumulator_width.ox 2>&1 | FileCheck %s --check-prefix=Q31-WIDTH
+// RUN: not ondrix-compile %S/Inputs/invalid_constexpr_q31_range.ox 2>&1 | FileCheck %s --check-prefix=Q31-RANGE
 
 // PYTHON: invalid_python_def.ox:1:1: error: unsupported top-level construct 'def'; expected 'kernel'
 // PYTHON-NEXT: def q15_dot(lhs, rhs):
@@ -23,6 +25,10 @@
 
 // CONSTEXPR-DYNAMIC: invalid_constexpr_dynamic_window.ox:2:5: error: constexpr FIR coefficients require a static input extent
 
-// CONSTEXPR-DOT: invalid_constexpr_dot.ox:3:10: error: constexpr is supported only for the coefficient operand of a Q15 FIR
+// CONSTEXPR-DOT: invalid_constexpr_dot.ox:3:10: error: constexpr is supported only for the coefficient operand of a fixed-point FIR
 
 // CONSTEXPR-RANGE: invalid_constexpr_q15_range.ox:2:29: error: Q15 constexpr coefficient is outside signed i16 storage range
+
+// Q31-WIDTH: invalid_q31_accumulator_width.ox:2:10: error: the executable Q31 profile requires exact accumulator width 64
+
+// Q31-RANGE: invalid_constexpr_q31_range.ox:2:29: error: Q31 constexpr coefficient is outside signed i32 storage range

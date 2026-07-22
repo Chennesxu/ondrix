@@ -190,7 +190,7 @@ private:
   unsigned column = 1;
 };
 
-enum class SourceType { Q15, F32 };
+enum class SourceType { Q15, Q31, F32 };
 
 enum class ReductionKind { Dot, Fir };
 
@@ -263,7 +263,7 @@ public:
     if (!expect(TokenKind::RightParen, "expected ')' after parameters") ||
         !expect(TokenKind::Arrow, "expected '->' after parameters"))
       return std::nullopt;
-    auto resultType = parseSourceType("expected kernel result type 'q15' or 'f32'");
+    auto resultType = parseSourceType("expected kernel result type 'q15', 'q31', or 'f32'");
     if (!resultType || !expect(TokenKind::Colon, "expected ':' before kernel body") ||
         !expectIdentifier("return", "expected a single return statement"))
       return std::nullopt;
@@ -287,7 +287,7 @@ public:
     kernel.result.lhs = lhs->spelling.str();
     kernel.result.rhs = rhs->spelling.str();
 
-    if (kernel.resultType == SourceType::Q15) {
+    if (kernel.resultType != SourceType::F32) {
       if (!parseFixedPolicy(kernel.result))
         return std::nullopt;
     } else {
@@ -360,6 +360,10 @@ private:
       advance();
       return SourceType::Q15;
     }
+    if (isIdentifier("q31")) {
+      advance();
+      return SourceType::Q31;
+    }
     if (isIdentifier("f32")) {
       advance();
       return SourceType::F32;
@@ -400,7 +404,7 @@ private:
       advance();
       if (!expect(TokenKind::LeftBracket, "expected '[' in buffer type"))
         return std::nullopt;
-      auto type = parseSourceType("expected buffer element type 'q15' or 'f32'");
+      auto type = parseSourceType("expected buffer element type 'q15', 'q31', or 'f32'");
       if (!type)
         return std::nullopt;
       parameter.type = *type;
@@ -424,14 +428,14 @@ private:
 
     if (!isIdentifier("constexpr")) {
       diagnostics.error(current.position,
-                        "expected parameter type 'buffer[...]' or 'constexpr[q15]'");
+                        "expected parameter type 'buffer[...]' or 'constexpr[q15|q31]'");
       return std::nullopt;
     }
     advance();
     parameter.compileTime = true;
     if (!expect(TokenKind::LeftBracket, "expected '[' in constexpr type"))
       return std::nullopt;
-    auto type = parseSourceType("expected constexpr element type 'q15'");
+    auto type = parseSourceType("expected constexpr element type 'q15' or 'q31'");
     if (!type || !expect(TokenKind::RightBracket, "expected ']' in constexpr type") ||
         !expect(TokenKind::Equal, "expected '=' after constexpr type") ||
         !expect(TokenKind::LeftBracket, "expected '[' before constexpr values"))
@@ -572,7 +576,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     if (llvm::any_of(ast.parameters,
                      [](const ParameterAst &parameter) { return parameter.isConstexpr(); })) {
       diagnostics.error(ast.result.position,
-                        "constexpr parameters are currently restricted to Q15 FIR coefficients");
+                        "constexpr parameters are restricted to fixed-point FIR coefficients");
       return std::nullopt;
     }
     if (ast.result.kind != ReductionKind::Dot) {
@@ -594,19 +598,27 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   if (constexprCount != 0) {
     if (ast.result.kind != ReductionKind::Fir || constexprCount != 1 || !rhsParameter ||
         !rhsParameter->isConstexpr() || !lhsParameter || lhsParameter->isConstexpr()) {
-      diagnostics.error(ast.result.position,
-                        "constexpr is supported only for the coefficient operand of a Q15 FIR");
+      diagnostics.error(
+          ast.result.position,
+          "constexpr is supported only for the coefficient operand of a fixed-point FIR");
       return std::nullopt;
     }
     if (rhsParameter->constantValues.empty()) {
       diagnostics.error(rhsParameter->position, "constexpr coefficients cannot be empty");
       return std::nullopt;
     }
+    int64_t minimum = ast.resultType == SourceType::Q15
+                          ? static_cast<int64_t>(std::numeric_limits<int16_t>::min())
+                          : static_cast<int64_t>(std::numeric_limits<int32_t>::min());
+    int64_t maximum = ast.resultType == SourceType::Q15
+                          ? static_cast<int64_t>(std::numeric_limits<int16_t>::max())
+                          : static_cast<int64_t>(std::numeric_limits<int32_t>::max());
     for (int64_t value : rhsParameter->constantValues) {
-      if (value < std::numeric_limits<int16_t>::min() ||
-          value > std::numeric_limits<int16_t>::max()) {
+      if (value < minimum || value > maximum) {
         diagnostics.error(rhsParameter->position,
-                          "Q15 constexpr coefficient is outside signed i16 storage range");
+                          ast.resultType == SourceType::Q15
+                              ? "Q15 constexpr coefficient is outside signed i16 storage range"
+                              : "Q31 constexpr coefficient is outside signed i32 storage range");
         return std::nullopt;
       }
     }
@@ -622,9 +634,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     }
   }
 
-  if (ast.result.accumulatorWidth != 40) {
+  uint64_t requiredAccumulatorWidth = ast.resultType == SourceType::Q15 ? 40 : 64;
+  if (ast.result.accumulatorWidth != requiredAccumulatorWidth) {
     diagnostics.error(ast.result.position,
-                      "the executable Q15 profile requires exact accumulator width 40");
+                      ast.resultType == SourceType::Q15
+                          ? "the executable Q15 profile requires exact accumulator width 40"
+                          : "the executable Q31 profile requires exact accumulator width 64");
     return std::nullopt;
   }
 
@@ -664,9 +679,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   Location kernelLocation = getLocation(context, sourceName, kernel.ast.position);
   OwningOpRef<ModuleOp> module = ModuleOp::create(kernelLocation);
 
-  Type elementType = kernel.ast.resultType == SourceType::Q15
-                         ? static_cast<Type>(builder.getI16Type())
-                         : static_cast<Type>(builder.getF32Type());
+  Type elementType;
+  if (kernel.ast.resultType == SourceType::Q15)
+    elementType = builder.getI16Type();
+  else if (kernel.ast.resultType == SourceType::Q31)
+    elementType = builder.getI32Type();
+  else
+    elementType = builder.getF32Type();
   SmallVector<Type> inputTypes;
   for (const ParameterAst &parameter : kernel.ast.parameters) {
     if (parameter.isConstexpr())
@@ -693,8 +712,9 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     RankedTensorType initializerType = RankedTensorType::get({extent}, elementType);
     SmallVector<llvm::APInt> values;
     values.reserve(parameter.constantValues.size());
+    unsigned storageWidth = cast<IntegerType>(elementType).getWidth();
     for (int64_t value : parameter.constantValues)
-      values.emplace_back(16, static_cast<uint64_t>(value), true);
+      values.emplace_back(storageWidth, static_cast<uint64_t>(value), true);
     auto initializer = DenseIntElementsAttr::get(initializerType, values);
     std::string symbolName = "__ox_" + kernel.ast.name + "_" + parameter.name;
 
@@ -712,11 +732,17 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   Location expressionLocation = getLocation(context, sourceName, kernel.ast.result.position);
   Value lhs = arguments.lookup(kernel.ast.result.lhs);
   Value rhs = arguments.lookup(kernel.ast.result.rhs);
-  if (kernel.ast.resultType == SourceType::Q15) {
-    auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
+  if (kernel.ast.resultType != SourceType::F32) {
+    unsigned storageWidth = cast<IntegerType>(elementType).getWidth();
+    unsigned fractionalBits = storageWidth - 1;
+    unsigned accumulatorWidth = kernel.ast.resultType == SourceType::Q15 ? 40 : 64;
+    unsigned accumulatorFractionalBits = fractionalBits * 2;
+    auto numeric =
+        ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, fractionalBits);
     auto product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::Full);
-    auto accumulatorType = ondsp::AccType::get(&context, builder.getIntegerType(40), 30,
-                                               ondsp::Signedness::Signed, *kernel.updateOverflow);
+    auto accumulatorType = ondsp::AccType::get(&context, builder.getIntegerType(accumulatorWidth),
+                                               accumulatorFractionalBits, ondsp::Signedness::Signed,
+                                               *kernel.updateOverflow);
     Value accumulator;
     if (kernel.ast.result.kind == ReductionKind::Dot)
       accumulator =

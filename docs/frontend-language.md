@@ -40,6 +40,22 @@ constant memref global, preserving immutable coefficient provenance for the
 existing constant FIR analysis and opt-in specialization pass. Values must fit
 signed i16 storage; constexpr is not yet a general expression facility.
 
+The same fixed-point source forms accept `q31`. The executable Q31 profile
+uses signed i32 storage with 31 fractional bits, an exact full product, and an
+explicit i64/frac62 accumulator:
+
+```python
+kernel q31_dot(lhs: buffer[q31], rhs: buffer[q31]) -> q31:
+  return dot(lhs, rhs,
+             accumulator=exact[64, saturate],
+             rounding=nearest_even,
+             overflow=saturate)
+```
+
+`constexpr[q31]` FIR coefficients follow the same static-length rule and must
+fit signed i32 storage. Raw-high Q31 products and implicit rescaling are not
+part of the source profile.
+
 An ordered f32 dot names its contraction policy instead of a fixed-point
 accumulator and export policy:
 
@@ -54,11 +70,12 @@ Compile it to textual MLIR with:
 ondrix-compile input.ox -o output.mlir
 ```
 
-The frontend expands `q15` to signed `i16` storage with 15 fractional bits,
-emits an exact full product, materializes the declared signed i40/frac30
-accumulator policy, and emits an explicit Q15 export. Supported update and
-destination overflow modes are `wrap` and `saturate`. Supported rounding modes
-are `toward_negative`, `toward_zero`, and `nearest_even`.
+The frontend expands `q15` and `q31` to their signed integer storage and
+fractional positions, emits an exact full product, materializes the declared
+i40/frac30 or i64/frac62 accumulator policy, and emits an explicit export.
+Supported update and destination overflow modes are `wrap` and `saturate`.
+Supported rounding modes are `toward_negative`, `toward_zero`, and
+`nearest_even`.
 
 f32 dot supports `contract=off`, `contract=fma`, and `contract=fast`. `off`
 preserves separate multiply and add operations, `fma` requires fused updates,
