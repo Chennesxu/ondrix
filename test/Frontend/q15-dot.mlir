@@ -1,5 +1,5 @@
-// RUN: ondrixc %S/Inputs/q15_dot.ox --print-source-locations | FileCheck %s --check-prefix=MLIR
-// RUN: ondrixc %S/Inputs/q15_dot.ox | ondrix-opt --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar | FileCheck %s --check-prefix=SCALAR
+// RUN: ondrix-compile %S/Inputs/q15_dot.ox --print-source-locations | FileCheck %s --check-prefix=MLIR
+// RUN: ondrix-compile %S/Inputs/q15_dot.ox | ondrix-opt --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar | FileCheck %s --check-prefix=SCALAR
 
 // MLIR: #loc = loc({{.*}}q15_dot.ox":1:1)
 // MLIR-LABEL: func.func @q15_dot

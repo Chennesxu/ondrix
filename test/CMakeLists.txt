@@ -18,7 +18,7 @@ set(ONDRIX_TEST_DEPENDS
   ondrix-ortumcore-target-profile-test
   ondrix-opt
   ondrix-translate
-  ondrixc
+  ondrix-compile
 )
 
 add_llvm_executable(ondrix-constant-sequence-analysis-test EXCLUDE_FROM_ALL

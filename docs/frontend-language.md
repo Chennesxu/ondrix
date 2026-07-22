@@ -1,6 +1,6 @@
 # Experimental `.ox` Frontend
 
-`ondrixc` is a standalone C++ frontend. Its first executable slice intentionally
+`ondrix-compile` is a standalone C++ frontend. Its first executable slice intentionally
 accepts one kernel per file and one dynamic rank-1 signed-Q15 dot expression:
 
 ```python
@@ -14,7 +14,7 @@ kernel q15_dot(lhs: buffer[q15], rhs: buffer[q15]) -> q15:
 Compile it to textual MLIR with:
 
 ```sh
-ondrixc input.ox -o output.mlir
+ondrix-compile input.ox -o output.mlir
 ```
 
 The frontend expands `q15` to signed `i16` storage with 15 fractional bits,

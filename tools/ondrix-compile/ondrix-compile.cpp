@@ -24,15 +24,16 @@ int main(int argc, char **argv) {
 
   ErrorOr<std::unique_ptr<MemoryBuffer>> input = MemoryBuffer::getFileOrSTDIN(inputFilename);
   if (!input) {
-    errs() << "ondrixc: cannot read '" << inputFilename << "': " << input.getError().message()
-           << "\n";
+    errs() << "ondrix-compile: cannot read '" << inputFilename
+           << "': " << input.getError().message() << "\n";
     return 1;
   }
 
   std::error_code outputError;
   ToolOutputFile output(outputFilename, outputError, sys::fs::OF_Text);
   if (outputError) {
-    errs() << "ondrixc: cannot open '" << outputFilename << "': " << outputError.message() << "\n";
+    errs() << "ondrix-compile: cannot open '" << outputFilename << "': " << outputError.message()
+           << "\n";
     return 1;
   }
 
