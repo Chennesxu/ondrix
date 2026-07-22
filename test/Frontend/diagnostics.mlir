@@ -2,7 +2,6 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_accumulator_width.ox 2>&1 | FileCheck %s --check-prefix=WIDTH
 // RUN: not ondrix-compile %S/Inputs/unknown_operand.ox 2>&1 | FileCheck %s --check-prefix=OPERAND
 // RUN: not ondrix-compile %S/Inputs/invalid_mixed_types.ox 2>&1 | FileCheck %s --check-prefix=MIXED
-// RUN: not ondrix-compile %S/Inputs/invalid_f32_fir.ox 2>&1 | FileCheck %s --check-prefix=F32-FIR
 // RUN: not ondrix-compile %S/Inputs/invalid_constexpr_dynamic_window.ox 2>&1 | FileCheck %s --check-prefix=CONSTEXPR-DYNAMIC
 // RUN: not ondrix-compile %S/Inputs/invalid_constexpr_dot.ox 2>&1 | FileCheck %s --check-prefix=CONSTEXPR-DOT
 // RUN: not ondrix-compile %S/Inputs/invalid_constexpr_q15_range.ox 2>&1 | FileCheck %s --check-prefix=CONSTEXPR-RANGE
@@ -20,8 +19,6 @@
 // OPERAND-NEXT: return dot(lhs, coefficients,
 
 // MIXED: invalid_mixed_types.ox:1:32: error: parameter element types must match the kernel result type
-
-// F32-FIR: invalid_f32_fir.ox:2:10: error: the current f32 frontend slice supports dot but not FIR
 
 // CONSTEXPR-DYNAMIC: invalid_constexpr_dynamic_window.ox:2:5: error: constexpr FIR coefficients require a static input extent
 

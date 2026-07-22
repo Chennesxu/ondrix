@@ -579,11 +579,6 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         "constexpr parameters are restricted to fixed-point FIR coefficients");
       return std::nullopt;
     }
-    if (ast.result.kind != ReductionKind::Dot) {
-      diagnostics.error(ast.result.position,
-                        "the current f32 frontend slice supports dot but not FIR");
-      return std::nullopt;
-    }
     auto contract = parseFpContract(ast.result.fpContract);
     if (!contract) {
       diagnostics.error(ast.result.position, llvm::Twine("unsupported floating-point contract '") +
@@ -758,9 +753,14 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     builder.create<func::ReturnOp>(expressionLocation, result.getResult());
   } else {
     auto numeric = ondsp::FpAttr::get(&context, elementType, *kernel.fpContract);
-    auto result = builder.create<ir::DotOp>(expressionLocation, elementType, lhs, rhs, numeric,
-                                            ondsp::ProductAttr());
-    builder.create<func::ReturnOp>(expressionLocation, result.getResult());
+    Value result;
+    if (kernel.ast.result.kind == ReductionKind::Dot)
+      result = builder.create<ir::DotOp>(expressionLocation, elementType, lhs, rhs, numeric,
+                                         ondsp::ProductAttr());
+    else
+      result = builder.create<ir::FirOp>(expressionLocation, elementType, lhs, rhs, numeric,
+                                         ondsp::ProductAttr());
+    builder.create<func::ReturnOp>(expressionLocation, result);
   }
 
   module->push_back(function);

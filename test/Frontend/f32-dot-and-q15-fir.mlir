@@ -5,6 +5,8 @@
 // RUN: ondrix-compile %S/Inputs/q15_fir.ox | ondrix-opt --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar | FileCheck %s --check-prefix=FIR-SCALAR
 // RUN: ondrix-compile %S/Inputs/q15_fir_constexpr.ox | FileCheck %s --check-prefix=CONSTEXPR
 // RUN: ondrix-compile %S/Inputs/q15_fir_constexpr.ox | ondrix-opt --specialize-ondrix-constant-fir | FileCheck %s --check-prefix=SPECIALIZED
+// RUN: ondrix-compile %S/Inputs/f32_fir_fma.ox | FileCheck %s --check-prefix=F32-FIR
+// RUN: ondrix-compile %S/Inputs/f32_fir_fma.ox | ondrix-opt --convert-ondrix-to-ondsp --lower-ondsp-f32-reduce-to-scalar | FileCheck %s --check-prefix=F32-FIR-SCALAR
 
 // F32-LABEL: func.func @f32_dot_fma
 // F32-SAME: memref<?xf32>
@@ -46,3 +48,14 @@
 // SPECIALIZED-LABEL: func.func @q15_fir_constexpr(
 // SPECIALIZED-NOT: ondrix.fir
 // SPECIALIZED: ondsp.acc_add_term
+
+// F32-FIR-LABEL: func.func @f32_fir_fma
+// F32-FIR: ondrix.fir
+// F32-FIR-SAME: numeric = #ondsp.fp<format = f32, contract = fma>
+
+// F32-FIR-SCALAR-LABEL: func.func @f32_fir_fma
+// F32-FIR-SCALAR: cf.assert
+// F32-FIR-SCALAR: scf.for
+// F32-FIR-SCALAR: math.fma
+// F32-FIR-SCALAR-NOT: ondrix.
+// F32-FIR-SCALAR-NOT: ondsp.

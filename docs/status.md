@@ -1,8 +1,8 @@
 # Implementation Status
 
 Textual MLIR remains the complete development and testing entry point. The
-experimental `.ox` frontend currently covers Q15/Q31 dot/FIR-sample and f32
-dot, including immutable inline Q15/Q31 coefficients for statically sized FIR
+experimental `.ox` frontend currently covers Q15/Q31/f32 dot and FIR-sample,
+including immutable inline Q15/Q31 coefficients for statically sized FIR
 samples.
 Dialect and source contracts may change while the numeric model is stabilized.
 
@@ -18,9 +18,9 @@ Dialect and source contracts may change while the numeric model is stabilized.
 | Streaming FIR | Experimental tensor-only `ondrix.fir_stream` with explicit chronological `K-1` history; ordered Q15/Q31/f32 generic scalar lowering, empty and short chunks, `K=1`, dynamic shape guards, multi-chunk state equivalence, and object+C execution are covered; an opt-in materialized concat decomposition reuses the existing Q15/Q31 Vector path; zero-copy buffer scheduling, public buffer semantics, reset/resampling policies, circular-buffer capabilities, and stable frontend binding remain open |
 | Recursive filters | Experimental tensor-only `ondrix.sos_filter_tdf2` defines an explicit f32 transposed-direct-form-II cascade; experimental `ondrix.sos_filter_df2_fixed` separately defines a signed uniform-Q DF-II cascade for Q15/full+i40/frac30 and Q31/full+i64/frac62 with independent state/output export policies; both have dynamic section guards, split/empty-chunk state equivalence, generic lowering, and object+C differential execution; nonuniform fixed scaling, raw-high products, Vector lowering, public buffer semantics, target selection, and stable frontend binding remain unsupported |
 | Packed Q15 butterfly lowering | Experimental instruction selection only; no public emulator or ABI correctness claim |
-| Object generation and C execution | Implemented for scalar and fixed-width Vector Q15/Q31 FIR-sample/full-output paths, ordered scalar Q15/Q31/f32 streaming chunks, opt-in materialized Q15/Q31 streaming Vector reuse, the experimental f32 TDF-II plus uniform-Q fixed DF-II SOS cascades, and the `.ox` Q15/Q31 dot/FIR plus f32 dot source slices, including constexpr FIR specialization |
+| Object generation and C execution | Implemented for scalar and fixed-width Vector Q15/Q31 FIR-sample/full-output paths, ordered scalar Q15/Q31/f32 streaming chunks, opt-in materialized Q15/Q31 streaming Vector reuse, the experimental f32 TDF-II plus uniform-Q fixed DF-II SOS cascades, and the `.ox` Q15/Q31/f32 dot/FIR source slices, including constexpr fixed FIR specialization |
 | Public OrtumCore emulation | Signed i40/frac30 saturating accumulator init and Q15 full-product MAC add/sub implemented through exact Ondsp expansion |
-| Python-like `.ox` frontend | Experimental standalone Lexer/Parser/AST/Sema/MLIRGen pipeline for rank-1 signed-Q15/Q31 dot/FIR-sample kernels and f32 dot kernels; buffers may have dynamic or static extent, and fixed FIR may carry inline constexpr coefficients that lower to immutable memref globals and activate existing specialization; Q15 i40/frac30 and Q31 i64/frac62 accumulator policies, destination rounding/overflow, and f32 contraction are explicit, source locations reach MLIR, diagnostics are source-aware, and object+C execution is covered; general constexpr expressions, indexing, loops, multiple kernels, output buffers, inferred accumulators, and stable source/ABI contracts remain planned |
+| Python-like `.ox` frontend | Experimental standalone Lexer/Parser/AST/Sema/MLIRGen pipeline for rank-1 Q15/Q31/f32 dot and FIR-sample kernels; buffers may have dynamic or static extent, and fixed FIR may carry inline constexpr coefficients that lower to immutable memref globals and activate existing specialization; Q15 i40/frac30 and Q31 i64/frac62 accumulator policies, destination rounding/overflow, and ordered f32 contraction are explicit, source locations reach MLIR, diagnostics are source-aware, and object+C execution is covered; general constexpr expressions, indexing, loops, multiple kernels, output buffers, inferred accumulators, and stable source/ABI contracts remain planned |
 | Stable public kernel ABI | Planned |
 
 ## Supported Q15 Slice

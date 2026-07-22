@@ -56,12 +56,17 @@ kernel q31_dot(lhs: buffer[q31], rhs: buffer[q31]) -> q31:
 fit signed i32 storage. Raw-high Q31 products and implicit rescaling are not
 part of the source profile.
 
-An ordered f32 dot names its contraction policy instead of a fixed-point
-accumulator and export policy:
+Ordered f32 dot and FIR-sample kernels name their contraction policy instead
+of a fixed-point accumulator and export policy:
 
 ```python
 kernel f32_dot(lhs: buffer[f32], rhs: buffer[f32]) -> f32:
   return dot(lhs, rhs, contract=fma)
+```
+
+```python
+kernel f32_fir(window: buffer[f32], coefficients: buffer[f32]) -> f32:
+  return fir(window, coefficients, contract=off)
 ```
 
 Compile it to textual MLIR with:
@@ -77,10 +82,10 @@ Supported update and destination overflow modes are `wrap` and `saturate`.
 Supported rounding modes are `toward_negative`, `toward_zero`, and
 `nearest_even`.
 
-f32 dot supports `contract=off`, `contract=fma`, and `contract=fast`. `off`
-preserves separate multiply and add operations, `fma` requires fused updates,
-and `fast` explicitly permits fast-math transformations. Only `off` and `fma`
-are bitwise differential contracts.
+f32 dot and FIR support `contract=off`, `contract=fma`, and `contract=fast`.
+`off` preserves separate multiply and add operations, `fma` requires fused
+updates, and `fast` explicitly permits fast-math transformations. Only `off`
+and `fma` are bitwise differential contracts.
 
 No target capability or physical register information enters source IR.
 `llvm.emit_c_interface` marks the generated function for the existing AOT
@@ -88,6 +93,6 @@ pipeline, but the resulting C ABI is not stable.
 
 This is not a general Python parser. Functions declared with `def`, imports,
 classes, heap objects, arbitrary expressions, and dynamic Python behavior are
-rejected. f32 FIR, scalar constants, indexing, loops, output buffers, multiple
-kernels, and inferred accumulators remain unimplemented. Textual MLIR remains
-an independent and more complete compiler entry point.
+rejected. Scalar constants, indexing, loops, output buffers, multiple kernels,
+and inferred accumulators remain unimplemented. Textual MLIR remains an
+independent and more complete compiler entry point.
