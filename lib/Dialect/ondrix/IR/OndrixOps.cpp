@@ -259,12 +259,22 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
   return success();
 }
 
+static LogicalResult verifyUnencodedTensorTypes(Operation *op,
+                                                ArrayRef<RankedTensorType> tensorTypes) {
+  if (llvm::any_of(tensorTypes, [](RankedTensorType type) { return type.getEncoding(); }))
+    return op->emitOpError("does not support encoded tensor types");
+  return success();
+}
+
 static LogicalResult verifyFirStreamDomain(FirStreamOp op) {
   RankedTensorType inputType = op.getInput().getType();
   RankedTensorType coefficientType = op.getCoeffs().getType();
   RankedTensorType stateType = op.getState().getType();
   RankedTensorType outputType = op.getOutput().getType();
   RankedTensorType nextStateType = op.getNextState().getType();
+  if (failed(verifyUnencodedTensorTypes(
+          op, {inputType, coefficientType, stateType, outputType, nextStateType})))
+    return failure();
   if (inputType.getRank() != 1 || coefficientType.getRank() != 1 || stateType.getRank() != 1 ||
       outputType.getRank() != 1 || nextStateType.getRank() != 1)
     return op.emitOpError("requires rank-1 input, coefficients, state, and results");
@@ -326,9 +336,8 @@ static LogicalResult verifyFirStreamDomain(FirStreamOp op) {
 static LogicalResult verifySosTensorLayout(Operation *op, RankedTensorType inputType,
                                            RankedTensorType coefficientType,
                                            RankedTensorType scaleType, RankedTensorType stateType) {
-  if (inputType.getEncoding() || coefficientType.getEncoding() || scaleType.getEncoding() ||
-      stateType.getEncoding())
-    return op->emitOpError("does not support encoded tensor types");
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, coefficientType, scaleType, stateType})))
+    return failure();
   if (inputType.getRank() != 1 || coefficientType.getRank() != 2 || scaleType.getRank() != 1 ||
       stateType.getRank() != 2)
     return op->emitOpError("requires rank-1 input/scales and rank-2 coefficients/state tensors");

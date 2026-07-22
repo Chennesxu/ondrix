@@ -102,3 +102,27 @@ func.func @fp_rejects_fixed_lifecycle(
       -> (tensor<4xf32>, tensor<2xf32>)
   return
 }
+
+// -----
+
+func.func @rejects_encoded_input(
+    %input: tensor<4xf32, "encoded">, %coeffs: tensor<3xf32>, %state: tensor<2xf32>) {
+  // expected-error @+1 {{does not support encoded tensor types}}
+  %output, %next = ondrix.fir_stream %input, %coeffs, %state {
+    numeric = #ondsp.fp<format = f32, contract = fma>
+  } : (tensor<4xf32, "encoded">, tensor<3xf32>, tensor<2xf32>)
+      -> (tensor<4xf32>, tensor<2xf32>)
+  return
+}
+
+// -----
+
+func.func @rejects_encoded_result(
+    %input: tensor<4xf32>, %coeffs: tensor<3xf32>, %state: tensor<2xf32>) {
+  // expected-error @+1 {{does not support encoded tensor types}}
+  %output, %next = ondrix.fir_stream %input, %coeffs, %state {
+    numeric = #ondsp.fp<format = f32, contract = fma>
+  } : (tensor<4xf32>, tensor<3xf32>, tensor<2xf32>)
+      -> (tensor<4xf32, "encoded">, tensor<2xf32>)
+  return
+}
