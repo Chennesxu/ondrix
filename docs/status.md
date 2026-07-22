@@ -2,8 +2,8 @@
 
 Textual MLIR remains the complete development and testing entry point. The
 experimental `.ox` frontend currently covers Q15/Q31/f32 dot and FIR-sample,
-including immutable inline Q15/Q31 coefficients for statically sized FIR
-samples.
+including immutable inline Q15/Q31 right operands for statically sized
+reductions.
 Dialect and source contracts may change while the numeric model is stabilized.
 
 | Capability | Status |
@@ -20,7 +20,7 @@ Dialect and source contracts may change while the numeric model is stabilized.
 | Packed Q15 butterfly lowering | Experimental instruction selection only; no public emulator or ABI correctness claim |
 | Object generation and C execution | Implemented for scalar and fixed-width Vector Q15/Q31 FIR-sample/full-output paths, ordered scalar Q15/Q31/f32 streaming chunks, opt-in materialized Q15/Q31 streaming Vector reuse, the experimental f32 TDF-II plus uniform-Q fixed DF-II SOS cascades, and the `.ox` Q15/Q31/f32 dot/FIR source slices, including constexpr fixed FIR specialization |
 | Public OrtumCore emulation | Signed i40/frac30 saturating accumulator init and Q15 full-product MAC add/sub implemented through exact Ondsp expansion |
-| Python-like `.ox` frontend | Experimental standalone Lexer/Parser/AST/Sema/MLIRGen pipeline for rank-1 Q15/Q31/f32 dot and FIR-sample kernels; buffers may have dynamic or static extent, and fixed FIR may carry inline constexpr coefficients that lower to immutable memref globals and activate existing specialization; Q15 i40/frac30 and Q31 i64/frac62 accumulator policies, destination rounding/overflow, and ordered f32 contraction are explicit, source locations reach MLIR, diagnostics are source-aware, and object+C execution is covered; general constexpr expressions, indexing, loops, multiple kernels, output buffers, inferred accumulators, and stable source/ABI contracts remain planned |
+| Python-like `.ox` frontend | Experimental standalone Lexer/Parser/AST/Sema/MLIRGen pipeline for rank-1 Q15/Q31/f32 dot and FIR-sample kernels; buffers may have dynamic or static extent, and a fixed reduction may carry an inline constexpr right operand that lowers to an immutable memref global and activates existing proof/specialization consumers; Q15 i40/frac30 and Q31 i64/frac62 accumulator policies, destination rounding/overflow, and ordered f32 contraction are explicit, source locations reach MLIR, diagnostics are source-aware, and object+C execution is covered; general constexpr expressions, indexing, loops, multiple kernels, output buffers, inferred accumulators, and stable source/ABI contracts remain planned |
 | Stable public kernel ABI | Planned |
 
 ## Supported Q15 Slice

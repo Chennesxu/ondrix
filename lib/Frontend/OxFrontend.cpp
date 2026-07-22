@@ -591,15 +591,15 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   unsigned constexprCount = llvm::count_if(
       ast.parameters, [](const ParameterAst &parameter) { return parameter.isConstexpr(); });
   if (constexprCount != 0) {
-    if (ast.result.kind != ReductionKind::Fir || constexprCount != 1 || !rhsParameter ||
-        !rhsParameter->isConstexpr() || !lhsParameter || lhsParameter->isConstexpr()) {
+    if (constexprCount != 1 || !rhsParameter || !rhsParameter->isConstexpr() || !lhsParameter ||
+        lhsParameter->isConstexpr()) {
       diagnostics.error(
           ast.result.position,
-          "constexpr is supported only for the coefficient operand of a fixed-point FIR");
+          "constexpr is supported only for the right operand of a fixed-point reduction");
       return std::nullopt;
     }
     if (rhsParameter->constantValues.empty()) {
-      diagnostics.error(rhsParameter->position, "constexpr coefficients cannot be empty");
+      diagnostics.error(rhsParameter->position, "constexpr reduction operand cannot be empty");
       return std::nullopt;
     }
     int64_t minimum = ast.resultType == SourceType::Q15
@@ -619,7 +619,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     }
     if (!lhsParameter->extent) {
       diagnostics.error(lhsParameter->position,
-                        "constexpr FIR coefficients require a static input extent");
+                        "a constexpr reduction operand requires a static left operand extent");
       return std::nullopt;
     }
     if (*lhsParameter->extent != static_cast<int64_t>(rhsParameter->constantValues.size())) {

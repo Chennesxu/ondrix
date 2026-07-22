@@ -21,9 +21,9 @@ kernel q15_fir(window: buffer[q15], coefficients: buffer[q15]) -> q15:
              overflow=saturate)
 ```
 
-FIR coefficients may instead be embedded as compile-time Q15 raw values. A
-static input extent is required so the frontend can prove the window and
-coefficient lengths agree:
+The right operand of a fixed-point dot or FIR may instead be embedded as
+compile-time raw values. A static left-operand extent is required so the
+frontend can prove the reduction lengths agree:
 
 ```python
 kernel q15_fir_constexpr(
@@ -36,9 +36,11 @@ kernel q15_fir_constexpr(
 ```
 
 The constexpr parameter is not a runtime ABI argument. It lowers to a private
-constant memref global, preserving immutable coefficient provenance for the
-existing constant FIR analysis and opt-in specialization pass. Values must fit
-signed i16 storage; constexpr is not yet a general expression facility.
+constant memref global, preserving immutable provenance for existing
+proof-driven constant reduction and FIR specialization passes. Values must fit
+the selected signed storage; constexpr is not yet a general expression
+facility. A constexpr dot can therefore enter prefix-proof-authorized Vector
+reassociation without turning a source assertion into legality authority.
 
 The same fixed-point source forms accept `q31`. The executable Q31 profile
 uses signed i32 storage with 31 fractional bits, an exact full product, and an
@@ -52,9 +54,9 @@ kernel q31_dot(lhs: buffer[q31], rhs: buffer[q31]) -> q31:
              overflow=saturate)
 ```
 
-`constexpr[q31]` FIR coefficients follow the same static-length rule and must
-fit signed i32 storage. Raw-high Q31 products and implicit rescaling are not
-part of the source profile.
+`constexpr[q31]` reduction operands follow the same static-length rule and
+must fit signed i32 storage. Raw-high Q31 products and implicit rescaling are
+not part of the source profile.
 
 Ordered f32 dot and FIR-sample kernels name their contraction policy instead
 of a fixed-point accumulator and export policy:

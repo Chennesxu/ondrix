@@ -7,6 +7,8 @@
 // RUN: ondrix-compile %S/Inputs/q15_fir_constexpr.ox | ondrix-opt --specialize-ondrix-constant-fir | FileCheck %s --check-prefix=SPECIALIZED
 // RUN: ondrix-compile %S/Inputs/f32_fir_fma.ox | FileCheck %s --check-prefix=F32-FIR
 // RUN: ondrix-compile %S/Inputs/f32_fir_fma.ox | ondrix-opt --convert-ondrix-to-ondsp --lower-ondsp-f32-reduce-to-scalar | FileCheck %s --check-prefix=F32-FIR-SCALAR
+// RUN: ondrix-compile %S/Inputs/q15_dot_constexpr.ox | FileCheck %s --check-prefix=CONST-DOT
+// RUN: ondrix-compile %S/Inputs/q15_dot_constexpr.ox | ondrix-opt --convert-ondrix-to-ondsp --vectorize-ondsp-constant-saturating-memref-reduce="vector-width=4 max-elements=64" | FileCheck %s --check-prefix=PROVEN-DOT
 
 // F32-LABEL: func.func @f32_dot_fma
 // F32-SAME: memref<?xf32>
@@ -59,3 +61,12 @@
 // F32-FIR-SCALAR: math.fma
 // F32-FIR-SCALAR-NOT: ondrix.
 // F32-FIR-SCALAR-NOT: ondsp.
+
+// CONST-DOT: memref.global "private" constant @__ox_q15_dot_constexpr_rhs
+// CONST-DOT-LABEL: func.func @q15_dot_constexpr(%{{.*}}: memref<8xi16>) -> i16
+// CONST-DOT: ondrix.dot
+
+// PROVEN-DOT-LABEL: func.func @q15_dot_constexpr
+// PROVEN-DOT: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// PROVEN-DOT: ondsp.acc_add_term
+// PROVEN-DOT-NOT: ondsp.reduce_mac
