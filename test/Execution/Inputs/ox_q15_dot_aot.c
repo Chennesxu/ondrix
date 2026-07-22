@@ -23,8 +23,8 @@ static int16_t dot_reference(const int16_t *lhs, const int16_t *rhs, int64_t cou
   int64_t accumulator = 0;
   for (int64_t i = 0; i < count; ++i)
     accumulator = update_reference(accumulator, lhs[i], rhs[i], &policy);
-  return (int16_t)export_reference(accumulator, policy.output_rounding,
-                                   policy.output_overflow, &policy);
+  return (int16_t)export_reference(accumulator, policy.output_rounding, policy.output_overflow,
+                                   &policy);
 }
 
 int main(void) {
@@ -37,8 +37,8 @@ int main(void) {
     int16_t actual = q15_dot(lhs, lhs, 0, length, 1, rhs, rhs, 0, length, 1);
     int16_t expected = dot_reference(lhs, rhs, length);
     if (actual != expected) {
-      fprintf(stderr, "q15 dot length %lld: got %d, expected %d\n", (long long)length,
-              actual, expected);
+      fprintf(stderr, "q15 dot length %lld: got %d, expected %d\n", (long long)length, actual,
+              expected);
       return 1;
     }
   }
