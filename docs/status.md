@@ -1,8 +1,8 @@
 # Implementation Status
 
-Textual MLIR is currently the supported development and testing entry point.
-Dialect contracts without a complete public consumer remain experimental and
-may change while the numeric model is stabilized.
+Textual MLIR remains the complete development and testing entry point. The
+experimental `.ox` frontend currently covers one explicit Q15 dot form only.
+Dialect and source contracts may change while the numeric model is stabilized.
 
 | Capability | Status |
 | --- | --- |
@@ -18,7 +18,7 @@ may change while the numeric model is stabilized.
 | Packed Q15 butterfly lowering | Experimental instruction selection only; no public emulator or ABI correctness claim |
 | Object generation and C execution | Implemented for scalar and fixed-width Vector Q15/Q31 FIR-sample/full-output paths, ordered scalar Q15/Q31/f32 streaming chunks, opt-in materialized Q15/Q31 streaming Vector reuse, and the experimental f32 TDF-II plus uniform-Q fixed DF-II SOS cascades |
 | Public OrtumCore emulation | Signed i40/frac30 saturating accumulator init and Q15 full-product MAC add/sub implemented through exact Ondsp expansion |
-| Python-like `.ox` frontend | Planned |
+| Python-like `.ox` frontend | Experimental standalone Lexer/Parser/AST/Sema/MLIRGen pipeline for one dynamic rank-1 signed-Q15 dot kernel form; exact i40 update overflow plus destination rounding/overflow are explicit, source locations reach MLIR, diagnostics are source-aware, and object+C execution is covered; f32, FIR, constexpr, indexing, loops, multiple kernels, output buffers, and stable source/ABI contracts remain planned |
 | Stable public kernel ABI | Planned |
 
 ## Supported Q15 Slice
@@ -35,8 +35,9 @@ The executable path currently covers:
 
 The sample, full-output, and explicit-state streaming forms remain separate
 algorithm contracts. Same-boundary FIR, streaming Vector scheduling, Q31 target
-lowering, scalable Vector, a stable C ABI, and the `.ox` frontend remain outside
-this supported Q15 slice.
+lowering, scalable Vector, and a stable C ABI remain outside this supported Q15
+slice. The experimental `.ox` Q15 dot form is a narrow source entry into the
+same scalar contract, not a stable language surface.
 
 ## Supported Q31 Slice
 

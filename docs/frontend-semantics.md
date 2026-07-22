@@ -1,8 +1,9 @@
 # Frontend Semantic Boundary
 
-This document defines the intended boundary between the future `.ox` source
-language, project dialects, and upstream MLIR dialects. It is a design
-contract, not a statement that the source parser is implemented.
+This document defines the intended boundary between the experimental `.ox`
+source language, project dialects, and upstream MLIR dialects. The implemented
+parser currently covers only the Q15 dot slice documented in
+`frontend-language.md`; the broader items below remain design constraints.
 
 ## Design Rule
 

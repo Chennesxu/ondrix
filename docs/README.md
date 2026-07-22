@@ -6,6 +6,7 @@ stable-candidate Ondrix behavior.
 - [Current implementation status](status.md)
 - [Fixed-point semantics](fixed-point-semantics.md)
 - [Frontend semantic boundary](frontend-semantics.md)
+- [Experimental `.ox` frontend](frontend-language.md)
 - [Streaming FIR contract](streaming-fir.md)
 - [Full-output FIR architecture prototype](full-output-fir-prototype.md)
 
