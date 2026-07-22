@@ -114,3 +114,16 @@ func.func @rejects_element_mismatch(
       -> (tensor<4xf32>, tensor<2x2xf32>)
   return
 }
+
+// -----
+
+func.func @rejects_tensor_encoding(
+    %input: tensor<4xf32, "encoded">, %coeffs: tensor<2x5xf32>,
+    %scales: tensor<2xf32>, %state: tensor<2x2xf32>) {
+  // expected-error @+1 {{does not support encoded tensor types}}
+  %output, %next = ondrix.sos_filter_tdf2 %input, %coeffs, %scales, %state {
+    numeric = #ondsp.fp<format = f32, contract = fma>
+  } : (tensor<4xf32, "encoded">, tensor<2x5xf32>, tensor<2xf32>, tensor<2x2xf32>)
+      -> (tensor<4xf32, "encoded">, tensor<2x2xf32>)
+  return
+}

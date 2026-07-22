@@ -326,6 +326,9 @@ static LogicalResult verifyFirStreamDomain(FirStreamOp op) {
 static LogicalResult verifySosTensorLayout(Operation *op, RankedTensorType inputType,
                                            RankedTensorType coefficientType,
                                            RankedTensorType scaleType, RankedTensorType stateType) {
+  if (inputType.getEncoding() || coefficientType.getEncoding() || scaleType.getEncoding() ||
+      stateType.getEncoding())
+    return op->emitOpError("does not support encoded tensor types");
   if (inputType.getRank() != 1 || coefficientType.getRank() != 2 || scaleType.getRank() != 1 ||
       stateType.getRank() != 2)
     return op->emitOpError("requires rank-1 input/scales and rank-2 coefficients/state tensors");

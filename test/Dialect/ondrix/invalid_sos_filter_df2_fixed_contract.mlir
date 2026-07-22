@@ -150,3 +150,20 @@ func.func @rejects_wrong_q31_accumulator(
       -> (tensor<4xi32>, tensor<2x2xi32>)
   return
 }
+
+// -----
+
+func.func @rejects_tensor_encoding(
+    %input: tensor<4xi16, "encoded">, %coeffs: tensor<2x5xi16>,
+    %scales: tensor<2xi16>, %state: tensor<2x2xi16>) {
+  // expected-error @+1 {{does not support encoded tensor types}}
+  %output, %next = ondrix.sos_filter_df2_fixed %input, %coeffs, %scales, %state {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_overflow = #ondsp.overflow<saturate>, output_rounding = #ondsp.rounding<nearest_even>,
+    product = #ondsp.product<full>, state_overflow = #ondsp.overflow<saturate>,
+    state_rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<4xi16, "encoded">, tensor<2x5xi16>, tensor<2xi16>, tensor<2x2xi16>)
+      -> (tensor<4xi16, "encoded">, tensor<2x2xi16>)
+  return
+}
