@@ -80,8 +80,16 @@ bool testMemRefProvenance() {
 } // namespace
 
 int main() {
-  if (!testSequenceProperties() || !testAnalysisLimit() || !testMemRefProvenance()) {
-    llvm::errs() << "constant sequence analysis: FAIL\n";
+  if (!testSequenceProperties()) {
+    llvm::errs() << "constant sequence properties: FAIL\n";
+    return 1;
+  }
+  if (!testAnalysisLimit()) {
+    llvm::errs() << "constant sequence analysis limit: FAIL\n";
+    return 1;
+  }
+  if (!testMemRefProvenance()) {
+    llvm::errs() << "constant memref provenance: FAIL\n";
     return 1;
   }
   llvm::outs() << "constant sequence analysis: PASS\n";

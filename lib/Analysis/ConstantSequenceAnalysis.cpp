@@ -52,9 +52,9 @@ bool isFullRangeUnitStrideSubview(memref::SubViewOp subview) {
       sourceType.getMemorySpace() != resultType.getMemorySpace())
     return false;
 
-  ArrayRef<OpFoldResult> offsets = subview.getMixedOffsets();
-  ArrayRef<OpFoldResult> sizes = subview.getMixedSizes();
-  ArrayRef<OpFoldResult> strides = subview.getMixedStrides();
+  SmallVector<OpFoldResult> offsets = subview.getMixedOffsets();
+  SmallVector<OpFoldResult> sizes = subview.getMixedSizes();
+  SmallVector<OpFoldResult> strides = subview.getMixedStrides();
   if (offsets.size() != 1 || sizes.size() != 1 || strides.size() != 1 ||
       getConstantIntValue(offsets.front()) != 0 || getConstantIntValue(strides.front()) != 1)
     return false;
