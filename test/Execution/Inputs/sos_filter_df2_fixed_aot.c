@@ -29,8 +29,13 @@ extern int32_t sos_fixed_q31_state_value(MEMREF1(int32_t), MEMREF2(int32_t), MEM
                                          MEMREF2(int32_t), int64_t, int64_t);
 extern int32_t sos_fixed_q15_wrap_output_value(MEMREF1(int16_t), MEMREF2(int16_t), MEMREF1(int16_t),
                                                MEMREF2(int16_t), int64_t);
+extern int32_t sos_fixed_q15_wrap_state_value(MEMREF1(int16_t), MEMREF2(int16_t), MEMREF1(int16_t),
+                                              MEMREF2(int16_t), int64_t, int64_t);
 extern int32_t sos_fixed_q31_saturate_output_value(MEMREF1(int32_t), MEMREF2(int32_t),
                                                    MEMREF1(int32_t), MEMREF2(int32_t), int64_t);
+extern int32_t sos_fixed_q31_saturate_state_value(MEMREF1(int32_t), MEMREF2(int32_t),
+                                                  MEMREF1(int32_t), MEMREF2(int32_t), int64_t,
+                                                  int64_t);
 
 static int64_t section_reference(int64_t input, const int64_t *coefficient, int64_t scale,
                                  int64_t *state, const struct Policy *policy) {
@@ -331,6 +336,18 @@ static int check_complementary_policies(void) {
       fprintf(stderr, "Q31 complementary policy output %lld mismatch\n", (long long)i);
       failed = 1;
     }
+  }
+  int32_t q15_final_state = invoke_state16(sos_fixed_q15_wrap_state_value, q15_input, 3,
+                                           q15_coefficients, q15_scales, q15_state, 1, 0);
+  if (q15_final_state != q15_next_state[2]) {
+    fprintf(stderr, "Q15 complementary policy final state mismatch\n");
+    failed = 1;
+  }
+  int32_t q31_final_state = invoke_state32(sos_fixed_q31_saturate_state_value, q31_input, 3,
+                                           q31_coefficients, q31_scales, q31_state, 1, 0);
+  if (q31_final_state != q31_next_state[2]) {
+    fprintf(stderr, "Q31 complementary policy final state mismatch\n");
+    failed = 1;
   }
   return failed;
 }
