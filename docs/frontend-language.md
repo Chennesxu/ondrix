@@ -104,6 +104,22 @@ fully overlapping interior. Dynamic full output, same padding, stride,
 dilation, streaming state, mutable destinations, and tensor indexing remain
 available only through textual MLIR contracts.
 
+Static packed-Q15 complex FFT uses an explicit experimental element spelling:
+
+```python
+kernel q15_cfft8(input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
+  return cfft(input)
+```
+
+`complex_q15` is stored as one `i32` with the imaginary component in bits
+31:16 and the real component in bits 15:0. The current builtin accepts only
+matching static extents of four or eight and emits the closed forward radix-2
+profile: exact full complex products, nearest-even saturating Q30-to-Q15
+product scaling, and nearest-even saturating one-bit scaling at every
+butterfly stage. This spelling does not imply a general source complex type;
+inverse transforms, other sizes, dynamic planning, and configurable complex
+policies remain unsupported.
+
 Compile it to textual MLIR with:
 
 ```sh

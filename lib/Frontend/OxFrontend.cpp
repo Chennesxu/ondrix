@@ -193,11 +193,11 @@ private:
   unsigned column = 1;
 };
 
-enum class SourceType { Q15, Q31, F32 };
+enum class SourceType { Q15, Q31, F32, ComplexQ15 };
 
 enum class ContainerKind { Buffer, Tensor, Constexpr };
 
-enum class ReductionKind { Dot, Fir, FirFilter };
+enum class ReductionKind { Dot, Fir, FirFilter, Cfft };
 
 struct ParameterAst {
   std::string name;
@@ -288,28 +288,44 @@ public:
         !expectIdentifier("return", "expected a single return statement"))
       return std::nullopt;
 
-    if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter")) {
+    if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter") &&
+        !isIdentifier("cfft")) {
       diagnostics.error(current.position,
-                        "expected dot(...), fir(...), or fir_filter(...) return expression");
+                        "expected dot(...), fir(...), fir_filter(...), or cfft(...) return "
+                        "expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
       kernel.result.kind = ReductionKind::Dot;
     else if (isIdentifier("fir"))
       kernel.result.kind = ReductionKind::Fir;
-    else
+    else if (isIdentifier("fir_filter"))
       kernel.result.kind = ReductionKind::FirFilter;
+    else
+      kernel.result.kind = ReductionKind::Cfft;
     kernel.result.position = current.position;
     advance();
-    if (!expect(TokenKind::LeftParen, "expected '(' after reduction builtin"))
+    if (!expect(TokenKind::LeftParen, "expected '(' after builtin"))
       return std::nullopt;
-    auto lhs = parseIdentifier("expected reduction left operand");
-    if (!lhs || !expect(TokenKind::Comma, "expected ',' after reduction left operand"))
+    auto lhs = parseIdentifier("expected builtin operand");
+    if (!lhs)
+      return std::nullopt;
+    kernel.result.lhs = lhs->spelling.str();
+    if (kernel.result.kind == ReductionKind::Cfft) {
+      if (!expect(TokenKind::RightParen, "expected ')' after cfft operand"))
+        return std::nullopt;
+      if (current.kind != TokenKind::Eof) {
+        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
+        return std::nullopt;
+      }
+      return kernel;
+    }
+
+    if (!expect(TokenKind::Comma, "expected ',' after reduction left operand"))
       return std::nullopt;
     auto rhs = parseIdentifier("expected reduction right operand");
     if (!rhs || !expect(TokenKind::Comma, "expected ',' before numeric policy"))
       return std::nullopt;
-    kernel.result.lhs = lhs->spelling.str();
     kernel.result.rhs = rhs->spelling.str();
 
     if (kernel.result.kind == ReductionKind::FirFilter) {
@@ -402,6 +418,10 @@ private:
     if (isIdentifier("f32")) {
       advance();
       return SourceType::F32;
+    }
+    if (isIdentifier("complex_q15")) {
+      advance();
+      return SourceType::ComplexQ15;
     }
     diagnostics.error(current.position, message);
     return std::nullopt;
@@ -580,8 +600,11 @@ static std::optional<ondsp::FpContractMode> parseFpContract(llvm::StringRef valu
 }
 
 static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diagnostics) {
-  if (ast.parameters.size() != 2) {
-    diagnostics.error(ast.position, "dot and FIR kernels require exactly two parameters");
+  size_t expectedParameterCount = ast.result.kind == ReductionKind::Cfft ? 1 : 2;
+  if (ast.parameters.size() != expectedParameterCount) {
+    diagnostics.error(ast.position, ast.result.kind == ReductionKind::Cfft
+                                        ? "cfft kernels require exactly one parameter"
+                                        : "dot and FIR kernels require exactly two parameters");
     return std::nullopt;
   }
   if (ast.resultExtent && *ast.resultExtent <= 0) {
@@ -614,10 +637,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   }
   if (!parameterNames.contains(ast.result.lhs)) {
     diagnostics.error(ast.result.position,
-                      llvm::Twine("unknown reduction operand '") + ast.result.lhs + "'");
+                      llvm::Twine("unknown builtin operand '") + ast.result.lhs + "'");
     return std::nullopt;
   }
-  if (!parameterNames.contains(ast.result.rhs)) {
+  if (ast.result.kind != ReductionKind::Cfft && !parameterNames.contains(ast.result.rhs)) {
     diagnostics.error(ast.result.position,
                       llvm::Twine("unknown reduction operand '") + ast.result.rhs + "'");
     return std::nullopt;
@@ -625,6 +648,37 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
 
   unsigned constexprCount = llvm::count_if(
       ast.parameters, [](const ParameterAst &parameter) { return parameter.isConstexpr(); });
+  if (ast.result.kind == ReductionKind::Cfft) {
+    if (ast.resultType != SourceType::ComplexQ15) {
+      diagnostics.error(ast.result.position,
+                        "cfft currently requires complex_q15 input and result elements");
+      return std::nullopt;
+    }
+    if (!ast.tensorResult || !lhsParameter || !lhsParameter->isTensor()) {
+      diagnostics.error(ast.result.position, "cfft currently requires a tensor input and result");
+      return std::nullopt;
+    }
+    if (!lhsParameter->extent || !ast.resultExtent) {
+      diagnostics.error(ast.result.position,
+                        "cfft currently requires static input and result extents");
+      return std::nullopt;
+    }
+    if (*lhsParameter->extent != *ast.resultExtent) {
+      diagnostics.error(ast.result.position, "cfft input and result extents must match");
+      return std::nullopt;
+    }
+    if (*lhsParameter->extent != 4 && *lhsParameter->extent != 8) {
+      diagnostics.error(ast.result.position, "cfft currently supports only four or eight points");
+      return std::nullopt;
+    }
+    return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, std::nullopt};
+  }
+
+  if (ast.resultType == SourceType::ComplexQ15) {
+    diagnostics.error(ast.result.position, "complex_q15 is currently supported only by cfft");
+    return std::nullopt;
+  }
+
   if (constexprCount != 0) {
     if (constexprCount != 1 || !rhsParameter || !rhsParameter->isConstexpr() || !lhsParameter ||
         lhsParameter->isConstexpr()) {
@@ -803,7 +857,8 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   Type elementType;
   if (kernel.ast.resultType == SourceType::Q15)
     elementType = builder.getI16Type();
-  else if (kernel.ast.resultType == SourceType::Q31)
+  else if (kernel.ast.resultType == SourceType::Q31 ||
+           kernel.ast.resultType == SourceType::ComplexQ15)
     elementType = builder.getI32Type();
   else
     elementType = builder.getF32Type();
@@ -864,6 +919,25 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
 
   Location expressionLocation = getLocation(context, sourceName, kernel.ast.result.position);
   Value lhs = arguments.lookup(kernel.ast.result.lhs);
+  if (kernel.ast.result.kind == ReductionKind::Cfft) {
+    auto outputType = cast<RankedTensorType>(resultType);
+    auto layout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI16ImagHiRealLo);
+    auto i16 = builder.getI16Type();
+    auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, i16, 15);
+    auto product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::Full);
+    auto productScale = ondsp::ScaleAttr::get(&context, 0, 15, ondsp::RoundingMode::NearestEven,
+                                              ondsp::OverflowMode::Saturate, i16);
+    auto outputScale = ondsp::ScaleAttr::get(&context, 0, 1, ondsp::RoundingMode::NearestEven,
+                                             ondsp::OverflowMode::Saturate, i16);
+    Value result = builder.create<ir::CfftOp>(expressionLocation, outputType, lhs, layout, numeric,
+                                              product, productScale, outputScale);
+    builder.create<func::ReturnOp>(expressionLocation, result);
+    module->push_back(function);
+    if (failed(verify(*module)))
+      return {};
+    return module;
+  }
+
   Value rhs = arguments.lookup(kernel.ast.result.rhs);
   if (kernel.ast.result.kind == ReductionKind::FirFilter) {
     auto outputType = cast<RankedTensorType>(resultType);
