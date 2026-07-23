@@ -31,24 +31,14 @@ The three project dialects have distinct responsibilities:
   private instruction encodings or physical registers.
 
 Textual MLIR remains the complete development and debugging entry point. An
-experimental standalone `.ox` frontend now supports signed-Q15/Q31
-dot/FIR-sample kernels, immutable inline fixed-point reduction operands, and
-Q15/Q31/f32 valid and static full-boundary FIR over tensor values through AOT
-execution. The repository also
-includes executable signed-Q15 and signed-Q31 scalar/fixed-width Vector AOT
-paths for FIR samples, full-output FIR, explicit-state streaming FIR, and dot
-products. Full-output and streaming contracts remain experimental; the
-streaming Vector-reuse path materializes state/input concatenation and is not
-a zero-copy implementation. Public emulation covers the OrtumCore signed
-i40/frac30 saturating accumulator with Q15 full-product MAC. The source
-language surface and additional target consumers remain under development.
+experimental `.ox` frontend, executable Q15/Q31 scalar and Vector paths, DSP
+algorithm contracts, and bounded OrtumCore capability validation are under
+active development.
 
 ## Documentation
 
-- [Documentation index](docs/README.md)
-- [Current implementation status](docs/status.md)
-- [Experimental `.ox` frontend](docs/frontend-language.md)
-- [Fixed-point semantics](docs/fixed-point-semantics.md)
+See the [documentation index](docs/README.md) for language usage, numeric
+semantics, implementation status, and experimental feature notes.
 
 ## Build
 
