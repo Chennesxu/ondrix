@@ -623,6 +623,42 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     return std::nullopt;
   }
 
+  unsigned constexprCount = llvm::count_if(
+      ast.parameters, [](const ParameterAst &parameter) { return parameter.isConstexpr(); });
+  if (constexprCount != 0) {
+    if (constexprCount != 1 || !rhsParameter || !rhsParameter->isConstexpr() || !lhsParameter ||
+        lhsParameter->isConstexpr()) {
+      diagnostics.error(
+          ast.result.position,
+          "constexpr is supported only for the right operand of a fixed-point reduction");
+      return std::nullopt;
+    }
+    if (ast.resultType == SourceType::F32) {
+      diagnostics.error(ast.result.position,
+                        "constexpr parameters are restricted to fixed-point FIR coefficients");
+      return std::nullopt;
+    }
+    if (rhsParameter->constantValues.empty()) {
+      diagnostics.error(rhsParameter->position, "constexpr reduction operand cannot be empty");
+      return std::nullopt;
+    }
+    int64_t minimum = ast.resultType == SourceType::Q15
+                          ? static_cast<int64_t>(std::numeric_limits<int16_t>::min())
+                          : static_cast<int64_t>(std::numeric_limits<int32_t>::min());
+    int64_t maximum = ast.resultType == SourceType::Q15
+                          ? static_cast<int64_t>(std::numeric_limits<int16_t>::max())
+                          : static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+    for (int64_t value : rhsParameter->constantValues) {
+      if (value < minimum || value > maximum) {
+        diagnostics.error(rhsParameter->position,
+                          ast.resultType == SourceType::Q15
+                              ? "Q15 constexpr coefficient is outside signed i16 storage range"
+                              : "Q31 constexpr coefficient is outside signed i32 storage range");
+        return std::nullopt;
+      }
+    }
+  }
+
   if (ast.result.kind == ReductionKind::FirFilter) {
     if (!ast.tensorResult) {
       diagnostics.error(ast.result.position, "fir_filter must return a tensor value");
@@ -639,6 +675,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     if (rhsParameter->isConstexpr())
       coefficientExtent = static_cast<int64_t>(rhsParameter->constantValues.size());
     if (ast.result.boundary == "valid") {
+      if ((!lhsParameter->extent || !coefficientExtent) && ast.resultExtent) {
+        diagnostics.error(ast.result.position,
+                          "a static valid fir_filter result requires static input and coefficient "
+                          "extents");
+        return std::nullopt;
+      }
       if (lhsParameter->extent && coefficientExtent) {
         if (*coefficientExtent > *lhsParameter->extent) {
           diagnostics.error(ast.result.position,
@@ -659,7 +701,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                           "result extents");
         return std::nullopt;
       }
-      if (*lhsParameter->extent > std::numeric_limits<int64_t>::max() - *coefficientExtent + 1) {
+      if (*lhsParameter->extent > std::numeric_limits<int64_t>::max() - (*coefficientExtent - 1)) {
         diagnostics.error(ast.result.position, "full fir_filter result extent overflows index");
         return std::nullopt;
       }
@@ -688,12 +730,6 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   }
 
   if (ast.resultType == SourceType::F32) {
-    if (llvm::any_of(ast.parameters,
-                     [](const ParameterAst &parameter) { return parameter.isConstexpr(); })) {
-      diagnostics.error(ast.result.position,
-                        "constexpr parameters are restricted to fixed-point FIR coefficients");
-      return std::nullopt;
-    }
     auto contract = parseFpContract(ast.result.fpContract);
     if (!contract) {
       diagnostics.error(ast.result.position, llvm::Twine("unsupported floating-point contract '") +
@@ -703,35 +739,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, *contract};
   }
 
-  unsigned constexprCount = llvm::count_if(
-      ast.parameters, [](const ParameterAst &parameter) { return parameter.isConstexpr(); });
   if (constexprCount != 0) {
-    if (constexprCount != 1 || !rhsParameter || !rhsParameter->isConstexpr() || !lhsParameter ||
-        lhsParameter->isConstexpr()) {
-      diagnostics.error(
-          ast.result.position,
-          "constexpr is supported only for the right operand of a fixed-point reduction");
-      return std::nullopt;
-    }
-    if (rhsParameter->constantValues.empty()) {
-      diagnostics.error(rhsParameter->position, "constexpr reduction operand cannot be empty");
-      return std::nullopt;
-    }
-    int64_t minimum = ast.resultType == SourceType::Q15
-                          ? static_cast<int64_t>(std::numeric_limits<int16_t>::min())
-                          : static_cast<int64_t>(std::numeric_limits<int32_t>::min());
-    int64_t maximum = ast.resultType == SourceType::Q15
-                          ? static_cast<int64_t>(std::numeric_limits<int16_t>::max())
-                          : static_cast<int64_t>(std::numeric_limits<int32_t>::max());
-    for (int64_t value : rhsParameter->constantValues) {
-      if (value < minimum || value > maximum) {
-        diagnostics.error(rhsParameter->position,
-                          ast.resultType == SourceType::Q15
-                              ? "Q15 constexpr coefficient is outside signed i16 storage range"
-                              : "Q31 constexpr coefficient is outside signed i32 storage range");
-        return std::nullopt;
-      }
-    }
     if (ast.result.kind != ReductionKind::FirFilter) {
       if (!lhsParameter->extent) {
         diagnostics.error(lhsParameter->position,

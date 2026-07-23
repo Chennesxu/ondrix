@@ -147,7 +147,7 @@ int main(void) {
   free(q31Output.allocated);
 
   float f32Input[] = {INFINITY, -3.25f, NAN, -0.0f, 0.5f};
-  float f32Coefficients[] = {1.0f, -0.5f, 0.25f};
+  float f32Coefficients[] = {INFINITY, NAN, 0.25f};
   MemRefF32 f32InputRef = MAKE_MEMREF(f32Input, 5);
   MemRefF32 f32CoefficientRef = MAKE_MEMREF(f32Coefficients, 3);
   MemRefF32 f32Output;

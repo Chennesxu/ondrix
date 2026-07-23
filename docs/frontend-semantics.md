@@ -2,8 +2,10 @@
 
 This document defines the intended boundary between the experimental `.ox`
 source language, project dialects, and upstream MLIR dialects. The implemented
-parser currently covers only the Q15 dot slice documented in
-`frontend-language.md`; the broader items below remain design constraints.
+parser currently covers Q15/Q31/f32 dot and FIR-sample kernels plus tensor-value
+valid and statically shaped full-output FIR. Fixed-point reductions may use
+compiler-owned constexpr coefficients. The broader items below remain design
+constraints.
 
 ## Design Rule
 

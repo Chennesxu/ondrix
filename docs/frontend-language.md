@@ -91,8 +91,9 @@ kernel q15_fir_filter(input: tensor[q15], coefficients: tensor[q15]) -> tensor[q
 Q31 uses the corresponding exact 64-bit accumulator profile. Fixed constexpr
 coefficients are accepted in the same right-operand position. f32 replaces the
 fixed-point policies with `contract=off|fma|fast`. Valid mode permits dynamic
-or static tensor extents; when all three are static, the result must equal
-`input_length - coefficient_length + 1`.
+or static tensor extents. A static result requires static input and coefficient
+extents and must equal `input_length - coefficient_length + 1`; otherwise the
+result extent must remain dynamic so the runtime shape contract is preserved.
 
 `boundary=full` exposes the existing zero-padded full-output equation. Its
 first source slice requires static input, coefficient, and result extents with

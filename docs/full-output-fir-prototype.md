@@ -1,7 +1,9 @@
 # Full-Output FIR Architecture Prototype
 
 This note records the architecture experiment and the first experimental
-full-output operation. It does not define a source-language binding.
+full-output operation. The `.ox` frontend now provides an experimental
+tensor-value binding for valid output and statically shaped full output;
+dynamic full output and a stable source or C ABI remain undefined.
 
 ## First Operation Contract
 

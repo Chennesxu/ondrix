@@ -13,6 +13,8 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_full_dynamic.ox 2>&1 | FileCheck %s --check-prefix=FULL-DYNAMIC
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_full_shape.ox 2>&1 | FileCheck %s --check-prefix=FULL-SHAPE
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_full_overflow.ox 2>&1 | FileCheck %s --check-prefix=FULL-OVERFLOW
+// RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_empty_constexpr.ox 2>&1 | FileCheck %s --check-prefix=EMPTY-CONSTEXPR
+// RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_valid_mixed_shape.ox 2>&1 | FileCheck %s --check-prefix=VALID-MIXED-SHAPE
 
 // PYTHON: invalid_python_def.ox:1:1: error: unsupported top-level construct 'def'; expected 'kernel'
 // PYTHON-NEXT: def q15_dot(lhs, rhs):
@@ -47,3 +49,7 @@
 // FULL-SHAPE: invalid_fir_filter_full_shape.ox:2:10: error: static fir_filter result extent does not match full convolution
 
 // FULL-OVERFLOW: invalid_fir_filter_full_overflow.ox:2:10: error: full fir_filter result extent overflows index
+
+// EMPTY-CONSTEXPR: invalid_fir_filter_empty_constexpr.ox:3:5: error: constexpr reduction operand cannot be empty
+
+// VALID-MIXED-SHAPE: invalid_fir_filter_valid_mixed_shape.ox:2:10: error: a static valid fir_filter result requires static input and coefficient extents
