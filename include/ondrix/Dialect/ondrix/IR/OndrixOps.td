@@ -323,29 +323,32 @@ def Ondrix_ButterflyOp : Ondrix_Op<"butterfly", [Pure]> {
 }
 
 def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
-  let summary = "Static four-point packed-Q15 forward CFFT";
+  let summary = "Static packed-Q15 forward radix-2 CFFT";
   let description = [{
-    Computes one four-point forward radix-2 decimation-in-time CFFT over
-    packed signed-Q15 complex values. The input and result use natural index
-    order and `tensor<4xi32>` storage. Each packed element uses the layout and
-    finite-precision butterfly contract of `ondrix.butterfly`.
+    Computes one static four- or eight-point forward radix-2
+    decimation-in-time CFFT over packed signed-Q15 complex values. The input
+    and result use natural index order and matching `tensor<Nxi32>` storage.
+    Each packed element uses the layout and finite-precision butterfly
+    contract of `ondrix.butterfly`.
 
-    The fixed schedule is:
+    The transform recursively decomposes even and odd input indices, then
+    combines the two half transforms in increasing frequency order:
 
-      `(s0, s2) = butterfly(x0, x2, 1)`
-      `(s1, s3) = butterfly(x1, x3, 1)`
-      `(y0, y2) = butterfly(s0, s1, 1)`
-      `(y1, y3) = butterfly(s2, s3, -j)`
+      `(y[k], y[k + N/2]) = butterfly(even[k], odd[k], W_N^k)`
 
-    The result is `[y0, y1, y2, y3]`. Q15 constants use `1 = (32767, 0)`
-    and `-j = (0, -32768)`. Each butterfly applies the declared product and
-    output requantization independently, so this two-stage transform has an
-    explicit stage-by-stage scale rather than one final real-arithmetic
-    normalization.
+    where `W_N^k = exp(-2*pi*j*k/N)` is frozen to signed-Q15 packed constants.
+    Four points use `[1, -j]`. Eight points use
+    `[1, 23170-j23170, -j, -23170-j23170]`. Q15 `1` is `(32767, 0)` and
+    `-j` is `(0, -32768)`.
 
-    The first executable profile is deliberately limited to four points,
-    forward direction, the imag-high/real-low packed layout, signed Q15,
-    exact full products, and the same two scale policies as the executable
+    Each butterfly applies the declared product and output requantization
+    independently. A size-N transform therefore has `log2(N)` observable
+    scaling boundaries; they must not be collapsed into one final
+    real-arithmetic normalization.
+
+    The executable profile is deliberately limited to four or eight points,
+    forward direction, the imag-high/real-low packed layout, signed Q15, exact
+    full products, and the same two scale policies as the executable
     butterfly. Dynamic planning, inverse transforms, other sizes and numeric
     profiles require separate extensions.
   }];

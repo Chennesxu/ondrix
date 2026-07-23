@@ -6,6 +6,8 @@
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Support/FirStreamRuntimeShape.h"
 
+#include "llvm/ADT/APInt.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -15,6 +17,9 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include <cassert>
+#include <cstdint>
+#include <functional>
 #include <optional>
 
 namespace ondrix {
@@ -656,27 +661,69 @@ public:
     if (!layout)
       return rewriter.notifyMatchFailure(op, "requires an ondsp.cx_layout layout attribute");
 
-    SmallVector<Value, 4> indices;
-    SmallVector<Value, 4> inputs;
-    for (int64_t index = 0; index < 4; ++index) {
+    int64_t extent = op.getInput().getType().getDimSize(0);
+    SmallVector<Value> indices;
+    SmallVector<Value> inputs;
+    indices.reserve(extent);
+    inputs.reserve(extent);
+    for (int64_t index = 0; index < extent; ++index) {
       Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
       indices.push_back(position);
       inputs.push_back(rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position));
     }
 
-    Value one = rewriter.create<arith::ConstantIntOp>(loc, 32767, 32);
-    Value minusJ = rewriter.create<arith::ConstantIntOp>(loc, -2147483648LL, 32);
+    auto createPackedTwiddle = [&](uint32_t bits) {
+      IntegerType i32 = rewriter.getI32Type();
+      return rewriter.create<arith::ConstantOp>(
+          loc, i32, rewriter.getIntegerAttr(i32, llvm::APInt(32, bits)));
+    };
+    auto getTwiddleBits = [](int64_t size, int64_t index) -> std::optional<uint32_t> {
+      constexpr uint32_t one = 0x00007fffU;
+      constexpr uint32_t minusJ = 0x80000000U;
+      if (size == 2 && index == 0)
+        return one;
+      if (size == 4) {
+        constexpr uint32_t values[] = {one, minusJ};
+        return values[index];
+      }
+      if (size == 8) {
+        constexpr uint32_t values[] = {one, 0xa57e5a82U, minusJ, 0xa57ea57eU};
+        return values[index];
+      }
+      return std::nullopt;
+    };
     auto createButterfly = [&](Value a, Value b, Value twiddle) {
       return rewriter.create<ondrix::ondsp::CxButterflyOp>(
           loc, rewriter.getI32Type(), rewriter.getI32Type(), a, b, twiddle, layout, op.getNumeric(),
           op.getProduct(), op.getProductScale(), op.getOutputScale());
     };
 
-    auto even = createButterfly(inputs[0], inputs[2], one);
-    auto odd = createButterfly(inputs[1], inputs[3], one);
-    auto low = createButterfly(even.getOut0(), odd.getOut0(), one);
-    auto high = createButterfly(even.getOut1(), odd.getOut1(), minusJ);
-    SmallVector<Value, 4> outputs = {low.getOut0(), high.getOut0(), low.getOut1(), high.getOut1()};
+    std::function<SmallVector<Value>(ArrayRef<Value>)> lowerCfft =
+        [&](ArrayRef<Value> values) -> SmallVector<Value> {
+      if (values.size() == 1)
+        return {values.front()};
+
+      SmallVector<Value> evenInputs;
+      SmallVector<Value> oddInputs;
+      evenInputs.reserve(values.size() / 2);
+      oddInputs.reserve(values.size() / 2);
+      for (auto [index, value] : llvm::enumerate(values))
+        (index % 2 == 0 ? evenInputs : oddInputs).push_back(value);
+
+      SmallVector<Value> even = lowerCfft(evenInputs);
+      SmallVector<Value> odd = lowerCfft(oddInputs);
+      SmallVector<Value> outputs(values.size());
+      for (int64_t index = 0, end = values.size() / 2; index < end; ++index) {
+        std::optional<uint32_t> twiddleBits = getTwiddleBits(values.size(), index);
+        assert(twiddleBits && "verified CFFT extent must have a static twiddle table");
+        auto butterfly =
+            createButterfly(even[index], odd[index], createPackedTwiddle(*twiddleBits));
+        outputs[index] = butterfly.getOut0();
+        outputs[index + end] = butterfly.getOut1();
+      }
+      return outputs;
+    };
+    SmallVector<Value> outputs = lowerCfft(inputs);
 
     Value result = rewriter.create<tensor::EmptyOp>(loc, op.getResult().getType().getShape(),
                                                     op.getResult().getType().getElementType());

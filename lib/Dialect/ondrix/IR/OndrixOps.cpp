@@ -99,9 +99,11 @@ static LogicalResult verifyCfftValueDomain(CfftOp op) {
   RankedTensorType resultType = op.getResult().getType();
   if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
     return failure();
-  if (inputType != resultType || inputType.getRank() != 1 || inputType.getDimSize(0) != 4 ||
+  int64_t extent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  if (inputType != resultType || inputType.getRank() != 1 || (extent != 4 && extent != 8) ||
       !inputType.getElementType().isSignlessInteger(32))
-    return op.emitOpError("executable CFFT requires matching tensor<4xi32> input and result");
+    return op.emitOpError(
+        "executable CFFT requires matching tensor<4xi32> or tensor<8xi32> input and result");
   return success();
 }
 
