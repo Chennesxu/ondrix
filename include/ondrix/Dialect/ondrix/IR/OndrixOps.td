@@ -120,6 +120,65 @@ def Ondrix_FirFilterOp
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_Conv1DOp
+    : Ondrix_Op<"conv1d", [
+        DestinationStyleOpInterface,
+        DeclareOpInterfaceMethods<ConditionallySpeculatable>,
+        NoMemoryEffect,
+        TypesMatchWith<"result type matches init type", "init", "result",
+                       "$_self">]> {
+  let summary = "Compute valid one-dimensional convolution or correlation";
+  let description = [{
+    `ondrix.conv1d` preserves one-dimensional convolution/correlation
+    algorithm identity while delegating finite-precision arithmetic to Ondsp.
+    It accepts rank-1 tensor values with input length `N`, non-empty kernel
+    length `K`, `N >= K`, and result length `N - K + 1`. The `init` tensor
+    provides only destination shape and storage; its element values are not
+    part of the mathematical result.
+
+    Every output starts from numeric zero and visits `k = 0..K-1` in increasing
+    order. For `mode = correlation`:
+
+      `y[n] = ordered_sum_k input[n + k] * kernel[k]`
+
+    For `mode = convolution`:
+
+      `y[n] = ordered_sum_k input[n + k] * kernel[K - 1 - k]`
+
+    The convolution result is therefore the valid subrange of the complete
+    linear convolution, in increasing output order. Freezing the update order
+    is required because fixed-point saturation and floating-point contraction
+    can make alternative real-arithmetic formulations observably different.
+
+    The first contract supports only unit-stride, undilated valid output.
+    Padding, same/full boundaries, grouped or multidimensional convolution,
+    and conjugating complex correlation require separate extensions.
+
+    Fixed-point execution explicitly names the accumulator domain and export
+    policy. Floating-point execution uses `numeric` and must not carry
+    fixed-point accumulator or export attributes.
+  }];
+  let arguments = (ins
+      AnyRankedTensor:$input,
+      AnyRankedTensor:$kernel,
+      AnyRankedTensor:$init,
+      Ondrix_Conv1DModeAttr:$mode,
+      Ondsp_NumericAttr:$numeric,
+      OptionalAttr<Ondsp_ProductAttr>:$product,
+      OptionalAttr<TypeAttrOf<Ondsp_Acc>>:$accumulator,
+      OptionalAttr<Ondsp_FixedAttr>:$dst,
+      OptionalAttr<Ondsp_RoundingModeAttr>:$rounding,
+      OptionalAttr<Ondsp_OverflowModeAttr>:$overflow);
+  let results = (outs AnyRankedTensor:$result);
+  let extraClassDeclaration = [{
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      return {2, 3};
+    }
+  }];
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_FirStreamOp
     : Ondrix_Op<"fir_stream", [
         DeclareOpInterfaceMethods<ConditionallySpeculatable>,

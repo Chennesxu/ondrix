@@ -10,4 +10,9 @@ def Ondrix_FirBoundaryModeAttr
   let assemblyFormat = "`<` $value `>`";
 }
 
+def Ondrix_Conv1DModeAttr
+    : EnumAttr<Ondrix_Dialect, Ondrix_Conv1DMode, "conv1d_mode"> {
+  let assemblyFormat = "`<` $value `>`";
+}
+
 #endif

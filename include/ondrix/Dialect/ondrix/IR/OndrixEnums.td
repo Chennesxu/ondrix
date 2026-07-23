@@ -12,4 +12,15 @@ def Ondrix_FirBoundaryMode
   let genSpecializedAttr = 0;
 }
 
+def Ondrix_Conv1DConvolution
+    : I32EnumAttrCase<"Convolution", 0, "convolution">;
+def Ondrix_Conv1DCorrelation
+    : I32EnumAttrCase<"Correlation", 1, "correlation">;
+def Ondrix_Conv1DMode
+    : I32EnumAttr<"Conv1DMode", "one-dimensional convolution family mode",
+                  [Ondrix_Conv1DConvolution, Ondrix_Conv1DCorrelation]> {
+  let cppNamespace = "::ondrix::ir";
+  let genSpecializedAttr = 0;
+}
+
 #endif

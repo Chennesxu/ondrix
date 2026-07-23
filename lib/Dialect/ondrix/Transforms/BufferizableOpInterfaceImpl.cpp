@@ -22,7 +22,8 @@ using namespace mlir::bufferization;
 namespace ondrix::ir {
 namespace {
 
-static Value createInitialAccumulator(FirFilterOp op, OpBuilder &builder, Location loc) {
+template <typename OpTy>
+static Value createInitialAccumulator(OpTy op, OpBuilder &builder, Location loc) {
   if (isa<ondrix::ondsp::FixedAttr>(op.getNumeric()))
     return builder.create<ondrix::ondsp::AccZeroOp>(loc, *op.getAccumulator());
   auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
@@ -45,7 +46,8 @@ static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value
   llvm_unreachable("unknown floating-point contract mode");
 }
 
-static Value exportFirSample(FirFilterOp op, Value accumulator, OpBuilder &builder, Location loc) {
+template <typename OpTy>
+static Value exportFirSample(OpTy op, Value accumulator, OpBuilder &builder, Location loc) {
   if (!isa<ondrix::ondsp::FixedAttr>(op.getNumeric()))
     return accumulator;
   return builder.create<ondrix::ondsp::AccExportOp>(loc, op.getDst()->getStorage(), accumulator,
@@ -53,8 +55,9 @@ static Value exportFirSample(FirFilterOp op, Value accumulator, OpBuilder &build
                                                     *op.getOverflow());
 }
 
-static Value createReducedFirSample(FirFilterOp op, Value window, Value coefficients,
-                                    OpBuilder &builder, Location loc) {
+template <typename OpTy>
+static Value createReducedFirSample(OpTy op, Value window, Value coefficients, OpBuilder &builder,
+                                    Location loc) {
   Value initial = createInitialAccumulator(op, builder, loc);
   Value reduced = builder.create<ondrix::ondsp::ReduceMacOp>(
       loc, initial.getType(), initial, window, coefficients, op.getNumeric(),
@@ -158,6 +161,27 @@ static void assertFullFirFilterTileShape(Location loc, Value inputLength, Value 
   builder.create<cf::AssertOp>(
       loc, validRange,
       builder.getStringAttr("full FIR output tile must lie within the complete output range"));
+}
+
+static void assertValidConv1DShape(Location loc, Value inputLength, Value kernelLength,
+                                   Value outputLength, Value zero, Value one, OpBuilder &builder) {
+  Value hasKernel =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, kernelLength, zero);
+  builder.create<cf::AssertOp>(
+      loc, hasKernel, builder.getStringAttr("conv1d requires at least one kernel element"));
+  Value inputCoversKernel =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, inputLength, kernelLength);
+  builder.create<cf::AssertOp>(
+      loc, inputCoversKernel,
+      builder.getStringAttr("conv1d input must cover one complete kernel window"));
+  Value remaining = builder.create<arith::SubIOp>(loc, inputLength, kernelLength);
+  Value requiredOutputLength = builder.create<arith::AddIOp>(loc, remaining, one);
+  Value outputMatches = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, outputLength,
+                                                      requiredOutputLength);
+  builder.create<cf::AssertOp>(
+      loc, outputMatches,
+      builder.getStringAttr(
+          "conv1d output length must equal input length minus kernel length plus one"));
 }
 
 struct FirFilterOpInterface
@@ -269,11 +293,64 @@ struct FirFilterOpInterface
   }
 };
 
+struct Conv1DOpInterface
+    : public DstBufferizableOpInterfaceExternalModel<Conv1DOpInterface, Conv1DOp> {
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand, const AnalysisState &) const {
+    auto conv = cast<Conv1DOp>(op);
+    return !conv.isDpsInit(&opOperand);
+  }
+
+  LogicalResult bufferize(Operation *operation, RewriterBase &rewriter,
+                          const BufferizationOptions &options) const {
+    auto op = cast<Conv1DOp>(operation);
+    FailureOr<Value> input = getBuffer(rewriter, op.getInput(), options);
+    FailureOr<Value> kernel = getBuffer(rewriter, op.getKernel(), options);
+    FailureOr<Value> output = getBuffer(rewriter, op.getInit(), options);
+    if (failed(input) || failed(kernel) || failed(output))
+      return failure();
+
+    rewriter.setInsertionPoint(op);
+    Location loc = op.getLoc();
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value inputLength = rewriter.create<memref::DimOp>(loc, *input, zero);
+    Value kernelLength = rewriter.create<memref::DimOp>(loc, *kernel, zero);
+    Value outputLength = rewriter.create<memref::DimOp>(loc, *output, zero);
+    assertValidConv1DShape(loc, inputLength, kernelLength, outputLength, zero, one, rewriter);
+
+    OpFoldResult kernelOffset = rewriter.getIndexAttr(0);
+    OpFoldResult kernelStride = rewriter.getIndexAttr(1);
+    if (op.getMode() == Conv1DMode::Convolution) {
+      kernelOffset = rewriter.create<arith::SubIOp>(loc, kernelLength, one).getResult();
+      kernelStride = rewriter.getIndexAttr(-1);
+    }
+    Value kernelView = rewriter.create<memref::SubViewOp>(
+        loc, *kernel, ArrayRef<OpFoldResult>{kernelOffset}, ArrayRef<OpFoldResult>{kernelLength},
+        ArrayRef<OpFoldResult>{kernelStride});
+
+    rewriter.create<scf::ForOp>(
+        loc, zero, outputLength, one, ValueRange{},
+        [&](OpBuilder &builder, Location bodyLoc, Value outputIndex, ValueRange) {
+          Value inputWindow = builder.create<memref::SubViewOp>(
+              bodyLoc, *input, ArrayRef<OpFoldResult>{outputIndex},
+              ArrayRef<OpFoldResult>{kernelLength},
+              ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
+          Value sample = createReducedFirSample(op, inputWindow, kernelView, builder, bodyLoc);
+          builder.create<memref::StoreOp>(bodyLoc, sample, *output, outputIndex);
+          builder.create<scf::YieldOp>(bodyLoc);
+        });
+
+    replaceOpWithBufferizedValues(rewriter, op, *output);
+    return success();
+  }
+};
+
 } // namespace
 
 void registerBufferizableOpInterfaceExternalModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *context, OndrixDialect *) {
     FirFilterOp::attachInterface<FirFilterOpInterface>(*context);
+    Conv1DOp::attachInterface<Conv1DOpInterface>(*context);
 
     // Bufferization materializes these dialects even when the input module
     // contains only tensor-form Ondrix operations.

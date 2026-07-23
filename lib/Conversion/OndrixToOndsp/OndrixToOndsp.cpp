@@ -110,6 +110,27 @@ static void assertValidFirFilterShape(Location loc, Value inputLength, Value coe
           "valid FIR output length must equal input length minus coefficient length plus one"));
 }
 
+static void assertValidConv1DShape(Location loc, Value inputLength, Value kernelLength,
+                                   Value outputLength, Value zero, Value one, OpBuilder &builder) {
+  Value hasKernel =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, kernelLength, zero);
+  builder.create<cf::AssertOp>(
+      loc, hasKernel, builder.getStringAttr("conv1d requires at least one kernel element"));
+  Value inputCoversKernel =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, inputLength, kernelLength);
+  builder.create<cf::AssertOp>(
+      loc, inputCoversKernel,
+      builder.getStringAttr("conv1d input must cover one complete kernel window"));
+  Value remaining = builder.create<arith::SubIOp>(loc, inputLength, kernelLength);
+  Value requiredOutputLength = builder.create<arith::AddIOp>(loc, remaining, one);
+  Value outputMatches = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, outputLength,
+                                                      requiredOutputLength);
+  builder.create<cf::AssertOp>(
+      loc, outputMatches,
+      builder.getStringAttr(
+          "conv1d output length must equal input length minus kernel length plus one"));
+}
+
 static void assertFullFirFilterShape(Location loc, Value inputLength, Value coefficientLength,
                                      Value outputLength, Value zero, Value one,
                                      OpBuilder &builder) {
@@ -320,6 +341,74 @@ public:
                   OpBuilder elseBuilder = guarded.getElseBodyBuilder();
                   elseBuilder.create<scf::YieldOp>(tapLoc, accumulatorArgs.front());
                   next = guarded.getResult(0);
+                }
+                tapBuilder.create<scf::YieldOp>(tapLoc, next);
+              });
+
+          Value sample = tapLoop.getResult(0);
+          if (fixed) {
+            sample = builder.create<ondrix::ondsp::AccExportOp>(
+                bodyLoc, op.getDst()->getStorage(), sample, *op.getDst(), *op.getRounding(),
+                *op.getOverflow());
+          }
+          Value updated = builder.create<tensor::InsertOp>(bodyLoc, sample, outputArgs.front(),
+                                                           ValueRange{outputIndex});
+          builder.create<scf::YieldOp>(bodyLoc, updated);
+        });
+
+    rewriter.replaceOp(op, outputLoop.getResult(0));
+    return success();
+  }
+};
+
+class Conv1DOpLowering final : public OpConversionPattern<ondrix::ir::Conv1DOp> {
+public:
+  using OpConversionPattern<ondrix::ir::Conv1DOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::Conv1DOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value inputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInput(), zero);
+    Value kernelLength = rewriter.create<tensor::DimOp>(loc, adaptor.getKernel(), zero);
+    Value outputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInit(), zero);
+    assertValidConv1DShape(loc, inputLength, kernelLength, outputLength, zero, one, rewriter);
+
+    auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+    auto outputLoop = rewriter.create<scf::ForOp>(
+        loc, zero, outputLength, one, ValueRange{adaptor.getInit()},
+        [&](OpBuilder &builder, Location bodyLoc, Value outputIndex, ValueRange outputArgs) {
+          Value initial;
+          if (fixed)
+            initial = builder.create<ondrix::ondsp::AccZeroOp>(bodyLoc, *op.getAccumulator());
+          else
+            initial = builder.create<arith::ConstantOp>(bodyLoc, fp.getFormat(),
+                                                        builder.getZeroAttr(fp.getFormat()));
+
+          auto tapLoop = builder.create<scf::ForOp>(
+              bodyLoc, zero, kernelLength, one, ValueRange{initial},
+              [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange accumulatorArgs) {
+                Value inputIndex = tapBuilder.create<arith::AddIOp>(tapLoc, outputIndex, tap);
+                Value kernelIndex = tap;
+                if (op.getMode() == ondrix::ir::Conv1DMode::Convolution) {
+                  Value lastKernelIndex =
+                      tapBuilder.create<arith::SubIOp>(tapLoc, kernelLength, one);
+                  kernelIndex = tapBuilder.create<arith::SubIOp>(tapLoc, lastKernelIndex, tap);
+                }
+                Value inputValue = tapBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getInput(),
+                                                                        ValueRange{inputIndex});
+                Value kernelValue = tapBuilder.create<tensor::ExtractOp>(
+                    tapLoc, adaptor.getKernel(), ValueRange{kernelIndex});
+                Value next;
+                if (fixed) {
+                  next = tapBuilder.create<ondrix::ondsp::MacOp>(
+                      tapLoc, *op.getAccumulator(), accumulatorArgs.front(), inputValue,
+                      kernelValue, fixed, *op.getProduct());
+                } else {
+                  next = createFpAccumulatorUpdate(tapLoc, inputValue, kernelValue,
+                                                   accumulatorArgs.front(), fp, tapBuilder);
                 }
                 tapBuilder.create<scf::YieldOp>(tapLoc, next);
               });
@@ -755,9 +844,9 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns.add<FirOpLowering, FirFilterOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
-                 SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, CfftOpLowering,
-                 QuantizeOpLowering>(&getContext());
+    patterns.add<FirOpLowering, FirFilterOpLowering, Conv1DOpLowering, FirStreamOpLowering,
+                 SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
+                 ButterflyOpLowering, CfftOpLowering, QuantizeOpLowering>(&getContext());
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,

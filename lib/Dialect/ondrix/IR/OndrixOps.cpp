@@ -228,6 +228,58 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
   return success();
 }
 
+static LogicalResult verifyConv1DDomain(Conv1DOp op) {
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType kernelType = op.getKernel().getType();
+  RankedTensorType initType = op.getInit().getType();
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, kernelType, initType})))
+    return failure();
+  if (inputType.getRank() != 1 || kernelType.getRank() != 1 || initType.getRank() != 1)
+    return op.emitOpError("requires rank-1 input, kernel, and init tensors");
+  if (inputType.getElementType() != kernelType.getElementType())
+    return op.emitOpError("input and kernel element types must match");
+
+  int64_t inputLength = inputType.getDimSize(0);
+  int64_t kernelLength = kernelType.getDimSize(0);
+  int64_t outputLength = initType.getDimSize(0);
+  if (!ShapedType::isDynamic(kernelLength) && kernelLength == 0)
+    return op.emitOpError("requires at least one kernel element");
+  if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(kernelLength)) {
+    if (inputLength < kernelLength)
+      return op.emitOpError("input must cover one complete kernel window");
+    int64_t expectedOutputLength = inputLength - kernelLength + 1;
+    if (!ShapedType::isDynamic(outputLength) && outputLength != expectedOutputLength)
+      return op.emitOpError() << "result length must be " << expectedOutputLength;
+  }
+
+  Type inputElement = inputType.getElementType();
+  Type outputElement = initType.getElementType();
+  if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric())) {
+    if (inputElement != fixed.getStorage())
+      return op.emitOpError("input and kernel element type must match fixed numeric storage");
+    if (!op.getAccumulator() || !op.getDst() || !op.getRounding() || !op.getOverflow())
+      return op.emitOpError(
+          "fixed conv1d requires accumulator, dst, rounding, and overflow attributes");
+    if (failed(verifyFixedReductionResult(op, *op.getAccumulator(), fixed, *op.getProduct())))
+      return failure();
+    if (op.getAccumulator()->getSignedness() != op.getDst()->getSignedness())
+      return op.emitOpError("accumulator and destination signedness must match");
+    if (op.getAccumulator()->getFrac() < op.getDst()->getFrac())
+      return op.emitOpError("destination frac must not exceed accumulator frac");
+    if (outputElement != op.getDst()->getStorage())
+      return op.emitOpError("init and result element type must match destination storage");
+    return success();
+  }
+
+  if (op.getAccumulator() || op.getDst() || op.getRounding() || op.getOverflow())
+    return op.emitOpError(
+        "floating-point conv1d must not specify fixed-point accumulator or export policy");
+  auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  if (inputElement != fp.getFormat() || outputElement != fp.getFormat())
+    return op.emitOpError("floating-point input, kernel, init, and result must match format");
+  return success();
+}
+
 static LogicalResult verifyFirStreamDomain(FirStreamOp op) {
   RankedTensorType inputType = op.getInput().getType();
   RankedTensorType coefficientType = op.getCoeffs().getType();
@@ -486,6 +538,20 @@ LogicalResult FirFilterOp::verify() {
   if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
   return verifyFirFilterDomain(*this);
+}
+
+Speculation::Speculatability Conv1DOp::getSpeculatability() {
+  return (ondrix::requiresConservativeDSPSpeculation(getInput().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getKernel().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getInit().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
+
+LogicalResult Conv1DOp::verify() {
+  if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
+    return failure();
+  return verifyConv1DDomain(*this);
 }
 
 Speculation::Speculatability FirStreamOp::getSpeculatability() {
