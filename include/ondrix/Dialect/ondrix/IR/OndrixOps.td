@@ -322,6 +322,44 @@ def Ondrix_ButterflyOp : Ondrix_Op<"butterfly", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
+  let summary = "Static four-point packed-Q15 forward CFFT";
+  let description = [{
+    Computes one four-point forward radix-2 decimation-in-time CFFT over
+    packed signed-Q15 complex values. The input and result use natural index
+    order and `tensor<4xi32>` storage. Each packed element uses the layout and
+    finite-precision butterfly contract of `ondrix.butterfly`.
+
+    The fixed schedule is:
+
+      `(s0, s2) = butterfly(x0, x2, 1)`
+      `(s1, s3) = butterfly(x1, x3, 1)`
+      `(y0, y2) = butterfly(s0, s1, 1)`
+      `(y1, y3) = butterfly(s2, s3, -j)`
+
+    The result is `[y0, y1, y2, y3]`. Q15 constants use `1 = (32767, 0)`
+    and `-j = (0, -32768)`. Each butterfly applies the declared product and
+    output requantization independently, so this two-stage transform has an
+    explicit stage-by-stage scale rather than one final real-arithmetic
+    normalization.
+
+    The first executable profile is deliberately limited to four points,
+    forward direction, the imag-high/real-low packed layout, signed Q15,
+    exact full products, and the same two scale policies as the executable
+    butterfly. Dynamic planning, inverse transforms, other sizes and numeric
+    profiles require separate extensions.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_CxLayoutAttr:$layout,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_ProductAttr:$product,
+                   Ondsp_ScaleAttr:$product_scale,
+                   Ondsp_ScaleAttr:$output_scale);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_QuantizeOp : Ondrix_Op<"quantize", [Pure]> {
   let summary = "High-level numeric conversion intent";
   let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$src,

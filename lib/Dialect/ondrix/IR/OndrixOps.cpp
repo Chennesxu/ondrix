@@ -85,6 +85,26 @@ static LogicalResult verifyButterflyValueDomain(ButterflyOp op) {
   return success();
 }
 
+static LogicalResult verifyUnencodedTensorTypes(Operation *op,
+                                                ArrayRef<RankedTensorType> tensorTypes) {
+  if (llvm::any_of(tensorTypes, [](RankedTensorType type) { return type.getEncoding(); }))
+    return op->emitOpError("does not support encoded tensor types");
+  return success();
+}
+
+static LogicalResult verifyCfftValueDomain(CfftOp op) {
+  if (op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
+    return op.emitOpError("executable CFFT requires packed_i16_imag_hi_real_lo layout");
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType resultType = op.getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
+    return failure();
+  if (inputType != resultType || inputType.getRank() != 1 || inputType.getDimSize(0) != 4 ||
+      !inputType.getElementType().isSignlessInteger(32))
+    return op.emitOpError("executable CFFT requires matching tensor<4xi32> input and result");
+  return success();
+}
+
 static LogicalResult verifyQuantizeDomain(QuantizeOp op) {
   if (!ondrix::haveSameElementwiseShape(op.getInput().getType(), op.getResult().getType()))
     return op.emitOpError("input and result must use the same scalar or static shaped domain");
@@ -203,13 +223,6 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
   auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
   if (inputElement != fp.getFormat() || outputElement != fp.getFormat())
     return op.emitOpError("floating-point input, coefficients, init, and result must match format");
-  return success();
-}
-
-static LogicalResult verifyUnencodedTensorTypes(Operation *op,
-                                                ArrayRef<RankedTensorType> tensorTypes) {
-  if (llvm::any_of(tensorTypes, [](RankedTensorType type) { return type.getEncoding(); }))
-    return op->emitOpError("does not support encoded tensor types");
   return success();
 }
 
@@ -591,6 +604,13 @@ LogicalResult ButterflyOp::verify() {
                                                            getProductScale(), getOutputScale())))
     return failure();
   return verifyButterflyValueDomain(*this);
+}
+
+LogicalResult CfftOp::verify() {
+  if (failed(ondrix::ondsp::verifyPackedQ15ButterflyPolicy(*this, getNumeric(), getProduct(),
+                                                           getProductScale(), getOutputScale())))
+    return failure();
+  return verifyCfftValueDomain(*this);
 }
 
 LogicalResult QuantizeOp::verify() {

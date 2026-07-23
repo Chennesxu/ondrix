@@ -645,6 +645,48 @@ public:
   }
 };
 
+class CfftOpLowering final : public OpConversionPattern<ondrix::ir::CfftOp> {
+public:
+  using OpConversionPattern<ondrix::ir::CfftOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::CfftOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto layout = dyn_cast<ondrix::ondsp::CxLayoutAttr>(op.getLayout());
+    if (!layout)
+      return rewriter.notifyMatchFailure(op, "requires an ondsp.cx_layout layout attribute");
+
+    SmallVector<Value, 4> indices;
+    SmallVector<Value, 4> inputs;
+    for (int64_t index = 0; index < 4; ++index) {
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      indices.push_back(position);
+      inputs.push_back(rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position));
+    }
+
+    Value one = rewriter.create<arith::ConstantIntOp>(loc, 32767, 32);
+    Value minusJ = rewriter.create<arith::ConstantIntOp>(loc, -2147483648LL, 32);
+    auto createButterfly = [&](Value a, Value b, Value twiddle) {
+      return rewriter.create<ondrix::ondsp::CxButterflyOp>(
+          loc, rewriter.getI32Type(), rewriter.getI32Type(), a, b, twiddle, layout, op.getNumeric(),
+          op.getProduct(), op.getProductScale(), op.getOutputScale());
+    };
+
+    auto even = createButterfly(inputs[0], inputs[2], one);
+    auto odd = createButterfly(inputs[1], inputs[3], one);
+    auto low = createButterfly(even.getOut0(), odd.getOut0(), one);
+    auto high = createButterfly(even.getOut1(), odd.getOut1(), minusJ);
+    SmallVector<Value, 4> outputs = {low.getOut0(), high.getOut0(), low.getOut1(), high.getOut1()};
+
+    Value result = rewriter.create<tensor::EmptyOp>(loc, op.getResult().getType().getShape(),
+                                                    op.getResult().getType().getElementType());
+    for (auto [value, position] : llvm::zip_equal(outputs, indices))
+      result = rewriter.create<tensor::InsertOp>(loc, value, result, position);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 class QuantizeOpLowering final : public OpConversionPattern<ondrix::ir::QuantizeOp> {
 public:
   using OpConversionPattern<ondrix::ir::QuantizeOp>::OpConversionPattern;
@@ -666,10 +708,9 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns
-        .add<FirOpLowering, FirFilterOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
-             SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering>(
-            &getContext());
+    patterns.add<FirOpLowering, FirFilterOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
+                 SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, CfftOpLowering,
+                 QuantizeOpLowering>(&getContext());
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,
