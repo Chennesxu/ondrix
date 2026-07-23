@@ -23,6 +23,33 @@ LogicalResult verifyProductPolicy(Operation *op, Attribute numeric,
   return success();
 }
 
+static LogicalResult verifyButterflyScale(Operation *op, ScaleAttr scale, unsigned rightShift,
+                                          StringRef name) {
+  if (scale.getPreShiftLeft() != 0 || scale.getPostShiftRight() != rightShift)
+    return op->emitOpError() << name
+                             << " requires pre_shift_left=0 and post_shift_right=" << rightShift;
+  if (scale.getRounding() != RoundingMode::NearestEven)
+    return op->emitOpError() << name << " requires nearest_even rounding";
+  if (scale.getOverflow() != OverflowMode::Saturate)
+    return op->emitOpError() << name << " requires saturating overflow";
+  auto destination = dyn_cast<IntegerType>(scale.getSaturateTo());
+  if (!destination || !destination.isSignless() || destination.getWidth() != 16)
+    return op->emitOpError() << name << " requires signless i16 destination storage";
+  return success();
+}
+
+LogicalResult verifyPackedQ15ButterflyPolicy(Operation *op, Attribute numeric, ProductAttr product,
+                                             ScaleAttr productScale, ScaleAttr outputScale) {
+  auto fixed = dyn_cast<FixedAttr>(numeric);
+  if (!fixed || !isSignedQ15(fixed))
+    return op->emitOpError("packed butterfly requires signed Q15 numeric semantics");
+  if (!isFullProduct(product))
+    return op->emitOpError("packed butterfly requires product = #ondsp.product<full>");
+  if (failed(verifyButterflyScale(op, productScale, 15, "product_scale")))
+    return failure();
+  return verifyButterflyScale(op, outputScale, 1, "output_scale");
+}
+
 FailureOr<ProductSemantics> inferProductSemantics(Operation *op, FixedAttr numeric,
                                                   ProductAttr product) {
   if (numeric.getSignedness() != Signedness::Signed)

@@ -3,7 +3,7 @@
 func.func @butterfly_rejects_memref_operand(
     %a: memref<1xi32>, %b: i32, %tw: i32) -> (i32, i32) {
   // expected-error@+1 {{value-only operation does not accept memref operands}}
-  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (memref<1xi32>, i32, i32) -> (i32, i32)
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>, output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (memref<1xi32>, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
 }
 
@@ -12,7 +12,7 @@ func.func @butterfly_rejects_memref_operand(
 func.func @butterfly_rejects_unranked_memref_operand(
     %a: memref<*xi32>, %b: i32, %tw: i32) -> (i32, i32) {
   // expected-error@+1 {{value-only operation does not accept memref operands}}
-  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (memref<*xi32>, i32, i32) -> (i32, i32)
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>, output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (memref<*xi32>, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
 }
 
@@ -21,7 +21,7 @@ func.func @butterfly_rejects_unranked_memref_operand(
 func.func @butterfly_rejects_memref_result(
     %a: i32, %b: i32, %tw: i32) -> (memref<1xi32>, i32) {
   // expected-error@+1 {{value-only operation does not produce memref results}}
-  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (i32, i32, i32) -> (memref<1xi32>, i32)
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>, output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (i32, i32, i32) -> (memref<1xi32>, i32)
   return %0, %1 : memref<1xi32>, i32
 }
 
@@ -30,7 +30,7 @@ func.func @butterfly_rejects_memref_result(
 func.func @butterfly_rejects_unranked_memref_result(
     %a: i32, %b: i32, %tw: i32) -> (memref<*xi32>, i32) {
   // expected-error@+1 {{value-only operation does not produce memref results}}
-  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (i32, i32, i32) -> (memref<*xi32>, i32)
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>, output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (i32, i32, i32) -> (memref<*xi32>, i32)
   return %0, %1 : memref<*xi32>, i32
 }
 
@@ -75,16 +75,17 @@ func.func @quantize_rejects_unranked_memref_result(
 func.func @butterfly_rejects_nested_memref(
     %a: tuple<memref<1xi32>>, %b: i32, %tw: i32) -> (i32, i32) {
   // expected-error@+1 {{value-only operation does not accept memref operands}}
-  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tuple<memref<1xi32>>, i32, i32) -> (i32, i32)
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>, output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (tuple<memref<1xi32>>, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
 }
 
 // -----
 
-func.func @butterfly_accepts_vector_values(
+func.func @butterfly_rejects_non_executable_vector_profile(
     %a: vector<2xi16>, %b: vector<2xi16>, %tw: vector<2xi16>)
     -> (vector<2xi16>, vector<2xi16>) {
-  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<2xi16>, vector<2xi16>) -> (vector<2xi16>, vector<2xi16>)
+  // expected-error@+1 {{executable butterfly requires packed_i16_imag_hi_real_lo layout}}
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>, output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<2xi16>, vector<2xi16>) -> (vector<2xi16>, vector<2xi16>)
   return %0, %1 : vector<2xi16>, vector<2xi16>
 }
 
@@ -94,7 +95,7 @@ func.func @butterfly_rejects_scalable_vectors(
     %a: vector<[2]xi16>, %b: vector<[2]xi16>, %tw: vector<[2]xi16>)
     -> (vector<[2]xi16>, vector<[2]xi16>) {
   // expected-error@+1 {{value-only operation does not accept scalable vector operands}}
-  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<[2]xi16>, vector<[2]xi16>, vector<[2]xi16>) -> (vector<[2]xi16>, vector<[2]xi16>)
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>, output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (vector<[2]xi16>, vector<[2]xi16>, vector<[2]xi16>) -> (vector<[2]xi16>, vector<[2]xi16>)
   return %0, %1 : vector<[2]xi16>, vector<[2]xi16>
 }
 
@@ -164,8 +165,8 @@ func.func @quantize_rejects_wrong_source_storage(%input: i16) -> i16 {
 func.func @butterfly_rejects_mismatched_shapes(
     %a: vector<2xi16>, %b: vector<4xi16>, %tw: vector<2xi16>)
     -> (vector<2xi16>, vector<2xi16>) {
-  // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
-  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<4xi16>, vector<2xi16>) -> (vector<2xi16>, vector<2xi16>)
+  // expected-error@+1 {{executable butterfly requires packed_i16_imag_hi_real_lo layout}}
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>, output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<4xi16>, vector<2xi16>) -> (vector<2xi16>, vector<2xi16>)
   return %0, %1 : vector<2xi16>, vector<2xi16>
 }
 
@@ -173,8 +174,8 @@ func.func @butterfly_rejects_mismatched_shapes(
 
 func.func @butterfly_rejects_signed_packed_container(
     %a: si32, %b: si32, %tw: si32) -> (si32, si32) {
-  // expected-error@+1 {{packed i16 operands and results require signless i32 containers}}
-  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (si32, si32, si32) -> (si32, si32)
+  // expected-error@+1 {{executable butterfly requires scalar signless i32 packed values}}
+  %0, %1 = ondrix.butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>, output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (si32, si32, si32) -> (si32, si32)
   return %0, %1 : si32, si32
 }
 

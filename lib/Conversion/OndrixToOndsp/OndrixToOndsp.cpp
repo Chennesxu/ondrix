@@ -638,9 +638,8 @@ public:
 
     auto replacement = rewriter.create<ondrix::ondsp::CxButterflyOp>(
         op.getLoc(), op.getOut0().getType(), op.getOut1().getType(), adaptor.getA(), adaptor.getB(),
-        adaptor.getTwiddle(), layout, op.getNumeric(),
-        op.getProduct().value_or(ondrix::ondsp::ProductAttr()),
-        op.getScale().value_or(ondrix::ondsp::ScaleAttr()), op.getTrivialTwiddle());
+        adaptor.getTwiddle(), layout, op.getNumeric(), op.getProduct(), op.getProductScale(),
+        op.getOutputScale());
     rewriter.replaceOp(op, replacement);
     return success();
   }

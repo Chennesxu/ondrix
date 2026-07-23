@@ -72,6 +72,11 @@ struct DistributivePairingSemantics {
 mlir::LogicalResult verifyProductPolicy(mlir::Operation *op, mlir::Attribute numeric,
                                         std::optional<ProductAttr> product);
 
+/// Verifies the single executable packed-Q15 radix-2 butterfly profile.
+mlir::LogicalResult verifyPackedQ15ButterflyPolicy(mlir::Operation *op, mlir::Attribute numeric,
+                                                   ProductAttr product, ScaleAttr productScale,
+                                                   ScaleAttr outputScale);
+
 /// Returns the raw product width, fractional position, and exact bit selection
 /// without applying target-specific arithmetic behavior.
 mlir::FailureOr<ProductSemantics> inferProductSemantics(mlir::Operation *op, FixedAttr numeric,

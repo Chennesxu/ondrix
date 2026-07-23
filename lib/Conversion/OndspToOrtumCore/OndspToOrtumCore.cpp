@@ -71,8 +71,6 @@ public:
   }
 };
 
-static bool isScalarI32(Type type) { return type.isSignlessInteger(32); }
-
 static bool isOndspType(Type type) {
   return type.getDialect().getNamespace() == ondrix::ondsp::OndspDialect::getDialectNamespace();
 }
@@ -284,109 +282,6 @@ public:
   }
 };
 
-class CxButterflyOpLowering final : public OpConversionPattern<ondrix::ondsp::CxButterflyOp> {
-public:
-  using OpConversionPattern<ondrix::ondsp::CxButterflyOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(ondrix::ondsp::CxButterflyOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    auto fixed = dyn_cast_or_null<ondrix::ondsp::FixedAttr>(op.getNumeric());
-    if (!fixed) {
-      op.emitError("expected fixed numeric policy for ortumcore butterfly lowering");
-      return failure();
-    }
-
-    auto intType = fixed.getStorage().dyn_cast<IntegerType>();
-    if (fixed.getSignedness() != ondrix::ondsp::Signedness::Signed || !intType ||
-        intType.getWidth() != 16 || fixed.getFrac() != 15) {
-      op.emitError("only signed packed q15 butterfly lowering is supported");
-      return failure();
-    }
-
-    auto layout = dyn_cast_or_null<ondrix::ondsp::CxLayoutAttr>(op.getLayout());
-    if (!layout) {
-      op.emitError("expected explicit complex layout for ortumcore butterfly lowering");
-      return failure();
-    }
-    auto layoutValue = layout.getLayout();
-    if (layoutValue != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo) {
-      op.emitError("ortumcore lowering supports only packed_i16_imag_hi_real_lo layout");
-      return failure();
-    }
-
-    for (Value operand : op.getOperands()) {
-      if (!isScalarI32(operand.getType())) {
-        op.emitError("ortumcore butterfly lowering requires signless scalar packed i32 operands");
-        return failure();
-      }
-    }
-    for (Value result : op.getResults()) {
-      if (!isScalarI32(result.getType())) {
-        op.emitError("ortumcore butterfly lowering requires signless scalar packed i32 results");
-        return failure();
-      }
-    }
-
-    auto scale = op.getScale();
-    if (!scale)
-      return op.emitOpError("packed q15 butterfly lowering requires an explicit scale policy");
-    if (scale->getPreShiftLeft() != 0 || scale->getPostShiftRight() != 15 ||
-        scale->getSaturateTo() != fixed.getStorage())
-      return op.emitOpError("packed q15 butterfly lowering requires pre_shift_left=0, "
-                            "post_shift_right=15, and saturate_to matching numeric storage");
-
-    bool roundToNearest;
-    switch (scale->getRounding()) {
-    case ondrix::ondsp::RoundingMode::TowardNegative:
-      roundToNearest = false;
-      break;
-    default:
-      return op.emitOpError("ortumcore butterfly lowering supports toward_negative rounding");
-    }
-
-    bool saturation;
-    switch (scale->getOverflow()) {
-    case ondrix::ondsp::OverflowMode::Wrap:
-      saturation = false;
-      break;
-    case ondrix::ondsp::OverflowMode::Saturate:
-      saturation = true;
-      break;
-    default:
-      return op.emitOpError("ortumcore butterfly lowering supports wrap or saturate overflow");
-    }
-
-    auto product = op.getProduct();
-    if (!product || product->getSelection() != ondrix::ondsp::ProductSelection::Full)
-      return op.emitOpError(
-          "packed q15 butterfly lowering requires product = #ondsp.product<full>");
-
-    if (op.getTrivialTwiddle())
-      return op.emitOpError("trivial-twiddle target selection is disabled until the twiddle "
-                            "value, stage role, layout, permutation, and scale are proven");
-
-    Type out0Type = getTypeConverter()->convertType(op.getOut0().getType());
-    Type out1Type = getTypeConverter()->convertType(op.getOut1().getType());
-    Type stateType = ondrix::ortumcore::VecStateType::get(rewriter.getContext());
-    auto init = rewriter.create<ondrix::ortumcore::VecStateInitOp>(op.getLoc(), stateType);
-    auto mode = rewriter.create<ondrix::ortumcore::VecSetModeOp>(
-        op.getLoc(), stateType, init.getState(), rewriter.getBoolAttr(saturation),
-        rewriter.getBoolAttr(roundToNearest), rewriter.getBoolAttr(true),
-        rewriter.getI64IntegerAttr(scale->getPostShiftRight()),
-        rewriter.getI64IntegerAttr(scale->getPreShiftLeft()));
-
-    auto mul = rewriter.create<ondrix::ortumcore::CxMulOp>(
-        op.getLoc(), stateType, adaptor.getB().getType(), mode.getResult(), adaptor.getB(),
-        adaptor.getTwiddle());
-    auto add = rewriter.create<ondrix::ortumcore::CxDualAddOp>(
-        op.getLoc(), stateType, out0Type, mul.getNextState(), adaptor.getA(), mul.getResult());
-    auto sub = rewriter.create<ondrix::ortumcore::CxDualSubOp>(
-        op.getLoc(), stateType, out1Type, add.getNextState(), adaptor.getA(), mul.getResult());
-    rewriter.replaceOp(op, ValueRange{add.getResult(), sub.getResult()});
-    return success();
-  }
-};
-
 class ConvertOndspToOrtumCorePass final
     : public ondrix::impl::ConvertOndspToOrtumCoreBase<ConvertOndspToOrtumCorePass> {
 public:
@@ -402,8 +297,7 @@ public:
     OndspToOrtumCoreTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
     patterns.add<AccZeroOpLowering, AccImportOpLowering, AccExportOpLowering, MacOpLowering,
-                 MacSubOpLowering, ReduceMacOpLowering, CxButterflyOpLowering>(typeConverter,
-                                                                               &getContext());
+                 MacSubOpLowering, ReduceMacOpLowering>(typeConverter, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);

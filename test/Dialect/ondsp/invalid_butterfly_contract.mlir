@@ -1,120 +1,142 @@
 // RUN: ondrix-opt %s -split-input-file -verify-diagnostics
 
-func.func @packed_butterfly_non_i32_container(
-    %a: vector<4xi16>, %b: vector<4xi16>, %tw: vector<4xi16>)
-    -> (vector<4xi16>, vector<4xi16>) {
-  // expected-error@+1 {{packed i16 butterfly operands must use signless i32 container storage}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<4xi16>, vector<4xi16>, vector<4xi16>) -> (vector<4xi16>, vector<4xi16>)
-  return %0, %1 : vector<4xi16>, vector<4xi16>
-}
-
-// -----
-
-func.func @fixed_butterfly_missing_scale(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
-  // expected-error@+1 {{fixed numeric butterfly requires a scale attribute}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i32, i32, i32) -> (i32, i32)
+func.func @rejects_non_q15_numeric(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{packed butterfly requires signed Q15 numeric semantics}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 14>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (i32, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
 }
 
 // -----
 
-func.func @floating_butterfly_with_scale(%a: f32, %b: f32, %tw: f32) -> (f32, f32) {
-  // expected-error@+1 {{floating-point numeric butterfly must not specify a scale attribute}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<split>, numeric = #ondsp.fp<format = f32, contract = off>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 0, rounding = toward_negative, overflow = wrap, saturate_to = i32>} : (f32, f32, f32) -> (f32, f32)
-  return %0, %1 : f32, f32
+func.func @rejects_raw_high_product(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{packed butterfly requires product = #ondsp.product<full>}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
 }
 
 // -----
 
-func.func @split_butterfly_fp_storage_mismatch(%a: f64, %b: f64, %tw: f64)
-    -> (f64, f64) {
-  // expected-error@+1 {{a type does not match numeric storage type}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<split>, numeric = #ondsp.fp<format = f32, contract = off>} : (f64, f64, f64) -> (f64, f64)
-  return %0, %1 : f64, f64
+func.func @rejects_other_layout(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{executable butterfly requires packed_i16_imag_hi_real_lo layout}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_real_hi_imag_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
 }
 
 // -----
 
-func.func @interleaved_butterfly_fixed_storage_mismatch(
+func.func @rejects_vector_values(
     %a: vector<2xi32>, %b: vector<2xi32>, %tw: vector<2xi32>)
     -> (vector<2xi32>, vector<2xi32>) {
-  // expected-error@+1 {{a type does not match numeric storage type}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi32>, vector<2xi32>, vector<2xi32>) -> (vector<2xi32>, vector<2xi32>)
+  // expected-error@+1 {{executable butterfly requires scalar signless i32 packed values}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (vector<2xi32>, vector<2xi32>, vector<2xi32>)
+      -> (vector<2xi32>, vector<2xi32>)
   return %0, %1 : vector<2xi32>, vector<2xi32>
 }
 
 // -----
 
-func.func @butterfly_rejects_scalable_vectors(
-    %a: vector<[2]xi16>, %b: vector<[2]xi16>, %tw: vector<[2]xi16>)
-    -> (vector<[2]xi16>, vector<[2]xi16>) {
-  // expected-error@+1 {{value-only operation does not accept scalable vector operands}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<[2]xi16>, vector<[2]xi16>, vector<[2]xi16>) -> (vector<[2]xi16>, vector<[2]xi16>)
-  return %0, %1 : vector<[2]xi16>, vector<[2]xi16>
-}
-
-// -----
-
-func.func @packed_butterfly_rejects_signed_scalar_container(
-    %a: si32, %b: si32, %tw: si32) -> (si32, si32) {
-  // expected-error@+1 {{packed i16 butterfly operands must use signless i32 container storage}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (si32, si32, si32) -> (si32, si32)
-  return %0, %1 : si32, si32
-}
-
-// -----
-
-func.func @packed_butterfly_rejects_unsigned_scalar_container(
-    %a: ui32, %b: ui32, %tw: ui32) -> (ui32, ui32) {
-  // expected-error@+1 {{packed i16 butterfly operands must use signless i32 container storage}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (ui32, ui32, ui32) -> (ui32, ui32)
-  return %0, %1 : ui32, ui32
-}
-
-// -----
-
-func.func @packed_butterfly_rejects_signed_result_container(
-    %a: i32, %b: i32, %tw: i32) -> (si32, si32) {
-  // expected-error@+1 {{packed i16 butterfly results must use signless i32 container storage}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (i32, i32, i32) -> (si32, si32)
-  return %0, %1 : si32, si32
-}
-
-// -----
-
-func.func @packed_butterfly_rejects_signed_shaped_container(
-    %a: vector<2xsi32>, %b: vector<2xsi32>, %tw: vector<2xsi32>)
-    -> (vector<2xsi32>, vector<2xsi32>) {
-  // expected-error@+1 {{packed i16 butterfly operands must use signless i32 container storage}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xsi32>, vector<2xsi32>, vector<2xsi32>) -> (vector<2xsi32>, vector<2xsi32>)
-  return %0, %1 : vector<2xsi32>, vector<2xsi32>
-}
-
-// -----
-
-func.func @packed_butterfly_rejects_signed_saturation_type(
-    %a: i32, %b: i32, %tw: i32) -> (i32, i32) {
-  // expected-error@+1 {{scale saturate_to must be a signless integer type}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = si16>} : (i32, i32, i32) -> (i32, i32)
+func.func @rejects_product_shift(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{product_scale requires pre_shift_left=0 and post_shift_right=15}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (i32, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
 }
 
 // -----
 
-func.func @butterfly_rejects_unsigned_product_contract(
-    %a: vector<2xi16>, %b: vector<2xi16>, %tw: vector<2xi16>)
-    -> (vector<2xi16>, vector<2xi16>) {
-  // expected-error@+1 {{fixed product semantics currently require a signed numeric policy}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<unsigned, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<2xi16>, vector<2xi16>) -> (vector<2xi16>, vector<2xi16>)
-  return %0, %1 : vector<2xi16>, vector<2xi16>
+func.func @rejects_product_rounding(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{product_scale requires nearest_even rounding}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
 }
 
 // -----
 
-func.func @butterfly_rejects_negative_high_raw_frac(
-    %a: vector<2xi16>, %b: vector<2xi16>, %tw: vector<2xi16>)
-    -> (vector<2xi16>, vector<2xi16>) {
-  // expected-error@+1 {{raw high product fractional position would be negative}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 0>, product = #ondsp.product<high_raw>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<2xi16>, vector<2xi16>) -> (vector<2xi16>, vector<2xi16>)
-  return %0, %1 : vector<2xi16>, vector<2xi16>
+func.func @rejects_product_overflow(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{product_scale requires saturating overflow}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = wrap, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
+}
+
+// -----
+
+func.func @rejects_output_shift(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{output_scale requires pre_shift_left=0 and post_shift_right=1}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 0, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
+}
+
+// -----
+
+func.func @rejects_output_rounding(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{output_scale requires nearest_even rounding}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_zero, overflow = saturate, saturate_to = i16>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
+}
+
+// -----
+
+func.func @rejects_output_overflow(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{output_scale requires saturating overflow}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = wrap, saturate_to = i16>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
 }

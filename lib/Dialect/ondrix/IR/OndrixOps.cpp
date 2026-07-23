@@ -52,23 +52,6 @@ static LogicalResult verifyValueOnlyTypes(Operation *op) {
   return success();
 }
 
-static LogicalResult verifyButterflyPolicies(Operation *op, Attribute numeric,
-                                             std::optional<ondrix::ondsp::ProductAttr> product,
-                                             std::optional<ondrix::ondsp::ScaleAttr> scale) {
-  if (failed(ondrix::ondsp::verifyProductPolicy(op, numeric, product)))
-    return failure();
-
-  if (isa<ondrix::ondsp::FixedAttr>(numeric)) {
-    if (!scale)
-      return op->emitOpError("fixed numeric butterfly requires a scale attribute");
-    return success();
-  }
-
-  if (scale)
-    return op->emitOpError("floating-point numeric butterfly must not specify a scale attribute");
-  return success();
-}
-
 static Type getNumericStorage(Attribute numeric) {
   if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric))
     return fixed.getStorage();
@@ -93,48 +76,12 @@ static LogicalResult verifyFixedReductionResult(Operation *op, Type resultType,
   return success();
 }
 
-static bool isPackedI16Layout(ondrix::ondsp::CxLayoutAttr layout) {
-  return layout.getLayout() == ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo ||
-         layout.getLayout() == ondrix::ondsp::ComplexLayout::PackedI16RealHiImagLo;
-}
-
-static bool hasSignlessI32Element(Type type) {
-  auto element = dyn_cast<IntegerType>(ondrix::getElementTypeOrSelf(type));
-  return element && element.isSignless() && element.getWidth() == 32;
-}
-
-static LogicalResult verifySameElementwiseShape(Operation *op, TypeRange types) {
-  if (types.empty())
-    return success();
-  Type reference = types.front();
-  if (llvm::all_of(types.drop_front(),
-                   [&](Type type) { return ondrix::haveSameElementwiseShape(reference, type); }))
-    return success();
-  return op->emitOpError("operands and results must use the same scalar or static shaped domain");
-}
-
 static LogicalResult verifyButterflyValueDomain(ButterflyOp op) {
-  SmallVector<Type> types(op.getOperandTypes());
-  llvm::append_range(types, op.getResultTypes());
-  if (failed(verifySameElementwiseShape(op, types)))
-    return failure();
-
-  if (!isPackedI16Layout(op.getLayout())) {
-    Type storage = getNumericStorage(op.getNumeric());
-    if (!llvm::all_of(types,
-                      [&](Type type) { return ondrix::getElementTypeOrSelf(type) == storage; }))
-      return op.emitOpError("operand and result element types must match numeric storage type");
-    return success();
-  }
-
-  auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
-  auto storage = fixed ? dyn_cast<IntegerType>(fixed.getStorage()) : IntegerType();
-  if (!storage || storage.getWidth() != 16)
-    return op.emitOpError("packed i16 layout requires an i16 fixed numeric policy");
-  if (!llvm::all_of(types, hasSignlessI32Element))
-    return op.emitOpError("packed i16 operands and results require signless i32 containers");
-  if (op.getScale()->getSaturateTo() != fixed.getStorage())
-    return op.emitOpError("packed i16 saturate_to must match fixed numeric storage type");
+  if (op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
+    return op.emitOpError("executable butterfly requires packed_i16_imag_hi_real_lo layout");
+  if (!llvm::all_of(op.getOperandTypes(), [](Type type) { return type.isSignlessInteger(32); }) ||
+      !llvm::all_of(op.getResultTypes(), [](Type type) { return type.isSignlessInteger(32); }))
+    return op.emitOpError("executable butterfly requires scalar signless i32 packed values");
   return success();
 }
 
@@ -640,7 +587,8 @@ LogicalResult DotOp::verify() {
 LogicalResult ButterflyOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();
-  if (failed(verifyButterflyPolicies(*this, getNumeric(), getProduct(), getScale())))
+  if (failed(ondrix::ondsp::verifyPackedQ15ButterflyPolicy(*this, getNumeric(), getProduct(),
+                                                           getProductScale(), getOutputScale())))
     return failure();
   return verifyButterflyValueDomain(*this);
 }

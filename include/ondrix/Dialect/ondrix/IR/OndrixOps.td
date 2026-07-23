@@ -289,12 +289,34 @@ def Ondrix_DotOp
 }
 
 def Ondrix_ButterflyOp : Ondrix_Op<"butterfly", [Pure]> {
-  let summary = "High-level complex radix-2 butterfly intent";
+  let summary = "Packed-Q15 radix-2 butterfly intent";
+  let description = [{
+    Computes one target-independent radix-2 butterfly over packed signed-Q15
+    complex values. Bits 31:16 contain the imaginary component and bits 15:0
+    contain the real component.
+
+    For `b = br + j*bi` and `w = wr + j*wi`, the exact complex product is
+    formed in signed i33/Q30 intermediates:
+
+      `pr = br*wr - bi*wi`
+      `pi = br*wi + bi*wr`
+
+    `product_scale` requantizes each product component to signed Q15. The
+    butterfly then forms exact signed i17 components `a + t` and `a - t`;
+    `output_scale` requantizes those components before packing the two i32
+    results. Scaling applies left shift, signed right-shift rounding, then
+    wrap or saturation in that order.
+
+    The current executable profile requires full products, nearest-even
+    saturating Q30-to-Q15 product scaling by 15 bits, and nearest-even
+    saturating output scaling by one bit. Twiddle classification is derived
+    by analysis and is not a user-authored legality promise.
+  }];
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
                    Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric,
-                   OptionalAttr<Ondsp_ProductAttr>:$product,
-                   OptionalAttr<Ondsp_ScaleAttr>:$scale,
-                   DefaultValuedAttr<BoolAttr, "false">:$trivial_twiddle);
+                   Ondsp_ProductAttr:$product,
+                   Ondsp_ScaleAttr:$product_scale,
+                   Ondsp_ScaleAttr:$output_scale);
   let results = (outs AnyType:$out0, AnyType:$out1);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

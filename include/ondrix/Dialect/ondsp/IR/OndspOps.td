@@ -173,12 +173,28 @@ def Ondsp_CxMulOp : Ondsp_Op<"cx_mul", [Pure]> {
 }
 
 def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
-  let summary = "Experimental complex radix-2 butterfly semantic operation";
+  let summary = "Packed-Q15 radix-2 butterfly semantic operation";
+  let description = [{
+    Implements the target-independent packed-Q15 equation documented by
+    `ondrix.butterfly`. Bits 31:16 are imaginary and bits 15:0 are real.
+
+    The complex product `b*w` is evaluated as exact signed i33/Q30
+    cross-products, then `product_scale` independently requantizes its real
+    and imaginary components to signed Q15. Exact signed i17 additions and
+    subtractions form `a + b*w` and `a - b*w`; `output_scale` independently
+    requantizes those components before packing.
+
+    Both scaling boundaries explicitly apply left shift, signed right-shift
+    rounding, then destination wrap or saturation. The current executable
+    profile is deliberately closed to scalar packed i32 signed-Q15 values,
+    full products, nearest-even saturating product shift 15, and nearest-even
+    saturating output shift 1.
+  }];
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
                    Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric,
-                   OptionalAttr<Ondsp_ProductAttr>:$product,
-                   OptionalAttr<Ondsp_ScaleAttr>:$scale,
-                   DefaultValuedAttr<BoolAttr, "false">:$trivial_twiddle);
+                   Ondsp_ProductAttr:$product,
+                   Ondsp_ScaleAttr:$product_scale,
+                   Ondsp_ScaleAttr:$output_scale);
   let results = (outs AnyType:$out0, AnyType:$out1);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

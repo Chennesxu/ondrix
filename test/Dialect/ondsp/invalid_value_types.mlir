@@ -98,7 +98,7 @@ func.func @cx_mul_rejects_memref_operand(
 func.func @cx_butterfly_rejects_unranked_memref_operand(
     %a: memref<*xi32>, %b: i32, %twiddle: i32) -> (i32, i32) {
   // expected-error@+1 {{value-only operation does not accept memref operands}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %twiddle {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (memref<*xi32>, i32, i32) -> (i32, i32)
+  %0, %1 = ondsp.cx_butterfly %a, %b, %twiddle {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>, output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (memref<*xi32>, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
 }
 
@@ -114,11 +114,10 @@ func.func @fft_stage_rejects_memref_result(%input: i32) -> memref<1xi32> {
 
 func.func @complex_value_ops_accept_shaped_values(
     %vector: vector<2xi16>, %tensor: tensor<2xi16>)
-    -> (vector<2xi16>, tensor<2xi16>, tensor<2xi16>, vector<2xi16>) {
+    -> (vector<2xi16>, vector<2xi16>) {
   %0 = ondsp.cx_mul %vector, %vector {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (vector<2xi16>, vector<2xi16>) -> vector<2xi16>
-  %1, %2 = ondsp.cx_butterfly %tensor, %tensor, %tensor {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tensor<2xi16>, tensor<2xi16>, tensor<2xi16>) -> (tensor<2xi16>, tensor<2xi16>)
-  %3 = ondsp.fft_stage %vector {stage = 0 : i64, layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (vector<2xi16>) -> vector<2xi16>
-  return %0, %1, %2, %3 : vector<2xi16>, tensor<2xi16>, tensor<2xi16>, vector<2xi16>
+  %1 = ondsp.fft_stage %vector {stage = 0 : i64, layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (vector<2xi16>) -> vector<2xi16>
+  return %0, %1 : vector<2xi16>, vector<2xi16>
 }
 
 // -----
@@ -206,8 +205,8 @@ func.func @cx_mul_rejects_wrong_numeric_storage(
 
 func.func @cx_butterfly_rejects_scalar_to_vector_domain(
     %a: i32, %b: i32, %tw: i32) -> (vector<2xi32>, vector<2xi32>) {
-  // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (i32, i32, i32) -> (vector<2xi32>, vector<2xi32>)
+  // expected-error@+1 {{executable butterfly requires scalar signless i32 packed values}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>, product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>, output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (i32, i32, i32) -> (vector<2xi32>, vector<2xi32>)
   return %0, %1 : vector<2xi32>, vector<2xi32>
 }
 

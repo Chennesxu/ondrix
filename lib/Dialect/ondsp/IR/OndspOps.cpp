@@ -132,23 +132,6 @@ static LogicalResult verifyMacLike(Operation *op, Value acc, Value lhs, Value rh
   return success();
 }
 
-static LogicalResult verifyButterflyPolicies(Operation *op, Attribute numeric,
-                                             std::optional<ProductAttr> product,
-                                             std::optional<ScaleAttr> scale) {
-  if (failed(verifyProductPolicy(op, numeric, product)))
-    return failure();
-
-  if (isa<FixedAttr>(numeric)) {
-    if (!scale)
-      return op->emitOpError("fixed numeric butterfly requires a scale attribute");
-    return success();
-  }
-
-  if (scale)
-    return op->emitOpError("floating-point numeric butterfly must not specify a scale attribute");
-  return success();
-}
-
 static bool isPackedI16Layout(CxLayoutAttr layout) {
   return layout.getLayout() == ComplexLayout::PackedI16ImagHiRealLo ||
          layout.getLayout() == ComplexLayout::PackedI16RealHiImagLo;
@@ -360,44 +343,14 @@ LogicalResult CxMulOp::verify() {
 LogicalResult CxButterflyOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();
-  if (failed(verifyButterflyPolicies(*this, getNumeric(), getProduct(), getScale())))
+  if (failed(verifyPackedQ15ButterflyPolicy(*this, getNumeric(), getProduct(), getProductScale(),
+                                            getOutputScale())))
     return failure();
-
-  SmallVector<Type> valueTypes(getOperandTypes());
-  valueTypes.append(getResultTypes().begin(), getResultTypes().end());
-  if (failed(verifySameElementwiseShape(*this, valueTypes)))
-    return failure();
-
-  if (!isPackedI16Layout(getLayout())) {
-    for (auto [index, type] : llvm::enumerate(getOperandTypes())) {
-      if (failed(verifyValueNumericType(*this, type, getNumeric(),
-                                        index == 0   ? "a"
-                                        : index == 1 ? "b"
-                                                     : "twiddle")))
-        return failure();
-    }
-    for (auto [index, type] : llvm::enumerate(getResultTypes())) {
-      if (failed(verifyValueNumericType(*this, type, getNumeric(), index == 0 ? "out0" : "out1")))
-        return failure();
-    }
-    return success();
-  }
-
-  auto fixed = dyn_cast<FixedAttr>(getNumeric());
-  auto storage = fixed ? fixed.getStorage().dyn_cast<IntegerType>() : IntegerType();
-  if (!storage || storage.getWidth() != 16)
-    return emitOpError("packed i16 complex layout requires an i16 fixed numeric policy");
-
-  for (Type type : getOperandTypes()) {
-    if (!hasI32Container(type))
-      return emitOpError("packed i16 butterfly operands must use signless i32 container storage");
-  }
-  for (Type type : getResultTypes()) {
-    if (!hasI32Container(type))
-      return emitOpError("packed i16 butterfly results must use signless i32 container storage");
-  }
-  if (getScale()->getSaturateTo() != fixed.getStorage())
-    return emitOpError("packed i16 butterfly saturate_to must match fixed numeric storage type");
+  if (getLayout().getLayout() != ComplexLayout::PackedI16ImagHiRealLo)
+    return emitOpError("executable butterfly requires packed_i16_imag_hi_real_lo layout");
+  if (!llvm::all_of(getOperandTypes(), [](Type type) { return type.isSignlessInteger(32); }) ||
+      !llvm::all_of(getResultTypes(), [](Type type) { return type.isSignlessInteger(32); }))
+    return emitOpError("executable butterfly requires scalar signless i32 packed values");
   return success();
 }
 

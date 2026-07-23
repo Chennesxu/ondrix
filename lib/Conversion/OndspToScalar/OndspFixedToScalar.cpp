@@ -22,6 +22,7 @@
 #include "mlir/Transforms/DialectConversion.h"
 
 #include <optional>
+#include <utility>
 
 namespace ondrix {
 #define GEN_PASS_DEF_CONVERTONDSPFIXEDTOSCALAR
@@ -318,6 +319,41 @@ static Value narrowSignedValue(Location loc, Value input, IntegerType destinatio
   return rewriter.create<arith::TruncIOp>(loc, destinationType, clamped);
 }
 
+static Value requantizeSignedValue(Location loc, Value input, ondrix::ondsp::ScaleAttr scale,
+                                   ConversionPatternRewriter &rewriter) {
+  auto inputType = cast<IntegerType>(input.getType());
+  Value shifted = input;
+  if (scale.getPreShiftLeft() != 0) {
+    Value amount = createIntegerConstant(loc, inputType, scale.getPreShiftLeft(), rewriter);
+    shifted = rewriter.create<arith::ShLIOp>(loc, input, amount);
+  }
+  Value rounded =
+      roundSignedRightShift(loc, shifted, scale.getPostShiftRight(), scale.getRounding(), rewriter);
+  return narrowSignedValue(loc, rounded, cast<IntegerType>(scale.getSaturateTo()),
+                           scale.getOverflow(), rewriter);
+}
+
+static std::pair<Value, Value> unpackPackedQ15(Location loc, Value packed,
+                                               ConversionPatternRewriter &rewriter) {
+  IntegerType i16 = rewriter.getI16Type();
+  IntegerType i32 = rewriter.getI32Type();
+  Value real = rewriter.create<arith::TruncIOp>(loc, i16, packed);
+  Value shift = createIntegerConstant(loc, i32, 16, rewriter);
+  Value high = rewriter.create<arith::ShRUIOp>(loc, packed, shift);
+  Value imaginary = rewriter.create<arith::TruncIOp>(loc, i16, high);
+  return {real, imaginary};
+}
+
+static Value packQ15Complex(Location loc, Value real, Value imaginary,
+                            ConversionPatternRewriter &rewriter) {
+  IntegerType i32 = rewriter.getI32Type();
+  Value realBits = rewriter.create<arith::ExtUIOp>(loc, i32, real);
+  Value imaginaryBits = rewriter.create<arith::ExtUIOp>(loc, i32, imaginary);
+  Value shift = createIntegerConstant(loc, i32, 16, rewriter);
+  Value shiftedImaginary = rewriter.create<arith::ShLIOp>(loc, imaginaryBits, shift);
+  return rewriter.create<arith::OrIOp>(loc, shiftedImaginary, realBits);
+}
+
 static Value lowerSignedProduct(Location loc, Value lhs, Value rhs,
                                 ondrix::ondsp::FixedAttr numeric,
                                 ondrix::ondsp::ProductSemantics semantics, OpBuilder &builder) {
@@ -366,6 +402,59 @@ using MacOpLowering =
 using MacSubOpLowering =
     MacLikeOpLowering<ondrix::ondsp::MacSubOp,
                       ondrix::fixedpoint::AccumulatorUpdateOperation::Subtract>;
+
+class CxButterflyOpLowering final : public OpConversionPattern<ondrix::ondsp::CxButterflyOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::CxButterflyOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::CxButterflyOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto [aReal, aImaginary] = unpackPackedQ15(loc, adaptor.getA(), rewriter);
+    auto [bReal, bImaginary] = unpackPackedQ15(loc, adaptor.getB(), rewriter);
+    auto [wReal, wImaginary] = unpackPackedQ15(loc, adaptor.getTwiddle(), rewriter);
+
+    IntegerType productType = rewriter.getIntegerType(33);
+    auto extendProductOperand = [&](Value value) {
+      return rewriter.create<arith::ExtSIOp>(loc, productType, value);
+    };
+    Value br = extendProductOperand(bReal);
+    Value bi = extendProductOperand(bImaginary);
+    Value wr = extendProductOperand(wReal);
+    Value wi = extendProductOperand(wImaginary);
+    Value brwr = rewriter.create<arith::MulIOp>(loc, br, wr);
+    Value biwi = rewriter.create<arith::MulIOp>(loc, bi, wi);
+    Value brwi = rewriter.create<arith::MulIOp>(loc, br, wi);
+    Value biwr = rewriter.create<arith::MulIOp>(loc, bi, wr);
+    Value productReal = rewriter.create<arith::SubIOp>(loc, brwr, biwi);
+    Value productImaginary = rewriter.create<arith::AddIOp>(loc, brwi, biwr);
+    Value twiddledReal = requantizeSignedValue(loc, productReal, op.getProductScale(), rewriter);
+    Value twiddledImaginary =
+        requantizeSignedValue(loc, productImaginary, op.getProductScale(), rewriter);
+
+    IntegerType sumType = rewriter.getIntegerType(17);
+    auto extendSumOperand = [&](Value value) {
+      return rewriter.create<arith::ExtSIOp>(loc, sumType, value);
+    };
+    Value ar = extendSumOperand(aReal);
+    Value ai = extendSumOperand(aImaginary);
+    Value tr = extendSumOperand(twiddledReal);
+    Value ti = extendSumOperand(twiddledImaginary);
+    Value out0Real = rewriter.create<arith::AddIOp>(loc, ar, tr);
+    Value out0Imaginary = rewriter.create<arith::AddIOp>(loc, ai, ti);
+    Value out1Real = rewriter.create<arith::SubIOp>(loc, ar, tr);
+    Value out1Imaginary = rewriter.create<arith::SubIOp>(loc, ai, ti);
+
+    out0Real = requantizeSignedValue(loc, out0Real, op.getOutputScale(), rewriter);
+    out0Imaginary = requantizeSignedValue(loc, out0Imaginary, op.getOutputScale(), rewriter);
+    out1Real = requantizeSignedValue(loc, out1Real, op.getOutputScale(), rewriter);
+    out1Imaginary = requantizeSignedValue(loc, out1Imaginary, op.getOutputScale(), rewriter);
+
+    rewriter.replaceOp(op, ValueRange{packQ15Complex(loc, out0Real, out0Imaginary, rewriter),
+                                      packQ15Complex(loc, out1Real, out1Imaginary, rewriter)});
+    return success();
+  }
+};
 
 class AccAddTermOpLowering final : public OpConversionPattern<ondrix::ondsp::AccAddTermOp> {
 public:
@@ -478,8 +567,8 @@ public:
     OndspFixedToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
-                 MacOpLowering, MacSubOpLowering, ReduceMacOpLowering>(typeConverter,
-                                                                       &getContext());
+                 CxButterflyOpLowering, MacOpLowering, MacSubOpLowering, ReduceMacOpLowering>(
+        typeConverter, &getContext());
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
