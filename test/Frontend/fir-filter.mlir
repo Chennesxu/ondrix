@@ -3,6 +3,9 @@
 // RUN: ondrix-compile %S/Inputs/f32_fir_filter_valid.ox | FileCheck %s --check-prefix=F32
 // RUN: ondrix-compile %S/Inputs/q15_fir_filter_constexpr.ox | FileCheck %s --check-prefix=CONST
 // RUN: ondrix-compile %S/Inputs/q15_fir_filter_constexpr.ox | ondrix-opt --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --cse --canonicalize --vectorize-ondsp-constant-saturating-memref-reduce="vector-width=4 max-elements=64" --normalize-ondsp-fixed-vector-reduce | FileCheck %s --check-prefix=PROVEN
+// RUN: ondrix-compile %S/Inputs/q15_fir_filter_full.ox | FileCheck %s --check-prefix=FULL-Q15
+// RUN: ondrix-compile %S/Inputs/q31_fir_filter_full.ox | FileCheck %s --check-prefix=FULL-Q31
+// RUN: ondrix-compile %S/Inputs/f32_fir_filter_full.ox | FileCheck %s --check-prefix=FULL-F32
 
 // Q15-LABEL: func.func @q15_fir_filter_valid(
 // Q15-SAME: tensor<?xi16>
@@ -48,3 +51,21 @@
 // PROVEN: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
 // PROVEN: ondsp.acc_add_term
 // PROVEN-NOT: ondsp.reduce_mac
+
+// FULL-Q15-LABEL: func.func @q15_fir_filter_full(
+// FULL-Q15-SAME: tensor<6xi16>
+// FULL-Q15-SAME: tensor<3xi16>
+// FULL-Q15-SAME: -> tensor<8xi16>
+// FULL-Q15: ondrix.fir_filter
+// FULL-Q15-SAME: boundary = #ondrix.fir_boundary<full>
+
+// FULL-Q31-LABEL: func.func @q31_fir_filter_full(
+// FULL-Q31-SAME: -> tensor<6xi32>
+// FULL-Q31: ondrix.fir_filter
+// FULL-Q31-SAME: update_overflow = wrap
+// FULL-Q31-SAME: boundary = #ondrix.fir_boundary<full>
+
+// FULL-F32-LABEL: func.func @f32_fir_filter_full(
+// FULL-F32-SAME: -> tensor<7xf32>
+// FULL-F32: boundary = #ondrix.fir_boundary<full>
+// FULL-F32-SAME: numeric = #ondsp.fp<format = f32, contract = fma>

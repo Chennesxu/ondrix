@@ -1,9 +1,10 @@
 # Implementation Status
 
 Textual MLIR remains the complete development and testing entry point. The
-experimental `.ox` frontend currently covers Q15/Q31/f32 dot, FIR-sample, and
-valid full-output FIR over tensor values, including immutable inline Q15/Q31
-right operands for scalar reductions and fixed full-output FIR.
+experimental `.ox` frontend currently covers Q15/Q31/f32 dot, FIR-sample,
+dynamic/static valid FIR, and static full-boundary FIR over tensor values,
+including immutable inline Q15/Q31 right operands for scalar reductions and
+fixed full-output FIR.
 Dialect and source contracts may change while the numeric model is stabilized.
 
 | Capability | Status |
@@ -20,7 +21,7 @@ Dialect and source contracts may change while the numeric model is stabilized.
 | Packed Q15 butterfly lowering | Experimental instruction selection only; no public emulator or ABI correctness claim |
 | Object generation and C execution | Implemented for scalar and fixed-width Vector Q15/Q31 FIR-sample/full-output paths, ordered scalar Q15/Q31/f32 streaming chunks, opt-in materialized Q15/Q31 streaming Vector reuse, the experimental f32 TDF-II plus uniform-Q fixed DF-II SOS cascades, and the `.ox` Q15/Q31/f32 dot/FIR-sample/valid full-output FIR source slices, including constexpr fixed FIR specialization |
 | Public OrtumCore emulation | Signed i40/frac30 saturating accumulator init and Q15 full-product MAC add/sub implemented through exact Ondsp expansion |
-| Python-like `.ox` frontend | Experimental standalone Lexer/Parser/AST/Sema/MLIRGen pipeline for rank-1 Q15/Q31/f32 dot, FIR-sample, and tensor-value valid full-output FIR kernels; buffers and tensors may have dynamic or static extent, and a fixed reduction or full-output FIR may carry inline constexpr right coefficients that lower to an immutable global and activate existing proof/specialization consumers; Q15 i40/frac30 and Q31 i64/frac62 accumulator policies, destination rounding/overflow, and ordered f32 contraction are explicit, source locations reach MLIR, diagnostics are source-aware, and object+C execution is covered; full-boundary source syntax, indexing, loops, multiple kernels, mutable output buffers, inferred accumulators, and stable source/ABI contracts remain planned |
+| Python-like `.ox` frontend | Experimental standalone Lexer/Parser/AST/Sema/MLIRGen pipeline for rank-1 Q15/Q31/f32 dot, FIR-sample, tensor-value valid FIR, and static full-boundary FIR kernels; buffers and tensors may have dynamic or static extent, while full boundary is initially static to keep result extent arithmetic checked; a fixed reduction or full-output FIR may carry inline constexpr right coefficients that lower to an immutable global and activate existing proof/specialization consumers; Q15 i40/frac30 and Q31 i64/frac62 accumulator policies, destination rounding/overflow, and ordered f32 contraction are explicit, source locations reach MLIR, diagnostics are source-aware, and object+C execution is covered; dynamic full boundary, same padding, indexing, loops, multiple kernels, mutable output buffers, inferred accumulators, and stable source/ABI contracts remain planned |
 | Stable public kernel ABI | Planned |
 
 ## Supported Q15 Slice

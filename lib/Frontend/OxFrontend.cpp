@@ -635,25 +635,44 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         "coefficients");
       return std::nullopt;
     }
-    if (ast.result.boundary != "valid") {
-      diagnostics.error(ast.result.position, "fir_filter currently supports only boundary=valid");
-      return std::nullopt;
-    }
     std::optional<int64_t> coefficientExtent = rhsParameter->extent;
     if (rhsParameter->isConstexpr())
       coefficientExtent = static_cast<int64_t>(rhsParameter->constantValues.size());
-    if (lhsParameter->extent && coefficientExtent) {
-      if (*coefficientExtent > *lhsParameter->extent) {
+    if (ast.result.boundary == "valid") {
+      if (lhsParameter->extent && coefficientExtent) {
+        if (*coefficientExtent > *lhsParameter->extent) {
+          diagnostics.error(ast.result.position,
+                            "valid fir_filter requires input extent at least coefficient extent");
+          return std::nullopt;
+        }
+        int64_t expectedExtent = *lhsParameter->extent - *coefficientExtent + 1;
+        if (ast.resultExtent && *ast.resultExtent != expectedExtent) {
+          diagnostics.error(ast.result.position,
+                            "static fir_filter result extent does not match valid convolution");
+          return std::nullopt;
+        }
+      }
+    } else if (ast.result.boundary == "full") {
+      if (!lhsParameter->extent || !coefficientExtent || !ast.resultExtent) {
         diagnostics.error(ast.result.position,
-                          "valid fir_filter requires input extent at least coefficient extent");
+                          "full fir_filter currently requires static input, coefficient, and "
+                          "result extents");
         return std::nullopt;
       }
-      int64_t expectedExtent = *lhsParameter->extent - *coefficientExtent + 1;
-      if (ast.resultExtent && *ast.resultExtent != expectedExtent) {
-        diagnostics.error(ast.result.position,
-                          "static fir_filter result extent does not match valid convolution");
+      if (*lhsParameter->extent > std::numeric_limits<int64_t>::max() - *coefficientExtent + 1) {
+        diagnostics.error(ast.result.position, "full fir_filter result extent overflows index");
         return std::nullopt;
       }
+      int64_t expectedExtent = *lhsParameter->extent + *coefficientExtent - 1;
+      if (*ast.resultExtent != expectedExtent) {
+        diagnostics.error(ast.result.position,
+                          "static fir_filter result extent does not match full convolution");
+        return std::nullopt;
+      }
+    } else {
+      diagnostics.error(ast.result.position,
+                        "fir_filter supports only boundary=valid or boundary=full");
+      return std::nullopt;
     }
   } else {
     if (ast.tensorResult) {
@@ -885,9 +904,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       overflow = ondsp::OverflowModeAttr::get(&context, *kernel.destinationOverflow);
     }
 
-    Value result = builder.create<ir::FirFilterOp>(
-        expressionLocation, outputType, lhs, rhs, init, Value(), ir::FirBoundaryMode::Valid,
-        numeric, product, accumulator, destination, rounding, overflow);
+    ir::FirBoundaryMode boundary = kernel.ast.result.boundary == "full"
+                                       ? ir::FirBoundaryMode::Full
+                                       : ir::FirBoundaryMode::Valid;
+    Value result = builder.create<ir::FirFilterOp>(expressionLocation, outputType, lhs, rhs, init,
+                                                   Value(), boundary, numeric, product, accumulator,
+                                                   destination, rounding, overflow);
     builder.create<func::ReturnOp>(expressionLocation, result);
     module->push_back(function);
     if (failed(verify(*module)))

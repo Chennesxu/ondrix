@@ -33,7 +33,7 @@ The three project dialects have distinct responsibilities:
 Textual MLIR remains the complete development and debugging entry point. An
 experimental standalone `.ox` frontend now supports signed-Q15/Q31
 dot/FIR-sample kernels, immutable inline fixed-point reduction operands, and
-Q15/Q31/f32 valid full-output FIR over tensor values through scalar AOT
+Q15/Q31/f32 valid and static full-boundary FIR over tensor values through AOT
 execution. The repository also
 includes executable signed-Q15 and signed-Q31 scalar/fixed-width Vector AOT
 paths for FIR samples, full-output FIR, explicit-state streaming FIR, and dot

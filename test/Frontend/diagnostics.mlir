@@ -10,6 +10,9 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_buffer.ox 2>&1 | FileCheck %s --check-prefix=FILTER-BUFFER
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_boundary.ox 2>&1 | FileCheck %s --check-prefix=FILTER-BOUNDARY
 // RUN: not ondrix-compile %S/Inputs/invalid_tensor_dot.ox 2>&1 | FileCheck %s --check-prefix=TENSOR-DOT
+// RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_full_dynamic.ox 2>&1 | FileCheck %s --check-prefix=FULL-DYNAMIC
+// RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_full_shape.ox 2>&1 | FileCheck %s --check-prefix=FULL-SHAPE
+// RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_full_overflow.ox 2>&1 | FileCheck %s --check-prefix=FULL-OVERFLOW
 
 // PYTHON: invalid_python_def.ox:1:1: error: unsupported top-level construct 'def'; expected 'kernel'
 // PYTHON-NEXT: def q15_dot(lhs, rhs):
@@ -35,6 +38,12 @@
 
 // FILTER-BUFFER: invalid_fir_filter_buffer.ox:2:10: error: fir_filter currently requires tensor input and tensor or constexpr coefficients
 
-// FILTER-BOUNDARY: invalid_fir_filter_boundary.ox:2:10: error: fir_filter currently supports only boundary=valid
+// FILTER-BOUNDARY: invalid_fir_filter_boundary.ox:2:10: error: fir_filter supports only boundary=valid or boundary=full
 
 // TENSOR-DOT: invalid_tensor_dot.ox:2:10: error: scalar dot and fir currently require buffer operands
+
+// FULL-DYNAMIC: invalid_fir_filter_full_dynamic.ox:2:10: error: full fir_filter currently requires static input, coefficient, and result extents
+
+// FULL-SHAPE: invalid_fir_filter_full_shape.ox:2:10: error: static fir_filter result extent does not match full convolution
+
+// FULL-OVERFLOW: invalid_fir_filter_full_overflow.ox:2:10: error: full fir_filter result extent overflows index

@@ -90,11 +90,18 @@ kernel q15_fir_filter(input: tensor[q15], coefficients: tensor[q15]) -> tensor[q
 
 Q31 uses the corresponding exact 64-bit accumulator profile. Fixed constexpr
 coefficients are accepted in the same right-operand position. f32 replaces the
-fixed-point policies with `contract=off|fma|fast`. Static tensor extents are
-optional; when all three extents are static, the result must equal
-`input_length - coefficient_length + 1`. Only `boundary=valid` is currently a
-source feature. Full padding, streaming state, mutable destinations, and
-tensor indexing remain available only through textual MLIR contracts.
+fixed-point policies with `contract=off|fma|fast`. Valid mode permits dynamic
+or static tensor extents; when all three are static, the result must equal
+`input_length - coefficient_length + 1`.
+
+`boundary=full` exposes the existing zero-padded full-output equation. Its
+first source slice requires static input, coefficient, and result extents with
+`result_length = input_length + coefficient_length - 1`; Sema rejects extent
+overflow. The lowered fixed-point path keeps guarded ordered updates on both
+padded edges and can use prefix-proof-authorized Vector reduction only in the
+fully overlapping interior. Dynamic full output, same padding, stride,
+dilation, streaming state, mutable destinations, and tensor indexing remain
+available only through textual MLIR contracts.
 
 Compile it to textual MLIR with:
 
