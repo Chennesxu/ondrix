@@ -7,6 +7,9 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_constexpr_q15_range.ox 2>&1 | FileCheck %s --check-prefix=CONSTEXPR-RANGE
 // RUN: not ondrix-compile %S/Inputs/invalid_q31_accumulator_width.ox 2>&1 | FileCheck %s --check-prefix=Q31-WIDTH
 // RUN: not ondrix-compile %S/Inputs/invalid_constexpr_q31_range.ox 2>&1 | FileCheck %s --check-prefix=Q31-RANGE
+// RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_buffer.ox 2>&1 | FileCheck %s --check-prefix=FILTER-BUFFER
+// RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_boundary.ox 2>&1 | FileCheck %s --check-prefix=FILTER-BOUNDARY
+// RUN: not ondrix-compile %S/Inputs/invalid_tensor_dot.ox 2>&1 | FileCheck %s --check-prefix=TENSOR-DOT
 
 // PYTHON: invalid_python_def.ox:1:1: error: unsupported top-level construct 'def'; expected 'kernel'
 // PYTHON-NEXT: def q15_dot(lhs, rhs):
@@ -29,3 +32,9 @@
 // Q31-WIDTH: invalid_q31_accumulator_width.ox:2:10: error: the executable Q31 profile requires exact accumulator width 64
 
 // Q31-RANGE: invalid_constexpr_q31_range.ox:2:29: error: Q31 constexpr coefficient is outside signed i32 storage range
+
+// FILTER-BUFFER: invalid_fir_filter_buffer.ox:2:10: error: fir_filter currently requires tensor input and coefficients
+
+// FILTER-BOUNDARY: invalid_fir_filter_boundary.ox:2:10: error: fir_filter currently supports only boundary=valid
+
+// TENSOR-DOT: invalid_tensor_dot.ox:2:10: error: scalar dot and fir currently require buffer operands

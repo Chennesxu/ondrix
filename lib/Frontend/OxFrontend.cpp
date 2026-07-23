@@ -8,8 +8,10 @@
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Verifier.h"
 
@@ -192,17 +194,21 @@ private:
 
 enum class SourceType { Q15, Q31, F32 };
 
-enum class ReductionKind { Dot, Fir };
+enum class ContainerKind { Buffer, Tensor, Constexpr };
+
+enum class ReductionKind { Dot, Fir, FirFilter };
 
 struct ParameterAst {
   std::string name;
   SourceType type;
   std::optional<int64_t> extent;
-  bool compileTime = false;
+  ContainerKind container = ContainerKind::Buffer;
   std::vector<int64_t> constantValues;
   SourcePosition position;
 
-  bool isConstexpr() const { return compileTime; }
+  bool isBuffer() const { return container == ContainerKind::Buffer; }
+  bool isTensor() const { return container == ContainerKind::Tensor; }
+  bool isConstexpr() const { return container == ContainerKind::Constexpr; }
 };
 
 struct ReductionAst {
@@ -214,6 +220,7 @@ struct ReductionAst {
   std::string rounding;
   std::string destinationOverflow;
   std::string fpContract;
+  std::string boundary;
   SourcePosition position;
 };
 
@@ -221,6 +228,8 @@ struct KernelAst {
   std::string name;
   std::vector<ParameterAst> parameters;
   SourceType resultType;
+  bool tensorResult = false;
+  std::optional<int64_t> resultExtent;
   ReductionAst result;
   SourcePosition position;
 };
@@ -263,17 +272,32 @@ public:
     if (!expect(TokenKind::RightParen, "expected ')' after parameters") ||
         !expect(TokenKind::Arrow, "expected '->' after parameters"))
       return std::nullopt;
-    auto resultType = parseSourceType("expected kernel result type 'q15', 'q31', or 'f32'");
-    if (!resultType || !expect(TokenKind::Colon, "expected ':' before kernel body") ||
+    if (isIdentifier("tensor")) {
+      kernel.tensorResult = true;
+      advance();
+      if (!parseShapedType(kernel.resultType, kernel.resultExtent, "tensor"))
+        return std::nullopt;
+    } else {
+      auto resultType = parseSourceType("expected kernel result type 'q15', 'q31', or 'f32'");
+      if (!resultType)
+        return std::nullopt;
+      kernel.resultType = *resultType;
+    }
+    if (!expect(TokenKind::Colon, "expected ':' before kernel body") ||
         !expectIdentifier("return", "expected a single return statement"))
       return std::nullopt;
-    kernel.resultType = *resultType;
 
-    if (!isIdentifier("dot") && !isIdentifier("fir")) {
-      diagnostics.error(current.position, "expected dot(...) or fir(...) return expression");
+    if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter")) {
+      diagnostics.error(current.position,
+                        "expected dot(...), fir(...), or fir_filter(...) return expression");
       return std::nullopt;
     }
-    kernel.result.kind = isIdentifier("dot") ? ReductionKind::Dot : ReductionKind::Fir;
+    if (isIdentifier("dot"))
+      kernel.result.kind = ReductionKind::Dot;
+    else if (isIdentifier("fir"))
+      kernel.result.kind = ReductionKind::Fir;
+    else
+      kernel.result.kind = ReductionKind::FirFilter;
     kernel.result.position = current.position;
     advance();
     if (!expect(TokenKind::LeftParen, "expected '(' after reduction builtin"))
@@ -286,6 +310,16 @@ public:
       return std::nullopt;
     kernel.result.lhs = lhs->spelling.str();
     kernel.result.rhs = rhs->spelling.str();
+
+    if (kernel.result.kind == ReductionKind::FirFilter) {
+      if (!expectIdentifier("boundary", "expected FIR boundary policy") ||
+          !expect(TokenKind::Equal, "expected '=' after boundary"))
+        return std::nullopt;
+      auto boundary = parseIdentifier("expected FIR boundary mode");
+      if (!boundary || !expect(TokenKind::Comma, "expected ',' after FIR boundary mode"))
+        return std::nullopt;
+      kernel.result.boundary = boundary->spelling.str();
+    }
 
     if (kernel.resultType != SourceType::F32) {
       if (!parseFixedPolicy(kernel.result))
@@ -392,6 +426,33 @@ private:
     return negative ? -signedValue : signedValue;
   }
 
+  bool parseShapedType(SourceType &type, std::optional<int64_t> &extent,
+                       llvm::StringRef containerName) {
+    if (!expect(TokenKind::LeftBracket, llvm::Twine("expected '[' in ") + containerName + " type"))
+      return false;
+    auto parsedType = parseSourceType(llvm::Twine("expected ") + containerName +
+                                      " element type 'q15', 'q31', or 'f32'");
+    if (!parsedType)
+      return false;
+    type = *parsedType;
+    if (current.kind == TokenKind::Comma) {
+      advance();
+      auto parsedExtent = parseInteger(llvm::Twine("expected static ") + containerName + " extent");
+      uint64_t value = 0;
+      if (!parsedExtent)
+        return false;
+      if (parsedExtent->spelling.getAsInteger(10, value) ||
+          value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        diagnostics.error(parsedExtent->position,
+                          llvm::Twine(containerName) + " extent is out of range");
+        return false;
+      }
+      extent = static_cast<int64_t>(value);
+    }
+    return expect(TokenKind::RightBracket,
+                  llvm::Twine("expected ']' in ") + containerName + " type");
+  }
+
   std::optional<ParameterAst> parseParameter() {
     auto name = parseIdentifier("expected parameter name");
     if (!name || !expect(TokenKind::Colon, "expected ':' after parameter name"))
@@ -400,39 +461,24 @@ private:
     ParameterAst parameter;
     parameter.name = name->spelling.str();
     parameter.position = name->position;
-    if (isIdentifier("buffer")) {
+    if (isIdentifier("buffer") || isIdentifier("tensor")) {
+      bool isTensor = isIdentifier("tensor");
+      llvm::StringRef containerName = isTensor ? "tensor" : "buffer";
       advance();
-      if (!expect(TokenKind::LeftBracket, "expected '[' in buffer type"))
-        return std::nullopt;
-      auto type = parseSourceType("expected buffer element type 'q15', 'q31', or 'f32'");
-      if (!type)
-        return std::nullopt;
-      parameter.type = *type;
-      if (current.kind == TokenKind::Comma) {
-        advance();
-        auto extent = parseInteger("expected static buffer extent");
-        uint64_t parsedExtent = 0;
-        if (!extent)
-          return std::nullopt;
-        if (extent->spelling.getAsInteger(10, parsedExtent) ||
-            parsedExtent > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-          diagnostics.error(extent->position, "buffer extent is out of range");
-          return std::nullopt;
-        }
-        parameter.extent = static_cast<int64_t>(parsedExtent);
-      }
-      if (!expect(TokenKind::RightBracket, "expected ']' in buffer type"))
+      parameter.container = isTensor ? ContainerKind::Tensor : ContainerKind::Buffer;
+      if (!parseShapedType(parameter.type, parameter.extent, containerName))
         return std::nullopt;
       return parameter;
     }
 
     if (!isIdentifier("constexpr")) {
       diagnostics.error(current.position,
-                        "expected parameter type 'buffer[...]' or 'constexpr[q15|q31]'");
+                        "expected parameter type 'buffer[...]', 'tensor[...]', or "
+                        "'constexpr[q15|q31]'");
       return std::nullopt;
     }
     advance();
-    parameter.compileTime = true;
+    parameter.container = ContainerKind::Constexpr;
     if (!expect(TokenKind::LeftBracket, "expected '[' in constexpr type"))
       return std::nullopt;
     auto type = parseSourceType("expected constexpr element type 'q15' or 'q31'");
@@ -537,6 +583,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     diagnostics.error(ast.position, "dot and FIR kernels require exactly two parameters");
     return std::nullopt;
   }
+  if (ast.resultExtent && *ast.resultExtent <= 0) {
+    diagnostics.error(ast.position, "static result tensor extent must be positive");
+    return std::nullopt;
+  }
 
   llvm::StringSet<> parameterNames;
   const ParameterAst *lhsParameter = nullptr;
@@ -553,7 +603,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       return std::nullopt;
     }
     if (parameter.extent && *parameter.extent <= 0) {
-      diagnostics.error(parameter.position, "static buffer extent must be positive");
+      diagnostics.error(parameter.position, "static shaped extent must be positive");
       return std::nullopt;
     }
     if (parameter.name == ast.result.lhs)
@@ -570,6 +620,46 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     diagnostics.error(ast.result.position,
                       llvm::Twine("unknown reduction operand '") + ast.result.rhs + "'");
     return std::nullopt;
+  }
+
+  if (ast.result.kind == ReductionKind::FirFilter) {
+    if (!ast.tensorResult) {
+      diagnostics.error(ast.result.position, "fir_filter must return a tensor value");
+      return std::nullopt;
+    }
+    if (!lhsParameter || !rhsParameter || !lhsParameter->isTensor() || !rhsParameter->isTensor()) {
+      diagnostics.error(ast.result.position,
+                        "fir_filter currently requires tensor input and coefficients");
+      return std::nullopt;
+    }
+    if (ast.result.boundary != "valid") {
+      diagnostics.error(ast.result.position, "fir_filter currently supports only boundary=valid");
+      return std::nullopt;
+    }
+    if (lhsParameter->extent && rhsParameter->extent) {
+      if (*rhsParameter->extent > *lhsParameter->extent) {
+        diagnostics.error(ast.result.position,
+                          "valid fir_filter requires input extent at least coefficient extent");
+        return std::nullopt;
+      }
+      int64_t expectedExtent = *lhsParameter->extent - *rhsParameter->extent + 1;
+      if (ast.resultExtent && *ast.resultExtent != expectedExtent) {
+        diagnostics.error(ast.result.position,
+                          "static fir_filter result extent does not match valid convolution");
+        return std::nullopt;
+      }
+    }
+  } else {
+    if (ast.tensorResult) {
+      diagnostics.error(ast.result.position, "dot and fir return scalar values");
+      return std::nullopt;
+    }
+    if (llvm::any_of(ast.parameters,
+                     [](const ParameterAst &parameter) { return parameter.isTensor(); })) {
+      diagnostics.error(ast.result.position,
+                        "scalar dot and fir currently require buffer operands");
+      return std::nullopt;
+    }
   }
 
   if (ast.resultType == SourceType::F32) {
@@ -668,8 +758,8 @@ static Location getLocation(MLIRContext &context, llvm::StringRef sourceName,
 
 static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::StringRef sourceName,
                                             MLIRContext &context) {
-  context.loadDialect<func::FuncDialect, memref::MemRefDialect, ir::OndrixDialect,
-                      ondsp::OndspDialect>();
+  context.loadDialect<arith::ArithDialect, func::FuncDialect, memref::MemRefDialect,
+                      tensor::TensorDialect, ir::OndrixDialect, ondsp::OndspDialect>();
   OpBuilder builder(&context);
   Location kernelLocation = getLocation(context, sourceName, kernel.ast.position);
   OwningOpRef<ModuleOp> module = ModuleOp::create(kernelLocation);
@@ -686,9 +776,17 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     if (parameter.isConstexpr())
       continue;
     int64_t extent = parameter.extent.value_or(ShapedType::kDynamic);
-    inputTypes.push_back(MemRefType::get({extent}, elementType));
+    if (parameter.isTensor())
+      inputTypes.push_back(RankedTensorType::get({extent}, elementType));
+    else
+      inputTypes.push_back(MemRefType::get({extent}, elementType));
   }
-  FunctionType functionType = builder.getFunctionType(inputTypes, {elementType});
+  Type resultType = elementType;
+  if (kernel.ast.tensorResult) {
+    int64_t extent = kernel.ast.resultExtent.value_or(ShapedType::kDynamic);
+    resultType = RankedTensorType::get({extent}, elementType);
+  }
+  FunctionType functionType = builder.getFunctionType(inputTypes, {resultType});
   auto function = func::FuncOp::create(kernelLocation, kernel.ast.name, functionType);
   function->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
   Block *entry = function.addEntryBlock();
@@ -727,6 +825,63 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   Location expressionLocation = getLocation(context, sourceName, kernel.ast.result.position);
   Value lhs = arguments.lookup(kernel.ast.result.lhs);
   Value rhs = arguments.lookup(kernel.ast.result.rhs);
+  if (kernel.ast.result.kind == ReductionKind::FirFilter) {
+    auto outputType = cast<RankedTensorType>(resultType);
+    SmallVector<Value> dynamicSizes;
+    if (outputType.isDynamicDim(0)) {
+      Value zero = builder.create<arith::ConstantIndexOp>(expressionLocation, 0);
+      Value one = builder.create<arith::ConstantIndexOp>(expressionLocation, 1);
+      Value inputLength = builder.create<tensor::DimOp>(expressionLocation, lhs, zero);
+      Value coefficientLength = builder.create<tensor::DimOp>(expressionLocation, rhs, zero);
+      Value nonempty = builder.create<arith::CmpIOp>(expressionLocation, arith::CmpIPredicate::ugt,
+                                                     coefficientLength, zero);
+      Value covered = builder.create<arith::CmpIOp>(expressionLocation, arith::CmpIPredicate::uge,
+                                                    inputLength, coefficientLength);
+      Value valid = builder.create<arith::AndIOp>(expressionLocation, nonempty, covered);
+      Value rawLength = builder.create<arith::AddIOp>(
+          expressionLocation,
+          builder.create<arith::SubIOp>(expressionLocation, inputLength, coefficientLength), one);
+      dynamicSizes.push_back(
+          builder.create<arith::SelectOp>(expressionLocation, valid, rawLength, zero));
+    }
+    Value init = builder.create<tensor::EmptyOp>(expressionLocation, outputType.getShape(),
+                                                 elementType, dynamicSizes);
+
+    Attribute numeric;
+    ondsp::ProductAttr product;
+    TypeAttr accumulator;
+    ondsp::FixedAttr destination;
+    ondsp::RoundingModeAttr rounding;
+    ondsp::OverflowModeAttr overflow;
+    if (kernel.ast.resultType == SourceType::F32) {
+      numeric = ondsp::FpAttr::get(&context, elementType, *kernel.fpContract);
+    } else {
+      unsigned storageWidth = cast<IntegerType>(elementType).getWidth();
+      unsigned fractionalBits = storageWidth - 1;
+      unsigned accumulatorWidth = kernel.ast.resultType == SourceType::Q15 ? 40 : 64;
+      auto fixed =
+          ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, fractionalBits);
+      auto accumulatorType = ondsp::AccType::get(&context, builder.getIntegerType(accumulatorWidth),
+                                                 fractionalBits * 2, ondsp::Signedness::Signed,
+                                                 *kernel.updateOverflow);
+      numeric = fixed;
+      product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::Full);
+      accumulator = TypeAttr::get(accumulatorType);
+      destination = fixed;
+      rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
+      overflow = ondsp::OverflowModeAttr::get(&context, *kernel.destinationOverflow);
+    }
+
+    Value result = builder.create<ir::FirFilterOp>(
+        expressionLocation, outputType, lhs, rhs, init, Value(), ir::FirBoundaryMode::Valid,
+        numeric, product, accumulator, destination, rounding, overflow);
+    builder.create<func::ReturnOp>(expressionLocation, result);
+    module->push_back(function);
+    if (failed(verify(*module)))
+      return {};
+    return module;
+  }
+
   if (kernel.ast.resultType != SourceType::F32) {
     unsigned storageWidth = cast<IntegerType>(elementType).getWidth();
     unsigned fractionalBits = storageWidth - 1;

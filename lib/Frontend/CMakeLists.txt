@@ -4,10 +4,12 @@ add_ondrix_library(OndrixFrontend
   PARTIAL_SOURCES_INTENDED
 
   LINK_LIBS PUBLIC
+  MLIRArithDialect
   MLIRFuncDialect
   MLIRIR
   MLIRMemRefDialect
   MLIRSupport
+  MLIRTensorDialect
   OndrixIR
   OndspIR
   )
