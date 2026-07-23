@@ -104,6 +104,29 @@ fully overlapping interior. Dynamic full output, same padding, stride,
 dilation, streaming state, mutable destinations, and tensor indexing remain
 available only through textual MLIR contracts.
 
+Valid one-dimensional convolution and correlation use tensor values and the
+same fixed-point or floating-point policy syntax as full-output FIR:
+
+```python
+kernel q15_convolution(
+    input: tensor[q15,6], kernel: tensor[q15,3]) -> tensor[q15,4]:
+  return convolution(input, kernel,
+                     accumulator=exact[40,saturate],
+                     rounding=nearest_even,
+                     overflow=saturate)
+
+kernel f32_correlation(
+    input: tensor[f32,6], kernel: tensor[f32,3]) -> tensor[f32,4]:
+  return correlation(input, kernel, contract=fma)
+```
+
+Both forms require `result_length = input_length - kernel_length + 1`.
+Correlation pairs increasing input and kernel indices. Convolution reverses
+the kernel while preserving increasing input-window and accumulator-update
+order. Dynamic tensor extents are accepted when the result is also dynamic.
+Padding, stride, dilation, multidimensional/grouped forms, and constexpr
+kernels are not part of this source slice.
+
 Static packed-Q15 complex FFT uses an explicit experimental element spelling:
 
 ```python

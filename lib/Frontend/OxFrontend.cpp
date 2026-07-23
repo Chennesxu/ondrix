@@ -197,7 +197,7 @@ enum class SourceType { Q15, Q31, F32, ComplexQ15 };
 
 enum class ContainerKind { Buffer, Tensor, Constexpr };
 
-enum class ReductionKind { Dot, Fir, FirFilter, Cfft };
+enum class ReductionKind { Dot, Fir, FirFilter, Convolution, Correlation, Cfft };
 
 struct ParameterAst {
   std::string name;
@@ -289,10 +289,10 @@ public:
       return std::nullopt;
 
     if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter") &&
-        !isIdentifier("cfft")) {
+        !isIdentifier("convolution") && !isIdentifier("correlation") && !isIdentifier("cfft")) {
       diagnostics.error(current.position,
-                        "expected dot(...), fir(...), fir_filter(...), or cfft(...) return "
-                        "expression");
+                        "expected dot(...), fir(...), fir_filter(...), convolution(...), "
+                        "correlation(...), or cfft(...) return expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -301,6 +301,10 @@ public:
       kernel.result.kind = ReductionKind::Fir;
     else if (isIdentifier("fir_filter"))
       kernel.result.kind = ReductionKind::FirFilter;
+    else if (isIdentifier("convolution"))
+      kernel.result.kind = ReductionKind::Convolution;
+    else if (isIdentifier("correlation"))
+      kernel.result.kind = ReductionKind::Correlation;
     else
       kernel.result.kind = ReductionKind::Cfft;
     kernel.result.position = current.position;
@@ -604,7 +608,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   if (ast.parameters.size() != expectedParameterCount) {
     diagnostics.error(ast.position, ast.result.kind == ReductionKind::Cfft
                                         ? "cfft kernels require exactly one parameter"
-                                        : "dot and FIR kernels require exactly two parameters");
+                                        : "binary DSP kernels require exactly two parameters");
     return std::nullopt;
   }
   if (ast.resultExtent && *ast.resultExtent <= 0) {
@@ -713,7 +717,40 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     }
   }
 
-  if (ast.result.kind == ReductionKind::FirFilter) {
+  bool isConv1D = ast.result.kind == ReductionKind::Convolution ||
+                  ast.result.kind == ReductionKind::Correlation;
+  if (isConv1D) {
+    if (constexprCount != 0) {
+      diagnostics.error(ast.result.position,
+                        "convolution and correlation currently require runtime tensor operands");
+      return std::nullopt;
+    }
+    if (!ast.tensorResult || !lhsParameter || !rhsParameter || !lhsParameter->isTensor() ||
+        !rhsParameter->isTensor()) {
+      diagnostics.error(ast.result.position,
+                        "convolution and correlation require tensor inputs and result");
+      return std::nullopt;
+    }
+    if ((!lhsParameter->extent || !rhsParameter->extent) && ast.resultExtent) {
+      diagnostics.error(ast.result.position,
+                        "a static convolution/correlation result requires static input and kernel "
+                        "extents");
+      return std::nullopt;
+    }
+    if (lhsParameter->extent && rhsParameter->extent) {
+      if (*rhsParameter->extent > *lhsParameter->extent) {
+        diagnostics.error(ast.result.position,
+                          "convolution/correlation input extent must cover the kernel");
+        return std::nullopt;
+      }
+      int64_t expectedExtent = *lhsParameter->extent - *rhsParameter->extent + 1;
+      if (ast.resultExtent && *ast.resultExtent != expectedExtent) {
+        diagnostics.error(ast.result.position,
+                          "static convolution/correlation result extent is incorrect");
+        return std::nullopt;
+      }
+    }
+  } else if (ast.result.kind == ReductionKind::FirFilter) {
     if (!ast.tensorResult) {
       diagnostics.error(ast.result.position, "fir_filter must return a tensor value");
       return std::nullopt;
@@ -939,7 +976,9 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
 
   Value rhs = arguments.lookup(kernel.ast.result.rhs);
-  if (kernel.ast.result.kind == ReductionKind::FirFilter) {
+  bool isConv1D = kernel.ast.result.kind == ReductionKind::Convolution ||
+                  kernel.ast.result.kind == ReductionKind::Correlation;
+  if (kernel.ast.result.kind == ReductionKind::FirFilter || isConv1D) {
     auto outputType = cast<RankedTensorType>(resultType);
     SmallVector<Value> dynamicSizes;
     if (outputType.isDynamicDim(0)) {
@@ -986,12 +1025,22 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       overflow = ondsp::OverflowModeAttr::get(&context, *kernel.destinationOverflow);
     }
 
-    ir::FirBoundaryMode boundary = kernel.ast.result.boundary == "full"
-                                       ? ir::FirBoundaryMode::Full
-                                       : ir::FirBoundaryMode::Valid;
-    Value result = builder.create<ir::FirFilterOp>(expressionLocation, outputType, lhs, rhs, init,
-                                                   Value(), boundary, numeric, product, accumulator,
-                                                   destination, rounding, overflow);
+    Value result;
+    if (isConv1D) {
+      ir::Conv1DMode mode = kernel.ast.result.kind == ReductionKind::Convolution
+                                ? ir::Conv1DMode::Convolution
+                                : ir::Conv1DMode::Correlation;
+      result = builder.create<ir::Conv1DOp>(expressionLocation, outputType, lhs, rhs, init, mode,
+                                            numeric, product, accumulator, destination, rounding,
+                                            overflow);
+    } else {
+      ir::FirBoundaryMode boundary = kernel.ast.result.boundary == "full"
+                                         ? ir::FirBoundaryMode::Full
+                                         : ir::FirBoundaryMode::Valid;
+      result = builder.create<ir::FirFilterOp>(expressionLocation, outputType, lhs, rhs, init,
+                                               Value(), boundary, numeric, product, accumulator,
+                                               destination, rounding, overflow);
+    }
     builder.create<func::ReturnOp>(expressionLocation, result);
     module->push_back(function);
     if (failed(verify(*module)))
