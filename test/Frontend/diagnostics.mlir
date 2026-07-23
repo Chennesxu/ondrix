@@ -33,7 +33,7 @@
 
 // Q31-RANGE: invalid_constexpr_q31_range.ox:2:29: error: Q31 constexpr coefficient is outside signed i32 storage range
 
-// FILTER-BUFFER: invalid_fir_filter_buffer.ox:2:10: error: fir_filter currently requires tensor input and coefficients
+// FILTER-BUFFER: invalid_fir_filter_buffer.ox:2:10: error: fir_filter currently requires tensor input and tensor or constexpr coefficients
 
 // FILTER-BOUNDARY: invalid_fir_filter_boundary.ox:2:10: error: fir_filter currently supports only boundary=valid
 

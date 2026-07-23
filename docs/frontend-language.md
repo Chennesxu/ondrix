@@ -21,9 +21,9 @@ kernel q15_fir(window: buffer[q15], coefficients: buffer[q15]) -> q15:
              overflow=saturate)
 ```
 
-The right operand of a fixed-point dot or FIR may instead be embedded as
-compile-time raw values. A static left-operand extent is required so the
-frontend can prove the reduction lengths agree:
+The right operand of a fixed-point dot, FIR sample, or valid full-output FIR
+may instead be embedded as compile-time raw values. Scalar reductions require
+a static left-operand extent so the frontend can prove the lengths agree:
 
 ```python
 kernel q15_fir_constexpr(
@@ -41,6 +41,10 @@ proof-driven constant reduction and FIR specialization passes. Values must fit
 the selected signed storage; constexpr is not yet a general expression
 facility. A constexpr dot can therefore enter prefix-proof-authorized Vector
 reassociation without turning a source assertion into legality authority.
+For `fir_filter`, the compiler-owned global is exposed as a read-only tensor
+value and removed again by bufferization. A static input extent is optional;
+the coefficient count still determines each valid window, and the recovered
+global provenance can authorize the existing prefix-proof Vector reduction.
 
 The same fixed-point source forms accept `q31`. The executable Q31 profile
 uses signed i32 storage with 31 fractional bits, an exact full product, and an
@@ -84,7 +88,8 @@ kernel q15_fir_filter(input: tensor[q15], coefficients: tensor[q15]) -> tensor[q
                     overflow=saturate)
 ```
 
-Q31 uses the corresponding exact 64-bit accumulator profile. f32 replaces the
+Q31 uses the corresponding exact 64-bit accumulator profile. Fixed constexpr
+coefficients are accepted in the same right-operand position. f32 replaces the
 fixed-point policies with `contract=off|fma|fast`. Static tensor extents are
 optional; when all three extents are static, the result must equal
 `input_length - coefficient_length + 1`. Only `boundary=valid` is currently a

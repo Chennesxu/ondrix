@@ -9,6 +9,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -627,22 +628,27 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       diagnostics.error(ast.result.position, "fir_filter must return a tensor value");
       return std::nullopt;
     }
-    if (!lhsParameter || !rhsParameter || !lhsParameter->isTensor() || !rhsParameter->isTensor()) {
+    if (!lhsParameter || !rhsParameter || !lhsParameter->isTensor() ||
+        (!rhsParameter->isTensor() && !rhsParameter->isConstexpr())) {
       diagnostics.error(ast.result.position,
-                        "fir_filter currently requires tensor input and coefficients");
+                        "fir_filter currently requires tensor input and tensor or constexpr "
+                        "coefficients");
       return std::nullopt;
     }
     if (ast.result.boundary != "valid") {
       diagnostics.error(ast.result.position, "fir_filter currently supports only boundary=valid");
       return std::nullopt;
     }
-    if (lhsParameter->extent && rhsParameter->extent) {
-      if (*rhsParameter->extent > *lhsParameter->extent) {
+    std::optional<int64_t> coefficientExtent = rhsParameter->extent;
+    if (rhsParameter->isConstexpr())
+      coefficientExtent = static_cast<int64_t>(rhsParameter->constantValues.size());
+    if (lhsParameter->extent && coefficientExtent) {
+      if (*coefficientExtent > *lhsParameter->extent) {
         diagnostics.error(ast.result.position,
                           "valid fir_filter requires input extent at least coefficient extent");
         return std::nullopt;
       }
-      int64_t expectedExtent = *lhsParameter->extent - *rhsParameter->extent + 1;
+      int64_t expectedExtent = *lhsParameter->extent - *coefficientExtent + 1;
       if (ast.resultExtent && *ast.resultExtent != expectedExtent) {
         diagnostics.error(ast.result.position,
                           "static fir_filter result extent does not match valid convolution");
@@ -707,15 +713,17 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       }
     }
-    if (!lhsParameter->extent) {
-      diagnostics.error(lhsParameter->position,
-                        "a constexpr reduction operand requires a static left operand extent");
-      return std::nullopt;
-    }
-    if (*lhsParameter->extent != static_cast<int64_t>(rhsParameter->constantValues.size())) {
-      diagnostics.error(lhsParameter->position,
-                        "static input extent must equal the constexpr coefficient count");
-      return std::nullopt;
+    if (ast.result.kind != ReductionKind::FirFilter) {
+      if (!lhsParameter->extent) {
+        diagnostics.error(lhsParameter->position,
+                          "a constexpr reduction operand requires a static left operand extent");
+        return std::nullopt;
+      }
+      if (*lhsParameter->extent != static_cast<int64_t>(rhsParameter->constantValues.size())) {
+        diagnostics.error(lhsParameter->position,
+                          "static input extent must equal the constexpr coefficient count");
+        return std::nullopt;
+      }
     }
   }
 
@@ -758,8 +766,9 @@ static Location getLocation(MLIRContext &context, llvm::StringRef sourceName,
 
 static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::StringRef sourceName,
                                             MLIRContext &context) {
-  context.loadDialect<arith::ArithDialect, func::FuncDialect, memref::MemRefDialect,
-                      tensor::TensorDialect, ir::OndrixDialect, ondsp::OndspDialect>();
+  context.loadDialect<arith::ArithDialect, bufferization::BufferizationDialect, func::FuncDialect,
+                      memref::MemRefDialect, tensor::TensorDialect, ir::OndrixDialect,
+                      ondsp::OndspDialect>();
   OpBuilder builder(&context);
   Location kernelLocation = getLocation(context, sourceName, kernel.ast.position);
   OwningOpRef<ModuleOp> module = ModuleOp::create(kernelLocation);
@@ -819,6 +828,10 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     builder.setInsertionPointToStart(entry);
     Value coefficients = builder.create<memref::GetGlobalOp>(
         getLocation(context, sourceName, parameter.position), coefficientType, symbolName);
+    if (kernel.ast.result.kind == ReductionKind::FirFilter)
+      coefficients = builder.create<bufferization::ToTensorOp>(
+          getLocation(context, sourceName, parameter.position), initializerType, coefficients,
+          /*restrict=*/true, /*writable=*/false);
     arguments.insert({parameter.name, coefficients});
   }
 
