@@ -4,6 +4,11 @@
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc %S/Inputs/cfft4_q15_aot.c %t.o -o %t
 // RUN: %t
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar="specialize-canonical-twiddles" --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --buffer-deallocation --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.specialized.mlir
+// RUN: ondrix-translate %t.specialized.mlir --mlir-to-llvmir > %t.specialized.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.specialized.ll -o %t.specialized.o
+// RUN: cc %S/Inputs/cfft4_q15_aot.c %t.specialized.o -o %t.specialized
+// RUN: %t.specialized
 
 // CHECK-NOT: ondrix.
 // CHECK-NOT: ondsp.

@@ -48,6 +48,29 @@ bool testQ15FullProducts() {
   return passed;
 }
 
+bool testCanonicalQ15TwiddleIdentities() {
+  const llvm::APInt one = signedValue(16, 32767);
+  const llvm::APInt negativeOne = signedValue(16, -32768);
+  for (int64_t value = INT16_MIN; value <= INT16_MAX; ++value) {
+    llvm::APInt input = signedValue(16, value);
+    llvm::APInt genericOne =
+        exportSignedAccumulator(computeSignedFullProduct(input, one), 15, 16,
+                                RoundingMode::NearestEven, AccumulatorOverflowMode::Saturate);
+    int64_t specializedOne = value + (value < -16384 ? 1 : 0) - (value > 16384 ? 1 : 0);
+    if (!expectEqual("canonical Q15 +1", genericOne, signedValue(16, specializedOne)))
+      return false;
+
+    llvm::APInt genericNegate =
+        exportSignedAccumulator(computeSignedFullProduct(input, negativeOne), 15, 16,
+                                RoundingMode::NearestEven, AccumulatorOverflowMode::Saturate);
+    int64_t specializedNegate = value == INT16_MIN ? INT16_MAX : -value;
+    if (!expectEqual("canonical Q15 saturating negate", genericNegate,
+                     signedValue(16, specializedNegate)))
+      return false;
+  }
+  return true;
+}
+
 bool testQ31FullProducts() {
   bool passed = true;
   passed &= expectEqual(
@@ -616,6 +639,7 @@ bool testQ31SosDf2UpdateOverflow() {
 
 int main() {
   bool passed = testQ15FullProducts();
+  passed &= testCanonicalQ15TwiddleIdentities();
   passed &= testQ31FullProducts();
   passed &= testQ31RawHighProducts();
   passed &= testAccumulatorIntermediateWidth();

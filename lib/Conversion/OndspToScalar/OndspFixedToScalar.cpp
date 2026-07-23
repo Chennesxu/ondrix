@@ -354,6 +354,55 @@ static Value packQ15Complex(Location loc, Value real, Value imaginary,
   return rewriter.create<arith::OrIOp>(loc, shiftedImaginary, realBits);
 }
 
+enum class CanonicalPackedQ15Twiddle {
+  One,
+  MinusJ,
+};
+
+static std::optional<CanonicalPackedQ15Twiddle> classifyCanonicalPackedQ15Twiddle(Value value) {
+  auto constant = value.getDefiningOp<arith::ConstantOp>();
+  auto integer = constant ? dyn_cast<IntegerAttr>(constant.getValue()) : IntegerAttr();
+  auto integerType = integer ? dyn_cast<IntegerType>(integer.getType()) : IntegerType();
+  if (!integerType || integerType.getWidth() != 32)
+    return std::nullopt;
+
+  uint64_t bits = integer.getValue().getZExtValue();
+  if (bits == 0x00007fffU)
+    return CanonicalPackedQ15Twiddle::One;
+  if (bits == 0x80000000U)
+    return CanonicalPackedQ15Twiddle::MinusJ;
+  return std::nullopt;
+}
+
+// Exact form of nearest-even saturating Q15 multiplication by 32767/32768.
+static Value multiplyByPackedQ15One(Location loc, Value input,
+                                    ConversionPatternRewriter &rewriter) {
+  IntegerType i16 = rewriter.getI16Type();
+  Value negativeThreshold = createIntegerConstant(loc, i16, -16384, rewriter);
+  Value positiveThreshold = createIntegerConstant(loc, i16, 16384, rewriter);
+  Value one = createIntegerConstant(loc, i16, 1, rewriter);
+  Value zero = createIntegerConstant(loc, i16, 0, rewriter);
+  Value below =
+      rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, input, negativeThreshold);
+  Value above =
+      rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, input, positiveThreshold);
+  Value increment = rewriter.create<arith::SelectOp>(loc, below, one, zero);
+  Value decrement = rewriter.create<arith::SelectOp>(loc, above, one, zero);
+  Value adjusted = rewriter.create<arith::AddIOp>(loc, input, increment);
+  return rewriter.create<arith::SubIOp>(loc, adjusted, decrement);
+}
+
+static Value saturatingNegatePackedQ15(Location loc, Value input,
+                                       ConversionPatternRewriter &rewriter) {
+  IntegerType i16 = rewriter.getI16Type();
+  Value zero = createIntegerConstant(loc, i16, 0, rewriter);
+  Value minimum = createIntegerConstant(loc, i16, -32768, rewriter);
+  Value maximum = createIntegerConstant(loc, i16, 32767, rewriter);
+  Value isMinimum = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, input, minimum);
+  Value negated = rewriter.create<arith::SubIOp>(loc, zero, input);
+  return rewriter.create<arith::SelectOp>(loc, isMinimum, maximum, negated);
+}
+
 static Value lowerSignedProduct(Location loc, Value lhs, Value rhs,
                                 ondrix::ondsp::FixedAttr numeric,
                                 ondrix::ondsp::ProductSemantics semantics, OpBuilder &builder) {
@@ -405,7 +454,10 @@ using MacSubOpLowering =
 
 class CxButterflyOpLowering final : public OpConversionPattern<ondrix::ondsp::CxButterflyOp> {
 public:
-  using OpConversionPattern<ondrix::ondsp::CxButterflyOp>::OpConversionPattern;
+  CxButterflyOpLowering(TypeConverter &typeConverter, MLIRContext *context,
+                        bool specializeCanonicalTwiddles)
+      : OpConversionPattern(typeConverter, context),
+        specializeCanonicalTwiddles(specializeCanonicalTwiddles) {}
 
   LogicalResult matchAndRewrite(ondrix::ondsp::CxButterflyOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -414,23 +466,36 @@ public:
     auto [bReal, bImaginary] = unpackPackedQ15(loc, adaptor.getB(), rewriter);
     auto [wReal, wImaginary] = unpackPackedQ15(loc, adaptor.getTwiddle(), rewriter);
 
-    IntegerType productType = rewriter.getIntegerType(33);
-    auto extendProductOperand = [&](Value value) {
-      return rewriter.create<arith::ExtSIOp>(loc, productType, value);
-    };
-    Value br = extendProductOperand(bReal);
-    Value bi = extendProductOperand(bImaginary);
-    Value wr = extendProductOperand(wReal);
-    Value wi = extendProductOperand(wImaginary);
-    Value brwr = rewriter.create<arith::MulIOp>(loc, br, wr);
-    Value biwi = rewriter.create<arith::MulIOp>(loc, bi, wi);
-    Value brwi = rewriter.create<arith::MulIOp>(loc, br, wi);
-    Value biwr = rewriter.create<arith::MulIOp>(loc, bi, wr);
-    Value productReal = rewriter.create<arith::SubIOp>(loc, brwr, biwi);
-    Value productImaginary = rewriter.create<arith::AddIOp>(loc, brwi, biwr);
-    Value twiddledReal = requantizeSignedValue(loc, productReal, op.getProductScale(), rewriter);
-    Value twiddledImaginary =
-        requantizeSignedValue(loc, productImaginary, op.getProductScale(), rewriter);
+    Value twiddledReal;
+    Value twiddledImaginary;
+    std::optional<CanonicalPackedQ15Twiddle> canonical =
+        specializeCanonicalTwiddles ? classifyCanonicalPackedQ15Twiddle(adaptor.getTwiddle())
+                                    : std::nullopt;
+    if (canonical == CanonicalPackedQ15Twiddle::One) {
+      twiddledReal = multiplyByPackedQ15One(loc, bReal, rewriter);
+      twiddledImaginary = multiplyByPackedQ15One(loc, bImaginary, rewriter);
+    } else if (canonical == CanonicalPackedQ15Twiddle::MinusJ) {
+      twiddledReal = bImaginary;
+      twiddledImaginary = saturatingNegatePackedQ15(loc, bReal, rewriter);
+    } else {
+      IntegerType productType = rewriter.getIntegerType(33);
+      auto extendProductOperand = [&](Value value) {
+        return rewriter.create<arith::ExtSIOp>(loc, productType, value);
+      };
+      Value br = extendProductOperand(bReal);
+      Value bi = extendProductOperand(bImaginary);
+      Value wr = extendProductOperand(wReal);
+      Value wi = extendProductOperand(wImaginary);
+      Value brwr = rewriter.create<arith::MulIOp>(loc, br, wr);
+      Value biwi = rewriter.create<arith::MulIOp>(loc, bi, wi);
+      Value brwi = rewriter.create<arith::MulIOp>(loc, br, wi);
+      Value biwr = rewriter.create<arith::MulIOp>(loc, bi, wr);
+      Value productReal = rewriter.create<arith::SubIOp>(loc, brwr, biwi);
+      Value productImaginary = rewriter.create<arith::AddIOp>(loc, brwi, biwr);
+      twiddledReal = requantizeSignedValue(loc, productReal, op.getProductScale(), rewriter);
+      twiddledImaginary =
+          requantizeSignedValue(loc, productImaginary, op.getProductScale(), rewriter);
+    }
 
     IntegerType sumType = rewriter.getIntegerType(17);
     auto extendSumOperand = [&](Value value) {
@@ -454,6 +519,9 @@ public:
                                       packQ15Complex(loc, out1Real, out1Imaginary, rewriter)});
     return success();
   }
+
+private:
+  bool specializeCanonicalTwiddles;
 };
 
 class AccAddTermOpLowering final : public OpConversionPattern<ondrix::ondsp::AccAddTermOp> {
@@ -567,8 +635,9 @@ public:
     OndspFixedToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
-                 CxButterflyOpLowering, MacOpLowering, MacSubOpLowering, ReduceMacOpLowering>(
-        typeConverter, &getContext());
+                 MacOpLowering, MacSubOpLowering, ReduceMacOpLowering>(typeConverter,
+                                                                       &getContext());
+    patterns.add<CxButterflyOpLowering>(typeConverter, &getContext(), specializeCanonicalTwiddles);
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
