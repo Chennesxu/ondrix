@@ -5,13 +5,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define DECLARE_MEMREF(NAME, TYPE)                                                                  \
-  typedef struct {                                                                                  \
-    TYPE *allocated;                                                                                \
-    TYPE *aligned;                                                                                  \
-    int64_t offset;                                                                                 \
-    int64_t sizes[1];                                                                               \
-    int64_t strides[1];                                                                             \
+#define DECLARE_MEMREF(NAME, TYPE)                                                                 \
+  typedef struct {                                                                                 \
+    TYPE *allocated;                                                                               \
+    TYPE *aligned;                                                                                 \
+    int64_t offset;                                                                                \
+    int64_t sizes[1];                                                                              \
+    int64_t strides[1];                                                                            \
   } NAME
 
 DECLARE_MEMREF(MemRefI16, int16_t);
@@ -22,7 +22,10 @@ extern void _mlir_ciface_q15_fir_filter_full(MemRefI16 *, MemRefI16 *, MemRefI16
 extern void _mlir_ciface_q31_fir_filter_full(MemRefI32 *, MemRefI32 *, MemRefI32 *);
 extern void _mlir_ciface_f32_fir_filter_full(MemRefF32 *, MemRefF32 *, MemRefF32 *);
 
-#define MAKE_MEMREF(DATA, COUNT) {DATA, DATA, 0, {COUNT}, {1}}
+#define MAKE_MEMREF(DATA, COUNT)                                                                   \
+  {                                                                                                \
+    DATA, DATA, 0, {COUNT}, { 1 }                                                                  \
+  }
 
 static int64_t clamp_i40(__int128 value) {
   const __int128 minimum = -((__int128)1 << 39);
@@ -68,16 +71,15 @@ static __int128 round_nearest_even(__int128 value, unsigned shift) {
   return quotient;
 }
 
-static int16_t q15_reference(const int16_t *input, int64_t inputCount,
-                             const int16_t *coefficients, int64_t coefficientCount,
-                             int64_t output) {
+static int16_t q15_reference(const int16_t *input, int64_t inputCount, const int16_t *coefficients,
+                             int64_t coefficientCount, int64_t output) {
   int64_t accumulator = 0;
   for (int64_t tap = 0; tap < coefficientCount; ++tap) {
     int64_t inputIndex = output + tap - (coefficientCount - 1);
     if (inputIndex < 0 || inputIndex >= inputCount)
       continue;
-    accumulator = clamp_i40((__int128)accumulator +
-                            (__int128)input[inputIndex] * coefficients[tap]);
+    accumulator =
+        clamp_i40((__int128)accumulator + (__int128)input[inputIndex] * coefficients[tap]);
   }
   __int128 value = round_nearest_even(accumulator, 15);
   if (value < INT16_MIN)
@@ -87,16 +89,14 @@ static int16_t q15_reference(const int16_t *input, int64_t inputCount,
   return (int16_t)value;
 }
 
-static int32_t q31_reference(const int32_t *input, int64_t inputCount,
-                             const int32_t *coefficients, int64_t coefficientCount,
-                             int64_t output) {
+static int32_t q31_reference(const int32_t *input, int64_t inputCount, const int32_t *coefficients,
+                             int64_t coefficientCount, int64_t output) {
   int64_t accumulator = 0;
   for (int64_t tap = 0; tap < coefficientCount; ++tap) {
     int64_t inputIndex = output + tap - (coefficientCount - 1);
     if (inputIndex < 0 || inputIndex >= inputCount)
       continue;
-    accumulator = wrap_i64((__int128)accumulator +
-                           (__int128)input[inputIndex] * coefficients[tap]);
+    accumulator = wrap_i64((__int128)accumulator + (__int128)input[inputIndex] * coefficients[tap]);
   }
   return wrap_i32((__int128)accumulator / ((__int128)1 << 31));
 }
