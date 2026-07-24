@@ -17,6 +17,7 @@ func.func @cfft4_q15_value(
     %x0: i32, %x1: i32, %x2: i32, %x3: i32, %index: index) -> i32 {
   %input = tensor.from_elements %x0, %x1, %x2, %x3 : tensor<4xi32>
   %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
     layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
     product = #ondsp.product<full>,

@@ -382,36 +382,42 @@ def Ondrix_ButterflyOp : Ondrix_Op<"butterfly", [Pure]> {
 }
 
 def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
-  let summary = "Static packed-Q15 forward radix-2 CFFT";
+  let summary = "Static packed-Q15 radix-2 CFFT";
   let description = [{
-    Computes one static four- or eight-point forward radix-2
-    decimation-in-time CFFT over packed signed-Q15 complex values. The input
-    and result use natural index order and matching `tensor<Nxi32>` storage.
-    Each packed element uses the layout and finite-precision butterfly
-    contract of `ondrix.butterfly`.
+    Computes one static four- or eight-point radix-2 decimation-in-time CFFT
+    over packed signed-Q15 complex values. The input and result use natural
+    index order and matching `tensor<Nxi32>` storage. Each packed element uses
+    the layout and finite-precision butterfly contract of
+    `ondrix.butterfly`.
 
     The transform recursively decomposes even and odd input indices, then
     combines the two half transforms in increasing frequency order:
 
       `(y[k], y[k + N/2]) = butterfly(even[k], odd[k], W_N^k)`
 
-    where `W_N^k = exp(-2*pi*j*k/N)` is frozen to signed-Q15 packed constants.
-    Four points use `[1, -j]`. Eight points use
-    `[1, 23170-j23170, -j, -23170-j23170]`. Q15 `1` is `(32767, 0)` and
-    `-j` is `(0, -32768)`.
+    Forward direction uses `W_N^k = exp(-2*pi*j*k/N)`, frozen to signed-Q15
+    packed constants. Four points use `[1, -j]`. Eight points use
+    `[1, 23170-j23170, -j, -23170-j23170]`.
+
+    Inverse direction uses `conj(W_N^k)`. Four points use `[1, +j]`. Eight
+    points use `[1, 23170+j23170, +j, -23170+j23170]`. Q15 `1` and `+j`
+    use positive raw value 32767, while `-j` uses raw value -32768.
 
     Each butterfly applies the declared product and output requantization
     independently. A size-N transform therefore has `log2(N)` observable
     scaling boundaries; they must not be collapsed into one final
-    real-arithmetic normalization.
+    real-arithmetic normalization. With the current one-bit output scale at
+    every stage, inverse direction includes the conventional `1/N`
+    normalization.
 
     The executable profile is deliberately limited to four or eight points,
-    forward direction, the imag-high/real-low packed layout, signed Q15, exact
-    full products, and the same two scale policies as the executable
-    butterfly. Dynamic planning, inverse transforms, other sizes and numeric
+    explicit forward or inverse direction, the imag-high/real-low packed
+    layout, signed Q15, exact full products, and the same two scale policies
+    as the executable butterfly. Dynamic planning, other sizes and numeric
     profiles require separate extensions.
   }];
   let arguments = (ins AnyRankedTensor:$input,
+                   Ondrix_CfftDirectionAttr:$direction,
                    Ondsp_CxLayoutAttr:$layout,
                    Ondsp_NumericAttr:$numeric,
                    Ondsp_ProductAttr:$product,

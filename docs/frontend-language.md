@@ -132,16 +132,20 @@ Static packed-Q15 complex FFT uses an explicit experimental element spelling:
 ```python
 kernel q15_cfft8(input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
   return cfft(input)
+
+kernel q15_icfft8(input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
+  return icfft(input)
 ```
 
 `complex_q15` is stored as one `i32` with the imaginary component in bits
-31:16 and the real component in bits 15:0. The current builtin accepts only
-matching static extents of four or eight and emits the closed forward radix-2
-profile: exact full complex products, nearest-even saturating Q30-to-Q15
-product scaling, and nearest-even saturating one-bit scaling at every
-butterfly stage. This spelling does not imply a general source complex type;
-inverse transforms, other sizes, dynamic planning, and configurable complex
-policies remain unsupported.
+31:16 and the real component in bits 15:0. The current builtins accept only
+matching static extents of four or eight and emit closed radix-2 profiles:
+`cfft` uses forward twiddles and `icfft` uses their conjugates. Both use exact
+full complex products, nearest-even saturating Q30-to-Q15 product scaling,
+and nearest-even saturating one-bit scaling at every butterfly stage. The
+per-stage scaling makes the inverse profile include the `1/N` normalization.
+This spelling does not imply a general source complex type; other sizes,
+dynamic planning, and configurable complex policies remain unsupported.
 
 Compile it to textual MLIR with:
 

@@ -197,7 +197,11 @@ enum class SourceType { Q15, Q31, F32, ComplexQ15 };
 
 enum class ContainerKind { Buffer, Tensor, Constexpr };
 
-enum class ReductionKind { Dot, Fir, FirFilter, Convolution, Correlation, Cfft };
+enum class ReductionKind { Dot, Fir, FirFilter, Convolution, Correlation, Cfft, Icfft };
+
+static bool isCfftKind(ReductionKind kind) {
+  return kind == ReductionKind::Cfft || kind == ReductionKind::Icfft;
+}
 
 struct ParameterAst {
   std::string name;
@@ -289,10 +293,11 @@ public:
       return std::nullopt;
 
     if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter") &&
-        !isIdentifier("convolution") && !isIdentifier("correlation") && !isIdentifier("cfft")) {
+        !isIdentifier("convolution") && !isIdentifier("correlation") && !isIdentifier("cfft") &&
+        !isIdentifier("icfft")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), convolution(...), "
-                        "correlation(...), or cfft(...) return expression");
+                        "correlation(...), cfft(...), or icfft(...) return expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -305,8 +310,10 @@ public:
       kernel.result.kind = ReductionKind::Convolution;
     else if (isIdentifier("correlation"))
       kernel.result.kind = ReductionKind::Correlation;
-    else
+    else if (isIdentifier("cfft"))
       kernel.result.kind = ReductionKind::Cfft;
+    else
+      kernel.result.kind = ReductionKind::Icfft;
     kernel.result.position = current.position;
     advance();
     if (!expect(TokenKind::LeftParen, "expected '(' after builtin"))
@@ -315,7 +322,7 @@ public:
     if (!lhs)
       return std::nullopt;
     kernel.result.lhs = lhs->spelling.str();
-    if (kernel.result.kind == ReductionKind::Cfft) {
+    if (isCfftKind(kernel.result.kind)) {
       if (!expect(TokenKind::RightParen, "expected ')' after cfft operand"))
         return std::nullopt;
       if (current.kind != TokenKind::Eof) {
@@ -604,9 +611,9 @@ static std::optional<ondsp::FpContractMode> parseFpContract(llvm::StringRef valu
 }
 
 static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diagnostics) {
-  size_t expectedParameterCount = ast.result.kind == ReductionKind::Cfft ? 1 : 2;
+  size_t expectedParameterCount = isCfftKind(ast.result.kind) ? 1 : 2;
   if (ast.parameters.size() != expectedParameterCount) {
-    diagnostics.error(ast.position, ast.result.kind == ReductionKind::Cfft
+    diagnostics.error(ast.position, isCfftKind(ast.result.kind)
                                         ? "cfft kernels require exactly one parameter"
                                         : "binary DSP kernels require exactly two parameters");
     return std::nullopt;
@@ -644,7 +651,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                       llvm::Twine("unknown builtin operand '") + ast.result.lhs + "'");
     return std::nullopt;
   }
-  if (ast.result.kind != ReductionKind::Cfft && !parameterNames.contains(ast.result.rhs)) {
+  if (!isCfftKind(ast.result.kind) && !parameterNames.contains(ast.result.rhs)) {
     diagnostics.error(ast.result.position,
                       llvm::Twine("unknown reduction operand '") + ast.result.rhs + "'");
     return std::nullopt;
@@ -652,7 +659,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
 
   unsigned constexprCount = llvm::count_if(
       ast.parameters, [](const ParameterAst &parameter) { return parameter.isConstexpr(); });
-  if (ast.result.kind == ReductionKind::Cfft) {
+  if (isCfftKind(ast.result.kind)) {
     if (ast.resultType != SourceType::ComplexQ15) {
       diagnostics.error(ast.result.position,
                         "cfft currently requires complex_q15 input and result elements");
@@ -679,7 +686,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   }
 
   if (ast.resultType == SourceType::ComplexQ15) {
-    diagnostics.error(ast.result.position, "complex_q15 is currently supported only by cfft");
+    diagnostics.error(ast.result.position,
+                      "complex_q15 is currently supported only by cfft and icfft");
     return std::nullopt;
   }
 
@@ -956,7 +964,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
 
   Location expressionLocation = getLocation(context, sourceName, kernel.ast.result.position);
   Value lhs = arguments.lookup(kernel.ast.result.lhs);
-  if (kernel.ast.result.kind == ReductionKind::Cfft) {
+  if (isCfftKind(kernel.ast.result.kind)) {
     auto outputType = cast<RankedTensorType>(resultType);
     auto layout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI16ImagHiRealLo);
     auto i16 = builder.getI16Type();
@@ -966,8 +974,11 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                                               ondsp::OverflowMode::Saturate, i16);
     auto outputScale = ondsp::ScaleAttr::get(&context, 0, 1, ondsp::RoundingMode::NearestEven,
                                              ondsp::OverflowMode::Saturate, i16);
-    Value result = builder.create<ir::CfftOp>(expressionLocation, outputType, lhs, layout, numeric,
-                                              product, productScale, outputScale);
+    auto direction = ir::CfftDirectionAttr::get(
+        &context, kernel.ast.result.kind == ReductionKind::Cfft ? ir::CfftDirection::Forward
+                                                                : ir::CfftDirection::Inverse);
+    Value result = builder.create<ir::CfftOp>(expressionLocation, outputType, lhs, direction,
+                                              layout, numeric, product, productScale, outputScale);
     builder.create<func::ReturnOp>(expressionLocation, result);
     module->push_back(function);
     if (failed(verify(*module)))

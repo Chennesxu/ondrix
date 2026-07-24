@@ -766,18 +766,23 @@ public:
       return rewriter.create<arith::ConstantOp>(
           loc, i32, rewriter.getIntegerAttr(i32, llvm::APInt(32, bits)));
     };
-    auto getTwiddleBits = [](int64_t size, int64_t index) -> std::optional<uint32_t> {
+    auto getTwiddleBits = [&](int64_t size, int64_t index) -> std::optional<uint32_t> {
       constexpr uint32_t one = 0x00007fffU;
       constexpr uint32_t minusJ = 0x80000000U;
+      constexpr uint32_t plusJ = 0x7fff0000U;
       if (size == 2 && index == 0)
         return one;
       if (size == 4) {
-        constexpr uint32_t values[] = {one, minusJ};
-        return values[index];
+        constexpr uint32_t forwardValues[] = {one, minusJ};
+        constexpr uint32_t inverseValues[] = {one, plusJ};
+        return op.getDirection() == ondrix::ir::CfftDirection::Forward ? forwardValues[index]
+                                                                       : inverseValues[index];
       }
       if (size == 8) {
-        constexpr uint32_t values[] = {one, 0xa57e5a82U, minusJ, 0xa57ea57eU};
-        return values[index];
+        constexpr uint32_t forwardValues[] = {one, 0xa57e5a82U, minusJ, 0xa57ea57eU};
+        constexpr uint32_t inverseValues[] = {one, 0x5a825a82U, plusJ, 0x5a82a57eU};
+        return op.getDirection() == ondrix::ir::CfftDirection::Forward ? forwardValues[index]
+                                                                       : inverseValues[index];
       }
       return std::nullopt;
     };

@@ -23,4 +23,13 @@ def Ondrix_Conv1DMode
   let genSpecializedAttr = 0;
 }
 
+def Ondrix_CfftForward : I32EnumAttrCase<"Forward", 0, "forward">;
+def Ondrix_CfftInverse : I32EnumAttrCase<"Inverse", 1, "inverse">;
+def Ondrix_CfftDirection
+    : I32EnumAttr<"CfftDirection", "complex FFT transform direction",
+                  [Ondrix_CfftForward, Ondrix_CfftInverse]> {
+  let cppNamespace = "::ondrix::ir";
+  let genSpecializedAttr = 0;
+}
+
 #endif
