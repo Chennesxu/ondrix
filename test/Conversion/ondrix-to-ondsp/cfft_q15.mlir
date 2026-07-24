@@ -1,5 +1,6 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s --check-prefix=STRUCTURE
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s --check-prefix=TWIDDLE
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="vectorize-static-cfft" | FileCheck %s --check-prefix=VECTOR
 
 func.func @cfft4_q15(%input: tensor<4xi32>) -> tensor<4xi32> {
   %result = ondrix.cfft %input {
@@ -40,6 +41,10 @@ func.func @cfft8_q15(%input: tensor<8xi32>) -> tensor<8xi32> {
 // TWIDDLE-LABEL: func.func @cfft8_q15
 // TWIDDLE-DAG: arith.constant -1518445950 : i32
 // TWIDDLE-DAG: arith.constant -1518426754 : i32
+// VECTOR-LABEL: func.func @cfft8_q15
+// VECTOR: ondsp.cx_butterfly {{.*}} : (vector<2xi32>, vector<2xi32>, vector<2xi32>) -> (vector<2xi32>, vector<2xi32>)
+// VECTOR: ondsp.cx_butterfly {{.*}} : (vector<4xi32>, vector<4xi32>, vector<4xi32>) -> (vector<4xi32>, vector<4xi32>)
+// VECTOR: vector.extract
 
 func.func @icfft8_q15(%input: tensor<8xi32>) -> tensor<8xi32> {
   %result = ondrix.cfft %input {
@@ -60,3 +65,5 @@ func.func @icfft8_q15(%input: tensor<8xi32>) -> tensor<8xi32> {
 // TWIDDLE-DAG: arith.constant 1518492290 : i32
 // TWIDDLE-DAG: arith.constant 2147418112 : i32
 // TWIDDLE-DAG: arith.constant 1518511486 : i32
+// VECTOR-LABEL: func.func @icfft8_q15
+// VECTOR: ondsp.cx_butterfly {{.*}} : (vector<4xi32>, vector<4xi32>, vector<4xi32>) -> (vector<4xi32>, vector<4xi32>)

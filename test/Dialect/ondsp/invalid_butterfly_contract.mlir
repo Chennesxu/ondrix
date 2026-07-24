@@ -42,17 +42,17 @@ func.func @rejects_other_layout(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
 
 // -----
 
-func.func @rejects_vector_values(
-    %a: vector<2xi32>, %b: vector<2xi32>, %tw: vector<2xi32>)
+func.func @rejects_mismatched_vector_shapes(
+    %a: vector<2xi32>, %b: vector<4xi32>, %tw: vector<2xi32>)
     -> (vector<2xi32>, vector<2xi32>) {
-  // expected-error@+1 {{executable butterfly requires scalar signless i32 packed values}}
+  // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
     layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
     product = #ondsp.product<full>,
     product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
     output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
-  } : (vector<2xi32>, vector<2xi32>, vector<2xi32>)
+  } : (vector<2xi32>, vector<4xi32>, vector<2xi32>)
       -> (vector<2xi32>, vector<2xi32>)
   return %0, %1 : vector<2xi32>, vector<2xi32>
 }

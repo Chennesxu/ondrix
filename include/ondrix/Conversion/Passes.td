@@ -7,6 +7,9 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
   let summary = "Lower ondrix algorithm intent ops to ondsp semantic ops";
   let description = [{
     Lower ondrix algorithm intent ops to ondsp semantic ops.
+    The opt-in static CFFT Vector mode groups only independent butterflies
+    within one combine stage. It preserves recursive stage order and every
+    product/output requantization boundary.
   }];
   let constructor = "ondrix::createConvertOndrixToOndspPass()";
   let dependentDialects = [
@@ -17,6 +20,12 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
     "mlir::math::MathDialect",
     "mlir::scf::SCFDialect",
     "mlir::tensor::TensorDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"vectorizeStaticCfft", "vectorize-static-cfft",
+           "bool", /*default=*/"false",
+           "Use fixed-length Vector arithmetic for independent static CFFT stage butterflies">,
   ];
 }
 

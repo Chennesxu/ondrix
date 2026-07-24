@@ -348,9 +348,18 @@ LogicalResult CxButterflyOp::verify() {
     return failure();
   if (getLayout().getLayout() != ComplexLayout::PackedI16ImagHiRealLo)
     return emitOpError("executable butterfly requires packed_i16_imag_hi_real_lo layout");
-  if (!llvm::all_of(getOperandTypes(), [](Type type) { return type.isSignlessInteger(32); }) ||
-      !llvm::all_of(getResultTypes(), [](Type type) { return type.isSignlessInteger(32); }))
-    return emitOpError("executable butterfly requires scalar signless i32 packed values");
+  SmallVector<Type> types(getOperandTypes().begin(), getOperandTypes().end());
+  types.append(getResultTypes().begin(), getResultTypes().end());
+  if (failed(verifySameElementwiseShape(*this, types)))
+    return failure();
+  if (!llvm::all_of(types, [](Type type) {
+        if (type.isSignlessInteger(32))
+          return true;
+        auto vector = dyn_cast<VectorType>(type);
+        return vector && !vector.isScalable() && vector.getElementType().isSignlessInteger(32);
+      }))
+    return emitOpError(
+        "executable butterfly requires scalar or fixed Vector signless i32 packed values");
   return success();
 }
 

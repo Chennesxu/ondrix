@@ -146,6 +146,10 @@ and nearest-even saturating one-bit scaling at every butterfly stage. The
 per-stage scaling makes the inverse profile include the `1/N` normalization.
 This spelling does not imply a general source complex type; other sizes,
 dynamic planning, and configurable complex policies remain unsupported.
+After source generation, the opt-in
+`--convert-ondrix-to-ondsp="vectorize-static-cfft"` mode maps independent
+combine-stage butterflies to fixed-length Vector arithmetic while preserving
+all stage and requantization boundaries.
 
 Compile it to textual MLIR with:
 

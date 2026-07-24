@@ -173,7 +173,7 @@ def Ondsp_CxMulOp : Ondsp_Op<"cx_mul", [Pure]> {
 }
 
 def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
-  let summary = "Packed-Q15 radix-2 butterfly semantic operation";
+  let summary = "Packed-Q15 elementwise radix-2 butterfly semantic operation";
   let description = [{
     Implements the target-independent packed-Q15 equation documented by
     `ondrix.butterfly`. Bits 31:16 are imaginary and bits 15:0 are real.
@@ -186,9 +186,11 @@ def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
 
     Both scaling boundaries explicitly apply left shift, signed right-shift
     rounding, then destination wrap or saturation. The current executable
-    profile is deliberately closed to scalar packed i32 signed-Q15 values,
-    full products, nearest-even saturating product shift 15, and nearest-even
-    saturating output shift 1.
+    profile is deliberately closed to scalar or matching fixed Vector packed
+    i32 signed-Q15 values, full products, nearest-even saturating product shift
+    15, and nearest-even saturating output shift 1. Vector lanes are
+    independent butterflies; the operation does not reorder FFT stages or
+    move either requantization boundary.
   }];
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
                    Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric,

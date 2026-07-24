@@ -242,15 +242,39 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
   return builder.create<arith::TruncIOp>(loc, accumulatorType, clamped);
 }
 
-static Value createIntegerConstant(Location loc, IntegerType type, int64_t value,
+static IntegerType getIntegerElementType(Type type) {
+  if (auto vector = dyn_cast<VectorType>(type))
+    return cast<IntegerType>(vector.getElementType());
+  return cast<IntegerType>(type);
+}
+
+static Type getIntegerTypeLike(Type reference, unsigned width, OpBuilder &builder) {
+  IntegerType elementType = builder.getIntegerType(width);
+  if (auto vector = dyn_cast<VectorType>(reference))
+    return VectorType::get(vector.getShape(), elementType);
+  return elementType;
+}
+
+static Value createIntegerConstant(Location loc, Type type, const llvm::APInt &value,
                                    ConversionPatternRewriter &rewriter) {
-  return rewriter.create<arith::ConstantOp>(loc, type, rewriter.getIntegerAttr(type, value));
+  IntegerType elementType = getIntegerElementType(type);
+  IntegerAttr valueAttr = rewriter.getIntegerAttr(elementType, value);
+  if (auto vector = dyn_cast<VectorType>(type))
+    return rewriter.create<arith::ConstantOp>(loc, vector,
+                                              SplatElementsAttr::get(vector, valueAttr));
+  return rewriter.create<arith::ConstantOp>(loc, type, valueAttr);
+}
+
+static Value createIntegerConstant(Location loc, Type type, int64_t value,
+                                   ConversionPatternRewriter &rewriter) {
+  return createIntegerConstant(
+      loc, type, llvm::APInt(getIntegerElementType(type).getWidth(), value, true), rewriter);
 }
 
 static Value roundSignedRightShift(Location loc, Value input, unsigned shift,
                                    ondrix::ondsp::RoundingMode roundingMode,
                                    ConversionPatternRewriter &rewriter) {
-  auto type = cast<IntegerType>(input.getType());
+  Type type = input.getType();
   if (shift == 0)
     return input;
 
@@ -259,7 +283,7 @@ static Value roundSignedRightShift(Location loc, Value input, unsigned shift,
   if (roundingMode == ondrix::ondsp::RoundingMode::TowardNegative)
     return quotient;
 
-  IntegerType remainderBitsType = rewriter.getIntegerType(shift);
+  Type remainderBitsType = getIntegerTypeLike(type, shift, rewriter);
   Value remainderBits = rewriter.create<arith::TruncIOp>(loc, remainderBitsType, input);
   Value remainder = rewriter.create<arith::ExtUIOp>(loc, type, remainderBits);
   Value zero = createIntegerConstant(loc, type, 0, rewriter);
@@ -295,21 +319,21 @@ static Value roundSignedRightShift(Location loc, Value input, unsigned shift,
   return rewriter.create<arith::AddIOp>(loc, quotient, increment);
 }
 
-static Value narrowSignedValue(Location loc, Value input, IntegerType destinationType,
+static Value narrowSignedValue(Location loc, Value input, Type destinationType,
                                ondrix::ondsp::OverflowMode overflowMode,
                                ConversionPatternRewriter &rewriter) {
-  auto inputType = cast<IntegerType>(input.getType());
+  Type inputType = input.getType();
   if (overflowMode == ondrix::ondsp::OverflowMode::Wrap)
     return rewriter.create<arith::TruncIOp>(loc, destinationType, input);
 
-  llvm::APInt minimum =
-      llvm::APInt::getSignedMinValue(destinationType.getWidth()).sext(inputType.getWidth());
-  llvm::APInt maximum =
-      llvm::APInt::getSignedMaxValue(destinationType.getWidth()).sext(inputType.getWidth());
-  Value minimumValue = rewriter.create<arith::ConstantOp>(
-      loc, inputType, rewriter.getIntegerAttr(inputType, minimum));
-  Value maximumValue = rewriter.create<arith::ConstantOp>(
-      loc, inputType, rewriter.getIntegerAttr(inputType, maximum));
+  IntegerType inputElementType = getIntegerElementType(inputType);
+  IntegerType destinationElementType = getIntegerElementType(destinationType);
+  llvm::APInt minimum = llvm::APInt::getSignedMinValue(destinationElementType.getWidth())
+                            .sext(inputElementType.getWidth());
+  llvm::APInt maximum = llvm::APInt::getSignedMaxValue(destinationElementType.getWidth())
+                            .sext(inputElementType.getWidth());
+  Value minimumValue = createIntegerConstant(loc, inputType, minimum, rewriter);
+  Value maximumValue = createIntegerConstant(loc, inputType, maximum, rewriter);
   Value belowMinimum =
       rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, input, minimumValue);
   Value aboveMaximum =
@@ -321,7 +345,7 @@ static Value narrowSignedValue(Location loc, Value input, IntegerType destinatio
 
 static Value requantizeSignedValue(Location loc, Value input, ondrix::ondsp::ScaleAttr scale,
                                    ConversionPatternRewriter &rewriter) {
-  auto inputType = cast<IntegerType>(input.getType());
+  Type inputType = input.getType();
   Value shifted = input;
   if (scale.getPreShiftLeft() != 0) {
     Value amount = createIntegerConstant(loc, inputType, scale.getPreShiftLeft(), rewriter);
@@ -329,14 +353,15 @@ static Value requantizeSignedValue(Location loc, Value input, ondrix::ondsp::Sca
   }
   Value rounded =
       roundSignedRightShift(loc, shifted, scale.getPostShiftRight(), scale.getRounding(), rewriter);
-  return narrowSignedValue(loc, rounded, cast<IntegerType>(scale.getSaturateTo()),
+  unsigned destinationWidth = cast<IntegerType>(scale.getSaturateTo()).getWidth();
+  return narrowSignedValue(loc, rounded, getIntegerTypeLike(inputType, destinationWidth, rewriter),
                            scale.getOverflow(), rewriter);
 }
 
 static std::pair<Value, Value> unpackPackedQ15(Location loc, Value packed,
                                                ConversionPatternRewriter &rewriter) {
-  IntegerType i16 = rewriter.getI16Type();
-  IntegerType i32 = rewriter.getI32Type();
+  Type i16 = getIntegerTypeLike(packed.getType(), 16, rewriter);
+  Type i32 = getIntegerTypeLike(packed.getType(), 32, rewriter);
   Value real = rewriter.create<arith::TruncIOp>(loc, i16, packed);
   Value shift = createIntegerConstant(loc, i32, 16, rewriter);
   Value high = rewriter.create<arith::ShRUIOp>(loc, packed, shift);
@@ -346,7 +371,7 @@ static std::pair<Value, Value> unpackPackedQ15(Location loc, Value packed,
 
 static Value packQ15Complex(Location loc, Value real, Value imaginary,
                             ConversionPatternRewriter &rewriter) {
-  IntegerType i32 = rewriter.getI32Type();
+  Type i32 = getIntegerTypeLike(real.getType(), 32, rewriter);
   Value realBits = rewriter.create<arith::ExtUIOp>(loc, i32, real);
   Value imaginaryBits = rewriter.create<arith::ExtUIOp>(loc, i32, imaginary);
   Value shift = createIntegerConstant(loc, i32, 16, rewriter);
@@ -478,7 +503,7 @@ public:
       twiddledReal = bImaginary;
       twiddledImaginary = saturatingNegatePackedQ15(loc, bReal, rewriter);
     } else {
-      IntegerType productType = rewriter.getIntegerType(33);
+      Type productType = getIntegerTypeLike(bReal.getType(), 33, rewriter);
       auto extendProductOperand = [&](Value value) {
         return rewriter.create<arith::ExtSIOp>(loc, productType, value);
       };
@@ -497,7 +522,7 @@ public:
           requantizeSignedValue(loc, productImaginary, op.getProductScale(), rewriter);
     }
 
-    IntegerType sumType = rewriter.getIntegerType(17);
+    Type sumType = getIntegerTypeLike(aReal.getType(), 17, rewriter);
     auto extendSumOperand = [&](Value value) {
       return rewriter.create<arith::ExtSIOp>(loc, sumType, value);
     };

@@ -13,6 +13,7 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -741,7 +742,8 @@ public:
 
 class CfftOpLowering final : public OpConversionPattern<ondrix::ir::CfftOp> {
 public:
-  using OpConversionPattern<ondrix::ir::CfftOp>::OpConversionPattern;
+  CfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft)
+      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft) {}
 
   LogicalResult matchAndRewrite(ondrix::ir::CfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -791,6 +793,16 @@ public:
           loc, rewriter.getI32Type(), rewriter.getI32Type(), a, b, twiddle, layout, op.getNumeric(),
           op.getProduct(), op.getProductScale(), op.getOutputScale());
     };
+    auto buildVector = [&](ArrayRef<Value> values) {
+      assert(!values.empty() && "CFFT stage vector must contain at least one lane");
+      auto vectorType =
+          VectorType::get({static_cast<int64_t>(values.size())}, values.front().getType());
+      Value vector = rewriter.create<vector::BroadcastOp>(loc, vectorType, values.front());
+      for (auto [index, value] : llvm::enumerate(values.drop_front()))
+        vector = rewriter.create<vector::InsertOp>(
+            loc, value, vector, ArrayRef<int64_t>{static_cast<int64_t>(index + 1)});
+      return vector;
+    };
 
     std::function<SmallVector<Value>(ArrayRef<Value>)> lowerCfft =
         [&](ArrayRef<Value> values) -> SmallVector<Value> {
@@ -807,6 +819,28 @@ public:
       SmallVector<Value> even = lowerCfft(evenInputs);
       SmallVector<Value> odd = lowerCfft(oddInputs);
       SmallVector<Value> outputs(values.size());
+      if (vectorizeStaticCfft && even.size() > 1) {
+        SmallVector<Value> twiddles;
+        twiddles.reserve(even.size());
+        for (int64_t index = 0, end = even.size(); index < end; ++index) {
+          std::optional<uint32_t> twiddleBits = getTwiddleBits(values.size(), index);
+          assert(twiddleBits && "verified CFFT extent must have a static twiddle table");
+          twiddles.push_back(createPackedTwiddle(*twiddleBits));
+        }
+        Value evenVector = buildVector(even);
+        Value oddVector = buildVector(odd);
+        Value twiddleVector = buildVector(twiddles);
+        auto vectorType = cast<VectorType>(evenVector.getType());
+        auto butterfly = rewriter.create<ondrix::ondsp::CxButterflyOp>(
+            loc, vectorType, vectorType, evenVector, oddVector, twiddleVector, layout,
+            op.getNumeric(), op.getProduct(), op.getProductScale(), op.getOutputScale());
+        for (int64_t index = 0, end = even.size(); index < end; ++index) {
+          outputs[index] = rewriter.create<vector::ExtractOp>(loc, butterfly.getOut0(), index);
+          outputs[index + end] =
+              rewriter.create<vector::ExtractOp>(loc, butterfly.getOut1(), index);
+        }
+        return outputs;
+      }
       for (int64_t index = 0, end = values.size() / 2; index < end; ++index) {
         std::optional<uint32_t> twiddleBits = getTwiddleBits(values.size(), index);
         assert(twiddleBits && "verified CFFT extent must have a static twiddle table");
@@ -826,6 +860,9 @@ public:
     rewriter.replaceOp(op, result);
     return success();
   }
+
+private:
+  bool vectorizeStaticCfft;
 };
 
 class QuantizeOpLowering final : public OpConversionPattern<ondrix::ir::QuantizeOp> {
@@ -851,11 +888,13 @@ public:
     RewritePatternSet patterns(&getContext());
     patterns.add<FirOpLowering, FirFilterOpLowering, Conv1DOpLowering, FirStreamOpLowering,
                  SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
-                 ButterflyOpLowering, CfftOpLowering, QuantizeOpLowering>(&getContext());
+                 ButterflyOpLowering, QuantizeOpLowering>(&getContext());
+    patterns.add<CfftOpLowering>(&getContext(), vectorizeStaticCfft);
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,
-                           scf::SCFDialect, tensor::TensorDialect, ondrix::ondsp::OndspDialect>();
+                           scf::SCFDialect, tensor::TensorDialect, vector::VectorDialect,
+                           ondrix::ondsp::OndspDialect>();
     target.addIllegalDialect<ondrix::ir::OndrixDialect>();
 
     if (failed(applyPartialConversion(module, target, std::move(patterns))))
