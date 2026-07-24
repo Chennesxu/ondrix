@@ -15,6 +15,7 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_full_overflow.ox 2>&1 | FileCheck %s --check-prefix=FULL-OVERFLOW
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_empty_constexpr.ox 2>&1 | FileCheck %s --check-prefix=EMPTY-CONSTEXPR
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_valid_mixed_shape.ox 2>&1 | FileCheck %s --check-prefix=VALID-MIXED-SHAPE
+// RUN: not ondrix-compile %S/Inputs/invalid_butterfly_result.ox 2>&1 | FileCheck %s --check-prefix=BUTTERFLY-RESULT
 
 // KERNEL: invalid_kernel_keyword.ox:1:1: error: unsupported top-level construct 'kernel'; expected 'def'
 // KERNEL-NEXT: kernel q15_dot(lhs: buffer[q15], rhs: buffer[q15]) -> q15:
@@ -53,3 +54,5 @@
 // EMPTY-CONSTEXPR: invalid_fir_filter_empty_constexpr.ox:3:5: error: constexpr reduction operand cannot be empty
 
 // VALID-MIXED-SHAPE: invalid_fir_filter_valid_mixed_shape.ox:2:10: error: a static valid fir_filter result requires static input and coefficient extents
+
+// BUTTERFLY-RESULT: invalid_butterfly_result.ox:3:10: error: butterfly requires three complex_q15 scalar parameters and two complex_q15 results

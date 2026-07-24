@@ -152,6 +152,19 @@ After source generation, the opt-in
 combine-stage butterflies to fixed-length Vector arithmetic while preserving
 all stage and requantization boundaries.
 
+The same closed packed-Q15 policy is available as one explicit two-result
+butterfly:
+
+```python
+def q15_butterfly(
+    a: complex_q15, b: complex_q15, twiddle: complex_q15)
+    -> (complex_q15, complex_q15):
+  return butterfly(a, b, twiddle)
+```
+
+This is the only multi-result source form. It does not introduce general
+tuples, assignments, configurable complex arithmetic, or a stable C ABI.
+
 Compile it to textual MLIR with:
 
 ```sh

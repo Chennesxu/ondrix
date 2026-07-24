@@ -3,7 +3,28 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#ifdef OX_MULTI_RESULT
+struct ButterflyResult {
+  int32_t out0;
+  int32_t out1;
+};
+extern void _mlir_ciface_q15_butterfly(struct ButterflyResult *result, int32_t a, int32_t b,
+                                       int32_t twiddle);
+
+static void execute_butterfly(int32_t a, int32_t b, int32_t twiddle, int32_t *out0, int32_t *out1) {
+  struct ButterflyResult result;
+  _mlir_ciface_q15_butterfly(&result, a, b, twiddle);
+  *out0 = result.out0;
+  *out1 = result.out1;
+}
+#else
 extern int32_t cx_butterfly_q15_result(int32_t a, int32_t b, int32_t twiddle, int32_t result_index);
+
+static void execute_butterfly(int32_t a, int32_t b, int32_t twiddle, int32_t *out0, int32_t *out1) {
+  *out0 = cx_butterfly_q15_result(a, b, twiddle, 0);
+  *out1 = cx_butterfly_q15_result(a, b, twiddle, 1);
+}
+#endif
 
 struct Complex {
   int16_t real;
@@ -92,8 +113,8 @@ int main(void) {
     int32_t twiddle = pack(cases[i].twiddle);
     int32_t expected0, expected1;
     butterfly_reference(a, b, twiddle, &expected0, &expected1);
-    int32_t actual0 = cx_butterfly_q15_result(a, b, twiddle, 0);
-    int32_t actual1 = cx_butterfly_q15_result(a, b, twiddle, 1);
+    int32_t actual0, actual1;
+    execute_butterfly(a, b, twiddle, &actual0, &actual1);
     if (actual0 != expected0 || actual1 != expected1) {
       fprintf(stderr,
               "%s: expected (%08" PRIx32 ", %08" PRIx32 "), got (%08" PRIx32 ", %08" PRIx32 ")\n",

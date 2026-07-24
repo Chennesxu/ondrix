@@ -195,9 +195,9 @@ private:
 
 enum class SourceType { Q15, Q31, F32, ComplexQ15 };
 
-enum class ContainerKind { Buffer, Tensor, Constexpr };
+enum class ContainerKind { Scalar, Buffer, Tensor, Constexpr };
 
-enum class ReductionKind { Dot, Fir, FirFilter, Convolution, Correlation, Cfft, Icfft };
+enum class ReductionKind { Dot, Fir, FirFilter, Convolution, Correlation, Butterfly, Cfft, Icfft };
 
 static bool isCfftKind(ReductionKind kind) {
   return kind == ReductionKind::Cfft || kind == ReductionKind::Icfft;
@@ -212,6 +212,7 @@ struct ParameterAst {
   SourcePosition position;
 
   bool isBuffer() const { return container == ContainerKind::Buffer; }
+  bool isScalar() const { return container == ContainerKind::Scalar; }
   bool isTensor() const { return container == ContainerKind::Tensor; }
   bool isConstexpr() const { return container == ContainerKind::Constexpr; }
 };
@@ -220,6 +221,7 @@ struct ReductionAst {
   ReductionKind kind;
   std::string lhs;
   std::string rhs;
+  std::string third;
   uint64_t accumulatorWidth = 0;
   std::string updateOverflow;
   std::string rounding;
@@ -233,6 +235,7 @@ struct KernelAst {
   std::string name;
   std::vector<ParameterAst> parameters;
   SourceType resultType;
+  unsigned resultCount = 1;
   bool tensorResult = false;
   std::optional<int64_t> resultExtent;
   ReductionAst result;
@@ -277,7 +280,21 @@ public:
     if (!expect(TokenKind::RightParen, "expected ')' after parameters") ||
         !expect(TokenKind::Arrow, "expected '->' after parameters"))
       return std::nullopt;
-    if (isIdentifier("tensor")) {
+    if (current.kind == TokenKind::LeftParen) {
+      advance();
+      auto firstType = parseSourceType("expected first function result type");
+      if (!firstType || !expect(TokenKind::Comma, "expected ',' between function result types"))
+        return std::nullopt;
+      auto secondType = parseSourceType("expected second function result type");
+      if (!secondType || !expect(TokenKind::RightParen, "expected ')' after function results"))
+        return std::nullopt;
+      if (*firstType != *secondType) {
+        diagnostics.error(current.position, "multi-result functions require matching result types");
+        return std::nullopt;
+      }
+      kernel.resultType = *firstType;
+      kernel.resultCount = 2;
+    } else if (isIdentifier("tensor")) {
       kernel.tensorResult = true;
       advance();
       if (!parseShapedType(kernel.resultType, kernel.resultExtent, "tensor"))
@@ -293,11 +310,12 @@ public:
       return std::nullopt;
 
     if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter") &&
-        !isIdentifier("convolution") && !isIdentifier("correlation") && !isIdentifier("cfft") &&
-        !isIdentifier("icfft")) {
+        !isIdentifier("convolution") && !isIdentifier("correlation") &&
+        !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), convolution(...), "
-                        "correlation(...), cfft(...), or icfft(...) return expression");
+                        "correlation(...), butterfly(...), cfft(...), or icfft(...) return "
+                        "expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -310,6 +328,8 @@ public:
       kernel.result.kind = ReductionKind::Convolution;
     else if (isIdentifier("correlation"))
       kernel.result.kind = ReductionKind::Correlation;
+    else if (isIdentifier("butterfly"))
+      kernel.result.kind = ReductionKind::Butterfly;
     else if (isIdentifier("cfft"))
       kernel.result.kind = ReductionKind::Cfft;
     else
@@ -322,6 +342,23 @@ public:
     if (!lhs)
       return std::nullopt;
     kernel.result.lhs = lhs->spelling.str();
+    if (kernel.result.kind == ReductionKind::Butterfly) {
+      if (!expect(TokenKind::Comma, "expected ',' after butterfly first operand"))
+        return std::nullopt;
+      auto rhs = parseIdentifier("expected butterfly second operand");
+      if (!rhs || !expect(TokenKind::Comma, "expected ',' after butterfly second operand"))
+        return std::nullopt;
+      auto third = parseIdentifier("expected butterfly twiddle operand");
+      if (!third || !expect(TokenKind::RightParen, "expected ')' after butterfly operands"))
+        return std::nullopt;
+      kernel.result.rhs = rhs->spelling.str();
+      kernel.result.third = third->spelling.str();
+      if (current.kind != TokenKind::Eof) {
+        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
+        return std::nullopt;
+      }
+      return kernel;
+    }
     if (isCfftKind(kernel.result.kind)) {
       if (!expect(TokenKind::RightParen, "expected ')' after cfft operand"))
         return std::nullopt;
@@ -503,9 +540,16 @@ private:
       return parameter;
     }
 
+    if (isIdentifier("complex_q15")) {
+      parameter.container = ContainerKind::Scalar;
+      parameter.type = SourceType::ComplexQ15;
+      advance();
+      return parameter;
+    }
+
     if (!isIdentifier("constexpr")) {
       diagnostics.error(current.position,
-                        "expected parameter type 'buffer[...]', 'tensor[...]', or "
+                        "expected parameter type 'complex_q15', 'buffer[...]', 'tensor[...]', or "
                         "'constexpr[q15|q31]'");
       return std::nullopt;
     }
@@ -611,10 +655,14 @@ static std::optional<ondsp::FpContractMode> parseFpContract(llvm::StringRef valu
 }
 
 static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diagnostics) {
-  size_t expectedParameterCount = isCfftKind(ast.result.kind) ? 1 : 2;
+  size_t expectedParameterCount = isCfftKind(ast.result.kind)                   ? 1
+                                  : ast.result.kind == ReductionKind::Butterfly ? 3
+                                                                                : 2;
   if (ast.parameters.size() != expectedParameterCount) {
     diagnostics.error(ast.position, isCfftKind(ast.result.kind)
                                         ? "cfft kernels require exactly one parameter"
+                                    : ast.result.kind == ReductionKind::Butterfly
+                                        ? "butterfly kernels require exactly three parameters"
                                         : "binary DSP kernels require exactly two parameters");
     return std::nullopt;
   }
@@ -656,9 +704,30 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                       llvm::Twine("unknown reduction operand '") + ast.result.rhs + "'");
     return std::nullopt;
   }
+  if (ast.result.kind == ReductionKind::Butterfly && !parameterNames.contains(ast.result.third)) {
+    diagnostics.error(ast.result.position,
+                      llvm::Twine("unknown butterfly twiddle operand '") + ast.result.third + "'");
+    return std::nullopt;
+  }
 
   unsigned constexprCount = llvm::count_if(
       ast.parameters, [](const ParameterAst &parameter) { return parameter.isConstexpr(); });
+  if (ast.result.kind == ReductionKind::Butterfly) {
+    if (ast.resultCount != 2 || ast.tensorResult || ast.resultType != SourceType::ComplexQ15 ||
+        llvm::any_of(ast.parameters,
+                     [](const ParameterAst &parameter) { return !parameter.isScalar(); })) {
+      diagnostics.error(ast.result.position,
+                        "butterfly requires three complex_q15 scalar parameters and two "
+                        "complex_q15 results");
+      return std::nullopt;
+    }
+    return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, std::nullopt};
+  }
+  if (ast.resultCount != 1) {
+    diagnostics.error(ast.result.position,
+                      "multiple results are currently supported only by butterfly");
+    return std::nullopt;
+  }
   if (isCfftKind(ast.result.kind)) {
     if (ast.resultType != SourceType::ComplexQ15) {
       diagnostics.error(ast.result.position,
@@ -912,7 +981,9 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     if (parameter.isConstexpr())
       continue;
     int64_t extent = parameter.extent.value_or(ShapedType::kDynamic);
-    if (parameter.isTensor())
+    if (parameter.isScalar())
+      inputTypes.push_back(elementType);
+    else if (parameter.isTensor())
       inputTypes.push_back(RankedTensorType::get({extent}, elementType));
     else
       inputTypes.push_back(MemRefType::get({extent}, elementType));
@@ -922,7 +993,8 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     int64_t extent = kernel.ast.resultExtent.value_or(ShapedType::kDynamic);
     resultType = RankedTensorType::get({extent}, elementType);
   }
-  FunctionType functionType = builder.getFunctionType(inputTypes, {resultType});
+  SmallVector<Type> resultTypes(kernel.ast.resultCount, resultType);
+  FunctionType functionType = builder.getFunctionType(inputTypes, resultTypes);
   auto function = func::FuncOp::create(kernelLocation, kernel.ast.name, functionType);
   function->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
   Block *entry = function.addEntryBlock();
@@ -964,6 +1036,27 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
 
   Location expressionLocation = getLocation(context, sourceName, kernel.ast.result.position);
   Value lhs = arguments.lookup(kernel.ast.result.lhs);
+  if (kernel.ast.result.kind == ReductionKind::Butterfly) {
+    Value rhs = arguments.lookup(kernel.ast.result.rhs);
+    Value twiddle = arguments.lookup(kernel.ast.result.third);
+    auto layout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI16ImagHiRealLo);
+    auto i16 = builder.getI16Type();
+    auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, i16, 15);
+    auto product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::Full);
+    auto productScale = ondsp::ScaleAttr::get(&context, 0, 15, ondsp::RoundingMode::NearestEven,
+                                              ondsp::OverflowMode::Saturate, i16);
+    auto outputScale = ondsp::ScaleAttr::get(&context, 0, 1, ondsp::RoundingMode::NearestEven,
+                                             ondsp::OverflowMode::Saturate, i16);
+    auto butterfly = builder.create<ir::ButterflyOp>(expressionLocation, elementType, elementType,
+                                                     lhs, rhs, twiddle, layout, numeric, product,
+                                                     productScale, outputScale);
+    builder.create<func::ReturnOp>(expressionLocation,
+                                   ValueRange{butterfly.getOut0(), butterfly.getOut1()});
+    module->push_back(function);
+    if (failed(verify(*module)))
+      return {};
+    return module;
+  }
   if (isCfftKind(kernel.ast.result.kind)) {
     auto outputType = cast<RankedTensorType>(resultType);
     auto layout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI16ImagHiRealLo);
