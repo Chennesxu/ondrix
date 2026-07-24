@@ -1,10 +1,11 @@
 # Experimental `.ox` Frontend
 
 `ondrix-compile` is a standalone C++ frontend. Its initial executable surface
-accepts one kernel per file and dynamic rank-1 buffers. Q15 dot is written as:
+accepts one `def` per file and dynamic rank-1 buffers. A `def` declares a DSP
+kernel entry point; it is not a general Python function. Q15 dot is written as:
 
 ```python
-kernel q15_dot(lhs: buffer[q15], rhs: buffer[q15]) -> q15:
+def q15_dot(lhs: buffer[q15], rhs: buffer[q15]) -> q15:
   return dot(lhs, rhs,
              accumulator=exact[40, saturate],
              rounding=nearest_even,
@@ -14,7 +15,7 @@ kernel q15_dot(lhs: buffer[q15], rhs: buffer[q15]) -> q15:
 Q15 FIR-sample preserves FIR intent while using the same numeric policy:
 
 ```python
-kernel q15_fir(window: buffer[q15], coefficients: buffer[q15]) -> q15:
+def q15_fir(window: buffer[q15], coefficients: buffer[q15]) -> q15:
   return fir(window, coefficients,
              accumulator=exact[40, saturate],
              rounding=nearest_even,
@@ -26,7 +27,7 @@ may instead be embedded as compile-time raw values. Scalar reductions require
 a static left-operand extent so the frontend can prove the lengths agree:
 
 ```python
-kernel q15_fir_constexpr(
+def q15_fir_constexpr(
     window: buffer[q15, 5],
     coefficients: constexpr[q15] = [16384, -8192, 4096, -8192, 16384]) -> q15:
   return fir(window, coefficients,
@@ -51,7 +52,7 @@ uses signed i32 storage with 31 fractional bits, an exact full product, and an
 explicit i64/frac62 accumulator:
 
 ```python
-kernel q31_dot(lhs: buffer[q31], rhs: buffer[q31]) -> q31:
+def q31_dot(lhs: buffer[q31], rhs: buffer[q31]) -> q31:
   return dot(lhs, rhs,
              accumulator=exact[64, saturate],
              rounding=nearest_even,
@@ -66,12 +67,12 @@ Ordered f32 dot and FIR-sample kernels name their contraction policy instead
 of a fixed-point accumulator and export policy:
 
 ```python
-kernel f32_dot(lhs: buffer[f32], rhs: buffer[f32]) -> f32:
+def f32_dot(lhs: buffer[f32], rhs: buffer[f32]) -> f32:
   return dot(lhs, rhs, contract=fma)
 ```
 
 ```python
-kernel f32_fir(window: buffer[f32], coefficients: buffer[f32]) -> f32:
+def f32_fir(window: buffer[f32], coefficients: buffer[f32]) -> f32:
   return fir(window, coefficients, contract=off)
 ```
 
@@ -80,7 +81,7 @@ buffers. It returns a new tensor and preserves the existing `ondrix.fir_filter`
 algorithm contract:
 
 ```python
-kernel q15_fir_filter(input: tensor[q15], coefficients: tensor[q15]) -> tensor[q15]:
+def q15_fir_filter(input: tensor[q15], coefficients: tensor[q15]) -> tensor[q15]:
   return fir_filter(input, coefficients,
                     boundary=valid,
                     accumulator=exact[40, saturate],
@@ -108,14 +109,14 @@ Valid one-dimensional convolution and correlation use tensor values and the
 same fixed-point or floating-point policy syntax as full-output FIR:
 
 ```python
-kernel q15_convolution(
+def q15_convolution(
     input: tensor[q15,6], kernel: tensor[q15,3]) -> tensor[q15,4]:
   return convolution(input, kernel,
                      accumulator=exact[40,saturate],
                      rounding=nearest_even,
                      overflow=saturate)
 
-kernel f32_correlation(
+def f32_correlation(
     input: tensor[f32,6], kernel: tensor[f32,3]) -> tensor[f32,4]:
   return correlation(input, kernel, contract=fma)
 ```
@@ -130,10 +131,10 @@ kernels are not part of this source slice.
 Static packed-Q15 complex FFT uses an explicit experimental element spelling:
 
 ```python
-kernel q15_cfft8(input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
+def q15_cfft8(input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
   return cfft(input)
 
-kernel q15_icfft8(input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
+def q15_icfft8(input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
   return icfft(input)
 ```
 

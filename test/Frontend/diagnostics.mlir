@@ -1,4 +1,4 @@
-// RUN: not ondrix-compile %S/Inputs/invalid_python_def.ox 2>&1 | FileCheck %s --check-prefix=PYTHON
+// RUN: not ondrix-compile %S/Inputs/invalid_kernel_keyword.ox 2>&1 | FileCheck %s --check-prefix=KERNEL
 // RUN: not ondrix-compile %S/Inputs/invalid_accumulator_width.ox 2>&1 | FileCheck %s --check-prefix=WIDTH
 // RUN: not ondrix-compile %S/Inputs/unknown_operand.ox 2>&1 | FileCheck %s --check-prefix=OPERAND
 // RUN: not ondrix-compile %S/Inputs/invalid_mixed_types.ox 2>&1 | FileCheck %s --check-prefix=MIXED
@@ -16,9 +16,9 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_empty_constexpr.ox 2>&1 | FileCheck %s --check-prefix=EMPTY-CONSTEXPR
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_valid_mixed_shape.ox 2>&1 | FileCheck %s --check-prefix=VALID-MIXED-SHAPE
 
-// PYTHON: invalid_python_def.ox:1:1: error: unsupported top-level construct 'def'; expected 'kernel'
-// PYTHON-NEXT: def q15_dot(lhs, rhs):
-// PYTHON-NEXT: ^
+// KERNEL: invalid_kernel_keyword.ox:1:1: error: unsupported top-level construct 'kernel'; expected 'def'
+// KERNEL-NEXT: kernel q15_dot(lhs: buffer[q15], rhs: buffer[q15]) -> q15:
+// KERNEL-NEXT: ^
 
 // WIDTH: invalid_accumulator_width.ox:2:10: error: the executable Q15 profile requires exact accumulator width 40
 // WIDTH-NEXT: return dot(lhs, rhs,
@@ -26,7 +26,7 @@
 // OPERAND: unknown_operand.ox:2:10: error: unknown reduction operand 'coefficients'
 // OPERAND-NEXT: return dot(lhs, coefficients,
 
-// MIXED: invalid_mixed_types.ox:1:32: error: parameter element types must match the kernel result type
+// MIXED: invalid_mixed_types.ox:1:29: error: parameter element types must match the kernel result type
 
 // CONSTEXPR-DYNAMIC: invalid_constexpr_dynamic_window.ox:2:5: error: a constexpr reduction operand requires a static left operand extent
 

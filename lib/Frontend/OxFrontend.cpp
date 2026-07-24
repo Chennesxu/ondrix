@@ -245,24 +245,24 @@ public:
       : lexer(lexer), diagnostics(diagnostics), current(lexer.next()) {}
 
   std::optional<KernelAst> parse() {
-    if (!isIdentifier("kernel")) {
+    if (!isIdentifier("def")) {
       if (current.kind == TokenKind::Identifier)
         diagnostics.error(current.position, llvm::Twine("unsupported top-level construct '") +
-                                                current.spelling + "'; expected 'kernel'");
+                                                current.spelling + "'; expected 'def'");
       else
-        diagnostics.error(current.position, "expected 'kernel'");
+        diagnostics.error(current.position, "expected 'def'");
       return std::nullopt;
     }
 
     KernelAst kernel;
     kernel.position = current.position;
     advance();
-    auto name = parseIdentifier("expected kernel name");
+    auto name = parseIdentifier("expected function name");
     if (!name)
       return std::nullopt;
     kernel.name = name->spelling.str();
 
-    if (!expect(TokenKind::LeftParen, "expected '(' after kernel name"))
+    if (!expect(TokenKind::LeftParen, "expected '(' after function name"))
       return std::nullopt;
     do {
       std::optional<ParameterAst> parameter = parseParameter();
@@ -283,12 +283,12 @@ public:
       if (!parseShapedType(kernel.resultType, kernel.resultExtent, "tensor"))
         return std::nullopt;
     } else {
-      auto resultType = parseSourceType("expected kernel result type 'q15', 'q31', or 'f32'");
+      auto resultType = parseSourceType("expected function result type 'q15', 'q31', or 'f32'");
       if (!resultType)
         return std::nullopt;
       kernel.resultType = *resultType;
     }
-    if (!expect(TokenKind::Colon, "expected ':' before kernel body") ||
+    if (!expect(TokenKind::Colon, "expected ':' before function body") ||
         !expectIdentifier("return", "expected a single return statement"))
       return std::nullopt;
 
