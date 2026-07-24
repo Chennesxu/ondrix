@@ -18,6 +18,7 @@ DECLARE_MEMREF(MemRefI16, int16_t);
 DECLARE_MEMREF(MemRefF32, float);
 
 extern void _mlir_ciface_q15_convolution(MemRefI16 *, MemRefI16 *, MemRefI16 *);
+extern void _mlir_ciface_q15_correlation_auto(MemRefI16 *, MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_f32_correlation(MemRefF32 *, MemRefF32 *, MemRefF32 *);
 
 static int64_t clampI40(__int128 value) {
@@ -55,6 +56,14 @@ static int16_t q15Convolution(const int16_t input[6], const int16_t kernel[3], u
   return exportQ15(accumulator);
 }
 
+static int16_t q15CorrelationExact(const int16_t input[6], const int16_t kernel[3],
+                                   unsigned output) {
+  int64_t accumulator = 0;
+  for (unsigned k = 0; k < 3; ++k)
+    accumulator += (int64_t)input[output + k] * kernel[k];
+  return exportQ15(accumulator);
+}
+
 static float f32Correlation(const float input[6], const float kernel[3], unsigned output) {
   float accumulator = 0.0f;
   for (unsigned k = 0; k < 3; ++k)
@@ -87,6 +96,22 @@ int main(void) {
     }
   }
   free(q15Output.allocated);
+
+  MemRefI16 q15AutoOutput;
+  _mlir_ciface_q15_correlation_auto(&q15AutoOutput, &q15InputRef, &q15KernelRef);
+  if (q15AutoOutput.sizes[0] != 4)
+    return 1;
+  for (unsigned output = 0; output < 4; ++output) {
+    int16_t actual =
+        q15AutoOutput.aligned[q15AutoOutput.offset + output * q15AutoOutput.strides[0]];
+    int16_t expected = q15CorrelationExact(q15Input, q15Kernel, output);
+    if (actual != expected) {
+      fprintf(stderr, "Q15 auto correlation output %u: %d/%d\n", output, actual, expected);
+      free(q15AutoOutput.allocated);
+      return 1;
+    }
+  }
+  free(q15AutoOutput.allocated);
 
   float f32Input[] = {1.25f, -2.0f, 3.5f, -4.25f, 5.0f, -6.5f};
   float f32Kernel[] = {0.5f, -1.25f, 2.0f};

@@ -9,6 +9,8 @@
 // RUN: ondrix-compile %S/Inputs/f32_fir_fma.ox | ondrix-opt --convert-ondrix-to-ondsp --lower-ondsp-f32-reduce-to-scalar | FileCheck %s --check-prefix=F32-FIR-SCALAR
 // RUN: ondrix-compile %S/Inputs/q15_dot_constexpr.ox | FileCheck %s --check-prefix=CONST-DOT
 // RUN: ondrix-compile %S/Inputs/q15_dot_constexpr.ox | ondrix-opt --convert-ondrix-to-ondsp --vectorize-ondsp-constant-saturating-memref-reduce="vector-width=4 max-elements=64" | FileCheck %s --check-prefix=PROVEN-DOT
+// RUN: ondrix-compile %S/Inputs/q15_fir_auto.ox | FileCheck %s --check-prefix=AUTO
+// RUN: ondrix-compile %S/Inputs/q15_fir_auto.ox | ondrix-opt --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar | FileCheck %s --check-prefix=AUTO-SCALAR
 
 // F32-LABEL: func.func @f32_dot_fma
 // F32-SAME: memref<?xf32>
@@ -70,3 +72,12 @@
 // PROVEN-DOT: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
 // PROVEN-DOT: ondsp.acc_add_term
 // PROVEN-DOT-NOT: ondsp.reduce_mac
+
+// AUTO-LABEL: func.func @q15_fir_auto
+// AUTO: ondrix.fir
+// AUTO-SAME: !ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>
+
+// AUTO-SCALAR-LABEL: func.func @q15_fir_auto
+// AUTO-SCALAR: arith.muli
+// AUTO-SCALAR-NOT: ondrix.
+// AUTO-SCALAR-NOT: ondsp.

@@ -1,6 +1,7 @@
 // RUN: ondrix-compile %S/Inputs/q15_convolution.ox | FileCheck %s --check-prefix=Q15
 // RUN: ondrix-compile %S/Inputs/q31_correlation.ox | FileCheck %s --check-prefix=Q31
 // RUN: ondrix-compile %S/Inputs/f32_correlation.ox | FileCheck %s --check-prefix=F32
+// RUN: ondrix-compile %S/Inputs/q15_correlation_auto.ox | FileCheck %s --check-prefix=AUTO
 // RUN: not ondrix-compile %S/Inputs/invalid_convolution_shape.ox 2>&1 | FileCheck %s --check-prefix=SHAPE
 
 // Q15-LABEL: func.func @q15_convolution(
@@ -24,5 +25,10 @@
 // F32-SAME: mode = #ondrix.conv1d_mode<correlation>
 // F32-SAME: numeric = #ondsp.fp<format = f32, contract = fma>
 // F32: return %[[RESULT]] : tensor<4xf32>
+
+// AUTO-LABEL: func.func @q15_correlation_auto(
+// AUTO: ondrix.conv1d
+// AUTO-SAME: accumulator = !ondsp.acc<storage = i33, frac = 30, signed, update_overflow = wrap>
+// AUTO-SAME: mode = #ondrix.conv1d_mode<correlation>
 
 // SHAPE: invalid_convolution_shape.ox:2:10: error: static convolution/correlation result extent is incorrect

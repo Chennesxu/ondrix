@@ -22,6 +22,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <limits>
@@ -223,6 +224,7 @@ struct ReductionAst {
   std::string rhs;
   std::string third;
   uint64_t accumulatorWidth = 0;
+  bool accumulatorAuto = false;
   std::string updateOverflow;
   std::string rounding;
   std::string destinationOverflow;
@@ -372,11 +374,13 @@ public:
     if (!expect(TokenKind::Comma, "expected ',' after reduction left operand"))
       return std::nullopt;
     auto rhs = parseIdentifier("expected reduction right operand");
-    if (!rhs || !expect(TokenKind::Comma, "expected ',' before numeric policy"))
+    if (!rhs)
       return std::nullopt;
     kernel.result.rhs = rhs->spelling.str();
 
     if (kernel.result.kind == ReductionKind::FirFilter) {
+      if (!expect(TokenKind::Comma, "expected ',' before FIR boundary policy"))
+        return std::nullopt;
       if (!expectIdentifier("boundary", "expected FIR boundary policy") ||
           !expect(TokenKind::Equal, "expected '=' after boundary"))
         return std::nullopt;
@@ -384,10 +388,17 @@ public:
       if (!boundary || !expect(TokenKind::Comma, "expected ',' after FIR boundary mode"))
         return std::nullopt;
       kernel.result.boundary = boundary->spelling.str();
+    } else if (current.kind == TokenKind::RightParen && kernel.resultType != SourceType::F32) {
+      kernel.result.accumulatorAuto = true;
+      kernel.result.rounding = "nearest_even";
+      kernel.result.destinationOverflow = "saturate";
+      kernel.result.updateOverflow = "wrap";
+    } else if (!expect(TokenKind::Comma, "expected ',' before numeric policy")) {
+      return std::nullopt;
     }
 
     if (kernel.resultType != SourceType::F32) {
-      if (!parseFixedPolicy(kernel.result))
+      if (!kernel.result.accumulatorAuto && !parseFixedPolicy(kernel.result))
         return std::nullopt;
     } else {
       if (!expectIdentifier("contract", "expected floating-point contract policy") ||
@@ -922,8 +933,39 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     }
   }
 
+  if (ast.result.accumulatorAuto) {
+    bool isScalarReduction =
+        ast.result.kind == ReductionKind::Dot || ast.result.kind == ReductionKind::Fir;
+    bool isWindowReduction = ast.result.kind == ReductionKind::Convolution ||
+                             ast.result.kind == ReductionKind::Correlation;
+    if (ast.resultType != SourceType::Q15 || (!isScalarReduction && !isWindowReduction)) {
+      diagnostics.error(
+          ast.result.position,
+          "automatic accumulation currently supports static Q15 dot, fir, and conv1d");
+      return std::nullopt;
+    }
+    std::optional<int64_t> rhsExtent = rhsParameter->extent;
+    if (rhsParameter->isConstexpr())
+      rhsExtent = static_cast<int64_t>(rhsParameter->constantValues.size());
+    if (!rhsExtent) {
+      diagnostics.error(ast.result.position,
+                        isScalarReduction
+                            ? "automatic accumulation requires equal static operand extents"
+                            : "automatic accumulation requires a static coefficient extent");
+      return std::nullopt;
+    }
+    if (isScalarReduction && (!lhsParameter->extent || *lhsParameter->extent != *rhsExtent)) {
+      diagnostics.error(ast.result.position,
+                        "automatic accumulation requires equal static operand extents");
+      return std::nullopt;
+    }
+    llvm::APInt maximumMagnitude(128, static_cast<uint64_t>(*rhsExtent));
+    maximumMagnitude <<= 30;
+    ast.result.accumulatorWidth = std::max(32u, maximumMagnitude.getActiveBits() + 1);
+  }
+
   uint64_t requiredAccumulatorWidth = ast.resultType == SourceType::Q15 ? 40 : 64;
-  if (ast.result.accumulatorWidth != requiredAccumulatorWidth) {
+  if (!ast.result.accumulatorAuto && ast.result.accumulatorWidth != requiredAccumulatorWidth) {
     diagnostics.error(ast.result.position,
                       ast.resultType == SourceType::Q15
                           ? "the executable Q15 profile requires exact accumulator width 40"
@@ -1115,7 +1157,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     } else {
       unsigned storageWidth = cast<IntegerType>(elementType).getWidth();
       unsigned fractionalBits = storageWidth - 1;
-      unsigned accumulatorWidth = kernel.ast.resultType == SourceType::Q15 ? 40 : 64;
+      unsigned accumulatorWidth = kernel.ast.result.accumulatorWidth;
       auto fixed =
           ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, fractionalBits);
       auto accumulatorType = ondsp::AccType::get(&context, builder.getIntegerType(accumulatorWidth),
@@ -1155,7 +1197,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   if (kernel.ast.resultType != SourceType::F32) {
     unsigned storageWidth = cast<IntegerType>(elementType).getWidth();
     unsigned fractionalBits = storageWidth - 1;
-    unsigned accumulatorWidth = kernel.ast.resultType == SourceType::Q15 ? 40 : 64;
+    unsigned accumulatorWidth = kernel.ast.result.accumulatorWidth;
     unsigned accumulatorFractionalBits = fractionalBits * 2;
     auto numeric =
         ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, fractionalBits);

@@ -55,12 +55,20 @@ The raw-high path cannot be exported directly as Q31 because value-preserving
 
 ## Accumulator Updates
 
-The executable slice uses an explicit accumulator domain such as:
+An accumulator domain is independent of the operand Q-format. For example, an
+explicit target/library-compatible profile may use:
 
 ```mlir
 !ondsp.acc<storage = i40, frac = 30, signed,
              update_overflow = saturate>
 ```
+
+The generic scalar consumer also accepts signed Q15 full-product accumulators
+with `frac = 30` and storage width at least 32. This permits a frontend or
+analysis to derive a sufficient target-independent width for a statically
+bounded reduction. Generic Vector and OrtumCore consumers retain their stricter
+closed profiles; they must prove that a different accumulator domain is
+equivalent before claiming it.
 
 For accumulator raw value `a` and exact product `p`, `ondsp.mac` and
 `ondsp.mac_sub` first compute an unbounded mathematical update:

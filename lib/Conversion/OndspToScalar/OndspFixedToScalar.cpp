@@ -40,14 +40,17 @@ static bool isSignedFixed(ondrix::ondsp::FixedAttr numeric, unsigned width, unsi
 }
 
 static bool isSupportedAccumulator(ondrix::ondsp::AccType accumulator) {
-  return ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator) ||
-         ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator);
+  auto storage = dyn_cast<IntegerType>(accumulator.getStorage());
+  bool isSignedFrac30 = storage && storage.isSignless() && storage.getWidth() >= 32 &&
+                        accumulator.getFrac() == 30 &&
+                        accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed;
+  return isSignedFrac30 || ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator);
 }
 
 static bool isSupportedImport(ondrix::ondsp::AccType accumulator, ondrix::ondsp::FixedAttr source) {
   if (ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator))
     return ondrix::ondsp::isSignedQ31(source);
-  if (!ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator))
+  if (!isSupportedAccumulator(accumulator) || accumulator.getFrac() != 30)
     return false;
   return ondrix::ondsp::isSignedQ15(source) || isSignedFixed(source, 32, 30);
 }
@@ -56,7 +59,7 @@ static bool isSupportedExport(ondrix::ondsp::AccType accumulator,
                               ondrix::ondsp::FixedAttr destination) {
   if (ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator))
     return ondrix::ondsp::isSignedQ31(destination);
-  if (!ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator))
+  if (!isSupportedAccumulator(accumulator) || accumulator.getFrac() != 30)
     return false;
   return ondrix::ondsp::isSignedQ15(destination) || isSignedFixed(destination, 32, 30);
 }

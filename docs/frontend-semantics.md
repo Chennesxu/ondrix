@@ -83,6 +83,13 @@ The normalized Ondsp IR always materializes the selected width, fractional
 position, signedness, and update overflow. A target must not silently replace
 `auto` exact accumulation with a narrower saturating capability.
 
+The first implemented `auto` slice covers statically bounded signed-Q15 dot,
+FIR-sample, convolution, and correlation reductions. It derives a full-product
+accumulator width from the complete signed input domain and the number of
+products in each output, and rejects unbounded lengths. Other algorithms must
+provide their own sound range/state analysis before adopting `auto`; Q-format
+alone never selects a target accumulator.
+
 Leaving an accumulator requires explicit destination format, rounding, and
 overflow policy. Source defaults, if introduced, must be language defaults and
 must not depend on the selected target.

@@ -1,8 +1,30 @@
 # Experimental `.ox` Frontend
 
 `ondrix-compile` is a standalone C++ frontend. Its initial executable surface
-accepts one `def` per file and dynamic rank-1 buffers. A `def` declares a DSP
-kernel entry point; it is not a general Python function. Q15 dot is written as:
+accepts one `def` per file and rank-1 buffers or tensors. A `def` declares a DSP
+kernel entry point; it is not a general Python function.
+
+For a statically bounded Q15 dot, FIR sample, convolution, or correlation,
+omitting the accumulator policy requests target-independent exact mathematical
+accumulation:
+
+```python
+def q15_fir_auto(
+    window: buffer[q15, 4], coefficients: buffer[q15, 4]) -> q15:
+  return fir(window, coefficients)
+```
+
+The frontend derives the smallest signed accumulator width that contains every
+possible full-precision Q15 product sum, with a minimum width of 32 bits. Scalar
+dot/FIR use the common operand extent; convolution/correlation use the kernel
+extent for each output window. The example above normalizes to an i34/frac30
+accumulator, while a three-tap correlation uses i33/frac30. This inferred width
+is not a hardware register choice, and a target may not silently narrow it.
+Dynamic reductions currently require an explicit finite profile because no
+finite exact width follows from an unbounded runtime length.
+
+An explicit accumulator instead makes finite-width update behavior observable.
+For example, Q15 dot with the currently executable i40 profile is written as:
 
 ```python
 def q15_dot(lhs: buffer[q15], rhs: buffer[q15]) -> q15:
@@ -12,7 +34,8 @@ def q15_dot(lhs: buffer[q15], rhs: buffer[q15]) -> q15:
              overflow=saturate)
 ```
 
-Q15 FIR-sample preserves FIR intent while using the same numeric policy:
+Q15 FIR-sample preserves FIR intent while using the same explicit numeric
+policy:
 
 ```python
 def q15_fir(window: buffer[q15], coefficients: buffer[q15]) -> q15:
@@ -121,6 +144,10 @@ def f32_correlation(
   return correlation(input, kernel, contract=fma)
 ```
 
+The fixed Q15 convolution/correlation forms may omit their policy when the
+kernel extent is static. Export then uses the same nearest-even/saturating
+language default as inferred Q15 dot/FIR.
+
 Both forms require `result_length = input_length - kernel_length + 1`.
 Correlation pairs increasing input and kernel indices. Convolution reverses
 the kernel while preserving increasing input-window and accumulator-update
@@ -172,8 +199,9 @@ ondrix-compile input.ox -o output.mlir
 ```
 
 The frontend expands `q15` and `q31` to their signed integer storage and
-fractional positions, emits an exact full product, materializes the declared
-i40/frac30 or i64/frac62 accumulator policy, and emits an explicit export.
+fractional positions, emits an exact full product, materializes either an
+inferred exact Q15 accumulator or the declared i40/frac30 or i64/frac62
+accumulator policy, and emits an explicit export.
 Supported update and destination overflow modes are `wrap` and `saturate`.
 Supported rounding modes are `toward_negative`, `toward_zero`, and
 `nearest_even`.
@@ -191,8 +219,8 @@ wrapper. That convention is not part of `.ox` source semantics. Tensor
 parameters are values; the frontend does not invent a `restrict` promise for
 them.
 
-This is not a general Python parser. Functions declared with `def`, imports,
-classes, heap objects, arbitrary expressions, and dynamic Python behavior are
-rejected. Scalar constants, indexing, loops, mutable output buffers, multiple
-kernels, and inferred accumulators remain unimplemented. Textual MLIR remains an
-independent and more complete compiler entry point.
+This is not a general Python parser. Imports, classes, heap objects, arbitrary
+expressions, and dynamic Python behavior are rejected. Scalar constants,
+indexing, loops, mutable output buffers, multiple kernels, and inferred
+accumulators outside the static Q15 real-reduction slice remain unimplemented.
+Textual MLIR remains an independent and more complete compiler entry point.
