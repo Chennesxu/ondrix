@@ -228,6 +228,46 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
   return success();
 }
 
+static LogicalResult verifyFirDecimateDomain(FirDecimateOp op) {
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType coefficientType = op.getCoeffs().getType();
+  RankedTensorType initType = op.getInit().getType();
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, coefficientType, initType})))
+    return failure();
+  if (inputType.getRank() != 1 || coefficientType.getRank() != 1 || initType.getRank() != 1)
+    return op.emitOpError("requires rank-1 input, coefficient, and init tensors");
+  if (inputType.getElementType() != coefficientType.getElementType())
+    return op.emitOpError("input and coefficient element types must match");
+  int64_t factor = op.getFactorAttr().getValue().getSExtValue();
+  if (factor < 2)
+    return op.emitOpError("requires factor at least 2");
+
+  int64_t inputLength = inputType.getDimSize(0);
+  int64_t coefficientLength = coefficientType.getDimSize(0);
+  int64_t outputLength = initType.getDimSize(0);
+  if (!ShapedType::isDynamic(coefficientLength) && coefficientLength == 0)
+    return op.emitOpError("requires at least one coefficient");
+  if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(coefficientLength)) {
+    if (inputLength < coefficientLength)
+      return op.emitOpError("input must cover one complete coefficient window");
+    int64_t expectedOutputLength = (inputLength - coefficientLength) / factor + 1;
+    if (!ShapedType::isDynamic(outputLength) && outputLength != expectedOutputLength)
+      return op.emitOpError() << "result length must be " << expectedOutputLength;
+  }
+
+  if (!ondrix::ondsp::isSignedQ15(op.getNumeric()) ||
+      !ondrix::ondsp::isFullProduct(op.getProduct()) ||
+      !ondrix::ondsp::isSignedI40Frac30Accumulator(op.getAccumulator()))
+    return op.emitOpError("supports only signed Q15/full with an i40/frac30 accumulator");
+  if (op.getDst() != op.getNumeric())
+    return op.emitOpError("destination policy must match the signed Q15 input format");
+  if (inputType.getElementType() != op.getNumeric().getStorage())
+    return op.emitOpError("input and coefficient element type must match Q15 storage");
+  if (initType.getElementType() != op.getDst().getStorage())
+    return op.emitOpError("init and result element type must match destination storage");
+  return verifyFixedReductionResult(op, op.getAccumulator(), op.getNumeric(), op.getProduct());
+}
+
 static LogicalResult verifyConv1DDomain(Conv1DOp op) {
   RankedTensorType inputType = op.getInput().getType();
   RankedTensorType kernelType = op.getKernel().getType();
@@ -538,6 +578,20 @@ LogicalResult FirFilterOp::verify() {
   if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
   return verifyFirFilterDomain(*this);
+}
+
+Speculation::Speculatability FirDecimateOp::getSpeculatability() {
+  return (ondrix::requiresConservativeDSPSpeculation(getInput().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getCoeffs().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getInit().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
+
+LogicalResult FirDecimateOp::verify() {
+  if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
+    return failure();
+  return verifyFirDecimateDomain(*this);
 }
 
 Speculation::Speculatability Conv1DOp::getSpeculatability() {

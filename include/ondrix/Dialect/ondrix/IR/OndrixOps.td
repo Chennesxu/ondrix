@@ -120,6 +120,57 @@ def Ondrix_FirFilterOp
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_FirDecimateOp
+    : Ondrix_Op<"fir_decimate", [
+        DestinationStyleOpInterface,
+        DeclareOpInterfaceMethods<ConditionallySpeculatable>,
+        NoMemoryEffect,
+        TypesMatchWith<"result type matches init type", "init", "result",
+                       "$_self">]> {
+  let summary = "Compute valid phase-zero FIR decimation";
+  let description = [{
+    `ondrix.fir_decimate` computes a valid, phase-zero FIR decimation over
+    rank-1 tensor values. For input length `N`, non-empty coefficient length
+    `K`, and static `factor = D >= 2`, the result length is:
+
+      `O = floor((N - K) / D) + 1`
+
+    Output `m` starts from numeric zero and visits taps in increasing `k`
+    order:
+
+      `output[m] = ordered_sum_k input[m * D + k] * coeffs[k]`
+
+    The `init` tensor provides destination shape and storage; its element
+    values are not part of the mathematical result. The first executable
+    contract is signed Q15 with an exact full product and explicit
+    accumulator/export policy. Input phase, padding, interpolation, polyphase
+    reassociation, Vector lowering, and target selection are outside this
+    operation.
+
+    Dynamic extent relationships are execution preconditions. Generic
+    lowering emits dominating assertions before evaluating any window.
+  }];
+  let arguments = (ins
+      AnyRankedTensor:$input,
+      AnyRankedTensor:$coeffs,
+      AnyRankedTensor:$init,
+      I64Attr:$factor,
+      Ondsp_FixedAttr:$numeric,
+      Ondsp_ProductAttr:$product,
+      TypeAttrOf<Ondsp_Acc>:$accumulator,
+      Ondsp_FixedAttr:$dst,
+      Ondsp_RoundingModeAttr:$rounding,
+      Ondsp_OverflowModeAttr:$overflow);
+  let results = (outs AnyRankedTensor:$result);
+  let extraClassDeclaration = [{
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      return {2, 3};
+    }
+  }];
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_Conv1DOp
     : Ondrix_Op<"conv1d", [
         DestinationStyleOpInterface,
