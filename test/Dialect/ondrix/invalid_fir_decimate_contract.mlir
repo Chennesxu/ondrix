@@ -76,7 +76,7 @@ func.func @rejects_encoded_input(
 
 func.func @rejects_high_raw_product(
     %input: tensor<12xi16>, %coeffs: tensor<5xi16>, %init: tensor<4xi16>) {
-  // expected-error @+1 {{supports only signed Q15/full with an i40/frac30 accumulator}}
+  // expected-error @+1 {{supports only signed Q15/full with a signed frac30 accumulator of at least 32 bits}}
   %0 = ondrix.fir_decimate %input, %coeffs, %init {
     accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
                               update_overflow = saturate>,
@@ -94,7 +94,7 @@ func.func @rejects_high_raw_product(
 
 func.func @rejects_q31_profile(
     %input: tensor<12xi32>, %coeffs: tensor<5xi32>, %init: tensor<4xi32>) {
-  // expected-error @+1 {{supports only signed Q15/full with an i40/frac30 accumulator}}
+  // expected-error @+1 {{supports only signed Q15/full with a signed frac30 accumulator of at least 32 bits}}
   %0 = ondrix.fir_decimate %input, %coeffs, %init {
     accumulator = !ondsp.acc<storage = i64, frac = 62, signed,
                               update_overflow = saturate>,

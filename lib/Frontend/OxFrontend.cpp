@@ -202,6 +202,7 @@ enum class ReductionKind {
   Dot,
   Fir,
   FirFilter,
+  FirDecimate,
   FirStream,
   SosDf2Fixed,
   Convolution,
@@ -244,6 +245,7 @@ struct ReductionAst {
   std::string stateOverflow;
   std::string fpContract;
   std::string boundary;
+  int64_t factor = 0;
   SourcePosition position;
 };
 
@@ -353,13 +355,14 @@ public:
       return std::nullopt;
 
     if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter") &&
-        !isIdentifier("fir_stream") && !isIdentifier("sos_df2_fixed") &&
-        !isIdentifier("convolution") && !isIdentifier("correlation") &&
-        !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft")) {
+        !isIdentifier("fir_decimate") && !isIdentifier("fir_stream") &&
+        !isIdentifier("sos_df2_fixed") && !isIdentifier("convolution") &&
+        !isIdentifier("correlation") && !isIdentifier("butterfly") && !isIdentifier("cfft") &&
+        !isIdentifier("icfft")) {
       diagnostics.error(current.position,
-                        "expected dot(...), fir(...), fir_filter(...), fir_stream(...), "
-                        "sos_df2_fixed(...), convolution(...), correlation(...), butterfly(...), "
-                        "cfft(...), or icfft(...) return expression");
+                        "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
+                        "fir_stream(...), sos_df2_fixed(...), convolution(...), correlation(...), "
+                        "butterfly(...), cfft(...), or icfft(...) return expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -368,6 +371,8 @@ public:
       kernel.result.kind = ReductionKind::Fir;
     else if (isIdentifier("fir_filter"))
       kernel.result.kind = ReductionKind::FirFilter;
+    else if (isIdentifier("fir_decimate"))
+      kernel.result.kind = ReductionKind::FirDecimate;
     else if (isIdentifier("fir_stream"))
       kernel.result.kind = ReductionKind::FirStream;
     else if (isIdentifier("sos_df2_fixed"))
@@ -473,6 +478,26 @@ public:
       if (!boundary || !expect(TokenKind::Comma, "expected ',' after FIR boundary mode"))
         return std::nullopt;
       kernel.result.boundary = boundary->spelling.str();
+    } else if (kernel.result.kind == ReductionKind::FirDecimate) {
+      if (!expect(TokenKind::Comma, "expected ',' before FIR decimation factor") ||
+          !expectIdentifier("factor", "expected FIR decimation factor") ||
+          !expect(TokenKind::Equal, "expected '=' after factor"))
+        return std::nullopt;
+      auto factor = parseSignedInteger("expected FIR decimation factor");
+      if (!factor)
+        return std::nullopt;
+      kernel.result.factor = *factor;
+      kernel.result.accumulatorAuto = true;
+      kernel.result.rounding = "nearest_even";
+      kernel.result.destinationOverflow = "saturate";
+      kernel.result.updateOverflow = "wrap";
+      if (!expect(TokenKind::RightParen, "expected ')' after fir_decimate expression"))
+        return std::nullopt;
+      if (current.kind != TokenKind::Eof) {
+        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
+        return std::nullopt;
+      }
+      return kernel;
     } else if (current.kind == TokenKind::RightParen && kernel.resultType != SourceType::F32) {
       kernel.result.accumulatorAuto = true;
       kernel.result.rounding = "nearest_even";
@@ -1088,6 +1113,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
 
   bool isConv1D = ast.result.kind == ReductionKind::Convolution ||
                   ast.result.kind == ReductionKind::Correlation;
+  bool isFirDecimate = ast.result.kind == ReductionKind::FirDecimate;
   if (isConv1D) {
     if (constexprCount != 0) {
       diagnostics.error(ast.result.position,
@@ -1121,6 +1147,41 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                           "static convolution/correlation result extent is incorrect");
         return std::nullopt;
       }
+    }
+  } else if (isFirDecimate) {
+    if (constexprCount != 0 || !ast.tensorResult || ast.resultType != SourceType::Q15 ||
+        !lhsParameter || !rhsParameter || !lhsParameter->isTensor() || !rhsParameter->isTensor()) {
+      diagnostics.error(ast.result.position,
+                        "fir_decimate requires Q15 tensor input, coefficients, and result");
+      return std::nullopt;
+    }
+    if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
+        !hasRank(ast.resultShape, 1)) {
+      diagnostics.error(ast.result.position, "fir_decimate currently requires rank-1 tensors");
+      return std::nullopt;
+    }
+    if (ast.result.factor != 2) {
+      diagnostics.error(ast.result.position,
+                        "fir_decimate source binding currently requires factor=2");
+      return std::nullopt;
+    }
+    const std::optional<int64_t> &lhsExtent = getRankOneExtent(lhsParameter->shape);
+    const std::optional<int64_t> &rhsExtent = getRankOneExtent(rhsParameter->shape);
+    const std::optional<int64_t> &resultExtent = getRankOneExtent(ast.resultShape);
+    if (!lhsExtent || !rhsExtent || !resultExtent) {
+      diagnostics.error(ast.result.position,
+                        "fir_decimate source binding currently requires static extents");
+      return std::nullopt;
+    }
+    if (*rhsExtent > *lhsExtent) {
+      diagnostics.error(ast.result.position,
+                        "fir_decimate input extent must cover the coefficient window");
+      return std::nullopt;
+    }
+    int64_t expectedExtent = (*lhsExtent - *rhsExtent) / ast.result.factor + 1;
+    if (*resultExtent != expectedExtent) {
+      diagnostics.error(ast.result.position, "static fir_decimate result extent is incorrect");
+      return std::nullopt;
     }
   } else if (ast.result.kind == ReductionKind::FirFilter) {
     if (!ast.tensorResult) {
@@ -1225,11 +1286,13 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     bool isScalarReduction =
         ast.result.kind == ReductionKind::Dot || ast.result.kind == ReductionKind::Fir;
     bool isWindowReduction = ast.result.kind == ReductionKind::Convolution ||
-                             ast.result.kind == ReductionKind::Correlation;
+                             ast.result.kind == ReductionKind::Correlation ||
+                             ast.result.kind == ReductionKind::FirDecimate;
     if (ast.resultType != SourceType::Q15 || (!isScalarReduction && !isWindowReduction)) {
       diagnostics.error(
           ast.result.position,
-          "automatic accumulation currently supports static Q15 dot, fir, and conv1d");
+          "automatic accumulation currently supports static Q15 dot, fir, fir_decimate, and "
+          "conv1d");
       return std::nullopt;
     }
     std::optional<int64_t> rhsExtent =
@@ -1464,8 +1527,14 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
 
   bool isConv1D = kernel.ast.result.kind == ReductionKind::Convolution ||
                   kernel.ast.result.kind == ReductionKind::Correlation;
-  if (kernel.ast.result.kind == ReductionKind::FirFilter || isConv1D) {
+  bool isFirDecimate = kernel.ast.result.kind == ReductionKind::FirDecimate;
+  if (kernel.ast.result.kind == ReductionKind::FirFilter || isFirDecimate || isConv1D) {
     auto outputType = cast<RankedTensorType>(resultType);
+    if (isFirDecimate && outputType.isDynamicDim(0)) {
+      emitError(expressionLocation,
+                "internal error: fir_decimate source result must have a static extent");
+      return {};
+    }
     SmallVector<Value> dynamicSizes;
     if (outputType.isDynamicDim(0)) {
       Value zero = builder.create<arith::ConstantIndexOp>(expressionLocation, 0);
@@ -1519,6 +1588,11 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       result = builder.create<ir::Conv1DOp>(expressionLocation, outputType, lhs, rhs, init, mode,
                                             numeric, product, accumulator, destination, rounding,
                                             overflow);
+    } else if (isFirDecimate) {
+      result = builder.create<ir::FirDecimateOp>(
+          expressionLocation, outputType, lhs, rhs, init,
+          builder.getI64IntegerAttr(kernel.ast.result.factor), cast<ondsp::FixedAttr>(numeric),
+          product, accumulator, destination, rounding, overflow);
     } else {
       ir::FirBoundaryMode boundary = kernel.ast.result.boundary == "full"
                                          ? ir::FirBoundaryMode::Full

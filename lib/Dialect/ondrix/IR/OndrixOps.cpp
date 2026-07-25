@@ -255,10 +255,14 @@ static LogicalResult verifyFirDecimateDomain(FirDecimateOp op) {
       return op.emitOpError() << "result length must be " << expectedOutputLength;
   }
 
+  auto accumulatorStorage = dyn_cast<IntegerType>(op.getAccumulator().getStorage());
   if (!ondrix::ondsp::isSignedQ15(op.getNumeric()) ||
-      !ondrix::ondsp::isFullProduct(op.getProduct()) ||
-      !ondrix::ondsp::isSignedI40Frac30Accumulator(op.getAccumulator()))
-    return op.emitOpError("supports only signed Q15/full with an i40/frac30 accumulator");
+      !ondrix::ondsp::isFullProduct(op.getProduct()) || !accumulatorStorage ||
+      accumulatorStorage.getWidth() < 32 ||
+      op.getAccumulator().getSignedness() != ondrix::ondsp::Signedness::Signed ||
+      op.getAccumulator().getFrac() != 30)
+    return op.emitOpError(
+        "supports only signed Q15/full with a signed frac30 accumulator of at least 32 bits");
   if (op.getDst() != op.getNumeric())
     return op.emitOpError("destination policy must match the signed Q15 input format");
   if (inputType.getElementType() != op.getNumeric().getStorage())

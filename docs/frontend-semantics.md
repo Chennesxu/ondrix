@@ -85,11 +85,11 @@ position, signedness, and update overflow. A target must not silently replace
 `auto` exact accumulation with a narrower saturating capability.
 
 The first implemented `auto` slice covers statically bounded signed-Q15 dot,
-FIR-sample, convolution, and correlation reductions. It derives a full-product
-accumulator width from the complete signed input domain and the number of
-products in each output, and rejects unbounded lengths. Other algorithms must
-provide their own sound range/state analysis before adopting `auto`; Q-format
-alone never selects a target accumulator.
+FIR-sample, FIR-decimation, convolution, and correlation reductions. It
+derives a full-product accumulator width from the complete signed input domain
+and the number of products in each output, and rejects unbounded lengths. Other
+algorithms must provide their own sound range/state analysis before adopting
+`auto`; Q-format alone never selects a target accumulator.
 
 Q15 `fir_stream` reuses this rule only because every output remains a
 fixed-tap feed-forward reduction. Its chronological next-state tensor consists

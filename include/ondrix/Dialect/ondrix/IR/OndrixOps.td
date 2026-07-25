@@ -142,10 +142,10 @@ def Ondrix_FirDecimateOp
 
     The `init` tensor provides destination shape and storage; its element
     values are not part of the mathematical result. The first executable
-    contract is signed Q15 with an exact full product and explicit
-    accumulator/export policy. Input phase, padding, interpolation, polyphase
-    reassociation, Vector lowering, and target selection are outside this
-    operation.
+    contract is signed Q15 with an exact full product, a signed frac30
+    accumulator of at least 32 bits, and explicit export policy. Input phase,
+    padding, interpolation, polyphase reassociation, Vector lowering, and
+    target selection are outside this operation.
 
     Dynamic extent relationships are execution preconditions. Generic
     lowering emits dominating assertions before evaluating any window.

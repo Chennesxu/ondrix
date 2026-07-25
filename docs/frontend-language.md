@@ -6,9 +6,9 @@ the fixed SOS slice also accepts the explicit rank-2 section layouts described
 below. A `def` declares a DSP kernel entry point; it is not a general Python
 function.
 
-For a statically bounded Q15 dot, FIR sample, convolution, or correlation,
-omitting the accumulator policy requests target-independent exact mathematical
-accumulation:
+For a statically bounded Q15 dot, FIR sample, FIR decimation, convolution, or
+correlation, omitting the accumulator policy requests target-independent exact
+mathematical accumulation:
 
 ```python
 def q15_fir_auto(
@@ -18,12 +18,13 @@ def q15_fir_auto(
 
 The frontend derives the smallest signed accumulator width that contains every
 possible full-precision Q15 product sum, with a minimum width of 32 bits. Scalar
-dot/FIR use the common operand extent; convolution/correlation use the kernel
-extent for each output window. The example above normalizes to an i34/frac30
-accumulator, while a three-tap correlation uses i33/frac30. This inferred width
-is not a hardware register choice, and a target may not silently narrow it.
-Dynamic reductions currently require an explicit finite profile because no
-finite exact width follows from an unbounded runtime length.
+dot/FIR use the common operand extent; FIR decimation and
+convolution/correlation use the coefficient or kernel extent for each output
+window. The example above normalizes to an i34/frac30 accumulator, while a
+three-tap correlation uses i33/frac30. This inferred width is not a hardware
+register choice, and a target may not silently narrow it. Dynamic reductions
+currently require an explicit finite profile because no finite exact width
+follows from an unbounded runtime length.
 
 An explicit accumulator instead makes finite-width update behavior observable.
 For example, Q15 dot with the currently executable i40 profile is written as:
@@ -129,6 +130,22 @@ padded edges and can use prefix-proof-authorized Vector reduction only in the
 fully overlapping interior. Dynamic full output, same padding, stride,
 dilation, streaming state, mutable destinations, and tensor indexing remain
 available only through textual MLIR contracts.
+
+The first source resampling slice exposes valid, phase-zero Q15 FIR decimation
+by two:
+
+```python
+def q15_fir_decimate(
+    input: tensor[q15,12], coefficients: tensor[q15,5]) -> tensor[q15,4]:
+  return fir_decimate(input, coefficients, factor=2)
+```
+
+All extents are static and the result must have
+`floor((input_length - coefficient_length) / 2) + 1` elements. Each output
+uses the same increasing-tap ordered FIR equation and portable accumulator
+inference as other static Q15 feed-forward reductions. Other factors, dynamic
+shapes, nonzero phase, interpolation, polyphase lowering, and Q31/f32
+resampling are not part of this source slice.
 
 Valid one-dimensional convolution and correlation use tensor values and the
 same fixed-point or floating-point policy syntax as full-output FIR:

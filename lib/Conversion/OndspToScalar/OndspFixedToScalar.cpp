@@ -190,8 +190,8 @@ public:
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
     if (!isSupportedImport(accumulator, op.getSrc()))
       return op.emitOpError(
-          "fixed scalar lowering supports Q15 to i40/frac30, Q30 to i40/frac30, or Q31 "
-          "to i64/frac62 exact import");
+          "fixed scalar lowering supports Q15 or Q30 to a signed frac30 accumulator of at least "
+          "32 bits, or Q31 to i64/frac62 exact import");
 
     auto accumulatorStorage = cast<IntegerType>(accumulator.getStorage());
     Value extended =
@@ -462,8 +462,8 @@ public:
                                                              op.getProduct());
     if (failed(domain))
       return op.emitOpError(
-          "fixed scalar lowering supports Q15/full with i40/frac30, Q31/full with "
-          "i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
+          "fixed scalar lowering supports Q15/full with a signed frac30 accumulator of at least "
+          "32 bits, Q31/full with i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
 
     Value product = lowerSignedProduct(op.getLoc(), adaptor.getLhs(), adaptor.getRhs(),
                                        op.getNumeric(), domain->product, rewriter);
@@ -582,16 +582,16 @@ public:
     auto numeric = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     if (!accumulator || !numeric || !op.getProduct())
       return op.emitOpError(
-          "fixed scalar reduction supports Q15/full with i40/frac30, Q31/full with "
-          "i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
+          "fixed scalar reduction supports Q15/full with a signed frac30 accumulator of at least "
+          "32 bits, Q31/full with i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
 
     FailureOr<ondrix::conversion::SupportedFixedMacDomain> domain =
         ondrix::conversion::getSupportedFixedScalarMacDomain(op, accumulator, numeric,
                                                              *op.getProduct());
     if (failed(domain))
       return op.emitOpError(
-          "fixed scalar reduction supports Q15/full with i40/frac30, Q31/full with "
-          "i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
+          "fixed scalar reduction supports Q15/full with a signed frac30 accumulator of at least "
+          "32 bits, Q31/full with i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
 
     FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
         ondrix::conversion::createRankOneMemRefReductionBounds(
@@ -629,8 +629,8 @@ public:
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
     if (!isSupportedExport(accumulator, op.getDst()))
       return op.emitOpError(
-          "fixed scalar lowering supports i40/frac30 to Q15 or Q30, and i64/frac62 to Q31 "
-          "export");
+          "fixed scalar lowering supports a signed frac30 accumulator of at least 32 bits to Q15 "
+          "or Q30, and i64/frac62 to Q31 export");
 
     unsigned shift = accumulator.getFrac() - op.getDst().getFrac();
     Value rounded =

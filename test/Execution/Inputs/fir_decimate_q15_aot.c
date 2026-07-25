@@ -12,15 +12,26 @@ typedef struct {
   int64_t strides[1];
 } MemRefI16;
 
-extern void _mlir_ciface_fir_decimate_q15(MemRefI16 *result, MemRefI16 *input,
-                                          MemRefI16 *coefficients);
+#ifndef FIR_DECIMATE_SYMBOL
+#define FIR_DECIMATE_SYMBOL _mlir_ciface_fir_decimate_q15
+#endif
+
+#ifndef FIR_DECIMATE_ACCUMULATOR_WIDTH
+#define FIR_DECIMATE_ACCUMULATOR_WIDTH 40
+#endif
+
+#ifndef FIR_DECIMATE_UPDATE_OVERFLOW
+#define FIR_DECIMATE_UPDATE_OVERFLOW SATURATE
+#endif
+
+extern void FIR_DECIMATE_SYMBOL(MemRefI16 *result, MemRefI16 *input, MemRefI16 *coefficients);
 
 static const struct Policy policy = {
     .width = 16,
     .frac = 15,
-    .accumulator_width = 40,
+    .accumulator_width = FIR_DECIMATE_ACCUMULATOR_WIDTH,
     .accumulator_frac = 30,
-    .update_overflow = SATURATE,
+    .update_overflow = FIR_DECIMATE_UPDATE_OVERFLOW,
     .state_rounding = NEAREST_EVEN,
     .state_overflow = SATURATE,
     .output_rounding = NEAREST_EVEN,
@@ -49,7 +60,7 @@ int main(void) {
   MemRefI16 input_ref = {input, input, 0, {12}, {1}};
   MemRefI16 coefficient_ref = {coefficients, coefficients, 0, {5}, {1}};
   MemRefI16 result;
-  _mlir_ciface_fir_decimate_q15(&result, &input_ref, &coefficient_ref);
+  FIR_DECIMATE_SYMBOL(&result, &input_ref, &coefficient_ref);
 
   int failed = result.sizes[0] != 4;
   for (int64_t index = 0; index < 4; ++index) {
