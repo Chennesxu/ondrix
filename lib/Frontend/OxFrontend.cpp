@@ -198,7 +198,17 @@ enum class SourceType { Q15, Q31, F32, ComplexQ15 };
 
 enum class ContainerKind { Scalar, Buffer, Tensor, Constexpr };
 
-enum class ReductionKind { Dot, Fir, FirFilter, Convolution, Correlation, Butterfly, Cfft, Icfft };
+enum class ReductionKind {
+  Dot,
+  Fir,
+  FirFilter,
+  FirStream,
+  Convolution,
+  Correlation,
+  Butterfly,
+  Cfft,
+  Icfft
+};
 
 static bool isCfftKind(ReductionKind kind) {
   return kind == ReductionKind::Cfft || kind == ReductionKind::Icfft;
@@ -240,6 +250,8 @@ struct KernelAst {
   unsigned resultCount = 1;
   bool tensorResult = false;
   std::optional<int64_t> resultExtent;
+  bool secondTensorResult = false;
+  std::optional<int64_t> secondResultExtent;
   ReductionAst result;
   SourcePosition position;
 };
@@ -284,17 +296,33 @@ public:
       return std::nullopt;
     if (current.kind == TokenKind::LeftParen) {
       advance();
-      auto firstType = parseSourceType("expected first function result type");
-      if (!firstType || !expect(TokenKind::Comma, "expected ',' between function result types"))
+      auto parseResult = [&](SourceType &type, bool &isTensor, std::optional<int64_t> &extent,
+                             llvm::StringRef ordinal) {
+        if (isIdentifier("tensor")) {
+          isTensor = true;
+          advance();
+          return parseShapedType(type, extent, "tensor");
+        }
+        auto parsed = parseSourceType(llvm::Twine("expected ") + ordinal + " function result type");
+        if (!parsed)
+          return false;
+        type = *parsed;
+        return true;
+      };
+      SourceType firstType;
+      if (!parseResult(firstType, kernel.tensorResult, kernel.resultExtent, "first") ||
+          !expect(TokenKind::Comma, "expected ',' between function result types"))
         return std::nullopt;
-      auto secondType = parseSourceType("expected second function result type");
-      if (!secondType || !expect(TokenKind::RightParen, "expected ')' after function results"))
+      SourceType secondType;
+      if (!parseResult(secondType, kernel.secondTensorResult, kernel.secondResultExtent,
+                       "second") ||
+          !expect(TokenKind::RightParen, "expected ')' after function results"))
         return std::nullopt;
-      if (*firstType != *secondType) {
+      if (firstType != secondType) {
         diagnostics.error(current.position, "multi-result functions require matching result types");
         return std::nullopt;
       }
-      kernel.resultType = *firstType;
+      kernel.resultType = firstType;
       kernel.resultCount = 2;
     } else if (isIdentifier("tensor")) {
       kernel.tensorResult = true;
@@ -312,12 +340,13 @@ public:
       return std::nullopt;
 
     if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter") &&
-        !isIdentifier("convolution") && !isIdentifier("correlation") &&
-        !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft")) {
+        !isIdentifier("fir_stream") && !isIdentifier("convolution") &&
+        !isIdentifier("correlation") && !isIdentifier("butterfly") && !isIdentifier("cfft") &&
+        !isIdentifier("icfft")) {
       diagnostics.error(current.position,
-                        "expected dot(...), fir(...), fir_filter(...), convolution(...), "
-                        "correlation(...), butterfly(...), cfft(...), or icfft(...) return "
-                        "expression");
+                        "expected dot(...), fir(...), fir_filter(...), fir_stream(...), "
+                        "convolution(...), correlation(...), butterfly(...), cfft(...), or "
+                        "icfft(...) return expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -326,6 +355,8 @@ public:
       kernel.result.kind = ReductionKind::Fir;
     else if (isIdentifier("fir_filter"))
       kernel.result.kind = ReductionKind::FirFilter;
+    else if (isIdentifier("fir_stream"))
+      kernel.result.kind = ReductionKind::FirStream;
     else if (isIdentifier("convolution"))
       kernel.result.kind = ReductionKind::Convolution;
     else if (isIdentifier("correlation"))
@@ -344,17 +375,31 @@ public:
     if (!lhs)
       return std::nullopt;
     kernel.result.lhs = lhs->spelling.str();
-    if (kernel.result.kind == ReductionKind::Butterfly) {
-      if (!expect(TokenKind::Comma, "expected ',' after butterfly first operand"))
+    if (kernel.result.kind == ReductionKind::Butterfly ||
+        kernel.result.kind == ReductionKind::FirStream) {
+      llvm::StringRef builtin =
+          kernel.result.kind == ReductionKind::Butterfly ? "butterfly" : "fir_stream";
+      if (!expect(TokenKind::Comma,
+                  llvm::Twine("expected ',' after ") + builtin + " first operand"))
         return std::nullopt;
-      auto rhs = parseIdentifier("expected butterfly second operand");
-      if (!rhs || !expect(TokenKind::Comma, "expected ',' after butterfly second operand"))
+      auto rhs = parseIdentifier(llvm::Twine("expected ") + builtin + " second operand");
+      if (!rhs || !expect(TokenKind::Comma,
+                          llvm::Twine("expected ',' after ") + builtin + " second operand"))
         return std::nullopt;
-      auto third = parseIdentifier("expected butterfly twiddle operand");
-      if (!third || !expect(TokenKind::RightParen, "expected ')' after butterfly operands"))
+      auto third = parseIdentifier(kernel.result.kind == ReductionKind::Butterfly
+                                       ? "expected butterfly twiddle operand"
+                                       : "expected fir_stream state operand");
+      if (!third || !expect(TokenKind::RightParen,
+                            llvm::Twine("expected ')' after ") + builtin + " operands"))
         return std::nullopt;
       kernel.result.rhs = rhs->spelling.str();
       kernel.result.third = third->spelling.str();
+      if (kernel.result.kind == ReductionKind::FirStream) {
+        kernel.result.accumulatorAuto = true;
+        kernel.result.rounding = "nearest_even";
+        kernel.result.destinationOverflow = "saturate";
+        kernel.result.updateOverflow = "wrap";
+      }
       if (current.kind != TokenKind::Eof) {
         diagnostics.error(current.position, "only one kernel is supported per file in this slice");
         return std::nullopt;
@@ -665,26 +710,37 @@ static std::optional<ondsp::FpContractMode> parseFpContract(llvm::StringRef valu
   return std::nullopt;
 }
 
+static unsigned inferQ15FullAccumulatorWidth(uint64_t productCount) {
+  llvm::APInt maximumMagnitude(128, productCount);
+  maximumMagnitude <<= 30;
+  return std::max(32u, maximumMagnitude.getActiveBits() + 1);
+}
+
 static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diagnostics) {
-  size_t expectedParameterCount = isCfftKind(ast.result.kind)                   ? 1
-                                  : ast.result.kind == ReductionKind::Butterfly ? 3
-                                                                                : 2;
+  bool hasThreeOperands =
+      ast.result.kind == ReductionKind::Butterfly || ast.result.kind == ReductionKind::FirStream;
+  size_t expectedParameterCount = isCfftKind(ast.result.kind) ? 1 : hasThreeOperands ? 3 : 2;
   if (ast.parameters.size() != expectedParameterCount) {
-    diagnostics.error(ast.position, isCfftKind(ast.result.kind)
-                                        ? "cfft kernels require exactly one parameter"
-                                    : ast.result.kind == ReductionKind::Butterfly
-                                        ? "butterfly kernels require exactly three parameters"
-                                        : "binary DSP kernels require exactly two parameters");
+    diagnostics.error(ast.position,
+                      isCfftKind(ast.result.kind) ? "cfft kernels require exactly one parameter"
+                      : hasThreeOperands ? "butterfly and fir_stream kernels require exactly three "
+                                           "parameters"
+                                         : "binary DSP kernels require exactly two parameters");
     return std::nullopt;
   }
   if (ast.resultExtent && *ast.resultExtent <= 0) {
     diagnostics.error(ast.position, "static result tensor extent must be positive");
     return std::nullopt;
   }
+  if (ast.secondResultExtent && *ast.secondResultExtent <= 0) {
+    diagnostics.error(ast.position, "static second result tensor extent must be positive");
+    return std::nullopt;
+  }
 
   llvm::StringSet<> parameterNames;
   const ParameterAst *lhsParameter = nullptr;
   const ParameterAst *rhsParameter = nullptr;
+  const ParameterAst *thirdParameter = nullptr;
   for (const ParameterAst &parameter : ast.parameters) {
     if (!parameterNames.insert(parameter.name).second) {
       diagnostics.error(parameter.position,
@@ -704,6 +760,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       lhsParameter = &parameter;
     if (parameter.name == ast.result.rhs)
       rhsParameter = &parameter;
+    if (parameter.name == ast.result.third)
+      thirdParameter = &parameter;
   }
   if (!parameterNames.contains(ast.result.lhs)) {
     diagnostics.error(ast.result.position,
@@ -715,16 +773,17 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                       llvm::Twine("unknown reduction operand '") + ast.result.rhs + "'");
     return std::nullopt;
   }
-  if (ast.result.kind == ReductionKind::Butterfly && !parameterNames.contains(ast.result.third)) {
+  if (hasThreeOperands && !parameterNames.contains(ast.result.third)) {
     diagnostics.error(ast.result.position,
-                      llvm::Twine("unknown butterfly twiddle operand '") + ast.result.third + "'");
+                      llvm::Twine("unknown third builtin operand '") + ast.result.third + "'");
     return std::nullopt;
   }
 
   unsigned constexprCount = llvm::count_if(
       ast.parameters, [](const ParameterAst &parameter) { return parameter.isConstexpr(); });
   if (ast.result.kind == ReductionKind::Butterfly) {
-    if (ast.resultCount != 2 || ast.tensorResult || ast.resultType != SourceType::ComplexQ15 ||
+    if (ast.resultCount != 2 || ast.tensorResult || ast.secondTensorResult ||
+        ast.resultType != SourceType::ComplexQ15 ||
         llvm::any_of(ast.parameters,
                      [](const ParameterAst &parameter) { return !parameter.isScalar(); })) {
       diagnostics.error(ast.result.position,
@@ -733,6 +792,43 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       return std::nullopt;
     }
     return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, std::nullopt};
+  }
+  if (ast.result.kind == ReductionKind::FirStream) {
+    if (ast.resultCount != 2 || !ast.tensorResult || !ast.secondTensorResult ||
+        ast.resultType != SourceType::Q15 || !lhsParameter || !rhsParameter || !thirdParameter ||
+        llvm::any_of(ast.parameters,
+                     [](const ParameterAst &parameter) { return !parameter.isTensor(); })) {
+      diagnostics.error(
+          ast.result.position,
+          "fir_stream requires three Q15 tensor parameters and two Q15 tensor results");
+      return std::nullopt;
+    }
+    if (!rhsParameter->extent || !thirdParameter->extent || !ast.secondResultExtent) {
+      diagnostics.error(ast.result.position,
+                        "fir_stream currently requires static coefficient, state, and next-state "
+                        "extents");
+      return std::nullopt;
+    }
+    int64_t coefficientExtent = *rhsParameter->extent;
+    int64_t expectedStateExtent = coefficientExtent - 1;
+    if (*thirdParameter->extent != expectedStateExtent ||
+        *ast.secondResultExtent != expectedStateExtent)
+      diagnostics.error(ast.result.position,
+                        "fir_stream state and next-state extents must equal coefficients - 1");
+    else if (lhsParameter->extent.has_value() != ast.resultExtent.has_value())
+      diagnostics.error(ast.result.position,
+                        "fir_stream input and output must both be static or both be dynamic");
+    else if (lhsParameter->extent && *ast.resultExtent != *lhsParameter->extent)
+      diagnostics.error(ast.result.position,
+                        "fir_stream output extent must equal the input chunk extent");
+    else {
+      ast.result.accumulatorWidth =
+          inferQ15FullAccumulatorWidth(static_cast<uint64_t>(coefficientExtent));
+      return CheckedKernel{std::move(ast), ondsp::OverflowMode::Wrap,
+                           ondsp::RoundingMode::NearestEven, ondsp::OverflowMode::Saturate,
+                           std::nullopt};
+    }
+    return std::nullopt;
   }
   if (ast.resultCount != 1) {
     diagnostics.error(ast.result.position,
@@ -959,9 +1055,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         "automatic accumulation requires equal static operand extents");
       return std::nullopt;
     }
-    llvm::APInt maximumMagnitude(128, static_cast<uint64_t>(*rhsExtent));
-    maximumMagnitude <<= 30;
-    ast.result.accumulatorWidth = std::max(32u, maximumMagnitude.getActiveBits() + 1);
+    ast.result.accumulatorWidth = inferQ15FullAccumulatorWidth(static_cast<uint64_t>(*rhsExtent));
   }
 
   uint64_t requiredAccumulatorWidth = ast.resultType == SourceType::Q15 ? 40 : 64;
@@ -1035,7 +1129,15 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     int64_t extent = kernel.ast.resultExtent.value_or(ShapedType::kDynamic);
     resultType = RankedTensorType::get({extent}, elementType);
   }
-  SmallVector<Type> resultTypes(kernel.ast.resultCount, resultType);
+  SmallVector<Type> resultTypes{resultType};
+  if (kernel.ast.resultCount == 2) {
+    Type secondResultType = elementType;
+    if (kernel.ast.secondTensorResult) {
+      int64_t extent = kernel.ast.secondResultExtent.value_or(ShapedType::kDynamic);
+      secondResultType = RankedTensorType::get({extent}, elementType);
+    }
+    resultTypes.push_back(secondResultType);
+  }
   FunctionType functionType = builder.getFunctionType(inputTypes, resultTypes);
   auto function = func::FuncOp::create(kernelLocation, kernel.ast.name, functionType);
   function->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
@@ -1122,6 +1224,28 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
 
   Value rhs = arguments.lookup(kernel.ast.result.rhs);
+  if (kernel.ast.result.kind == ReductionKind::FirStream) {
+    Value state = arguments.lookup(kernel.ast.result.third);
+    auto outputType = cast<RankedTensorType>(resultTypes[0]);
+    auto nextStateType = cast<RankedTensorType>(resultTypes[1]);
+    auto fixed = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
+    auto product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::Full);
+    auto accumulatorType =
+        ondsp::AccType::get(&context, builder.getIntegerType(kernel.ast.result.accumulatorWidth),
+                            30, ondsp::Signedness::Signed, *kernel.updateOverflow);
+    auto stream = builder.create<ir::FirStreamOp>(
+        expressionLocation, TypeRange{outputType, nextStateType}, lhs, rhs, state, fixed, product,
+        TypeAttr::get(accumulatorType), fixed,
+        ondsp::RoundingModeAttr::get(&context, *kernel.rounding),
+        ondsp::OverflowModeAttr::get(&context, *kernel.destinationOverflow));
+    builder.create<func::ReturnOp>(expressionLocation,
+                                   ValueRange{stream.getOutput(), stream.getNextState()});
+    module->push_back(function);
+    if (failed(verify(*module)))
+      return {};
+    return module;
+  }
+
   bool isConv1D = kernel.ast.result.kind == ReductionKind::Convolution ||
                   kernel.ast.result.kind == ReductionKind::Correlation;
   if (kernel.ast.result.kind == ReductionKind::FirFilter || isConv1D) {

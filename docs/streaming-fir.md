@@ -70,6 +70,13 @@ Tests also cover an initial chunk shorter than state, an empty chunk, `K = 1`,
 dynamic extents, accumulator/export behavior, allocation release, and
 process-level rejection of invalid state, coefficient, and result extents.
 
+The experimental `.ox` binding covers one target-independent Q15 profile with
+static coefficient/state extents and a dynamic input/output chunk extent. It
+infers a sufficient exact accumulator width from the static tap count, returns
+both tensors through the existing experimental result convention, and has
+source-to-object whole/split-chunk differential execution. It does not expose
+the materialized concat transform or define a stable result ABI.
+
 ## Deliberate Limits
 
 The first implementation is an ordered generic scalar path. It does not yet
@@ -79,7 +86,8 @@ define:
 - output-axis or cross-chunk Vector scheduling;
 - state reset, decimation/interpolation, stride, or dilation;
 - concurrent ownership of one state value by multiple stream invocations;
-- target capability selection for state movement or circular buffers.
+- target capability selection for state movement or circular buffers;
+- dynamic coefficient/state shapes or Q31/f32 source bindings.
 
 These require separate legality and ownership decisions. In particular, a
 private backend may implement the state with a circular buffer or register

@@ -189,8 +189,26 @@ def q15_butterfly(
   return butterfly(a, b, twiddle)
 ```
 
-This is the only multi-result source form. It does not introduce general
-tuples, assignments, configurable complex arithmetic, or a stable C ABI.
+Static-coefficient Q15 streaming FIR is the second bounded multi-result form:
+
+```python
+def q15_fir_stream(
+    input: tensor[q15],
+    coefficients: tensor[q15,3],
+    state: tensor[q15,2])
+    -> (tensor[q15], tensor[q15,2]):
+  return fir_stream(input, coefficients, state)
+```
+
+The chunk extent may be dynamic. Coefficient, state, and next-state extents are
+static, with `state_length = coefficient_length - 1`; output extent follows the
+input chunk. Each output uses the same inferred exact Q15 accumulation as a
+static-tap FIR sample, while next state is the chronological raw-sample suffix
+and is not requantized. Whole and split chunks therefore have identical output
+and final-state semantics.
+
+These two forms do not introduce general tuples, assignments, configurable
+complex arithmetic, recursive-state inference, or a stable C ABI.
 
 Compile it to textual MLIR with:
 
@@ -222,5 +240,6 @@ them.
 This is not a general Python parser. Imports, classes, heap objects, arbitrary
 expressions, and dynamic Python behavior are rejected. Scalar constants,
 indexing, loops, mutable output buffers, multiple kernels, and inferred
-accumulators outside the static Q15 real-reduction slice remain unimplemented.
-Textual MLIR remains an independent and more complete compiler entry point.
+accumulators outside the statically bounded Q15 real-reduction slice remain
+unimplemented. Textual MLIR remains an independent and more complete compiler
+entry point.

@@ -52,8 +52,9 @@ The current operations have different expected roles:
 
 Full-output and streaming FIR use distinct contracts for boundaries, output
 shape, state, and aliasing. The experimental `ondrix.fir_filter` and
-`ondrix.fir_stream` operations encode those separate contracts; a future
-frontend must not infer either one from the single-sample operation.
+`ondrix.fir_stream` operations encode those separate contracts. The first
+source binding exposes streaming as an explicit `(output, next_state)` result
+and must not infer it from the single-sample operation.
 
 The experimental `ondrix.sos_filter_tdf2` operation is the first recursive
 filter contract. It deliberately names one form and fixes coefficient order,
@@ -89,6 +90,12 @@ accumulator width from the complete signed input domain and the number of
 products in each output, and rejects unbounded lengths. Other algorithms must
 provide their own sound range/state analysis before adopting `auto`; Q-format
 alone never selects a target accumulator.
+
+Q15 `fir_stream` reuses this rule only because every output remains a
+fixed-tap feed-forward reduction. Its chronological next-state tensor consists
+of source samples and does not pass through the accumulator/export lifecycle.
+This does not authorize inferred accumulator or state widths for SOS/IIR
+recurrences.
 
 Leaving an accumulator requires explicit destination format, rounding, and
 overflow policy. Source defaults, if introduced, must be language defaults and

@@ -17,6 +17,7 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_valid_mixed_shape.ox 2>&1 | FileCheck %s --check-prefix=VALID-MIXED-SHAPE
 // RUN: not ondrix-compile %S/Inputs/invalid_butterfly_result.ox 2>&1 | FileCheck %s --check-prefix=BUTTERFLY-RESULT
 // RUN: not ondrix-compile %S/Inputs/invalid_auto_dynamic.ox 2>&1 | FileCheck %s --check-prefix=AUTO-DYNAMIC
+// RUN: not ondrix-compile %S/Inputs/invalid_fir_stream_state.ox 2>&1 | FileCheck %s --check-prefix=STREAM-STATE
 
 // KERNEL: invalid_kernel_keyword.ox:1:1: error: unsupported top-level construct 'kernel'; expected 'def'
 // KERNEL-NEXT: kernel q15_dot(lhs: buffer[q15], rhs: buffer[q15]) -> q15:
@@ -59,3 +60,4 @@
 // BUTTERFLY-RESULT: invalid_butterfly_result.ox:3:10: error: butterfly requires three complex_q15 scalar parameters and two complex_q15 results
 
 // AUTO-DYNAMIC: invalid_auto_dynamic.ox:3:10: error: automatic accumulation requires equal static operand extents
+// STREAM-STATE: invalid_fir_stream_state.ox:6:10: error: fir_stream state and next-state extents must equal coefficients - 1
