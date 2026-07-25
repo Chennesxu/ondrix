@@ -184,6 +184,40 @@ static void assertValidConv1DShape(Location loc, Value inputLength, Value kernel
           "conv1d output length must equal input length minus kernel length plus one"));
 }
 
+static void assertValidFirDecimateShape(Location loc, Value inputLength, Value coefficientLength,
+                                        Value outputLength, Value factor, Value zero, Value one,
+                                        OpBuilder &builder) {
+  Value hasCoefficients =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientLength, zero);
+  builder.create<cf::AssertOp>(
+      loc, hasCoefficients,
+      builder.getStringAttr("fir_decimate requires at least one coefficient"));
+  Value inputCoversCoefficients =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, inputLength, coefficientLength);
+  builder.create<cf::AssertOp>(
+      loc, inputCoversCoefficients,
+      builder.getStringAttr("fir_decimate input must cover one complete coefficient window"));
+  Value remaining = builder.create<arith::SubIOp>(loc, inputLength, coefficientLength);
+  Value completeSteps = builder.create<arith::DivUIOp>(loc, remaining, factor);
+  Value requiredOutputLength = builder.create<arith::AddIOp>(loc, completeSteps, one);
+  Value outputMatches = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, outputLength,
+                                                      requiredOutputLength);
+  builder.create<cf::AssertOp>(
+      loc, outputMatches,
+      builder.getStringAttr(
+          "fir_decimate output length must equal floor((input length - coefficient length) / "
+          "factor) plus one"));
+}
+
+static Value createReducedFirDecimateSample(FirDecimateOp op, Value window, Value coefficients,
+                                            OpBuilder &builder, Location loc) {
+  Value initial = builder.create<ondrix::ondsp::AccZeroOp>(loc, op.getAccumulator());
+  Value reduced = builder.create<ondrix::ondsp::ReduceMacOp>(
+      loc, initial.getType(), initial, window, coefficients, op.getNumeric(), op.getProduct());
+  return builder.create<ondrix::ondsp::AccExportOp>(
+      loc, op.getDst().getStorage(), reduced, op.getDst(), op.getRounding(), op.getOverflow());
+}
+
 struct FirFilterOpInterface
     : public DstBufferizableOpInterfaceExternalModel<FirFilterOpInterface, FirFilterOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand, const AnalysisState &) const {
@@ -293,6 +327,57 @@ struct FirFilterOpInterface
   }
 };
 
+struct FirDecimateOpInterface
+    : public DstBufferizableOpInterfaceExternalModel<FirDecimateOpInterface, FirDecimateOp> {
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand, const AnalysisState &) const {
+    auto decimate = cast<FirDecimateOp>(op);
+    return !decimate.isDpsInit(&opOperand);
+  }
+
+  LogicalResult bufferize(Operation *operation, RewriterBase &rewriter,
+                          const BufferizationOptions &options) const {
+    auto op = cast<FirDecimateOp>(operation);
+    FailureOr<Value> input = getBuffer(rewriter, op.getInput(), options);
+    FailureOr<Value> coefficients = getBuffer(rewriter, op.getCoeffs(), options);
+    FailureOr<Value> output = getBuffer(rewriter, op.getInit(), options);
+    if (failed(input) || failed(coefficients) || failed(output))
+      return failure();
+
+    rewriter.setInsertionPoint(op);
+    Location loc = op.getLoc();
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value factor =
+        rewriter.create<arith::ConstantIndexOp>(loc, op.getFactorAttr().getValue().getSExtValue());
+    Value inputLength = rewriter.create<memref::DimOp>(loc, *input, zero);
+    Value coefficientLength = rewriter.create<memref::DimOp>(loc, *coefficients, zero);
+    Value outputLength = rewriter.create<memref::DimOp>(loc, *output, zero);
+    assertValidFirDecimateShape(loc, inputLength, coefficientLength, outputLength, factor, zero,
+                                one, rewriter);
+
+    Value coefficientView = rewriter.create<memref::SubViewOp>(
+        loc, *coefficients, ArrayRef<OpFoldResult>{rewriter.getIndexAttr(0)},
+        ArrayRef<OpFoldResult>{coefficientLength},
+        ArrayRef<OpFoldResult>{rewriter.getIndexAttr(1)});
+    rewriter.create<scf::ForOp>(
+        loc, zero, outputLength, one, ValueRange{},
+        [&](OpBuilder &builder, Location bodyLoc, Value outputIndex, ValueRange) {
+          Value inputOffset = builder.create<arith::MulIOp>(bodyLoc, outputIndex, factor);
+          Value inputWindow = builder.create<memref::SubViewOp>(
+              bodyLoc, *input, ArrayRef<OpFoldResult>{inputOffset},
+              ArrayRef<OpFoldResult>{coefficientLength},
+              ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
+          Value sample =
+              createReducedFirDecimateSample(op, inputWindow, coefficientView, builder, bodyLoc);
+          builder.create<memref::StoreOp>(bodyLoc, sample, *output, outputIndex);
+          builder.create<scf::YieldOp>(bodyLoc);
+        });
+
+    replaceOpWithBufferizedValues(rewriter, op, *output);
+    return success();
+  }
+};
+
 struct Conv1DOpInterface
     : public DstBufferizableOpInterfaceExternalModel<Conv1DOpInterface, Conv1DOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand, const AnalysisState &) const {
@@ -350,6 +435,7 @@ struct Conv1DOpInterface
 void registerBufferizableOpInterfaceExternalModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *context, OndrixDialect *) {
     FirFilterOp::attachInterface<FirFilterOpInterface>(*context);
+    FirDecimateOp::attachInterface<FirDecimateOpInterface>(*context);
     Conv1DOp::attachInterface<Conv1DOpInterface>(*context);
 
     // Bufferization materializes these dialects even when the input module

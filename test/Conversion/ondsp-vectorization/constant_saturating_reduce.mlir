@@ -30,6 +30,24 @@ func.func @safe_q15(%input: memref<8xi16>)
 // CHECK: ondsp.acc_add_term
 // CHECK-NOT: ondsp.reduce_mac
 
+func.func @safe_q15_portable_i34(%input: memref<8xi16>)
+    -> !ondsp.acc<storage = i34, frac = 30, signed,
+                  update_overflow = saturate> {
+  %coefficients = memref.get_global @safe_q15_coefficients : memref<8xi16>
+  %result = ondrix.fir %input, %coefficients {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (memref<8xi16>, memref<8xi16>)
+      -> !ondsp.acc<storage = i34, frac = 30, signed,
+                    update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i34, frac = 30, signed,
+                              update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @safe_q15_portable_i34
+// CHECK: ondsp.reduce_mac
+// CHECK-NOT: vector.reduction
+
 func.func @safe_q15_dynamic_cast(%input_static: memref<8xi16>)
     -> !ondsp.acc<storage = i40, frac = 30, signed,
                   update_overflow = saturate> {

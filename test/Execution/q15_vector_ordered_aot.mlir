@@ -53,3 +53,39 @@ func.func @q15_vector_reduce_wrap(
   } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>) -> i16
   return %result : i16
 }
+
+func.func @q15_vector_i32_saturate(
+    %lhs: memref<4xi16>, %rhs: memref<4xi16>) -> i16 {
+  %c0 = arith.constant 0 : index
+  %zero = ondsp.acc_zero : !ondsp.acc<storage = i32, frac = 30, signed, update_overflow = saturate>
+  %lhs_vector = vector.load %lhs[%c0] : memref<4xi16>, vector<4xi16>
+  %rhs_vector = vector.load %rhs[%c0] : memref<4xi16>, vector<4xi16>
+  %acc = ondsp.reduce_mac %zero, %lhs_vector, %rhs_vector {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i32, frac = 30, signed, update_overflow = saturate>, vector<4xi16>, vector<4xi16>) -> !ondsp.acc<storage = i32, frac = 30, signed, update_overflow = saturate>
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<toward_negative>,
+    overflow = #ondsp.overflow<wrap>
+  } : (!ondsp.acc<storage = i32, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %result : i16
+}
+
+func.func @q15_vector_i32_wrap(
+    %lhs: memref<4xi16>, %rhs: memref<4xi16>) -> i16 {
+  %c0 = arith.constant 0 : index
+  %zero = ondsp.acc_zero : !ondsp.acc<storage = i32, frac = 30, signed, update_overflow = wrap>
+  %lhs_vector = vector.load %lhs[%c0] : memref<4xi16>, vector<4xi16>
+  %rhs_vector = vector.load %rhs[%c0] : memref<4xi16>, vector<4xi16>
+  %acc = ondsp.reduce_mac %zero, %lhs_vector, %rhs_vector {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i32, frac = 30, signed, update_overflow = wrap>, vector<4xi16>, vector<4xi16>) -> !ondsp.acc<storage = i32, frac = 30, signed, update_overflow = wrap>
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<toward_negative>,
+    overflow = #ondsp.overflow<wrap>
+  } : (!ondsp.acc<storage = i32, frac = 30, signed, update_overflow = wrap>) -> i16
+  return %result : i16
+}

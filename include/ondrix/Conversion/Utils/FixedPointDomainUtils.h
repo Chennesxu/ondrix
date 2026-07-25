@@ -29,6 +29,12 @@ bool isSupportedFixedVectorMacDomain(ondrix::ondsp::AccType accumulator,
                                      ondrix::ondsp::FixedAttr numeric,
                                      ondrix::ondsp::ProductAttr product);
 
+/// Returns whether the horizontal i64 partial-sum consumers implement this
+/// exact Vector domain. This remains narrower than ordered lane lowering.
+bool isSupportedFixedHorizontalMacDomain(ondrix::ondsp::AccType accumulator,
+                                         ondrix::ondsp::FixedAttr numeric,
+                                         ondrix::ondsp::ProductAttr product);
+
 /// Materializes the storage types and target-independent product semantics for
 /// a scalar-supported domain. Unsupported domains fail closed.
 mlir::FailureOr<SupportedFixedMacDomain>

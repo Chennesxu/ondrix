@@ -108,3 +108,18 @@ func.func @rhs_custom_memory_space_fallback(
 // CHECK-LABEL: func.func @rhs_custom_memory_space_fallback
 // CHECK: ondsp.reduce_mac
 // CHECK-NOT: vector.load
+
+func.func @wider_than_i64_accumulator_fallback(
+    %initial: !ondsp.acc<storage = i65, frac = 30, signed, update_overflow = wrap>,
+    %lhs: memref<8xi16>, %rhs: memref<8xi16>)
+    -> !ondsp.acc<storage = i65, frac = 30, signed, update_overflow = wrap> {
+  %result = ondsp.reduce_mac %initial, %lhs, %rhs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i65, frac = 30, signed, update_overflow = wrap>, memref<8xi16>, memref<8xi16>) -> !ondsp.acc<storage = i65, frac = 30, signed, update_overflow = wrap>
+  return %result : !ondsp.acc<storage = i65, frac = 30, signed, update_overflow = wrap>
+}
+
+// CHECK-LABEL: func.func @wider_than_i64_accumulator_fallback
+// CHECK: ondsp.reduce_mac
+// CHECK-NOT: vector.load

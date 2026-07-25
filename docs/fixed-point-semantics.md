@@ -64,11 +64,13 @@ explicit target/library-compatible profile may use:
 ```
 
 The generic scalar consumer also accepts signed Q15 full-product accumulators
-with `frac = 30` and storage width at least 32. This permits a frontend or
+with `frac = 30` and storage width at least 32. The fixed-Vector consumers
+accept widths from 32 through 64 for ordered lane updates. Horizontal Q15
+partial-sum consumers retain the closed i40 profile. This permits a frontend or
 analysis to derive a sufficient target-independent width for a statically
-bounded reduction. Generic Vector and OrtumCore consumers retain their stricter
-closed profiles; they must prove that a different accumulator domain is
-equivalent before claiming it.
+bounded reduction without broadening reassociation legality. OrtumCore retains
+its stricter closed i40 profile; it must prove that a different accumulator
+domain is equivalent before claiming it.
 
 For accumulator raw value `a` and exact product `p`, `ondsp.mac` and
 `ondsp.mac_sub` first compute an unbounded mathematical update:

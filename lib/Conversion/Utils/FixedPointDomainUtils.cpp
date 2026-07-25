@@ -6,13 +6,12 @@ namespace ondrix::conversion {
 
 static bool isSignedQ15FullDomain(ondrix::ondsp::AccType accumulator,
                                   ondrix::ondsp::FixedAttr numeric,
-                                  ondrix::ondsp::ProductAttr product, bool requireI40) {
+                                  ondrix::ondsp::ProductAttr product) {
   if (ondrix::ondsp::isSignedQ15(numeric))
     return ondrix::ondsp::isFullProduct(product) &&
-           (requireI40 ? ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator)
-                       : accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed &&
-                             accumulator.getFrac() == 30 &&
-                             accumulator.getStorage().cast<IntegerType>().getWidth() >= 32);
+           accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed &&
+           accumulator.getFrac() == 30 &&
+           accumulator.getStorage().cast<IntegerType>().getWidth() >= 32;
   return false;
 }
 
@@ -33,7 +32,7 @@ static bool isSignedQ31RawHighDomain(ondrix::ondsp::AccType accumulator,
 bool isSupportedFixedScalarMacDomain(ondrix::ondsp::AccType accumulator,
                                      ondrix::ondsp::FixedAttr numeric,
                                      ondrix::ondsp::ProductAttr product) {
-  return isSignedQ15FullDomain(accumulator, numeric, product, false) ||
+  return isSignedQ15FullDomain(accumulator, numeric, product) ||
          isSignedQ31FullDomain(accumulator, numeric, product) ||
          isSignedQ31RawHighDomain(accumulator, numeric, product);
 }
@@ -45,9 +44,21 @@ bool isSupportedFixedVectorMacDomain(ondrix::ondsp::AccType accumulator,
   // selection. Keep signedness in the capability gate, not in rewrite details.
   if (numeric.getSignedness() != ondrix::ondsp::Signedness::Signed)
     return false;
-  return isSignedQ15FullDomain(accumulator, numeric, product, true) ||
+  if (accumulator.getStorage().cast<IntegerType>().getWidth() > 64)
+    return false;
+  return isSignedQ15FullDomain(accumulator, numeric, product) ||
          isSignedQ31FullDomain(accumulator, numeric, product) ||
          isSignedQ31RawHighDomain(accumulator, numeric, product);
+}
+
+bool isSupportedFixedHorizontalMacDomain(ondrix::ondsp::AccType accumulator,
+                                         ondrix::ondsp::FixedAttr numeric,
+                                         ondrix::ondsp::ProductAttr product) {
+  if (!isSupportedFixedVectorMacDomain(accumulator, numeric, product))
+    return false;
+  if (ondrix::ondsp::isSignedQ15(numeric))
+    return ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator);
+  return true;
 }
 
 static FailureOr<SupportedFixedMacDomain>

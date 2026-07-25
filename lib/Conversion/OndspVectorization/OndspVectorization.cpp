@@ -109,7 +109,9 @@ planConstantSaturatingReduction(ondrix::ondsp::ReduceMacOp op, int64_t vectorWid
   auto accumulator = cast<ondrix::ondsp::AccType>(op.getInitial().getType());
   auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
   if (accumulator.getUpdateOverflow() != ondrix::ondsp::OverflowMode::Saturate ||
-      !ondrix::ondsp::isFullProduct(*op.getProduct()))
+      !ondrix::ondsp::isFullProduct(*op.getProduct()) ||
+      !ondrix::conversion::isSupportedFixedHorizontalMacDomain(accumulator, numeric,
+                                                               *op.getProduct()))
     return failure();
   FailureOr<ondrix::conversion::SupportedFixedMacDomain> domain =
       ondrix::conversion::getSupportedFixedVectorMacDomain(op, accumulator, numeric,

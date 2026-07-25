@@ -143,8 +143,10 @@ def q15_fir_decimate(
 All extents are static and the result must have
 `floor((input_length - coefficient_length) / 2) + 1` elements. Each output
 uses the same increasing-tap ordered FIR equation and portable accumulator
-inference as other static Q15 feed-forward reductions. Other factors, dynamic
-shapes, nonzero phase, interpolation, polyphase lowering, and Q31/f32
+inference as other static Q15 feed-forward reductions. It can lower through
+the generic scalar path or through direct bufferization into ordered
+fixed-width Vector products plus a scalar tail. Other factors, dynamic shapes,
+nonzero phase, interpolation, cross-output polyphase lowering, and Q31/f32
 resampling are not part of this source slice.
 
 Valid one-dimensional convolution and correlation use tensor values and the

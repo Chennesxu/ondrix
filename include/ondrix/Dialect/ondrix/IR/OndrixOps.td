@@ -144,8 +144,10 @@ def Ondrix_FirDecimateOp
     values are not part of the mathematical result. The first executable
     contract is signed Q15 with an exact full product, a signed frac30
     accumulator of at least 32 bits, and explicit export policy. Input phase,
-    padding, interpolation, polyphase reassociation, Vector lowering, and
-    target selection are outside this operation.
+    padding, interpolation, cross-output polyphase reassociation, and target
+    selection are outside this operation. Vectorization is not part of the
+    mathematical contract; consumers may batch products only while preserving
+    the declared ordered updates.
 
     Dynamic extent relationships are execution preconditions. Generic
     lowering emits dominating assertions before evaluating any window.

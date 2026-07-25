@@ -38,6 +38,10 @@ static bool isParallelizableWrapReduction(ondrix::ondsp::ReduceMacOp op) {
   if (!isSupportedVectorReduction(op))
     return false;
   auto accumulator = cast<ondrix::ondsp::AccType>(op.getInitial().getType());
+  auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+  if (!ondrix::conversion::isSupportedFixedHorizontalMacDomain(accumulator, numeric,
+                                                               *op.getProduct()))
+    return false;
   return ondrix::ondsp::classifyReductionReassociation(accumulator.getUpdateOverflow()) ==
          ondrix::ondsp::ReductionReassociationSafety::ExactModulo;
 }
@@ -65,7 +69,7 @@ public:
     if (failed(horizontal))
       return failure();
 
-    // Modular i64 addition preserves every low bit of the supported i40/i64 accumulators.
+    // Modular i64 addition preserves every low bit of supported accumulators up to i64.
     rewriter.replaceOpWithNewOp<ondrix::ondsp::AccAddTermOp>(
         op, op.getResult().getType(), adaptor.getInitial(), horizontal->sum, horizontal->numeric);
     return success();

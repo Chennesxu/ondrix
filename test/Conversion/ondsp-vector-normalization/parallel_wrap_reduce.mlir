@@ -37,6 +37,21 @@ func.func @preserve_saturate(
 // CHECK: ondsp.reduce_mac
 // CHECK-NOT: vector.reduction
 
+func.func @preserve_portable_i34(
+    %initial: !ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>,
+    %lhs: vector<8xi16>, %rhs: vector<8xi16>)
+    -> !ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap> {
+  %result = ondsp.reduce_mac %initial, %lhs, %rhs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>, vector<8xi16>, vector<8xi16>) -> !ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>
+  return %result : !ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>
+}
+
+// CHECK-LABEL: func.func @preserve_portable_i34
+// CHECK: ondsp.reduce_mac
+// CHECK-NOT: vector.reduction
+
 // FINAL-LABEL: func.func @parallel_wrap
 // FINAL: vector.reduction <add>
 // FINAL: arith.extsi {{.*}} : i40 to i65
