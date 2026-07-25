@@ -144,12 +144,15 @@ def Ondsp_ReduceMacOp
                               DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
   let summary = "Ordered rank-1 dot/reduce MAC semantic operation";
   let description = [{
-    Accepts two equal-length rank-1 shaped operands and folds their pairwise
-    products into `initial` in increasing index order. Fixed-point reductions
-    use an `!ondsp.acc` initial/result type, so accumulator width, fractional
-    position, signedness, and per-update overflow remain explicit. Floating-
-    point reductions use the numeric format as their initial/result type.
-    Dynamic lengths require a runtime proof in the selected lowering pipeline.
+    Accepts two equal-length rank-1 memrefs or fixed-point vectors and folds
+    their pairwise products into `initial` in increasing index order. Tensor
+    reductions are not accepted until a bufferization consumer exists, and
+    floating-point Vector reduction awaits a dedicated consumer. Fixed-point
+    reductions use an `!ondsp.acc` initial/result type, so accumulator width,
+    fractional position, signedness, and per-update overflow remain explicit.
+    Floating-point memref reductions use the numeric format as their
+    initial/result type. Dynamic lengths require a runtime proof in the
+    selected lowering pipeline.
 
     This ordered left-fold contract is the portable correctness baseline.
     Consumers may reassociate or vectorize it only when the numeric policy and

@@ -43,38 +43,3 @@ func.func @value_reduce_mac_is_speculatable(%lhs: vector<8xi16>, %rhs: vector<8x
 // LICM: %[[REDUCE:.*]] = ondsp.reduce_mac
 // LICM: scf.for
 // LICM-NOT: ondsp.reduce_mac
-
-func.func @static_vector_reduce_mac_is_speculatable(
-    %lhs: vector<8xf32>, %rhs: vector<8xf32>, %upper: index) -> f32 {
-  %c0 = arith.constant 0 : index
-  %c1 = arith.constant 1 : index
-  %init = arith.constant 0.0 : f32
-  %result = scf.for %i = %c0 to %upper step %c1 iter_args(%acc = %init) -> (f32) {
-    %reduce = ondsp.reduce_mac %init, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, vector<8xf32>, vector<8xf32>) -> f32
-    %next = arith.addf %acc, %reduce : f32
-    scf.yield %next : f32
-  }
-  return %result : f32
-}
-
-// LICM-LABEL: func.func @static_vector_reduce_mac_is_speculatable
-// LICM: %[[REDUCE:.*]] = ondsp.reduce_mac
-// LICM: scf.for
-// LICM-NOT: ondsp.reduce_mac
-
-func.func @dynamic_tensor_reduce_mac_remains_in_loop(
-    %lhs: tensor<?xf32>, %rhs: tensor<?xf32>, %upper: index) -> f32 {
-  %c0 = arith.constant 0 : index
-  %c1 = arith.constant 1 : index
-  %init = arith.constant 0.0 : f32
-  %result = scf.for %i = %c0 to %upper step %c1 iter_args(%acc = %init) -> (f32) {
-    %reduce = ondsp.reduce_mac %init, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, tensor<?xf32>, tensor<?xf32>) -> f32
-    %next = arith.addf %acc, %reduce : f32
-    scf.yield %next : f32
-  }
-  return %result : f32
-}
-
-// LICM-LABEL: func.func @dynamic_tensor_reduce_mac_remains_in_loop
-// LICM: scf.for
-// LICM: ondsp.reduce_mac

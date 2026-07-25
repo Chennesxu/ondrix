@@ -21,7 +21,9 @@ def Ondrix_FirOp
     construction, signal boundaries, and streaming state are outside this
     operation. A fixed-point FIR produces an explicit `!ondsp.acc` result;
     destination rounding and overflow are modeled by a subsequent
-    `ondsp.acc_export`.
+    `ondsp.acc_export`. The current executable windows are memrefs or
+    fixed-point vectors. Tensor value semantics belong to output-producing
+    algorithm ops such as `ondrix.fir_filter`.
   }];
   let arguments = (ins AnyType:$input, AnyType:$coeffs, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);
@@ -453,6 +455,8 @@ def Ondrix_DotOp
     lengths require a runtime proof in the selected lowering pipeline. A
     fixed-point dot produces an explicit `!ondsp.acc` result; destination
     rounding and overflow are modeled by a subsequent `ondsp.acc_export`.
+    Ranked tensors are reserved for output-producing algorithm operations;
+    current shaped dot consumers accept memrefs or fixed-point vectors.
   }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_ProductAttr>:$product);

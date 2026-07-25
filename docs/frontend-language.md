@@ -6,9 +6,9 @@ the fixed SOS slice also accepts the explicit rank-2 section layouts described
 below. A `def` declares a DSP kernel entry point; it is not a general Python
 function.
 
-For a statically bounded Q15 dot, FIR sample, FIR decimation, convolution, or
-correlation, omitting the accumulator policy requests target-independent exact
-mathematical accumulation:
+For a statically bounded Q15 dot, FIR sample, FIR decimation, FIR
+interpolation, convolution, or correlation, omitting the accumulator policy
+requests target-independent exact mathematical accumulation:
 
 ```python
 def q15_fir_auto(

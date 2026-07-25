@@ -86,12 +86,22 @@ func.func @reduce_mac_rejects_unranked(
 
 // -----
 
-func.func @floating_reduce_mac_requires_scalar_result(
-    %lhs: vector<8xf32>, %rhs: vector<8xf32>) -> vector<8xf32> {
-  %zero = arith.constant dense<0.0> : vector<8xf32>
-  // expected-error@+1 {{floating-point reduce_mac initial and result must match numeric format}}
-  %0 = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fma>} : (vector<8xf32>, vector<8xf32>, vector<8xf32>) -> vector<8xf32>
-  return %0 : vector<8xf32>
+func.func @reduce_mac_rejects_tensor_operands(
+    %lhs: tensor<8xf32>, %rhs: tensor<8xf32>) -> f32 {
+  %zero = arith.constant 0.0 : f32
+  // expected-error@+1 {{tensor reduce_mac operands have no executable consumer; use memrefs or fixed vectors}}
+  %0 = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, tensor<8xf32>, tensor<8xf32>) -> f32
+  return %0 : f32
+}
+
+// -----
+
+func.func @reduce_mac_rejects_floating_vectors(
+    %lhs: vector<8xf32>, %rhs: vector<8xf32>) -> f32 {
+  %zero = arith.constant 0.0 : f32
+  // expected-error@+1 {{floating-point vector reduce_mac operands have no executable consumer}}
+  %0 = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fma>} : (f32, vector<8xf32>, vector<8xf32>) -> f32
+  return %0 : f32
 }
 
 // -----

@@ -8,6 +8,15 @@ func.func @dot_rejects_mixed_domains(%lhs: memref<8xf32>, %rhs: f32) -> f32 {
 
 // -----
 
+func.func @dot_rejects_tensor_operands(
+    %lhs: tensor<8xf32>, %rhs: tensor<8xf32>) -> f32 {
+  // expected-error@+1 {{tensor dot operands have no executable consumer; use memrefs or fixed vectors}}
+  %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (tensor<8xf32>, tensor<8xf32>) -> f32
+  return %0 : f32
+}
+
+// -----
+
 func.func @dot_rejects_unranked(
     %lhs: memref<*xf32>, %rhs: memref<*xf32>) -> f32 {
   // expected-error@+1 {{shaped operands must be rank-1}}
@@ -18,18 +27,18 @@ func.func @dot_rejects_unranked(
 // -----
 
 func.func @dot_rejects_static_length_mismatch(
-    %lhs: tensor<8xf32>, %rhs: tensor<4xf32>) -> f32 {
+    %lhs: memref<8xf32>, %rhs: memref<4xf32>) -> f32 {
   // expected-error@+1 {{shaped operands must have equal static lengths}}
-  %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (tensor<8xf32>, tensor<4xf32>) -> f32
+  %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (memref<8xf32>, memref<4xf32>) -> f32
   return %0 : f32
 }
 
 // -----
 
 func.func @dot_requires_matching_element_types(
-    %lhs: tensor<8xf32>, %rhs: tensor<8xf64>) -> f32 {
+    %lhs: memref<8xf32>, %rhs: memref<8xf64>) -> f32 {
   // expected-error@+1 {{operand element types must match}}
-  %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (tensor<8xf32>, tensor<8xf64>) -> f32
+  %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (memref<8xf32>, memref<8xf64>) -> f32
   return %0 : f32
 }
 
@@ -63,6 +72,15 @@ func.func @dot_rejects_scalable_vectors(
     %lhs: vector<8xf32>, %rhs: vector<[8]xf32>) -> f32 {
   // expected-error@+1 {{scalable vector operands are not supported}}
   %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (vector<8xf32>, vector<[8]xf32>) -> f32
+  return %0 : f32
+}
+
+// -----
+
+func.func @dot_rejects_floating_vectors(
+    %lhs: vector<8xf32>, %rhs: vector<8xf32>) -> f32 {
+  // expected-error@+1 {{floating-point vector dot operands have no executable consumer}}
+  %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (vector<8xf32>, vector<8xf32>) -> f32
   return %0 : f32
 }
 

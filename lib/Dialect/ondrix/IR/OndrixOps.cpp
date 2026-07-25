@@ -118,6 +118,11 @@ static LogicalResult verifyQuantizeDomain(QuantizeOp op) {
 }
 
 static LogicalResult verifyFirWindow(FirOp op) {
+  if (isa<RankedTensorType>(op.getInput().getType()) ||
+      isa<RankedTensorType>(op.getCoeffs().getType()))
+    return op.emitOpError(
+        "tensor FIR windows have no executable consumer; use memrefs or fixed vectors");
+
   auto inputType = dyn_cast<ShapedType>(op.getInput().getType());
   auto coeffType = dyn_cast<ShapedType>(op.getCoeffs().getType());
   if (!inputType || !coeffType || !inputType.hasRank() || !coeffType.hasRank() ||
@@ -126,6 +131,9 @@ static LogicalResult verifyFirWindow(FirOp op) {
   if (ondrix::isScalableVectorType(op.getInput().getType()) ||
       ondrix::isScalableVectorType(op.getCoeffs().getType()))
     return op.emitOpError("scalable vector windows are not supported");
+  if (isa<ondrix::ondsp::FpAttr>(op.getNumeric()) &&
+      (isa<VectorType>(op.getInput().getType()) || isa<VectorType>(op.getCoeffs().getType())))
+    return op.emitOpError("floating-point vector FIR windows have no executable consumer");
 
   if (inputType.getElementType() != coeffType.getElementType())
     return op.emitOpError("input and coefficient element types must match");
@@ -541,6 +549,10 @@ static OpFoldResult addFirInputHalo(OpBuilder &builder, Location loc, OpFoldResu
 }
 
 static LogicalResult verifyDotDomain(DotOp op) {
+  if (isa<RankedTensorType>(op.getLhs().getType()) || isa<RankedTensorType>(op.getRhs().getType()))
+    return op.emitOpError(
+        "tensor dot operands have no executable consumer; use memrefs or fixed vectors");
+
   auto lhsShaped = dyn_cast<ShapedType>(op.getLhs().getType());
   auto rhsShaped = dyn_cast<ShapedType>(op.getRhs().getType());
   if (static_cast<bool>(lhsShaped) != static_cast<bool>(rhsShaped))
@@ -555,6 +567,9 @@ static LogicalResult verifyDotDomain(DotOp op) {
     if (ondrix::isScalableVectorType(op.getLhs().getType()) ||
         ondrix::isScalableVectorType(op.getRhs().getType()))
       return op.emitOpError("scalable vector operands are not supported");
+    if (isa<ondrix::ondsp::FpAttr>(op.getNumeric()) &&
+        (isa<VectorType>(op.getLhs().getType()) || isa<VectorType>(op.getRhs().getType())))
+      return op.emitOpError("floating-point vector dot operands have no executable consumer");
     lhsElement = lhsShaped.getElementType();
     rhsElement = rhsShaped.getElementType();
 

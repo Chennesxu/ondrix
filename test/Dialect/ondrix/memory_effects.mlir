@@ -70,58 +70,6 @@ func.func @scalar_dot_is_speculatable(%lhs: i16, %rhs: i16, %upper: index) -> !o
 // LICM: scf.for
 // LICM-NOT: ondrix.dot
 
-func.func @static_tensor_dot_is_speculatable(
-    %lhs: tensor<8xf32>, %rhs: tensor<8xf32>, %upper: index) -> f32 {
-  %c0 = arith.constant 0 : index
-  %c1 = arith.constant 1 : index
-  %init = arith.constant 0.0 : f32
-  %result = scf.for %i = %c0 to %upper step %c1 iter_args(%acc = %init) -> (f32) {
-    %dot = ondrix.dot %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (tensor<8xf32>, tensor<8xf32>) -> f32
-    %next = arith.addf %acc, %dot : f32
-    scf.yield %next : f32
-  }
-  return %result : f32
-}
-
-// LICM-LABEL: func.func @static_tensor_dot_is_speculatable
-// LICM: %[[DOT:.*]] = ondrix.dot
-// LICM: scf.for
-// LICM-NOT: ondrix.dot
-
-func.func @dynamic_tensor_dot_remains_in_loop(
-    %lhs: tensor<?xf32>, %rhs: tensor<?xf32>, %upper: index) -> f32 {
-  %c0 = arith.constant 0 : index
-  %c1 = arith.constant 1 : index
-  %init = arith.constant 0.0 : f32
-  %result = scf.for %i = %c0 to %upper step %c1 iter_args(%acc = %init) -> (f32) {
-    %dot = ondrix.dot %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (tensor<?xf32>, tensor<?xf32>) -> f32
-    %next = arith.addf %acc, %dot : f32
-    scf.yield %next : f32
-  }
-  return %result : f32
-}
-
-// LICM-LABEL: func.func @dynamic_tensor_dot_remains_in_loop
-// LICM: scf.for
-// LICM: ondrix.dot
-
-func.func @dynamic_tensor_fir_remains_in_loop(
-    %input: tensor<?xf32>, %coeffs: tensor<?xf32>, %upper: index) -> f32 {
-  %c0 = arith.constant 0 : index
-  %c1 = arith.constant 1 : index
-  %init = arith.constant 0.0 : f32
-  %result = scf.for %i = %c0 to %upper step %c1 iter_args(%acc = %init) -> (f32) {
-    %sample = ondrix.fir %input, %coeffs {numeric = #ondsp.fp<format = f32, contract = off>} : (tensor<?xf32>, tensor<?xf32>) -> f32
-    %next = arith.addf %acc, %sample : f32
-    scf.yield %next : f32
-  }
-  return %result : f32
-}
-
-// LICM-LABEL: func.func @dynamic_tensor_fir_remains_in_loop
-// LICM: scf.for
-// LICM: ondrix.fir
-
 func.func @static_tensor_fir_filter_is_speculatable(
     %input: tensor<8xf32>, %coeffs: tensor<3xf32>, %init: tensor<6xf32>,
     %upper: index) -> tensor<6xf32> {

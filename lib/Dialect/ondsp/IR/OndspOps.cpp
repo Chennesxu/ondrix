@@ -148,6 +148,10 @@ static bool hasI32Container(Type type) {
 }
 
 static LogicalResult verifyReduceDomain(ReduceMacOp op) {
+  if (isa<RankedTensorType>(op.getLhs().getType()) || isa<RankedTensorType>(op.getRhs().getType()))
+    return op.emitOpError(
+        "tensor reduce_mac operands have no executable consumer; use memrefs or fixed vectors");
+
   auto lhs = dyn_cast<ShapedType>(op.getLhs().getType());
   auto rhs = dyn_cast<ShapedType>(op.getRhs().getType());
   if (!lhs || !rhs || !lhs.hasRank() || !rhs.hasRank() || lhs.getRank() != 1 || rhs.getRank() != 1)
@@ -155,6 +159,9 @@ static LogicalResult verifyReduceDomain(ReduceMacOp op) {
   if (ondrix::isScalableVectorType(op.getLhs().getType()) ||
       ondrix::isScalableVectorType(op.getRhs().getType()))
     return op.emitOpError("scalable vector operands are not supported");
+  if (isa<FpAttr>(op.getNumeric()) &&
+      (isa<VectorType>(op.getLhs().getType()) || isa<VectorType>(op.getRhs().getType())))
+    return op.emitOpError("floating-point vector reduce_mac operands have no executable consumer");
   if (lhs.getElementType() != rhs.getElementType())
     return op.emitOpError("shaped operand element types must match");
 

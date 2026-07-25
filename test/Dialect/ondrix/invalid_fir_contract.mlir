@@ -80,6 +80,24 @@ func.func @fir_rejects_scalable_vectors(
 
 // -----
 
+func.func @fir_rejects_tensor_windows(
+    %input: tensor<8xf32>, %coeffs: tensor<8xf32>) -> f32 {
+  // expected-error@+1 {{tensor FIR windows have no executable consumer; use memrefs or fixed vectors}}
+  %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fp<format = f32, contract = off>} : (tensor<8xf32>, tensor<8xf32>) -> f32
+  return %0 : f32
+}
+
+// -----
+
+func.func @fir_rejects_floating_vector_windows(
+    %input: vector<8xf32>, %coeffs: vector<8xf32>) -> f32 {
+  // expected-error@+1 {{floating-point vector FIR windows have no executable consumer}}
+  %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fp<format = f32, contract = off>} : (vector<8xf32>, vector<8xf32>) -> f32
+  return %0 : f32
+}
+
+// -----
+
 func.func @fixed_fir_rejects_builtin_integer_result(
     %input: memref<8xi16>, %coeffs: memref<8xi16>) -> si32 {
   // expected-error@+1 {{fixed reduction result must use !ondsp.acc}}

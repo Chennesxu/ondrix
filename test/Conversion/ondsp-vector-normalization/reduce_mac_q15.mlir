@@ -29,13 +29,16 @@ func.func @reduce_q15_vector(
 // CHECK: return %[[A3]]
 // CHECK-NOT: ondsp.reduce_mac
 
-func.func @preserve_unsupported_fp_vector(
-    %initial: f32, %lhs: vector<4xf32>, %rhs: vector<4xf32>) -> f32 {
+func.func @preserve_unsupported_i65_vector(
+    %initial: !ondsp.acc<storage = i65, frac = 30, signed, update_overflow = saturate>,
+    %lhs: vector<4xi16>, %rhs: vector<4xi16>)
+    -> !ondsp.acc<storage = i65, frac = 30, signed, update_overflow = saturate> {
   %result = ondsp.reduce_mac %initial, %lhs, %rhs {
-    numeric = #ondsp.fp<format = f32, contract = fma>
-  } : (f32, vector<4xf32>, vector<4xf32>) -> f32
-  return %result : f32
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i65, frac = 30, signed, update_overflow = saturate>, vector<4xi16>, vector<4xi16>) -> !ondsp.acc<storage = i65, frac = 30, signed, update_overflow = saturate>
+  return %result : !ondsp.acc<storage = i65, frac = 30, signed, update_overflow = saturate>
 }
 
-// CHECK-LABEL: func.func @preserve_unsupported_fp_vector
+// CHECK-LABEL: func.func @preserve_unsupported_i65_vector
 // CHECK: ondsp.reduce_mac
