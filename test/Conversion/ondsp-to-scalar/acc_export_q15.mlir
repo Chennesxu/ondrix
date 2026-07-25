@@ -33,6 +33,28 @@ func.func @export_nearest_even_wrap(
   return %result : i16
 }
 
+func.func @export_same_width_wrap(
+    %acc: !ondsp.acc<storage = i32, frac = 30, signed, update_overflow = wrap>)
+    -> i32 {
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i32, frac = 30>,
+    rounding = #ondsp.rounding<toward_negative>,
+    overflow = #ondsp.overflow<wrap>
+  } : (!ondsp.acc<storage = i32, frac = 30, signed, update_overflow = wrap>) -> i32
+  return %result : i32
+}
+
+func.func @export_same_width_saturate(
+    %acc: !ondsp.acc<storage = i32, frac = 30, signed, update_overflow = saturate>)
+    -> i32 {
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i32, frac = 30>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (!ondsp.acc<storage = i32, frac = 30, signed, update_overflow = saturate>) -> i32
+  return %result : i32
+}
+
 // CHECK-LABEL: func.func @export_floor_saturate(
 // CHECK-SAME: %[[ACC:.*]]: i40) -> i16
 // CHECK: %[[SHIFT:.*]] = arith.constant 15 : i40
@@ -80,4 +102,12 @@ func.func @export_nearest_even_wrap(
 // CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[INCREMENT]] : i40
 // CHECK: %[[RESULT:.*]] = arith.trunci %[[ROUNDED]] : i40 to i16
 // CHECK: return %[[RESULT]] : i16
+
+// CHECK-LABEL: func.func @export_same_width_wrap(
+// CHECK-SAME: %[[ACC:.*]]: i32) -> i32
+// CHECK-NEXT: return %[[ACC]] : i32
+
+// CHECK-LABEL: func.func @export_same_width_saturate(
+// CHECK-SAME: %[[ACC:.*]]: i32) -> i32
+// CHECK-NEXT: return %[[ACC]] : i32
 // CHECK-NOT: ondsp.

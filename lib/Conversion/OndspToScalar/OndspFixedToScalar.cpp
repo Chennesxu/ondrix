@@ -326,6 +326,8 @@ static Value narrowSignedValue(Location loc, Value input, Type destinationType,
                                ondrix::ondsp::OverflowMode overflowMode,
                                ConversionPatternRewriter &rewriter) {
   Type inputType = input.getType();
+  if (inputType == destinationType)
+    return input;
   if (overflowMode == ondrix::ondsp::OverflowMode::Wrap)
     return rewriter.create<arith::TruncIOp>(loc, destinationType, input);
 
