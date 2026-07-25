@@ -146,8 +146,24 @@ uses the same increasing-tap ordered FIR equation and portable accumulator
 inference as other static Q15 feed-forward reductions. It can lower through
 the generic scalar path or through direct bufferization into ordered
 fixed-width Vector products plus a scalar tail. Other factors, dynamic shapes,
-nonzero phase, interpolation, cross-output polyphase lowering, and Q31/f32
-resampling are not part of this source slice.
+nonzero phase, cross-output polyphase lowering, and Q31/f32 resampling are not
+part of this source slice.
+
+Static phase-zero Q15 FIR interpolation by two is also available:
+
+```python
+def q15_fir_interpolate(
+    input: tensor[q15,4], coefficients: tensor[q15,3]) -> tensor[q15,9]:
+  return fir_interpolate(input, coefficients, factor=2)
+```
+
+The result extent must equal `(input_length - 1) * 2 + coefficient_length`.
+Portable accumulator inference uses the maximum phase-tap bound,
+`ceil(coefficient_length / 2)`, rather than counting inserted zeros. The
+current source slice lowers through the generic scalar consumer;
+dynamic shapes, constexpr coefficients, configurable phase/factor, stateful
+interpolation, polyphase transforms, Vector, and target consumers remain
+outside the source contract.
 
 Valid one-dimensional convolution and correlation use tensor values and the
 same fixed-point or floating-point policy syntax as full-output FIR:

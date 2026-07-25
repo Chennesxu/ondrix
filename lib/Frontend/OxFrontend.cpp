@@ -203,6 +203,7 @@ enum class ReductionKind {
   Fir,
   FirFilter,
   FirDecimate,
+  FirInterpolate,
   FirStream,
   SosDf2Fixed,
   Convolution,
@@ -355,14 +356,15 @@ public:
       return std::nullopt;
 
     if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter") &&
-        !isIdentifier("fir_decimate") && !isIdentifier("fir_stream") &&
-        !isIdentifier("sos_df2_fixed") && !isIdentifier("convolution") &&
-        !isIdentifier("correlation") && !isIdentifier("butterfly") && !isIdentifier("cfft") &&
-        !isIdentifier("icfft")) {
+        !isIdentifier("fir_decimate") && !isIdentifier("fir_interpolate") &&
+        !isIdentifier("fir_stream") && !isIdentifier("sos_df2_fixed") &&
+        !isIdentifier("convolution") && !isIdentifier("correlation") &&
+        !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
-                        "fir_stream(...), sos_df2_fixed(...), convolution(...), correlation(...), "
-                        "butterfly(...), cfft(...), or icfft(...) return expression");
+                        "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
+                        "convolution(...), correlation(...), butterfly(...), cfft(...), or "
+                        "icfft(...) return expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -373,6 +375,8 @@ public:
       kernel.result.kind = ReductionKind::FirFilter;
     else if (isIdentifier("fir_decimate"))
       kernel.result.kind = ReductionKind::FirDecimate;
+    else if (isIdentifier("fir_interpolate"))
+      kernel.result.kind = ReductionKind::FirInterpolate;
     else if (isIdentifier("fir_stream"))
       kernel.result.kind = ReductionKind::FirStream;
     else if (isIdentifier("sos_df2_fixed"))
@@ -478,12 +482,15 @@ public:
       if (!boundary || !expect(TokenKind::Comma, "expected ',' after FIR boundary mode"))
         return std::nullopt;
       kernel.result.boundary = boundary->spelling.str();
-    } else if (kernel.result.kind == ReductionKind::FirDecimate) {
-      if (!expect(TokenKind::Comma, "expected ',' before FIR decimation factor") ||
-          !expectIdentifier("factor", "expected FIR decimation factor") ||
+    } else if (kernel.result.kind == ReductionKind::FirDecimate ||
+               kernel.result.kind == ReductionKind::FirInterpolate) {
+      bool isInterpolation = kernel.result.kind == ReductionKind::FirInterpolate;
+      llvm::StringRef operation = isInterpolation ? "fir_interpolate" : "fir_decimate";
+      if (!expect(TokenKind::Comma, "expected ',' before FIR resampling factor") ||
+          !expectIdentifier("factor", "expected FIR resampling factor") ||
           !expect(TokenKind::Equal, "expected '=' after factor"))
         return std::nullopt;
-      auto factor = parseSignedInteger("expected FIR decimation factor");
+      auto factor = parseSignedInteger("expected FIR resampling factor");
       if (!factor)
         return std::nullopt;
       kernel.result.factor = *factor;
@@ -491,7 +498,8 @@ public:
       kernel.result.rounding = "nearest_even";
       kernel.result.destinationOverflow = "saturate";
       kernel.result.updateOverflow = "wrap";
-      if (!expect(TokenKind::RightParen, "expected ')' after fir_decimate expression"))
+      if (!expect(TokenKind::RightParen,
+                  llvm::Twine("expected ')' after ") + operation + " expression"))
         return std::nullopt;
       if (current.kind != TokenKind::Eof) {
         diagnostics.error(current.position, "only one kernel is supported per file in this slice");
@@ -1114,6 +1122,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   bool isConv1D = ast.result.kind == ReductionKind::Convolution ||
                   ast.result.kind == ReductionKind::Correlation;
   bool isFirDecimate = ast.result.kind == ReductionKind::FirDecimate;
+  bool isFirInterpolate = ast.result.kind == ReductionKind::FirInterpolate;
   if (isConv1D) {
     if (constexprCount != 0) {
       diagnostics.error(ast.result.position,
@@ -1181,6 +1190,41 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     int64_t expectedExtent = (*lhsExtent - *rhsExtent) / ast.result.factor + 1;
     if (*resultExtent != expectedExtent) {
       diagnostics.error(ast.result.position, "static fir_decimate result extent is incorrect");
+      return std::nullopt;
+    }
+  } else if (isFirInterpolate) {
+    if (constexprCount != 0 || !ast.tensorResult || ast.resultType != SourceType::Q15 ||
+        !lhsParameter || !rhsParameter || !lhsParameter->isTensor() || !rhsParameter->isTensor()) {
+      diagnostics.error(ast.result.position,
+                        "fir_interpolate requires Q15 tensor input, coefficients, and result");
+      return std::nullopt;
+    }
+    if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
+        !hasRank(ast.resultShape, 1)) {
+      diagnostics.error(ast.result.position, "fir_interpolate currently requires rank-1 tensors");
+      return std::nullopt;
+    }
+    if (ast.result.factor != 2) {
+      diagnostics.error(ast.result.position,
+                        "fir_interpolate source binding currently requires factor=2");
+      return std::nullopt;
+    }
+    const std::optional<int64_t> &lhsExtent = getRankOneExtent(lhsParameter->shape);
+    const std::optional<int64_t> &rhsExtent = getRankOneExtent(rhsParameter->shape);
+    const std::optional<int64_t> &resultExtent = getRankOneExtent(ast.resultShape);
+    if (!lhsExtent || !rhsExtent || !resultExtent) {
+      diagnostics.error(ast.result.position,
+                        "fir_interpolate source binding currently requires static extents");
+      return std::nullopt;
+    }
+    int64_t inputIntervals = *lhsExtent - 1;
+    if (inputIntervals > (std::numeric_limits<int64_t>::max() - *rhsExtent) / ast.result.factor) {
+      diagnostics.error(ast.result.position, "fir_interpolate result extent overflows index");
+      return std::nullopt;
+    }
+    int64_t expectedExtent = inputIntervals * ast.result.factor + *rhsExtent;
+    if (*resultExtent != expectedExtent) {
+      diagnostics.error(ast.result.position, "static fir_interpolate result extent is incorrect");
       return std::nullopt;
     }
   } else if (ast.result.kind == ReductionKind::FirFilter) {
@@ -1287,12 +1331,13 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         ast.result.kind == ReductionKind::Dot || ast.result.kind == ReductionKind::Fir;
     bool isWindowReduction = ast.result.kind == ReductionKind::Convolution ||
                              ast.result.kind == ReductionKind::Correlation ||
-                             ast.result.kind == ReductionKind::FirDecimate;
+                             ast.result.kind == ReductionKind::FirDecimate ||
+                             ast.result.kind == ReductionKind::FirInterpolate;
     if (ast.resultType != SourceType::Q15 || (!isScalarReduction && !isWindowReduction)) {
       diagnostics.error(
           ast.result.position,
-          "automatic accumulation currently supports static Q15 dot, fir, fir_decimate, and "
-          "conv1d");
+          "automatic accumulation currently supports static Q15 dot, fir, fir_decimate, "
+          "fir_interpolate, and conv1d");
       return std::nullopt;
     }
     std::optional<int64_t> rhsExtent =
@@ -1312,7 +1357,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         "automatic accumulation requires equal static operand extents");
       return std::nullopt;
     }
-    ast.result.accumulatorWidth = inferQ15FullAccumulatorWidth(static_cast<uint64_t>(*rhsExtent));
+    uint64_t productCount = static_cast<uint64_t>(*rhsExtent);
+    if (isFirInterpolate)
+      productCount = (productCount + static_cast<uint64_t>(ast.result.factor) - 1) /
+                     static_cast<uint64_t>(ast.result.factor);
+    ast.result.accumulatorWidth = inferQ15FullAccumulatorWidth(productCount);
   }
 
   uint64_t requiredAccumulatorWidth = ast.resultType == SourceType::Q15 ? 40 : 64;
@@ -1528,11 +1577,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   bool isConv1D = kernel.ast.result.kind == ReductionKind::Convolution ||
                   kernel.ast.result.kind == ReductionKind::Correlation;
   bool isFirDecimate = kernel.ast.result.kind == ReductionKind::FirDecimate;
-  if (kernel.ast.result.kind == ReductionKind::FirFilter || isFirDecimate || isConv1D) {
+  bool isFirInterpolate = kernel.ast.result.kind == ReductionKind::FirInterpolate;
+  if (kernel.ast.result.kind == ReductionKind::FirFilter || isFirDecimate || isFirInterpolate ||
+      isConv1D) {
     auto outputType = cast<RankedTensorType>(resultType);
-    if (isFirDecimate && outputType.isDynamicDim(0)) {
-      emitError(expressionLocation,
-                "internal error: fir_decimate source result must have a static extent");
+    if ((isFirDecimate || isFirInterpolate) && outputType.isDynamicDim(0)) {
+      emitError(expressionLocation, "internal error: resampling source result must be static");
       return {};
     }
     SmallVector<Value> dynamicSizes;
@@ -1590,6 +1640,11 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                                             overflow);
     } else if (isFirDecimate) {
       result = builder.create<ir::FirDecimateOp>(
+          expressionLocation, outputType, lhs, rhs, init,
+          builder.getI64IntegerAttr(kernel.ast.result.factor), cast<ondsp::FixedAttr>(numeric),
+          product, accumulator, destination, rounding, overflow);
+    } else if (isFirInterpolate) {
+      result = builder.create<ir::FirInterpolateOp>(
           expressionLocation, outputType, lhs, rhs, init,
           builder.getI64IntegerAttr(kernel.ast.result.factor), cast<ondsp::FixedAttr>(numeric),
           product, accumulator, destination, rounding, overflow);

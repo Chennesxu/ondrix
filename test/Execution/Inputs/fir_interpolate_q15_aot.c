@@ -12,15 +12,26 @@ typedef struct {
   int64_t strides[1];
 } MemRefI16;
 
-extern void _mlir_ciface_fir_interpolate_q15(MemRefI16 *result, MemRefI16 *input,
-                                             MemRefI16 *coefficients);
+#ifndef FIR_INTERPOLATE_SYMBOL
+#define FIR_INTERPOLATE_SYMBOL _mlir_ciface_fir_interpolate_q15
+#endif
+
+#ifndef FIR_INTERPOLATE_ACCUMULATOR_WIDTH
+#define FIR_INTERPOLATE_ACCUMULATOR_WIDTH 40
+#endif
+
+#ifndef FIR_INTERPOLATE_UPDATE_OVERFLOW
+#define FIR_INTERPOLATE_UPDATE_OVERFLOW SATURATE
+#endif
+
+extern void FIR_INTERPOLATE_SYMBOL(MemRefI16 *result, MemRefI16 *input, MemRefI16 *coefficients);
 
 static const struct Policy policy = {
     .width = 16,
     .frac = 15,
-    .accumulator_width = 40,
+    .accumulator_width = FIR_INTERPOLATE_ACCUMULATOR_WIDTH,
     .accumulator_frac = 30,
-    .update_overflow = SATURATE,
+    .update_overflow = FIR_INTERPOLATE_UPDATE_OVERFLOW,
     .state_rounding = NEAREST_EVEN,
     .state_overflow = SATURATE,
     .output_rounding = NEAREST_EVEN,
@@ -39,8 +50,7 @@ static void reference(const int16_t input[4], const int16_t coefficients[3], int
       int64_t input_index = upsampled_index / 2;
       if (input_index >= 4)
         continue;
-      accumulator =
-          update_reference(accumulator, input[input_index], coefficients[tap], &policy);
+      accumulator = update_reference(accumulator, input[input_index], coefficients[tap], &policy);
     }
     output[result] = (int16_t)export_reference(accumulator, policy.output_rounding,
                                                policy.output_overflow, &policy);
@@ -50,15 +60,14 @@ static void reference(const int16_t input[4], const int16_t coefficients[3], int
 int main(void) {
   int16_t input[4] = {INT16_MIN, INT16_MAX, 16384, -8192};
   int16_t coefficients[3] = {INT16_MAX, -16384, 8192};
-  const int16_t golden[9] = {-32767, 16384, 24574, -16384, 24575,
-                             -8192,  -4096, 4096,  -2048};
+  const int16_t golden[9] = {-32767, 16384, 24574, -16384, 24575, -8192, -4096, 4096, -2048};
   int16_t expected[9];
   reference(input, coefficients, expected);
 
   MemRefI16 input_ref = {input, input, 0, {4}, {1}};
   MemRefI16 coefficient_ref = {coefficients, coefficients, 0, {3}, {1}};
   MemRefI16 result;
-  _mlir_ciface_fir_interpolate_q15(&result, &input_ref, &coefficient_ref);
+  FIR_INTERPOLATE_SYMBOL(&result, &input_ref, &coefficient_ref);
 
   int failed = result.sizes[0] != 9;
   for (int64_t index = 0; index < 9; ++index) {
