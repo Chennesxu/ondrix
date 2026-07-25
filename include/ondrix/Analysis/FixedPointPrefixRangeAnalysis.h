@@ -72,6 +72,10 @@ computeSignedFullProductInterval(ondsp::FixedAttr numeric, const llvm::APInt &co
 mlir::FailureOr<FixedPointRawInterval> addFixedPointRawIntervals(const FixedPointRawInterval &lhs,
                                                                  const FixedPointRawInterval &rhs);
 
+/// Returns whether every raw value in `interval` fits a signed implementation
+/// value of `width` bits.
+bool fitsSignedImplementationWidth(const FixedPointRawInterval &interval, unsigned width);
+
 using DistributivePairingConsumer = llvm::function_ref<mlir::LogicalResult(
     const ondsp::DistributivePairingSemantics &, llvm::ArrayRef<llvm::APInt>)>;
 

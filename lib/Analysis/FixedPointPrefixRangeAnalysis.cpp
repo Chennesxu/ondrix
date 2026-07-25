@@ -227,6 +227,16 @@ FailureOr<FixedPointRawInterval> addFixedPointRawIntervals(const FixedPointRawIn
                                lhs.upper.sext(width) + rhs.upper.sext(width), lhs.frac};
 }
 
+bool fitsSignedImplementationWidth(const FixedPointRawInterval &interval, unsigned width) {
+  if (!isValidInterval(interval) || width == 0)
+    return false;
+  unsigned comparisonWidth = std::max(width, interval.lower.getBitWidth());
+  APInt minimum = APInt::getSignedMinValue(width).sext(comparisonWidth);
+  APInt maximum = APInt::getSignedMaxValue(width).sext(comparisonWidth);
+  return !interval.lower.sext(comparisonWidth).slt(minimum) &&
+         !interval.upper.sext(comparisonWidth).sgt(maximum);
+}
+
 json::Object toJSON(const NoOverflowChunkReassociationTrace &trace) {
   json::Array coefficientValues;
   for (const APInt &coefficient : trace.coefficients)
@@ -377,6 +387,10 @@ verifyNoOverflowChunkReassociationTrace(const NoOverflowChunkReassociationTrace 
   for (size_t index = fullChunkCount * static_cast<size_t>(trace.chunkWidth);
        index < originalUpdates.size(); ++index)
     reassociatedUpdates.push_back(originalUpdates[index]);
+  if (llvm::any_of(reassociatedUpdates, [](const FixedPointRawInterval &interval) {
+        return !fitsSignedImplementationWidth(interval, 64);
+      }))
+    return failure();
 
   FixedPointRawInterval initial{APInt(trace.accumulatorStorageWidth, 0),
                                 APInt(trace.accumulatorStorageWidth, 0), trace.accumulatorFrac};
@@ -547,6 +561,13 @@ FailureOr<DistributivePairingPlan> FixedPointPrefixRangePlanner::planZeroSeededS
       ondsp::classifyDistributiveProductPairing(subject, numeric, product, accumulator);
   if (failed(semantics) || !semantics->exactBeforeAccumulatorOverflow)
     return failure();
+  if (semantics->product.rawWidth == std::numeric_limits<unsigned>::max())
+    return failure();
+  unsigned pairedTermWidth = semantics->product.rawWidth + 1;
+  if (llvm::any_of(reassociatedUpdates, [pairedTermWidth](const FixedPointRawInterval &interval) {
+        return !fitsSignedImplementationWidth(interval, pairedTermWidth);
+      }))
+    return failure();
 
   ondsp::TransformLegality legalityWithoutRangeProof = semantics->legalityWithoutRangeProof;
   if (legalityWithoutRangeProof.isExact()) {
@@ -617,6 +638,10 @@ FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
   for (size_t index = fullChunkCount * static_cast<size_t>(chunkWidth);
        index < originalUpdates.size(); ++index)
     chunkedUpdates.push_back(originalUpdates[index]);
+  if (llvm::any_of(chunkedUpdates, [](const FixedPointRawInterval &interval) {
+        return !fitsSignedImplementationWidth(interval, 64);
+      }))
+    return failure();
 
   FixedPointRawInterval initial{APInt(accumulatorStorage.getWidth(), 0),
                                 APInt(accumulatorStorage.getWidth(), 0), accumulator.getFrac()};

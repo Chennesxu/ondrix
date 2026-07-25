@@ -18,6 +18,7 @@ using ondrix::analysis::addFixedPointRawIntervals;
 using ondrix::analysis::areEquivalent;
 using ondrix::analysis::computeSignedFullProductInterval;
 using ondrix::analysis::DistributivePairingPlan;
+using ondrix::analysis::fitsSignedImplementationWidth;
 using ondrix::analysis::FixedPointPrefixRangePlanner;
 using ondrix::analysis::FixedPointRawInterval;
 using ondrix::analysis::NoOverflowChunkReassociationPlan;
@@ -45,6 +46,19 @@ FixedPointRawInterval range(unsigned width, int64_t lower, int64_t upper, unsign
 
 FixedPointRawInterval exactRange(const llvm::APInt &value, unsigned frac) {
   return {value, value, frac};
+}
+
+llvm::SmallVector<FixedPointRawInterval>
+prefixesForTest(unsigned analysisWidth, unsigned frac,
+                llvm::ArrayRef<FixedPointRawInterval> updates) {
+  FixedPointRawInterval prefix{llvm::APInt(analysisWidth, 0), llvm::APInt(analysisWidth, 0), frac};
+  llvm::SmallVector<FixedPointRawInterval> prefixes = {prefix};
+  for (const FixedPointRawInterval &update : updates) {
+    prefix.lower += update.lower.sext(analysisWidth);
+    prefix.upper += update.upper.sext(analysisWidth);
+    prefixes.push_back(prefix);
+  }
+  return prefixes;
 }
 
 bool equals(const FixedPointRawInterval &interval, const FixedPointRawInterval &expected) {
@@ -97,6 +111,53 @@ bool testRawIntervalAddition() {
   return mlir::succeeded(sum) &&
          equals(*sum, range(33, INT64_C(-4294967296), INT64_C(4294967294), 30)) &&
          mlir::failed(mismatchedFrac) && mlir::failed(invalid);
+}
+
+bool testImplementationWidthContainment() {
+  llvm::APInt negativeI64Endpoint = -llvm::APInt::getOneBitSet(65, 63);
+  llvm::APInt positiveI64Overflow = llvm::APInt::getOneBitSet(65, 63);
+  return fitsSignedImplementationWidth(exactRange(negativeI64Endpoint, 62), 64) &&
+         !fitsSignedImplementationWidth(exactRange(positiveI64Overflow, 62), 64) &&
+         !fitsSignedImplementationWidth(range(4, 1, -1), 4) &&
+         !fitsSignedImplementationWidth(range(4, 0, 0), 0);
+}
+
+bool testTraceRejectsWideChunkTerm() {
+  mlir::MLIRContext context;
+  context.getOrLoadDialect<ondrix::ondsp::OndspDialect>();
+  auto i32 = mlir::IntegerType::get(&context, 32);
+  auto q31 = FixedAttr::get(&context, Signedness::Signed, i32, 31);
+  llvm::SmallVector<llvm::APInt> coefficients(4, signedValue(32, INT32_MIN));
+  llvm::SmallVector<FixedPointRawInterval> originalUpdates;
+  for (const llvm::APInt &coefficient : coefficients) {
+    auto interval = computeSignedFullProductInterval(q31, coefficient);
+    if (mlir::failed(interval))
+      return false;
+    originalUpdates.push_back(std::move(*interval));
+  }
+
+  FixedPointRawInterval chunk = originalUpdates.front();
+  for (size_t index = 1; index < originalUpdates.size(); ++index) {
+    auto sum = addFixedPointRawIntervals(chunk, originalUpdates[index]);
+    if (mlir::failed(sum))
+      return false;
+    chunk = std::move(*sum);
+  }
+  llvm::SmallVector<FixedPointRawInterval> reassociatedUpdates = {chunk};
+
+  NoOverflowChunkReassociationTrace trace;
+  trace.subjectOrdinal = 0;
+  trace.numericStorageWidth = 32;
+  trace.numericFrac = 31;
+  trace.accumulatorStorageWidth = 67;
+  trace.accumulatorFrac = 62;
+  trace.productRawWidth = 64;
+  trace.productFrac = 62;
+  trace.chunkWidth = 4;
+  trace.coefficients = coefficients;
+  trace.originalPrefixes = prefixesForTest(71, 62, originalUpdates);
+  trace.reassociatedPrefixes = prefixesForTest(71, 62, reassociatedUpdates);
+  return mlir::failed(verifyNoOverflowChunkReassociationTrace(trace));
 }
 
 bool testSuccessfulContainment() {
@@ -352,6 +413,7 @@ bool testConstantChunkReductionPlan() {
   auto i32 = mlir::IntegerType::get(&context, 32);
   auto i40 = mlir::IntegerType::get(&context, 40);
   auto i64 = mlir::IntegerType::get(&context, 64);
+  auto i65 = mlir::IntegerType::get(&context, 65);
   auto q15 = FixedAttr::get(&context, Signedness::Signed, i16, 15);
   auto q31 = FixedAttr::get(&context, Signedness::Signed, i32, 31);
   auto full = ProductAttr::get(&context, ProductSelection::Full);
@@ -361,20 +423,26 @@ bool testConstantChunkReductionPlan() {
   auto q15HighSaturate =
       AccType::get(&context, i40, 14, Signedness::Signed, OverflowMode::Saturate);
   auto q31Saturate = AccType::get(&context, i64, 62, Signedness::Signed, OverflowMode::Saturate);
+  auto q31WideSaturate =
+      AccType::get(&context, i65, 62, Signedness::Signed, OverflowMode::Saturate);
   llvm::SmallVector<llvm::APInt> q15Safe;
   for (int64_t index = 0; index < 17; ++index)
     q15Safe.push_back(signedValue(16, index - 8));
   llvm::SmallVector<llvm::APInt> q15Overflowing(512, signedValue(16, INT16_MIN));
   llvm::SmallVector<llvm::APInt> q31Safe = {signedValue(32, 1), signedValue(32, -2),
                                             signedValue(32, 3), signedValue(32, -4)};
+  llvm::SmallVector<llvm::APInt> q31WidePartialOverflow(2, signedValue(32, INT32_MIN));
 
   auto q15Constant = createConstantMemRefFacts(*subject, "q15_safe", i16, q15Safe);
   auto q15OtherConstant = createConstantMemRefFacts(*subject, "q15_safe_other", i16, q15Safe);
   auto q15OverflowingConstant =
       createConstantMemRefFacts(*subject, "q15_overflow", i16, q15Overflowing);
   auto q31Constant = createConstantMemRefFacts(*subject, "q31_safe", i32, q31Safe);
+  auto q31WidePartialOverflowConstant =
+      createConstantMemRefFacts(*subject, "q31_wide_partial_overflow", i32, q31WidePartialOverflow);
   if (mlir::failed(q15Constant) || mlir::failed(q15OtherConstant) ||
-      mlir::failed(q15OverflowingConstant) || mlir::failed(q31Constant))
+      mlir::failed(q15OverflowingConstant) || mlir::failed(q31Constant) ||
+      mlir::failed(q31WidePartialOverflowConstant))
     return false;
 
   auto q15Reduction = createZeroSeededReduction(*subject, *q15Constant, q15, full, q15Saturate);
@@ -386,6 +454,8 @@ bool testConstantChunkReductionPlan() {
   auto q15HighReduction =
       createZeroSeededReduction(*subject, *q15Constant, q15, highRaw, q15HighSaturate);
   auto q31Reduction = createZeroSeededReduction(*subject, *q31Constant, q31, full, q31Saturate);
+  auto q31WidePartialOverflowReduction = createZeroSeededReduction(
+      *subject, *q31WidePartialOverflowConstant, q31, full, q31WideSaturate);
 
   auto plan = FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(q15Reduction,
                                                                                  *q15Constant, 8);
@@ -475,6 +545,8 @@ bool testConstantChunkReductionPlan() {
          mlir::failed(FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
              q15HighReduction, *q15Constant, 8)) &&
          mlir::failed(FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
+             q31WidePartialOverflowReduction, *q31WidePartialOverflowConstant, 2)) &&
+         mlir::failed(FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
              q15Reduction, *q15Constant, 1));
 }
 
@@ -495,6 +567,7 @@ bool testInvalidInputs() {
 
 int main() {
   if (!testSignedFullProductIntervals() || !testRawIntervalAddition() ||
+      !testImplementationWidthContainment() || !testTraceRejectsWideChunkTerm() ||
       !testSuccessfulContainment() || !testOriginalPrefixOverflow() ||
       !testReassociatedPrefixOverflow() || !testNegativePrefixUnderflow() ||
       !testWiderAccumulator() || !testQ31I65Boundaries() || !testPairingPlanValidation() ||
