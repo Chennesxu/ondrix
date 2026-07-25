@@ -2,10 +2,10 @@
 
 This document defines the intended boundary between the experimental `.ox`
 source language, project dialects, and upstream MLIR dialects. The implemented
-parser currently covers Q15/Q31/f32 dot and FIR-sample kernels plus tensor-value
-valid and statically shaped full-output FIR. Fixed-point reductions may use
-compiler-owned constexpr coefficients. The broader items below remain design
-constraints.
+parser currently covers Q15/Q31/f32 real reductions, bounded packed-Q15
+complex transforms, explicit-state Q15 streaming FIR, and one static-section
+Q15 fixed SOS profile. Fixed-point reductions may use compiler-owned constexpr
+coefficients. The broader items below remain design constraints.
 
 ## Design Rule
 
@@ -96,6 +96,12 @@ fixed-tap feed-forward reduction. Its chronological next-state tensor consists
 of source samples and does not pass through the accumulator/export lifecycle.
 This does not authorize inferred accumulator or state widths for SOS/IIR
 recurrences.
+
+The first source-level fixed SOS binding therefore requires an explicit
+`exact[40, ...]` accumulator and separate state/output rounding and overflow
+policies. Its coefficient, scale, and state section layout is static; the
+frontend does not infer recursive range bounds or reinterpret Q15 as a target
+accumulator choice.
 
 Leaving an accumulator requires explicit destination format, rounding, and
 overflow policy. Source defaults, if introduced, must be language defaults and

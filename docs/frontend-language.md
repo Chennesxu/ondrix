@@ -1,8 +1,10 @@
 # Experimental `.ox` Frontend
 
 `ondrix-compile` is a standalone C++ frontend. Its initial executable surface
-accepts one `def` per file and rank-1 buffers or tensors. A `def` declares a DSP
-kernel entry point; it is not a general Python function.
+accepts one `def` per file. Most current kernels use rank-1 buffers or tensors;
+the fixed SOS slice also accepts the explicit rank-2 section layouts described
+below. A `def` declares a DSP kernel entry point; it is not a general Python
+function.
 
 For a statically bounded Q15 dot, FIR sample, convolution, or correlation,
 omitting the accumulator policy requests target-independent exact mathematical
@@ -209,6 +211,33 @@ and final-state semantics.
 
 These two forms do not introduce general tuples, assignments, configurable
 complex arithmetic, recursive-state inference, or a stable C ABI.
+
+One fixed direct-form-II SOS section is available through an explicit
+recursive numeric profile:
+
+```python
+def q15_sos_df2_fixed(
+    input: tensor[q15],
+    coefficients: tensor[q15,1,5],
+    scales: tensor[q15,1],
+    state: tensor[q15,1,2])
+    -> (tensor[q15], tensor[q15,1,2]):
+  return sos_df2_fixed(
+      input, coefficients, scales, state,
+      accumulator=exact[40,saturate],
+      state_rounding=nearest_even,
+      state_overflow=saturate,
+      output_rounding=toward_zero,
+      output_overflow=wrap)
+```
+
+The coefficient row is `[b0,b1,b2,a1,a2]`; feedback is additive, so a
+subtractive convention supplies negated `a1/a2`. State is `[d1,d2]`. The input
+and output chunk extent may be dynamic, while coefficients `[1,5]`, scales
+`[1]`, and state/next-state `[1,2]` are static. Unlike feed-forward `auto`
+accumulation, all recursive update and quantization behavior is explicit.
+Q31/f32 variants, additional direct forms, recursive Vector lowering, and a
+stable state ABI are outside this source slice.
 
 Compile it to textual MLIR with:
 

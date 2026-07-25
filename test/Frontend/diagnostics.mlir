@@ -18,6 +18,7 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_butterfly_result.ox 2>&1 | FileCheck %s --check-prefix=BUTTERFLY-RESULT
 // RUN: not ondrix-compile %S/Inputs/invalid_auto_dynamic.ox 2>&1 | FileCheck %s --check-prefix=AUTO-DYNAMIC
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_stream_state.ox 2>&1 | FileCheck %s --check-prefix=STREAM-STATE
+// RUN: not ondrix-compile %S/Inputs/invalid_sos_df2_fixed_layout.ox 2>&1 | FileCheck %s --check-prefix=SOS-LAYOUT
 
 // KERNEL: invalid_kernel_keyword.ox:1:1: error: unsupported top-level construct 'kernel'; expected 'def'
 // KERNEL-NEXT: kernel q15_dot(lhs: buffer[q15], rhs: buffer[q15]) -> q15:
@@ -61,3 +62,5 @@
 
 // AUTO-DYNAMIC: invalid_auto_dynamic.ox:3:10: error: automatic accumulation requires equal static operand extents
 // STREAM-STATE: invalid_fir_stream_state.ox:6:10: error: fir_stream state and next-state extents must equal coefficients - 1
+
+// SOS-LAYOUT: invalid_sos_df2_fixed_layout.ox:7:10: error: sos_df2_fixed requires input/output rank 1, coefficients/state rank 2, and scales rank 1

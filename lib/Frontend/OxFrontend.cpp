@@ -203,6 +203,7 @@ enum class ReductionKind {
   Fir,
   FirFilter,
   FirStream,
+  SosDf2Fixed,
   Convolution,
   Correlation,
   Butterfly,
@@ -217,7 +218,7 @@ static bool isCfftKind(ReductionKind kind) {
 struct ParameterAst {
   std::string name;
   SourceType type;
-  std::optional<int64_t> extent;
+  std::vector<std::optional<int64_t>> shape;
   ContainerKind container = ContainerKind::Buffer;
   std::vector<int64_t> constantValues;
   SourcePosition position;
@@ -233,11 +234,14 @@ struct ReductionAst {
   std::string lhs;
   std::string rhs;
   std::string third;
+  std::string fourth;
   uint64_t accumulatorWidth = 0;
   bool accumulatorAuto = false;
   std::string updateOverflow;
   std::string rounding;
   std::string destinationOverflow;
+  std::string stateRounding;
+  std::string stateOverflow;
   std::string fpContract;
   std::string boundary;
   SourcePosition position;
@@ -249,12 +253,22 @@ struct KernelAst {
   SourceType resultType;
   unsigned resultCount = 1;
   bool tensorResult = false;
-  std::optional<int64_t> resultExtent;
+  std::vector<std::optional<int64_t>> resultShape;
   bool secondTensorResult = false;
-  std::optional<int64_t> secondResultExtent;
+  std::vector<std::optional<int64_t>> secondResultShape;
   ReductionAst result;
   SourcePosition position;
 };
+
+static bool hasRank(llvm::ArrayRef<std::optional<int64_t>> shape, unsigned rank) {
+  return shape.size() == rank;
+}
+
+static const std::optional<int64_t> &
+getRankOneExtent(llvm::ArrayRef<std::optional<int64_t>> shape) {
+  assert(hasRank(shape, 1));
+  return shape.front();
+}
 
 class Parser {
 public:
@@ -296,12 +310,12 @@ public:
       return std::nullopt;
     if (current.kind == TokenKind::LeftParen) {
       advance();
-      auto parseResult = [&](SourceType &type, bool &isTensor, std::optional<int64_t> &extent,
-                             llvm::StringRef ordinal) {
+      auto parseResult = [&](SourceType &type, bool &isTensor,
+                             std::vector<std::optional<int64_t>> &shape, llvm::StringRef ordinal) {
         if (isIdentifier("tensor")) {
           isTensor = true;
           advance();
-          return parseShapedType(type, extent, "tensor");
+          return parseShapedType(type, shape, "tensor");
         }
         auto parsed = parseSourceType(llvm::Twine("expected ") + ordinal + " function result type");
         if (!parsed)
@@ -310,12 +324,11 @@ public:
         return true;
       };
       SourceType firstType;
-      if (!parseResult(firstType, kernel.tensorResult, kernel.resultExtent, "first") ||
+      if (!parseResult(firstType, kernel.tensorResult, kernel.resultShape, "first") ||
           !expect(TokenKind::Comma, "expected ',' between function result types"))
         return std::nullopt;
       SourceType secondType;
-      if (!parseResult(secondType, kernel.secondTensorResult, kernel.secondResultExtent,
-                       "second") ||
+      if (!parseResult(secondType, kernel.secondTensorResult, kernel.secondResultShape, "second") ||
           !expect(TokenKind::RightParen, "expected ')' after function results"))
         return std::nullopt;
       if (firstType != secondType) {
@@ -327,7 +340,7 @@ public:
     } else if (isIdentifier("tensor")) {
       kernel.tensorResult = true;
       advance();
-      if (!parseShapedType(kernel.resultType, kernel.resultExtent, "tensor"))
+      if (!parseShapedType(kernel.resultType, kernel.resultShape, "tensor"))
         return std::nullopt;
     } else {
       auto resultType = parseSourceType("expected function result type 'q15', 'q31', or 'f32'");
@@ -340,13 +353,13 @@ public:
       return std::nullopt;
 
     if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter") &&
-        !isIdentifier("fir_stream") && !isIdentifier("convolution") &&
-        !isIdentifier("correlation") && !isIdentifier("butterfly") && !isIdentifier("cfft") &&
-        !isIdentifier("icfft")) {
+        !isIdentifier("fir_stream") && !isIdentifier("sos_df2_fixed") &&
+        !isIdentifier("convolution") && !isIdentifier("correlation") &&
+        !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_stream(...), "
-                        "convolution(...), correlation(...), butterfly(...), cfft(...), or "
-                        "icfft(...) return expression");
+                        "sos_df2_fixed(...), convolution(...), correlation(...), butterfly(...), "
+                        "cfft(...), or icfft(...) return expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -357,6 +370,8 @@ public:
       kernel.result.kind = ReductionKind::FirFilter;
     else if (isIdentifier("fir_stream"))
       kernel.result.kind = ReductionKind::FirStream;
+    else if (isIdentifier("sos_df2_fixed"))
+      kernel.result.kind = ReductionKind::SosDf2Fixed;
     else if (isIdentifier("convolution"))
       kernel.result.kind = ReductionKind::Convolution;
     else if (isIdentifier("correlation"))
@@ -375,6 +390,31 @@ public:
     if (!lhs)
       return std::nullopt;
     kernel.result.lhs = lhs->spelling.str();
+    if (kernel.result.kind == ReductionKind::SosDf2Fixed) {
+      if (!expect(TokenKind::Comma, "expected ',' after sos_df2_fixed input operand"))
+        return std::nullopt;
+      auto coefficients = parseIdentifier("expected sos_df2_fixed coefficients operand");
+      if (!coefficients ||
+          !expect(TokenKind::Comma, "expected ',' after sos_df2_fixed coefficients operand"))
+        return std::nullopt;
+      auto scales = parseIdentifier("expected sos_df2_fixed scales operand");
+      if (!scales || !expect(TokenKind::Comma, "expected ',' after sos_df2_fixed scales operand"))
+        return std::nullopt;
+      auto state = parseIdentifier("expected sos_df2_fixed state operand");
+      if (!state || !expect(TokenKind::Comma, "expected ',' before sos_df2_fixed numeric policy"))
+        return std::nullopt;
+      kernel.result.rhs = coefficients->spelling.str();
+      kernel.result.third = scales->spelling.str();
+      kernel.result.fourth = state->spelling.str();
+      if (!parseFixedSosPolicy(kernel.result) ||
+          !expect(TokenKind::RightParen, "expected ')' after sos_df2_fixed expression"))
+        return std::nullopt;
+      if (current.kind != TokenKind::Eof) {
+        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
+        return std::nullopt;
+      }
+      return kernel;
+    }
     if (kernel.result.kind == ReductionKind::Butterfly ||
         kernel.result.kind == ReductionKind::FirStream) {
       llvm::StringRef builtin =
@@ -551,7 +591,7 @@ private:
     return negative ? -signedValue : signedValue;
   }
 
-  bool parseShapedType(SourceType &type, std::optional<int64_t> &extent,
+  bool parseShapedType(SourceType &type, std::vector<std::optional<int64_t>> &shape,
                        llvm::StringRef containerName) {
     if (!expect(TokenKind::LeftBracket, llvm::Twine("expected '[' in ") + containerName + " type"))
       return false;
@@ -560,19 +600,28 @@ private:
     if (!parsedType)
       return false;
     type = *parsedType;
+    shape.clear();
     if (current.kind == TokenKind::Comma) {
       advance();
-      auto parsedExtent = parseInteger(llvm::Twine("expected static ") + containerName + " extent");
-      uint64_t value = 0;
-      if (!parsedExtent)
-        return false;
-      if (parsedExtent->spelling.getAsInteger(10, value) ||
-          value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-        diagnostics.error(parsedExtent->position,
-                          llvm::Twine(containerName) + " extent is out of range");
-        return false;
-      }
-      extent = static_cast<int64_t>(value);
+      do {
+        auto parsedExtent =
+            parseInteger(llvm::Twine("expected static ") + containerName + " extent");
+        uint64_t value = 0;
+        if (!parsedExtent)
+          return false;
+        if (parsedExtent->spelling.getAsInteger(10, value) ||
+            value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+          diagnostics.error(parsedExtent->position,
+                            llvm::Twine(containerName) + " extent is out of range");
+          return false;
+        }
+        shape.emplace_back(static_cast<int64_t>(value));
+        if (current.kind != TokenKind::Comma)
+          break;
+        advance();
+      } while (true);
+    } else {
+      shape.emplace_back(std::nullopt);
     }
     return expect(TokenKind::RightBracket,
                   llvm::Twine("expected ']' in ") + containerName + " type");
@@ -591,7 +640,7 @@ private:
       llvm::StringRef containerName = isTensor ? "tensor" : "buffer";
       advance();
       parameter.container = isTensor ? ContainerKind::Tensor : ContainerKind::Buffer;
-      if (!parseShapedType(parameter.type, parameter.extent, containerName))
+      if (!parseShapedType(parameter.type, parameter.shape, containerName))
         return std::nullopt;
       return parameter;
     }
@@ -636,6 +685,25 @@ private:
   }
 
   bool parseFixedPolicy(ReductionAst &result) {
+    if (!parseAccumulatorPolicy(result) ||
+        !expect(TokenKind::Comma, "expected ',' before rounding policy") ||
+        !expectIdentifier("rounding", "expected rounding policy") ||
+        !expect(TokenKind::Equal, "expected '=' after rounding"))
+      return false;
+    auto rounding = parseIdentifier("expected rounding mode");
+    if (!rounding || !expect(TokenKind::Comma, "expected ',' before destination overflow policy") ||
+        !expectIdentifier("overflow", "expected destination overflow policy") ||
+        !expect(TokenKind::Equal, "expected '=' after overflow"))
+      return false;
+    result.rounding = rounding->spelling.str();
+    auto destinationOverflow = parseIdentifier("expected destination overflow mode");
+    if (!destinationOverflow)
+      return false;
+    result.destinationOverflow = destinationOverflow->spelling.str();
+    return true;
+  }
+
+  bool parseAccumulatorPolicy(ReductionAst &result) {
     if (!expectIdentifier("accumulator", "expected accumulator policy") ||
         !expect(TokenKind::Equal, "expected '=' after accumulator") ||
         !expectIdentifier("exact", "only exact accumulator semantics are currently supported") ||
@@ -650,22 +718,42 @@ private:
     }
     auto updateOverflow = parseIdentifier("expected accumulator update overflow policy");
     if (!updateOverflow ||
-        !expect(TokenKind::RightBracket, "expected ']' after accumulator policy") ||
-        !expect(TokenKind::Comma, "expected ',' before rounding policy") ||
-        !expectIdentifier("rounding", "expected rounding policy") ||
-        !expect(TokenKind::Equal, "expected '=' after rounding"))
+        !expect(TokenKind::RightBracket, "expected ']' after accumulator policy"))
       return false;
     result.updateOverflow = updateOverflow->spelling.str();
-    auto rounding = parseIdentifier("expected rounding mode");
-    if (!rounding || !expect(TokenKind::Comma, "expected ',' before destination overflow policy") ||
-        !expectIdentifier("overflow", "expected destination overflow policy") ||
-        !expect(TokenKind::Equal, "expected '=' after overflow"))
+    return true;
+  }
+
+  bool parseFixedSosPolicy(ReductionAst &result) {
+    if (!parseAccumulatorPolicy(result) ||
+        !expect(TokenKind::Comma, "expected ',' before state rounding policy") ||
+        !expectIdentifier("state_rounding", "expected state rounding policy") ||
+        !expect(TokenKind::Equal, "expected '=' after state_rounding"))
       return false;
-    result.rounding = rounding->spelling.str();
-    auto destinationOverflow = parseIdentifier("expected destination overflow mode");
-    if (!destinationOverflow)
+    auto stateRounding = parseIdentifier("expected state rounding mode");
+    if (!stateRounding ||
+        !expect(TokenKind::Comma, "expected ',' before state destination overflow policy") ||
+        !expectIdentifier("state_overflow", "expected state destination overflow policy") ||
+        !expect(TokenKind::Equal, "expected '=' after state_overflow"))
       return false;
-    result.destinationOverflow = destinationOverflow->spelling.str();
+    result.stateRounding = stateRounding->spelling.str();
+    auto stateOverflow = parseIdentifier("expected state destination overflow mode");
+    if (!stateOverflow || !expect(TokenKind::Comma, "expected ',' before output rounding policy") ||
+        !expectIdentifier("output_rounding", "expected output rounding policy") ||
+        !expect(TokenKind::Equal, "expected '=' after output_rounding"))
+      return false;
+    result.stateOverflow = stateOverflow->spelling.str();
+    auto outputRounding = parseIdentifier("expected output rounding mode");
+    if (!outputRounding ||
+        !expect(TokenKind::Comma, "expected ',' before output destination overflow policy") ||
+        !expectIdentifier("output_overflow", "expected output destination overflow policy") ||
+        !expect(TokenKind::Equal, "expected '=' after output_overflow"))
+      return false;
+    result.rounding = outputRounding->spelling.str();
+    auto outputOverflow = parseIdentifier("expected output destination overflow mode");
+    if (!outputOverflow)
+      return false;
+    result.destinationOverflow = outputOverflow->spelling.str();
     return true;
   }
 
@@ -676,10 +764,12 @@ private:
 
 struct CheckedKernel {
   KernelAst ast;
-  std::optional<ondsp::OverflowMode> updateOverflow;
-  std::optional<ondsp::RoundingMode> rounding;
-  std::optional<ondsp::OverflowMode> destinationOverflow;
-  std::optional<ondsp::FpContractMode> fpContract;
+  std::optional<ondsp::OverflowMode> updateOverflow = std::nullopt;
+  std::optional<ondsp::RoundingMode> rounding = std::nullopt;
+  std::optional<ondsp::OverflowMode> destinationOverflow = std::nullopt;
+  std::optional<ondsp::FpContractMode> fpContract = std::nullopt;
+  std::optional<ondsp::RoundingMode> stateRounding = std::nullopt;
+  std::optional<ondsp::OverflowMode> stateOverflow = std::nullopt;
 };
 
 static std::optional<ondsp::OverflowMode> parseOverflow(llvm::StringRef value) {
@@ -719,28 +809,38 @@ static unsigned inferQ15FullAccumulatorWidth(uint64_t productCount) {
 static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diagnostics) {
   bool hasThreeOperands =
       ast.result.kind == ReductionKind::Butterfly || ast.result.kind == ReductionKind::FirStream;
-  size_t expectedParameterCount = isCfftKind(ast.result.kind) ? 1 : hasThreeOperands ? 3 : 2;
+  bool hasFourOperands = ast.result.kind == ReductionKind::SosDf2Fixed;
+  size_t expectedParameterCount = isCfftKind(ast.result.kind) ? 1
+                                  : hasFourOperands           ? 4
+                                  : hasThreeOperands          ? 3
+                                                              : 2;
   if (ast.parameters.size() != expectedParameterCount) {
     diagnostics.error(ast.position,
                       isCfftKind(ast.result.kind) ? "cfft kernels require exactly one parameter"
+                      : hasFourOperands  ? "sos_df2_fixed kernels require exactly four parameters"
                       : hasThreeOperands ? "butterfly and fir_stream kernels require exactly three "
                                            "parameters"
                                          : "binary DSP kernels require exactly two parameters");
     return std::nullopt;
   }
-  if (ast.resultExtent && *ast.resultExtent <= 0) {
-    diagnostics.error(ast.position, "static result tensor extent must be positive");
+  auto verifyPositiveShape = [&](llvm::ArrayRef<std::optional<int64_t>> shape,
+                                 llvm::StringRef description, SourcePosition position) {
+    if (llvm::any_of(shape, [](std::optional<int64_t> extent) { return extent && *extent <= 0; })) {
+      diagnostics.error(position,
+                        llvm::Twine("static ") + description + " tensor extents must be positive");
+      return false;
+    }
+    return true;
+  };
+  if (!verifyPositiveShape(ast.resultShape, "result", ast.position) ||
+      !verifyPositiveShape(ast.secondResultShape, "second result", ast.position))
     return std::nullopt;
-  }
-  if (ast.secondResultExtent && *ast.secondResultExtent <= 0) {
-    diagnostics.error(ast.position, "static second result tensor extent must be positive");
-    return std::nullopt;
-  }
 
   llvm::StringSet<> parameterNames;
   const ParameterAst *lhsParameter = nullptr;
   const ParameterAst *rhsParameter = nullptr;
   const ParameterAst *thirdParameter = nullptr;
+  const ParameterAst *fourthParameter = nullptr;
   for (const ParameterAst &parameter : ast.parameters) {
     if (!parameterNames.insert(parameter.name).second) {
       diagnostics.error(parameter.position,
@@ -752,16 +852,16 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         "parameter element types must match the kernel result type");
       return std::nullopt;
     }
-    if (parameter.extent && *parameter.extent <= 0) {
-      diagnostics.error(parameter.position, "static shaped extent must be positive");
+    if (!verifyPositiveShape(parameter.shape, "parameter", parameter.position))
       return std::nullopt;
-    }
     if (parameter.name == ast.result.lhs)
       lhsParameter = &parameter;
     if (parameter.name == ast.result.rhs)
       rhsParameter = &parameter;
     if (parameter.name == ast.result.third)
       thirdParameter = &parameter;
+    if (parameter.name == ast.result.fourth)
+      fourthParameter = &parameter;
   }
   if (!parameterNames.contains(ast.result.lhs)) {
     diagnostics.error(ast.result.position,
@@ -776,6 +876,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   if (hasThreeOperands && !parameterNames.contains(ast.result.third)) {
     diagnostics.error(ast.result.position,
                       llvm::Twine("unknown third builtin operand '") + ast.result.third + "'");
+    return std::nullopt;
+  }
+  if (hasFourOperands &&
+      (!parameterNames.contains(ast.result.third) || !parameterNames.contains(ast.result.fourth))) {
+    diagnostics.error(ast.result.position, "unknown sos_df2_fixed builtin operand");
     return std::nullopt;
   }
 
@@ -803,22 +908,32 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           "fir_stream requires three Q15 tensor parameters and two Q15 tensor results");
       return std::nullopt;
     }
-    if (!rhsParameter->extent || !thirdParameter->extent || !ast.secondResultExtent) {
+    if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
+        !hasRank(thirdParameter->shape, 1) || !hasRank(ast.resultShape, 1) ||
+        !hasRank(ast.secondResultShape, 1)) {
+      diagnostics.error(ast.result.position, "fir_stream currently requires rank-1 tensors");
+      return std::nullopt;
+    }
+    const std::optional<int64_t> &lhsExtent = getRankOneExtent(lhsParameter->shape);
+    const std::optional<int64_t> &rhsExtent = getRankOneExtent(rhsParameter->shape);
+    const std::optional<int64_t> &stateExtent = getRankOneExtent(thirdParameter->shape);
+    const std::optional<int64_t> &resultExtent = getRankOneExtent(ast.resultShape);
+    const std::optional<int64_t> &nextStateExtent = getRankOneExtent(ast.secondResultShape);
+    if (!rhsExtent || !stateExtent || !nextStateExtent) {
       diagnostics.error(ast.result.position,
                         "fir_stream currently requires static coefficient, state, and next-state "
                         "extents");
       return std::nullopt;
     }
-    int64_t coefficientExtent = *rhsParameter->extent;
+    int64_t coefficientExtent = *rhsExtent;
     int64_t expectedStateExtent = coefficientExtent - 1;
-    if (*thirdParameter->extent != expectedStateExtent ||
-        *ast.secondResultExtent != expectedStateExtent)
+    if (*stateExtent != expectedStateExtent || *nextStateExtent != expectedStateExtent)
       diagnostics.error(ast.result.position,
                         "fir_stream state and next-state extents must equal coefficients - 1");
-    else if (lhsParameter->extent.has_value() != ast.resultExtent.has_value())
+    else if (lhsExtent.has_value() != resultExtent.has_value())
       diagnostics.error(ast.result.position,
                         "fir_stream input and output must both be static or both be dynamic");
-    else if (lhsParameter->extent && *ast.resultExtent != *lhsParameter->extent)
+    else if (lhsExtent && *resultExtent != *lhsExtent)
       diagnostics.error(ast.result.position,
                         "fir_stream output extent must equal the input chunk extent");
     else {
@@ -830,9 +945,77 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     }
     return std::nullopt;
   }
+  if (ast.result.kind == ReductionKind::SosDf2Fixed) {
+    if (ast.resultCount != 2 || !ast.tensorResult || !ast.secondTensorResult ||
+        ast.resultType != SourceType::Q15 || !lhsParameter || !rhsParameter || !thirdParameter ||
+        !fourthParameter || constexprCount != 0 ||
+        llvm::any_of(ast.parameters,
+                     [](const ParameterAst &parameter) { return !parameter.isTensor(); })) {
+      diagnostics.error(
+          ast.result.position,
+          "sos_df2_fixed requires four Q15 tensor parameters and two Q15 tensor results");
+      return std::nullopt;
+    }
+    if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 2) ||
+        !hasRank(thirdParameter->shape, 1) || !hasRank(fourthParameter->shape, 2) ||
+        !hasRank(ast.resultShape, 1) || !hasRank(ast.secondResultShape, 2)) {
+      diagnostics.error(ast.result.position, "sos_df2_fixed requires input/output rank 1, "
+                                             "coefficients/state rank 2, and scales rank 1");
+      return std::nullopt;
+    }
+    const std::optional<int64_t> &inputExtent = lhsParameter->shape[0];
+    const std::optional<int64_t> &outputExtent = ast.resultShape[0];
+    if (inputExtent.has_value() != outputExtent.has_value() ||
+        (inputExtent && *inputExtent != *outputExtent)) {
+      diagnostics.error(ast.result.position,
+                        "sos_df2_fixed input and output chunk extents must match");
+      return std::nullopt;
+    }
+    if (rhsParameter->shape[0] != std::optional<int64_t>(1) ||
+        rhsParameter->shape[1] != std::optional<int64_t>(5) ||
+        thirdParameter->shape[0] != std::optional<int64_t>(1) ||
+        fourthParameter->shape[0] != std::optional<int64_t>(1) ||
+        fourthParameter->shape[1] != std::optional<int64_t>(2) ||
+        ast.secondResultShape[0] != std::optional<int64_t>(1) ||
+        ast.secondResultShape[1] != std::optional<int64_t>(2)) {
+      diagnostics.error(
+          ast.result.position,
+          "sos_df2_fixed currently requires coefficients [1,5], scales [1], and state [1,2]");
+      return std::nullopt;
+    }
+    if (ast.result.accumulatorWidth != 40) {
+      diagnostics.error(ast.result.position,
+                        "the executable Q15 SOS profile requires exact accumulator width 40");
+      return std::nullopt;
+    }
+    auto updateOverflow = parseOverflow(ast.result.updateOverflow);
+    auto stateRounding = parseRounding(ast.result.stateRounding);
+    auto stateOverflow = parseOverflow(ast.result.stateOverflow);
+    auto outputRounding = parseRounding(ast.result.rounding);
+    auto outputOverflow = parseOverflow(ast.result.destinationOverflow);
+    if (!updateOverflow || !stateRounding || !stateOverflow || !outputRounding || !outputOverflow) {
+      diagnostics.error(ast.result.position,
+                        "sos_df2_fixed contains an unsupported numeric policy");
+      return std::nullopt;
+    }
+    return CheckedKernel{std::move(ast), *updateOverflow, *outputRounding, *outputOverflow,
+                         std::nullopt,   *stateRounding,  *stateOverflow};
+  }
+  if (llvm::any_of(ast.parameters,
+                   [](const ParameterAst &parameter) {
+                     return (parameter.isBuffer() || parameter.isTensor()) &&
+                            !hasRank(parameter.shape, 1);
+                   }) ||
+      (ast.tensorResult && !hasRank(ast.resultShape, 1)) ||
+      (ast.secondTensorResult && !hasRank(ast.secondResultShape, 1))) {
+    diagnostics.error(ast.result.position,
+                      "this builtin currently requires rank-1 shaped parameters and results");
+    return std::nullopt;
+  }
   if (ast.resultCount != 1) {
     diagnostics.error(ast.result.position,
-                      "multiple results are currently supported only by butterfly");
+                      "multiple results are currently supported only by butterfly and stateful "
+                      "DSP builtins");
     return std::nullopt;
   }
   if (isCfftKind(ast.result.kind)) {
@@ -845,16 +1028,18 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       diagnostics.error(ast.result.position, "cfft currently requires a tensor input and result");
       return std::nullopt;
     }
-    if (!lhsParameter->extent || !ast.resultExtent) {
+    const std::optional<int64_t> &lhsExtent = getRankOneExtent(lhsParameter->shape);
+    const std::optional<int64_t> &resultExtent = getRankOneExtent(ast.resultShape);
+    if (!lhsExtent || !resultExtent) {
       diagnostics.error(ast.result.position,
                         "cfft currently requires static input and result extents");
       return std::nullopt;
     }
-    if (*lhsParameter->extent != *ast.resultExtent) {
+    if (*lhsExtent != *resultExtent) {
       diagnostics.error(ast.result.position, "cfft input and result extents must match");
       return std::nullopt;
     }
-    if (*lhsParameter->extent != 4 && *lhsParameter->extent != 8) {
+    if (*lhsExtent != 4 && *lhsExtent != 8) {
       diagnostics.error(ast.result.position, "cfft currently supports only four or eight points");
       return std::nullopt;
     }
@@ -915,20 +1100,23 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         "convolution and correlation require tensor inputs and result");
       return std::nullopt;
     }
-    if ((!lhsParameter->extent || !rhsParameter->extent) && ast.resultExtent) {
+    const std::optional<int64_t> &lhsExtent = getRankOneExtent(lhsParameter->shape);
+    const std::optional<int64_t> &rhsExtent = getRankOneExtent(rhsParameter->shape);
+    const std::optional<int64_t> &resultExtent = getRankOneExtent(ast.resultShape);
+    if ((!lhsExtent || !rhsExtent) && resultExtent) {
       diagnostics.error(ast.result.position,
                         "a static convolution/correlation result requires static input and kernel "
                         "extents");
       return std::nullopt;
     }
-    if (lhsParameter->extent && rhsParameter->extent) {
-      if (*rhsParameter->extent > *lhsParameter->extent) {
+    if (lhsExtent && rhsExtent) {
+      if (*rhsExtent > *lhsExtent) {
         diagnostics.error(ast.result.position,
                           "convolution/correlation input extent must cover the kernel");
         return std::nullopt;
       }
-      int64_t expectedExtent = *lhsParameter->extent - *rhsParameter->extent + 1;
-      if (ast.resultExtent && *ast.resultExtent != expectedExtent) {
+      int64_t expectedExtent = *lhsExtent - *rhsExtent + 1;
+      if (resultExtent && *resultExtent != expectedExtent) {
         diagnostics.error(ast.result.position,
                           "static convolution/correlation result extent is incorrect");
         return std::nullopt;
@@ -946,42 +1134,45 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         "coefficients");
       return std::nullopt;
     }
-    std::optional<int64_t> coefficientExtent = rhsParameter->extent;
+    const std::optional<int64_t> &lhsExtent = getRankOneExtent(lhsParameter->shape);
+    const std::optional<int64_t> &resultExtent = getRankOneExtent(ast.resultShape);
+    std::optional<int64_t> coefficientExtent =
+        rhsParameter->isConstexpr() ? std::nullopt : getRankOneExtent(rhsParameter->shape);
     if (rhsParameter->isConstexpr())
       coefficientExtent = static_cast<int64_t>(rhsParameter->constantValues.size());
     if (ast.result.boundary == "valid") {
-      if ((!lhsParameter->extent || !coefficientExtent) && ast.resultExtent) {
+      if ((!lhsExtent || !coefficientExtent) && resultExtent) {
         diagnostics.error(ast.result.position,
                           "a static valid fir_filter result requires static input and coefficient "
                           "extents");
         return std::nullopt;
       }
-      if (lhsParameter->extent && coefficientExtent) {
-        if (*coefficientExtent > *lhsParameter->extent) {
+      if (lhsExtent && coefficientExtent) {
+        if (*coefficientExtent > *lhsExtent) {
           diagnostics.error(ast.result.position,
                             "valid fir_filter requires input extent at least coefficient extent");
           return std::nullopt;
         }
-        int64_t expectedExtent = *lhsParameter->extent - *coefficientExtent + 1;
-        if (ast.resultExtent && *ast.resultExtent != expectedExtent) {
+        int64_t expectedExtent = *lhsExtent - *coefficientExtent + 1;
+        if (resultExtent && *resultExtent != expectedExtent) {
           diagnostics.error(ast.result.position,
                             "static fir_filter result extent does not match valid convolution");
           return std::nullopt;
         }
       }
     } else if (ast.result.boundary == "full") {
-      if (!lhsParameter->extent || !coefficientExtent || !ast.resultExtent) {
+      if (!lhsExtent || !coefficientExtent || !resultExtent) {
         diagnostics.error(ast.result.position,
                           "full fir_filter currently requires static input, coefficient, and "
                           "result extents");
         return std::nullopt;
       }
-      if (*lhsParameter->extent > std::numeric_limits<int64_t>::max() - (*coefficientExtent - 1)) {
+      if (*lhsExtent > std::numeric_limits<int64_t>::max() - (*coefficientExtent - 1)) {
         diagnostics.error(ast.result.position, "full fir_filter result extent overflows index");
         return std::nullopt;
       }
-      int64_t expectedExtent = *lhsParameter->extent + *coefficientExtent - 1;
-      if (*ast.resultExtent != expectedExtent) {
+      int64_t expectedExtent = *lhsExtent + *coefficientExtent - 1;
+      if (*resultExtent != expectedExtent) {
         diagnostics.error(ast.result.position,
                           "static fir_filter result extent does not match full convolution");
         return std::nullopt;
@@ -1016,12 +1207,13 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
 
   if (constexprCount != 0) {
     if (ast.result.kind != ReductionKind::FirFilter) {
-      if (!lhsParameter->extent) {
+      const std::optional<int64_t> &lhsExtent = getRankOneExtent(lhsParameter->shape);
+      if (!lhsExtent) {
         diagnostics.error(lhsParameter->position,
                           "a constexpr reduction operand requires a static left operand extent");
         return std::nullopt;
       }
-      if (*lhsParameter->extent != static_cast<int64_t>(rhsParameter->constantValues.size())) {
+      if (*lhsExtent != static_cast<int64_t>(rhsParameter->constantValues.size())) {
         diagnostics.error(lhsParameter->position,
                           "static input extent must equal the constexpr coefficient count");
         return std::nullopt;
@@ -1040,7 +1232,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           "automatic accumulation currently supports static Q15 dot, fir, and conv1d");
       return std::nullopt;
     }
-    std::optional<int64_t> rhsExtent = rhsParameter->extent;
+    std::optional<int64_t> rhsExtent =
+        rhsParameter->isConstexpr() ? std::nullopt : getRankOneExtent(rhsParameter->shape);
     if (rhsParameter->isConstexpr())
       rhsExtent = static_cast<int64_t>(rhsParameter->constantValues.size());
     if (!rhsExtent) {
@@ -1050,7 +1243,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                             : "automatic accumulation requires a static coefficient extent");
       return std::nullopt;
     }
-    if (isScalarReduction && (!lhsParameter->extent || *lhsParameter->extent != *rhsExtent)) {
+    const std::optional<int64_t> &lhsExtent = getRankOneExtent(lhsParameter->shape);
+    if (isScalarReduction && (!lhsExtent || *lhsExtent != *rhsExtent)) {
       diagnostics.error(ast.result.position,
                         "automatic accumulation requires equal static operand extents");
       return std::nullopt;
@@ -1112,30 +1306,33 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     elementType = builder.getI32Type();
   else
     elementType = builder.getF32Type();
+  auto materializeShape = [](llvm::ArrayRef<std::optional<int64_t>> shape) {
+    SmallVector<int64_t> dimensions;
+    dimensions.reserve(shape.size());
+    for (std::optional<int64_t> extent : shape)
+      dimensions.push_back(extent.value_or(ShapedType::kDynamic));
+    return dimensions;
+  };
   SmallVector<Type> inputTypes;
   for (const ParameterAst &parameter : kernel.ast.parameters) {
     if (parameter.isConstexpr())
       continue;
-    int64_t extent = parameter.extent.value_or(ShapedType::kDynamic);
     if (parameter.isScalar())
       inputTypes.push_back(elementType);
     else if (parameter.isTensor())
-      inputTypes.push_back(RankedTensorType::get({extent}, elementType));
+      inputTypes.push_back(RankedTensorType::get(materializeShape(parameter.shape), elementType));
     else
-      inputTypes.push_back(MemRefType::get({extent}, elementType));
+      inputTypes.push_back(MemRefType::get(materializeShape(parameter.shape), elementType));
   }
   Type resultType = elementType;
-  if (kernel.ast.tensorResult) {
-    int64_t extent = kernel.ast.resultExtent.value_or(ShapedType::kDynamic);
-    resultType = RankedTensorType::get({extent}, elementType);
-  }
+  if (kernel.ast.tensorResult)
+    resultType = RankedTensorType::get(materializeShape(kernel.ast.resultShape), elementType);
   SmallVector<Type> resultTypes{resultType};
   if (kernel.ast.resultCount == 2) {
     Type secondResultType = elementType;
-    if (kernel.ast.secondTensorResult) {
-      int64_t extent = kernel.ast.secondResultExtent.value_or(ShapedType::kDynamic);
-      secondResultType = RankedTensorType::get({extent}, elementType);
-    }
+    if (kernel.ast.secondTensorResult)
+      secondResultType =
+          RankedTensorType::get(materializeShape(kernel.ast.secondResultShape), elementType);
     resultTypes.push_back(secondResultType);
   }
   FunctionType functionType = builder.getFunctionType(inputTypes, resultTypes);
@@ -1224,6 +1421,25 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
 
   Value rhs = arguments.lookup(kernel.ast.result.rhs);
+  if (kernel.ast.result.kind == ReductionKind::SosDf2Fixed) {
+    Value scales = arguments.lookup(kernel.ast.result.third);
+    Value state = arguments.lookup(kernel.ast.result.fourth);
+    auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
+    auto product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::Full);
+    auto accumulatorType =
+        ondsp::AccType::get(&context, builder.getIntegerType(kernel.ast.result.accumulatorWidth),
+                            30, ondsp::Signedness::Signed, *kernel.updateOverflow);
+    auto sos = builder.create<ir::SosFilterDf2FixedOp>(
+        expressionLocation, resultTypes, lhs, rhs, scales, state, numeric, product, accumulatorType,
+        *kernel.stateRounding, *kernel.stateOverflow, *kernel.rounding,
+        *kernel.destinationOverflow);
+    builder.create<func::ReturnOp>(expressionLocation,
+                                   ValueRange{sos.getOutput(), sos.getNextState()});
+    module->push_back(function);
+    if (failed(verify(*module)))
+      return {};
+    return module;
+  }
   if (kernel.ast.result.kind == ReductionKind::FirStream) {
     Value state = arguments.lookup(kernel.ast.result.third);
     auto outputType = cast<RankedTensorType>(resultTypes[0]);
