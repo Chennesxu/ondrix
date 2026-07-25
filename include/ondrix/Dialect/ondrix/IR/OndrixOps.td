@@ -173,6 +173,67 @@ def Ondrix_FirDecimateOp
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_FirInterpolateOp
+    : Ondrix_Op<"fir_interpolate", [
+        DestinationStyleOpInterface,
+        DeclareOpInterfaceMethods<ConditionallySpeculatable>,
+        NoMemoryEffect,
+        TypesMatchWith<"result type matches init type", "init", "result",
+                       "$_self">]> {
+  let summary = "Compute full phase-zero FIR interpolation";
+  let description = [{
+    `ondrix.fir_interpolate` computes the complete linear convolution of a
+    rank-1 input after phase-zero insertion by static `factor = L`. Let:
+
+      `upsampled[j] = input[j / L]` when `j mod L = 0`, otherwise numeric zero
+
+    For non-empty input length `N` and coefficient length `K`, the result
+    length is:
+
+      `O = (N - 1) * L + K`
+
+    Output `m` starts from numeric zero and visits coefficients in increasing
+    `k` order. A tap updates the accumulator only when `m >= k`,
+    `(m - k) mod L = 0`, and `(m - k) / L < N`:
+
+      `output[m] = ordered_sum_k upsampled[m - k] * coeffs[k]`
+
+    Skipping inserted-zero terms is part of this fixed-point contract and does
+    not authorize reassociation of the remaining updates. The `init` tensor
+    provides destination shape and storage; its element values are not part
+    of the mathematical result.
+
+    The first executable profile accepts exactly `factor = 2`, signed Q15,
+    exact full products, a signed frac30 accumulator of at least 32 bits, and
+    explicit export policy. Stateful block forms, configurable phase,
+    polyphase scheduling, floating point, Q31, Vector, and target selection
+    are outside this operation.
+
+    Dynamic extent relationships and index arithmetic are execution
+    preconditions. Generic lowering emits dominating assertions before
+    evaluating any sample.
+  }];
+  let arguments = (ins
+      AnyRankedTensor:$input,
+      AnyRankedTensor:$coeffs,
+      AnyRankedTensor:$init,
+      I64Attr:$factor,
+      Ondsp_FixedAttr:$numeric,
+      Ondsp_ProductAttr:$product,
+      TypeAttrOf<Ondsp_Acc>:$accumulator,
+      Ondsp_FixedAttr:$dst,
+      Ondsp_RoundingModeAttr:$rounding,
+      Ondsp_OverflowModeAttr:$overflow);
+  let results = (outs AnyRankedTensor:$result);
+  let extraClassDeclaration = [{
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      return {2, 3};
+    }
+  }];
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_Conv1DOp
     : Ondrix_Op<"conv1d", [
         DestinationStyleOpInterface,

@@ -157,6 +157,43 @@ static void assertValidFirDecimateShape(Location loc, Value inputLength, Value c
           "factor) plus one"));
 }
 
+static void assertFirInterpolateShape(Location loc, Value inputLength, Value coefficientLength,
+                                      Value outputLength, Value factor, Value zero, Value one,
+                                      OpBuilder &builder) {
+  Value hasInput = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, inputLength, zero);
+  builder.create<cf::AssertOp>(
+      loc, hasInput, builder.getStringAttr("fir_interpolate requires at least one input sample"));
+  Value hasCoefficients =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, coefficientLength, zero);
+  builder.create<cf::AssertOp>(
+      loc, hasCoefficients,
+      builder.getStringAttr("fir_interpolate requires at least one coefficient"));
+
+  Value inputIntervals = builder.create<arith::SubIOp>(loc, inputLength, one);
+  Value scaledIntervals = builder.create<arith::MulIOp>(loc, inputIntervals, factor);
+  Value recoveredIntervals = builder.create<arith::DivUIOp>(loc, scaledIntervals, factor);
+  Value multiplicationFits = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                                           recoveredIntervals, inputIntervals);
+  builder.create<cf::AssertOp>(
+      loc, multiplicationFits,
+      builder.getStringAttr("fir_interpolate result length multiplication must not overflow"));
+
+  Value requiredOutputLength =
+      builder.create<arith::AddIOp>(loc, scaledIntervals, coefficientLength);
+  Value additionFits = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge,
+                                                     requiredOutputLength, scaledIntervals);
+  builder.create<cf::AssertOp>(
+      loc, additionFits,
+      builder.getStringAttr("fir_interpolate result length addition must not overflow"));
+  Value outputMatches = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, outputLength,
+                                                      requiredOutputLength);
+  builder.create<cf::AssertOp>(
+      loc, outputMatches,
+      builder.getStringAttr(
+          "fir_interpolate output length must equal (input length - 1) * factor plus "
+          "coefficient length"));
+}
+
 static void assertFullFirFilterShape(Location loc, Value inputLength, Value coefficientLength,
                                      Value outputLength, Value zero, Value one,
                                      OpBuilder &builder) {
@@ -421,6 +458,72 @@ public:
                     tapLoc, op.getAccumulator(), tapArgs.front(), input, coefficient,
                     op.getNumeric(), op.getProduct());
                 tapBuilder.create<scf::YieldOp>(tapLoc, updated);
+              });
+          Value output = builder.create<ondrix::ondsp::AccExportOp>(
+              outputLoc, op.getDst().getStorage(), tapLoop.getResult(0), op.getDst(),
+              op.getRounding(), op.getOverflow());
+          Value next =
+              builder.create<tensor::InsertOp>(outputLoc, output, outputArgs.front(), outputIndex);
+          builder.create<scf::YieldOp>(outputLoc, next);
+        });
+    rewriter.replaceOp(op, outputLoop.getResult(0));
+    return success();
+  }
+};
+
+class FirInterpolateOpLowering final : public OpConversionPattern<ondrix::ir::FirInterpolateOp> {
+public:
+  using OpConversionPattern<ondrix::ir::FirInterpolateOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::FirInterpolateOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    int64_t factorValue = op.getFactorAttr().getValue().getSExtValue();
+    Value factor = rewriter.create<arith::ConstantIndexOp>(loc, factorValue);
+    Value inputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInput(), zero);
+    Value coefficientLength = rewriter.create<tensor::DimOp>(loc, adaptor.getCoeffs(), zero);
+    Value outputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInit(), zero);
+    assertFirInterpolateShape(loc, inputLength, coefficientLength, outputLength, factor, zero, one,
+                              rewriter);
+
+    auto outputLoop = rewriter.create<scf::ForOp>(
+        loc, zero, outputLength, one, ValueRange{adaptor.getInit()},
+        [&](OpBuilder &builder, Location outputLoc, Value outputIndex, ValueRange outputArgs) {
+          Value initial = builder.create<ondrix::ondsp::AccZeroOp>(outputLoc, op.getAccumulator());
+          auto tapLoop = builder.create<scf::ForOp>(
+              outputLoc, zero, coefficientLength, one, ValueRange{initial},
+              [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange tapArgs) {
+                Value outputCoversTap = tapBuilder.create<arith::CmpIOp>(
+                    tapLoc, arith::CmpIPredicate::uge, outputIndex, tap);
+                Value upsampledIndex = tapBuilder.create<arith::SubIOp>(tapLoc, outputIndex, tap);
+                Value phase = tapBuilder.create<arith::RemUIOp>(tapLoc, upsampledIndex, factor);
+                Value isInputPhase =
+                    tapBuilder.create<arith::CmpIOp>(tapLoc, arith::CmpIPredicate::eq, phase, zero);
+                Value inputIndex =
+                    tapBuilder.create<arith::DivUIOp>(tapLoc, upsampledIndex, factor);
+                Value beforeInputEnd = tapBuilder.create<arith::CmpIOp>(
+                    tapLoc, arith::CmpIPredicate::ult, inputIndex, inputLength);
+                Value inPhaseAndBounds =
+                    tapBuilder.create<arith::AndIOp>(tapLoc, isInputPhase, beforeInputEnd);
+                Value contributes =
+                    tapBuilder.create<arith::AndIOp>(tapLoc, outputCoversTap, inPhaseAndBounds);
+                auto guarded = tapBuilder.create<scf::IfOp>(
+                    tapLoc, TypeRange{tapArgs.front().getType()}, contributes,
+                    /*withElseRegion=*/true);
+                OpBuilder thenBuilder = guarded.getThenBodyBuilder();
+                Value input =
+                    thenBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getInput(), inputIndex);
+                Value coefficient =
+                    thenBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getCoeffs(), tap);
+                Value updated = thenBuilder.create<ondrix::ondsp::MacOp>(
+                    tapLoc, op.getAccumulator(), tapArgs.front(), input, coefficient,
+                    op.getNumeric(), op.getProduct());
+                thenBuilder.create<scf::YieldOp>(tapLoc, updated);
+                OpBuilder elseBuilder = guarded.getElseBodyBuilder();
+                elseBuilder.create<scf::YieldOp>(tapLoc, tapArgs.front());
+                tapBuilder.create<scf::YieldOp>(tapLoc, guarded.getResult(0));
               });
           Value output = builder.create<ondrix::ondsp::AccExportOp>(
               outputLoc, op.getDst().getStorage(), tapLoop.getResult(0), op.getDst(),
@@ -958,9 +1061,11 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns.add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, Conv1DOpLowering,
-                 FirStreamOpLowering, SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering,
-                 DotOpLowering, ButterflyOpLowering, QuantizeOpLowering>(&getContext());
+    patterns
+        .add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
+             Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
+             SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering>(
+            &getContext());
     patterns.add<CfftOpLowering>(&getContext(), vectorizeStaticCfft);
 
     ConversionTarget target(getContext());

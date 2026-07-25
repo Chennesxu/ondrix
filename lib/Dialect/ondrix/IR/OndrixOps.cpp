@@ -228,6 +228,26 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
   return success();
 }
 
+static LogicalResult verifyQ15ResamplingProfile(
+    Operation *op, RankedTensorType inputType, RankedTensorType coefficientType,
+    RankedTensorType initType, ondrix::ondsp::FixedAttr numeric, ondrix::ondsp::ProductAttr product,
+    ondrix::ondsp::AccType accumulator, ondrix::ondsp::FixedAttr destination) {
+  auto accumulatorStorage = dyn_cast<IntegerType>(accumulator.getStorage());
+  if (!ondrix::ondsp::isSignedQ15(numeric) || !ondrix::ondsp::isFullProduct(product) ||
+      !accumulatorStorage || accumulatorStorage.getWidth() < 32 ||
+      accumulator.getSignedness() != ondrix::ondsp::Signedness::Signed ||
+      accumulator.getFrac() != 30)
+    return op->emitOpError(
+        "supports only signed Q15/full with a signed frac30 accumulator of at least 32 bits");
+  if (destination != numeric)
+    return op->emitOpError("destination policy must match the signed Q15 input format");
+  if (inputType.getElementType() != numeric.getStorage())
+    return op->emitOpError("input and coefficient element type must match Q15 storage");
+  if (initType.getElementType() != destination.getStorage())
+    return op->emitOpError("init and result element type must match destination storage");
+  return verifyFixedReductionResult(op, accumulator, numeric, product);
+}
+
 static LogicalResult verifyFirDecimateDomain(FirDecimateOp op) {
   RankedTensorType inputType = op.getInput().getType();
   RankedTensorType coefficientType = op.getCoeffs().getType();
@@ -255,21 +275,43 @@ static LogicalResult verifyFirDecimateDomain(FirDecimateOp op) {
       return op.emitOpError() << "result length must be " << expectedOutputLength;
   }
 
-  auto accumulatorStorage = dyn_cast<IntegerType>(op.getAccumulator().getStorage());
-  if (!ondrix::ondsp::isSignedQ15(op.getNumeric()) ||
-      !ondrix::ondsp::isFullProduct(op.getProduct()) || !accumulatorStorage ||
-      accumulatorStorage.getWidth() < 32 ||
-      op.getAccumulator().getSignedness() != ondrix::ondsp::Signedness::Signed ||
-      op.getAccumulator().getFrac() != 30)
-    return op.emitOpError(
-        "supports only signed Q15/full with a signed frac30 accumulator of at least 32 bits");
-  if (op.getDst() != op.getNumeric())
-    return op.emitOpError("destination policy must match the signed Q15 input format");
-  if (inputType.getElementType() != op.getNumeric().getStorage())
-    return op.emitOpError("input and coefficient element type must match Q15 storage");
-  if (initType.getElementType() != op.getDst().getStorage())
-    return op.emitOpError("init and result element type must match destination storage");
-  return verifyFixedReductionResult(op, op.getAccumulator(), op.getNumeric(), op.getProduct());
+  return verifyQ15ResamplingProfile(op, inputType, coefficientType, initType, op.getNumeric(),
+                                    op.getProduct(), op.getAccumulator(), op.getDst());
+}
+
+static LogicalResult verifyFirInterpolateDomain(FirInterpolateOp op) {
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType coefficientType = op.getCoeffs().getType();
+  RankedTensorType initType = op.getInit().getType();
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, coefficientType, initType})))
+    return failure();
+  if (inputType.getRank() != 1 || coefficientType.getRank() != 1 || initType.getRank() != 1)
+    return op.emitOpError("requires rank-1 input, coefficient, and init tensors");
+  if (inputType.getElementType() != coefficientType.getElementType())
+    return op.emitOpError("input and coefficient element types must match");
+  int64_t factor = op.getFactorAttr().getValue().getSExtValue();
+  if (factor != 2)
+    return op.emitOpError("first executable profile requires factor 2");
+
+  int64_t inputLength = inputType.getDimSize(0);
+  int64_t coefficientLength = coefficientType.getDimSize(0);
+  int64_t outputLength = initType.getDimSize(0);
+  if (!ShapedType::isDynamic(inputLength) && inputLength == 0)
+    return op.emitOpError("requires at least one input sample");
+  if (!ShapedType::isDynamic(coefficientLength) && coefficientLength == 0)
+    return op.emitOpError("requires at least one coefficient");
+  if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(coefficientLength)) {
+    int64_t inputIntervals = inputLength - 1;
+    int64_t maximumExtent = std::numeric_limits<int64_t>::max();
+    if (inputIntervals > (maximumExtent - coefficientLength) / factor)
+      return op.emitOpError("result length exceeds the indexable extent range");
+    int64_t expectedOutputLength = inputIntervals * factor + coefficientLength;
+    if (!ShapedType::isDynamic(outputLength) && outputLength != expectedOutputLength)
+      return op.emitOpError() << "result length must be " << expectedOutputLength;
+  }
+
+  return verifyQ15ResamplingProfile(op, inputType, coefficientType, initType, op.getNumeric(),
+                                    op.getProduct(), op.getAccumulator(), op.getDst());
 }
 
 static LogicalResult verifyConv1DDomain(Conv1DOp op) {
@@ -596,6 +638,20 @@ LogicalResult FirDecimateOp::verify() {
   if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
   return verifyFirDecimateDomain(*this);
+}
+
+Speculation::Speculatability FirInterpolateOp::getSpeculatability() {
+  return (ondrix::requiresConservativeDSPSpeculation(getInput().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getCoeffs().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getInit().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
+
+LogicalResult FirInterpolateOp::verify() {
+  if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
+    return failure();
+  return verifyFirInterpolateDomain(*this);
 }
 
 Speculation::Speculatability Conv1DOp::getSpeculatability() {

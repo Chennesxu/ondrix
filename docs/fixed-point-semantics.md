@@ -167,6 +167,24 @@ target:       retain structured intent until a proven target capability matches
 A default pipeline must not run constant specialization before generic Vector
 or target selection merely because immutable coefficients are available.
 
+## Resampling
+
+The experimental `ondrix.fir_decimate` contract changes the output indexing
+without changing the ordered Q15 accumulator lifecycle. Its phase-zero output
+`m` consumes the contiguous input window beginning at `m * factor`. Direct
+bufferization can therefore reuse the existing ordered fixed-Vector reduction
+for each window while retaining a scalar tail.
+
+The experimental `ondrix.fir_interpolate` contract defines factor-two
+phase-zero interpolation as full convolution after inserting one numeric zero
+between adjacent input samples. For input length `N` and coefficient length
+`K`, it produces `(N - 1) * 2 + K` samples. Every output visits coefficients
+in increasing index order and skips terms that address an inserted zero or lie
+outside the original input. Its first executable profile is signed Q15/full
+product with an explicit signed frac30 accumulator and export policy. It has a
+generic scalar consumer; source binding, stateful block processing, polyphase
+reassociation, and Vector or target consumers remain deferred.
+
 ## Import and Export
 
 `ondsp.acc_import` is an exact value-preserving conversion into the
