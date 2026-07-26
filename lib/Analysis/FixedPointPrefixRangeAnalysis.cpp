@@ -237,6 +237,70 @@ bool fitsSignedImplementationWidth(const FixedPointRawInterval &interval, unsign
          !interval.upper.sext(comparisonWidth).sgt(maximum);
 }
 
+ConstantChunkReassociationAnalysis
+analyzeZeroSeededConstantChunkReassociation(unsigned numericStorageWidth, unsigned numericFrac,
+                                            unsigned accumulatorWidth, ArrayRef<APInt> coefficients,
+                                            int64_t chunkWidth, unsigned implementationTermWidth) {
+  ConstantChunkReassociationAnalysis analysis;
+  if (numericStorageWidth == 0 || numericFrac > numericStorageWidth || accumulatorWidth == 0 ||
+      chunkWidth <= 1 || static_cast<uint64_t>(chunkWidth) > std::numeric_limits<size_t>::max() ||
+      implementationTermWidth == 0 || coefficients.size() < static_cast<size_t>(chunkWidth) ||
+      coefficients.size() > static_cast<size_t>(std::numeric_limits<int64_t>::max()))
+    return analysis;
+
+  analysis.originalUpdates.reserve(coefficients.size());
+  for (const APInt &coefficient : coefficients) {
+    FailureOr<FixedPointRawInterval> interval =
+        computeSignedFullProductIntervalRaw(numericStorageWidth, numericFrac, coefficient);
+    if (failed(interval))
+      return analysis;
+    analysis.originalUpdates.push_back(std::move(*interval));
+  }
+
+  size_t fullChunkCount = coefficients.size() / static_cast<size_t>(chunkWidth);
+  analysis.reassociatedUpdates.reserve(fullChunkCount +
+                                       coefficients.size() % static_cast<size_t>(chunkWidth));
+  for (size_t chunk = 0; chunk < fullChunkCount; ++chunk) {
+    size_t first = chunk * static_cast<size_t>(chunkWidth);
+    FixedPointRawInterval partial = analysis.originalUpdates[first];
+    for (int64_t lane = 1; lane < chunkWidth; ++lane) {
+      FailureOr<FixedPointRawInterval> sum = addFixedPointRawIntervals(
+          partial, analysis.originalUpdates[first + static_cast<size_t>(lane)]);
+      if (failed(sum))
+        return analysis;
+      partial = std::move(*sum);
+    }
+    analysis.reassociatedUpdates.push_back(std::move(partial));
+  }
+  for (size_t index = fullChunkCount * static_cast<size_t>(chunkWidth);
+       index < analysis.originalUpdates.size(); ++index)
+    analysis.reassociatedUpdates.push_back(analysis.originalUpdates[index]);
+
+  if (llvm::any_of(analysis.reassociatedUpdates,
+                   [implementationTermWidth](const FixedPointRawInterval &interval) {
+                     return !fitsSignedImplementationWidth(interval, implementationTermWidth);
+                   })) {
+    analysis.status = ConstantChunkReassociationStatus::ImplementationTermOverflow;
+    return analysis;
+  }
+
+  unsigned frac = analysis.originalUpdates.front().frac;
+  FixedPointRawInterval initial{APInt(accumulatorWidth, 0), APInt(accumulatorWidth, 0), frac};
+  if (failed(FixedPointPrefixRangePlanner::proveAllPrefixesFit(
+          accumulatorWidth, initial, analysis.originalUpdates, analysis.originalUpdates))) {
+    analysis.status = ConstantChunkReassociationStatus::PrefixOverflow;
+    return analysis;
+  }
+  if (failed(FixedPointPrefixRangePlanner::proveAllPrefixesFit(
+          accumulatorWidth, initial, analysis.originalUpdates, analysis.reassociatedUpdates))) {
+    analysis.status = ConstantChunkReassociationStatus::PrefixOverflow;
+    return analysis;
+  }
+
+  analysis.status = ConstantChunkReassociationStatus::Authorized;
+  return analysis;
+}
+
 json::Object toJSON(const NoOverflowChunkReassociationTrace &trace) {
   json::Array coefficientValues;
   for (const APInt &coefficient : trace.coefficients)
@@ -358,51 +422,21 @@ verifyNoOverflowChunkReassociationTrace(const NoOverflowChunkReassociationTrace 
       trace.coefficients.size() < static_cast<size_t>(trace.chunkWidth))
     return failure();
 
-  SmallVector<FixedPointRawInterval> originalUpdates;
-  originalUpdates.reserve(trace.coefficients.size());
-  for (const APInt &coefficient : trace.coefficients) {
-    FailureOr<FixedPointRawInterval> interval = computeSignedFullProductIntervalRaw(
-        trace.numericStorageWidth, trace.numericFrac, coefficient);
-    if (failed(interval))
-      return failure();
-    originalUpdates.push_back(std::move(*interval));
-  }
-
-  SmallVector<FixedPointRawInterval> reassociatedUpdates;
-  size_t fullChunkCount = trace.coefficients.size() / static_cast<size_t>(trace.chunkWidth);
-  reassociatedUpdates.reserve(fullChunkCount +
-                              trace.coefficients.size() % static_cast<size_t>(trace.chunkWidth));
-  for (size_t chunk = 0; chunk < fullChunkCount; ++chunk) {
-    size_t first = chunk * static_cast<size_t>(trace.chunkWidth);
-    FixedPointRawInterval partial = originalUpdates[first];
-    for (int64_t lane = 1; lane < trace.chunkWidth; ++lane) {
-      FailureOr<FixedPointRawInterval> sum =
-          addFixedPointRawIntervals(partial, originalUpdates[first + static_cast<size_t>(lane)]);
-      if (failed(sum))
-        return failure();
-      partial = std::move(*sum);
-    }
-    reassociatedUpdates.push_back(std::move(partial));
-  }
-  for (size_t index = fullChunkCount * static_cast<size_t>(trace.chunkWidth);
-       index < originalUpdates.size(); ++index)
-    reassociatedUpdates.push_back(originalUpdates[index]);
-  if (llvm::any_of(reassociatedUpdates, [](const FixedPointRawInterval &interval) {
-        return !fitsSignedImplementationWidth(interval, 64);
-      }))
+  ConstantChunkReassociationAnalysis schedule = analyzeZeroSeededConstantChunkReassociation(
+      trace.numericStorageWidth, trace.numericFrac, trace.accumulatorStorageWidth,
+      trace.coefficients, trace.chunkWidth, /*implementationTermWidth=*/64);
+  if (schedule.status != ConstantChunkReassociationStatus::Authorized)
     return failure();
 
   FixedPointRawInterval initial{APInt(trace.accumulatorStorageWidth, 0),
                                 APInt(trace.accumulatorStorageWidth, 0), trace.accumulatorFrac};
   FailureOr<SmallVector<FixedPointRawInterval>> originalPrefixes =
-      computePrefixIntervals(trace.accumulatorStorageWidth, initial, originalUpdates);
+      computePrefixIntervals(trace.accumulatorStorageWidth, initial, schedule.originalUpdates);
   FailureOr<SmallVector<FixedPointRawInterval>> reassociatedPrefixes =
-      computePrefixIntervals(trace.accumulatorStorageWidth, initial, reassociatedUpdates);
+      computePrefixIntervals(trace.accumulatorStorageWidth, initial, schedule.reassociatedUpdates);
   return succeeded(originalPrefixes) && succeeded(reassociatedPrefixes) &&
                  equalIntervals(*originalPrefixes, trace.originalPrefixes) &&
-                 equalIntervals(*reassociatedPrefixes, trace.reassociatedPrefixes) &&
-                 succeeded(FixedPointPrefixRangePlanner::proveAllPrefixesFit(
-                     trace.accumulatorStorageWidth, initial, originalUpdates, reassociatedUpdates))
+                 equalIntervals(*reassociatedPrefixes, trace.reassociatedPrefixes)
              ? success()
              : failure();
 }
@@ -610,52 +644,23 @@ FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
       accumulator.getFrac() != productSemantics->frac)
     return failure();
 
-  SmallVector<FixedPointRawInterval> originalUpdates;
-  originalUpdates.reserve(coefficients.size());
-  for (const APInt &coefficient : coefficients) {
-    FailureOr<FixedPointRawInterval> interval =
-        computeSignedFullProductInterval(numeric, coefficient);
-    if (failed(interval))
-      return failure();
-    originalUpdates.push_back(std::move(*interval));
-  }
-
-  SmallVector<FixedPointRawInterval> chunkedUpdates;
-  size_t fullChunkCount = coefficients.size() / static_cast<size_t>(chunkWidth);
-  chunkedUpdates.reserve(fullChunkCount + coefficients.size() % static_cast<size_t>(chunkWidth));
-  for (size_t chunk = 0; chunk < fullChunkCount; ++chunk) {
-    size_t first = chunk * static_cast<size_t>(chunkWidth);
-    FixedPointRawInterval partial = originalUpdates[first];
-    for (int64_t lane = 1; lane < chunkWidth; ++lane) {
-      FailureOr<FixedPointRawInterval> sum =
-          addFixedPointRawIntervals(partial, originalUpdates[first + static_cast<size_t>(lane)]);
-      if (failed(sum))
-        return failure();
-      partial = std::move(*sum);
-    }
-    chunkedUpdates.push_back(std::move(partial));
-  }
-  for (size_t index = fullChunkCount * static_cast<size_t>(chunkWidth);
-       index < originalUpdates.size(); ++index)
-    chunkedUpdates.push_back(originalUpdates[index]);
-  if (llvm::any_of(chunkedUpdates, [](const FixedPointRawInterval &interval) {
-        return !fitsSignedImplementationWidth(interval, 64);
-      }))
+  auto numericStorage = cast<IntegerType>(numeric.getStorage());
+  ConstantChunkReassociationAnalysis schedule = analyzeZeroSeededConstantChunkReassociation(
+      numericStorage.getWidth(), numeric.getFrac(), accumulatorStorage.getWidth(), coefficients,
+      chunkWidth,
+      /*implementationTermWidth=*/64);
+  if (schedule.status != ConstantChunkReassociationStatus::Authorized)
     return failure();
 
   FixedPointRawInterval initial{APInt(accumulatorStorage.getWidth(), 0),
                                 APInt(accumulatorStorage.getWidth(), 0), accumulator.getFrac()};
-  if (failed(proveAllPrefixesFit(accumulatorStorage.getWidth(), initial, originalUpdates,
-                                 chunkedUpdates)))
-    return failure();
   FailureOr<SmallVector<FixedPointRawInterval>> originalPrefixes =
-      computePrefixIntervals(accumulatorStorage.getWidth(), initial, originalUpdates);
+      computePrefixIntervals(accumulatorStorage.getWidth(), initial, schedule.originalUpdates);
   FailureOr<SmallVector<FixedPointRawInterval>> reassociatedPrefixes =
-      computePrefixIntervals(accumulatorStorage.getWidth(), initial, chunkedUpdates);
+      computePrefixIntervals(accumulatorStorage.getWidth(), initial, schedule.reassociatedUpdates);
   if (failed(originalPrefixes) || failed(reassociatedPrefixes))
     return failure();
 
-  auto numericStorage = cast<IntegerType>(numeric.getStorage());
   NoOverflowChunkReassociationTrace trace;
   trace.numericStorageWidth = numericStorage.getWidth();
   trace.numericFrac = numeric.getFrac();

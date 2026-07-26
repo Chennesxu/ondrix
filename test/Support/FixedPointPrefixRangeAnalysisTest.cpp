@@ -15,8 +15,10 @@
 #include <type_traits>
 
 using ondrix::analysis::addFixedPointRawIntervals;
+using ondrix::analysis::analyzeZeroSeededConstantChunkReassociation;
 using ondrix::analysis::areEquivalent;
 using ondrix::analysis::computeSignedFullProductInterval;
+using ondrix::analysis::ConstantChunkReassociationStatus;
 using ondrix::analysis::DistributivePairingPlan;
 using ondrix::analysis::fitsSignedImplementationWidth;
 using ondrix::analysis::FixedPointPrefixRangePlanner;
@@ -120,6 +122,35 @@ bool testImplementationWidthContainment() {
          !fitsSignedImplementationWidth(exactRange(positiveI64Overflow, 62), 64) &&
          !fitsSignedImplementationWidth(range(4, 1, -1), 4) &&
          !fitsSignedImplementationWidth(range(4, 0, 0), 0);
+}
+
+bool testConstantChunkScheduleClassification() {
+  llvm::SmallVector<llvm::APInt> q1OverflowingCoefficients = {signedValue(2, -2),
+                                                              signedValue(2, -2)};
+  auto prefixOverflow = analyzeZeroSeededConstantChunkReassociation(
+      /*numericStorageWidth=*/2, /*numericFrac=*/1, /*accumulatorWidth=*/4,
+      q1OverflowingCoefficients,
+      /*chunkWidth=*/2, /*implementationTermWidth=*/64);
+
+  llvm::SmallVector<llvm::APInt> q15Coefficients = {signedValue(16, 1), signedValue(16, -2),
+                                                    signedValue(16, 3), signedValue(16, -4)};
+  auto authorized = analyzeZeroSeededConstantChunkReassociation(
+      /*numericStorageWidth=*/16, /*numericFrac=*/15, /*accumulatorWidth=*/40, q15Coefficients,
+      /*chunkWidth=*/4, /*implementationTermWidth=*/64);
+
+  llvm::SmallVector<llvm::APInt> q31Coefficients(4, signedValue(32, INT32_MIN));
+  auto termOverflow = analyzeZeroSeededConstantChunkReassociation(
+      /*numericStorageWidth=*/32, /*numericFrac=*/31, /*accumulatorWidth=*/67, q31Coefficients,
+      /*chunkWidth=*/4, /*implementationTermWidth=*/64);
+  auto invalid = analyzeZeroSeededConstantChunkReassociation(
+      /*numericStorageWidth=*/16, /*numericFrac=*/15, /*accumulatorWidth=*/40, q15Coefficients,
+      /*chunkWidth=*/1, /*implementationTermWidth=*/64);
+
+  return authorized.status == ConstantChunkReassociationStatus::Authorized &&
+         authorized.originalUpdates.size() == 4 && authorized.reassociatedUpdates.size() == 1 &&
+         prefixOverflow.status == ConstantChunkReassociationStatus::PrefixOverflow &&
+         termOverflow.status == ConstantChunkReassociationStatus::ImplementationTermOverflow &&
+         invalid.status == ConstantChunkReassociationStatus::InvalidInput;
 }
 
 bool testTraceRejectsWideChunkTerm() {
@@ -567,12 +598,13 @@ bool testInvalidInputs() {
 
 int main() {
   if (!testSignedFullProductIntervals() || !testRawIntervalAddition() ||
-      !testImplementationWidthContainment() || !testTraceRejectsWideChunkTerm() ||
-      !testSuccessfulContainment() || !testOriginalPrefixOverflow() ||
-      !testReassociatedPrefixOverflow() || !testNegativePrefixUnderflow() ||
-      !testWiderAccumulator() || !testQ31I65Boundaries() || !testPairingPlanValidation() ||
-      !testWrappingPairingPlan() || !testPlannerDerivesTrustedSchedules() ||
-      !testConstantChunkReductionPlan() || !testInvalidInputs()) {
+      !testImplementationWidthContainment() || !testConstantChunkScheduleClassification() ||
+      !testTraceRejectsWideChunkTerm() || !testSuccessfulContainment() ||
+      !testOriginalPrefixOverflow() || !testReassociatedPrefixOverflow() ||
+      !testNegativePrefixUnderflow() || !testWiderAccumulator() || !testQ31I65Boundaries() ||
+      !testPairingPlanValidation() || !testWrappingPairingPlan() ||
+      !testPlannerDerivesTrustedSchedules() || !testConstantChunkReductionPlan() ||
+      !testInvalidInputs()) {
     llvm::errs() << "fixed-point prefix range analysis: FAIL\n";
     return 1;
   }

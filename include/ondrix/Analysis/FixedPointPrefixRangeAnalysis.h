@@ -76,6 +76,33 @@ mlir::FailureOr<FixedPointRawInterval> addFixedPointRawIntervals(const FixedPoin
 /// value of `width` bits.
 bool fitsSignedImplementationWidth(const FixedPointRawInterval &interval, unsigned width);
 
+/// Result of analyzing the numeric schedule used by fixed-width horizontal
+/// chunk reduction. This classification does not authorize an IR rewrite:
+/// callers must separately validate the operation, product policy, zero seed,
+/// coefficient provenance, and subject identity.
+enum class ConstantChunkReassociationStatus {
+  Authorized,
+  InvalidInput,
+  ImplementationTermOverflow,
+  PrefixOverflow,
+};
+
+struct ConstantChunkReassociationAnalysis {
+  ConstantChunkReassociationStatus status = ConstantChunkReassociationStatus::InvalidInput;
+  llvm::SmallVector<FixedPointRawInterval> originalUpdates;
+  llvm::SmallVector<FixedPointRawInterval> reassociatedUpdates;
+};
+
+/// Classifies one zero-seeded constant chunk schedule. Product intervals are
+/// derived from the complete signed input domain. `implementationTermWidth`
+/// is the actual integer width used by the horizontal-sum consumer. The caller
+/// must separately verify that the accumulator fractional position is
+/// `2 * numericFrac`; only its storage width participates in this raw-range
+/// classification.
+ConstantChunkReassociationAnalysis analyzeZeroSeededConstantChunkReassociation(
+    unsigned numericStorageWidth, unsigned numericFrac, unsigned accumulatorWidth,
+    llvm::ArrayRef<llvm::APInt> coefficients, int64_t chunkWidth, unsigned implementationTermWidth);
+
 using DistributivePairingConsumer = llvm::function_ref<mlir::LogicalResult(
     const ondsp::DistributivePairingSemantics &, llvm::ArrayRef<llvm::APInt>)>;
 
