@@ -18,6 +18,7 @@ add_ondrix_library(OndspToScalar
   MLIRSCFTransforms
   MLIRSupport
   MLIRTransformUtils
+  OndrixCanonicalTwiddleAnalysis
   OndrixConversionUtils
   OndrixFixedPointSemantics
   OndspIR

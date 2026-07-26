@@ -22,6 +22,7 @@ tools = [
     "ondrix-opt",
     "ondrix-translate",
     "ondrix-compile",
+    "ondrix-canonical-twiddle-analysis-test",
     "ondrix-constant-sequence-analysis-test",
     "ondrix-fixed-point-prefix-range-analysis-test",
     "ondrix-fixed-point-semantics-test",

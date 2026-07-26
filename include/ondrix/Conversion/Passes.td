@@ -122,10 +122,12 @@ def ConvertOndspFixedToScalar
     fixed-length vector reductions must be normalized by
     `normalize-ondsp-fixed-vector-reduce` before this final conversion.
 
-    The opt-in `specialize-canonical-twiddles` mode recognizes compiler-visible
-    packed-Q15 `+1` and `-j` constants and replaces their complex products with
-    exact finite-precision identities. Runtime and other twiddles retain the
-    generic widened complex-product lowering.
+    The opt-in `specialize-canonical-twiddles` mode consumes a subject-bound,
+    one-shot legality plan for compiler-visible packed-Q15 `+1` and `-j`
+    constants and replaces their complex products with exact finite-precision
+    identities. The plan rechecks the operation, twiddle SSA value, layout,
+    numeric/product policy, and both scaling boundaries. Runtime and other
+    twiddles retain the generic widened complex-product lowering.
   }];
   let constructor = "ondrix::createConvertOndspFixedToScalarPass()";
   let options = [

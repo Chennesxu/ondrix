@@ -20,3 +20,15 @@ add_ondrix_library(OndrixFixedPointPrefixRangeAnalysis
   OndrixConstantSequenceAnalysis
   OndspIR
 )
+
+add_ondrix_library(OndrixCanonicalTwiddleAnalysis
+  CanonicalTwiddleAnalysis.cpp
+
+  PARTIAL_SOURCES_INTENDED
+
+  LINK_LIBS PUBLIC
+  MLIRArithDialect
+  MLIRIR
+  MLIRSupport
+  OndspIR
+)

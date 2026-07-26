@@ -1,3 +1,4 @@
+#include "ondrix/Analysis/CanonicalTwiddleAnalysis.h"
 #include "ondrix/Conversion/OndspToScalar/OndspToScalar.h"
 #include "ondrix/Conversion/Utils/ConversionLegality.h"
 #include "ondrix/Conversion/Utils/FixedPointDomainUtils.h"
@@ -384,26 +385,6 @@ static Value packQ15Complex(Location loc, Value real, Value imaginary,
   return rewriter.create<arith::OrIOp>(loc, shiftedImaginary, realBits);
 }
 
-enum class CanonicalPackedQ15Twiddle {
-  One,
-  MinusJ,
-};
-
-static std::optional<CanonicalPackedQ15Twiddle> classifyCanonicalPackedQ15Twiddle(Value value) {
-  auto constant = value.getDefiningOp<arith::ConstantOp>();
-  auto integer = constant ? dyn_cast<IntegerAttr>(constant.getValue()) : IntegerAttr();
-  auto integerType = integer ? dyn_cast<IntegerType>(integer.getType()) : IntegerType();
-  if (!integerType || integerType.getWidth() != 32)
-    return std::nullopt;
-
-  uint64_t bits = integer.getValue().getZExtValue();
-  if (bits == 0x00007fffU)
-    return CanonicalPackedQ15Twiddle::One;
-  if (bits == 0x80000000U)
-    return CanonicalPackedQ15Twiddle::MinusJ;
-  return std::nullopt;
-}
-
 // Exact form of nearest-even saturating Q15 multiplication by 32767/32768.
 static Value multiplyByPackedQ15One(Location loc, Value input,
                                     ConversionPatternRewriter &rewriter) {
@@ -498,16 +479,30 @@ public:
 
     Value twiddledReal;
     Value twiddledImaginary;
-    std::optional<CanonicalPackedQ15Twiddle> canonical =
-        specializeCanonicalTwiddles ? classifyCanonicalPackedQ15Twiddle(adaptor.getTwiddle())
-                                    : std::nullopt;
-    if (canonical == CanonicalPackedQ15Twiddle::One) {
-      twiddledReal = multiplyByPackedQ15One(loc, bReal, rewriter);
-      twiddledImaginary = multiplyByPackedQ15One(loc, bImaginary, rewriter);
-    } else if (canonical == CanonicalPackedQ15Twiddle::MinusJ) {
-      twiddledReal = bImaginary;
-      twiddledImaginary = saturatingNegatePackedQ15(loc, bReal, rewriter);
-    } else {
+    bool specialized = false;
+    if (specializeCanonicalTwiddles) {
+      std::optional<ondrix::analysis::CanonicalPackedQ15TwiddlePlan> plan =
+          ondrix::analysis::planCanonicalPackedQ15Twiddle(op);
+      if (plan) {
+        if (failed(std::move(*plan).consumeIfValid(
+                op, [&](ondrix::analysis::CanonicalPackedQ15TwiddleIdentity identity) {
+                  switch (identity) {
+                  case ondrix::analysis::CanonicalPackedQ15TwiddleIdentity::One:
+                    twiddledReal = multiplyByPackedQ15One(loc, bReal, rewriter);
+                    twiddledImaginary = multiplyByPackedQ15One(loc, bImaginary, rewriter);
+                    break;
+                  case ondrix::analysis::CanonicalPackedQ15TwiddleIdentity::MinusJ:
+                    twiddledReal = bImaginary;
+                    twiddledImaginary = saturatingNegatePackedQ15(loc, bReal, rewriter);
+                    break;
+                  }
+                  specialized = true;
+                  return success();
+                })))
+          return rewriter.notifyMatchFailure(op, "canonical twiddle authorization became stale");
+      }
+    }
+    if (!specialized) {
       Type productType = getIntegerTypeLike(bReal.getType(), 33, rewriter);
       auto extendProductOperand = [&](Value value) {
         return rewriter.create<arith::ExtSIOp>(loc, productType, value);
