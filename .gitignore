@@ -5,6 +5,9 @@
 *.xlsx
 build/
 cmake-build-*/
+benchmarks/
+benchmark-results/
+evaluation/
 *.o
 *.a
 *.so

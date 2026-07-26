@@ -8,6 +8,11 @@ if git ls-files | grep -E '(^|/)(reference|references|third_party_reference)(/|$
   fail=1
 fi
 
+if git ls-files | grep -E '(^|/)(benchmarks|benchmark-results|evaluation)(/|$)' >/dev/null; then
+  echo "error: evaluation and benchmark artifacts belong in a separate repository" >&2
+  fail=1
+fi
+
 if git ls-files | grep -E '\.(docx|xlsx|pdf)$' >/dev/null; then
   echo "error: binary reference/document files must not be tracked" >&2
   fail=1

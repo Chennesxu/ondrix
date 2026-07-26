@@ -8,7 +8,7 @@ stable-candidate Ondrix behavior.
 - [Frontend semantic boundary](frontend-semantics.md)
 - [Experimental `.ox` frontend](frontend-language.md)
 - [Streaming FIR contract](streaming-fir.md)
-- [Full-output FIR architecture prototype](full-output-fir-prototype.md)
+- [Full-output FIR contract](full-output-fir.md)
 
 Internal plans, private target material, review notes, and task history are not
 part of this directory.
