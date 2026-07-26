@@ -200,6 +200,10 @@ def q15_cfft8(input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
 
 def q15_icfft8(input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
   return icfft(input)
+
+def q15_cfft_round_trip(
+    input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
+  return icfft(cfft(input))
 ```
 
 `complex_q15` is stored as one `i32` with the imaginary component in bits
@@ -211,6 +215,10 @@ and nearest-even saturating one-bit scaling at every butterfly stage. The
 per-stage scaling makes the inverse profile include the `1/N` normalization.
 This spelling does not imply a general source complex type; other sizes,
 dynamic planning, and configurable complex policies remain unsupported.
+As a bounded expression-composition slice, the unary `cfft` and `icfft`
+builtins may be nested. Each nested call emits a separate `ondrix.cfft`, so
+the intermediate stage-scaling and requantization boundaries remain
+observable. Other builtins still require direct parameter operands.
 After source generation, the opt-in
 `--convert-ondrix-to-ondsp="vectorize-static-cfft"` mode maps independent
 combine-stage butterflies to fixed-length Vector arithmetic while preserving

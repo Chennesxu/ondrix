@@ -1,5 +1,7 @@
 // RUN: ondrix-compile %S/Inputs/q15_cfft8.ox | FileCheck %s
 // RUN: ondrix-compile %S/Inputs/q15_icfft8.ox | FileCheck %s --check-prefix=INVERSE
+// RUN: ondrix-compile %S/Inputs/q15_cfft_round_trip.ox | FileCheck %s --check-prefix=COMPOSE
+// RUN: ondrix-compile %S/Inputs/q15_icfft_named_operand.ox | FileCheck %s --check-prefix=NAMED
 // RUN: not ondrix-compile %S/Inputs/invalid_cfft_dynamic.ox 2>&1 | FileCheck %s --check-prefix=DYNAMIC
 // RUN: not ondrix-compile %S/Inputs/invalid_cfft_extent.ox 2>&1 | FileCheck %s --check-prefix=EXTENT
 
@@ -24,6 +26,20 @@
 // INVERSE-SAME: product = #ondsp.product<full>
 // INVERSE-SAME: product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>
 // INVERSE: return %[[RESULT]] : tensor<8xi32>
+
+// COMPOSE-LABEL: func.func @q15_cfft_round_trip(
+// COMPOSE-SAME: %[[INPUT:.*]]: tensor<8xi32>) -> tensor<8xi32>
+// COMPOSE: %[[FORWARD:.*]] = ondrix.cfft %[[INPUT]]
+// COMPOSE-SAME: direction = #ondrix.cfft_direction<forward>
+// COMPOSE: %[[ROUND_TRIP:.*]] = ondrix.cfft %[[FORWARD]]
+// COMPOSE-SAME: direction = #ondrix.cfft_direction<inverse>
+// COMPOSE: return %[[ROUND_TRIP]] : tensor<8xi32>
+
+// NAMED-LABEL: func.func @q15_icfft_named_operand(
+// NAMED-SAME: %[[INPUT:.*]]: tensor<8xi32>) -> tensor<8xi32>
+// NAMED: %[[RESULT:.*]] = ondrix.cfft %[[INPUT]]
+// NAMED-SAME: direction = #ondrix.cfft_direction<inverse>
+// NAMED: return %[[RESULT]] : tensor<8xi32>
 
 // DYNAMIC: invalid_cfft_dynamic.ox:2:10: error: cfft currently requires static input and result extents
 // EXTENT: invalid_cfft_extent.ox:2:10: error: cfft currently supports only four or eight points
