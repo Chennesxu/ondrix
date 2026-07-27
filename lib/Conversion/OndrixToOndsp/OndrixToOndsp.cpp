@@ -1089,7 +1089,8 @@ private:
 
 class RfftOpLowering final : public OpConversionPattern<ondrix::ir::RfftOp> {
 public:
-  using OpConversionPattern<ondrix::ir::RfftOp>::OpConversionPattern;
+  RfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft)
+      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft) {}
 
   LogicalResult matchAndRewrite(ondrix::ir::RfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -1105,8 +1106,7 @@ public:
 
     SmallVector<Value> outputs = lowerPackedQ15Cfft(
         loc, inputs, ondrix::ir::CfftDirection::Forward, op.getLayout(), op.getNumeric(),
-        op.getProduct(), op.getProductScale(), op.getOutputScale(),
-        /*vectorizeStaticCfft=*/false, rewriter);
+        op.getProduct(), op.getProductScale(), op.getOutputScale(), vectorizeStaticCfft, rewriter);
     outputs.front() = canonicalizePackedQ15Real(loc, outputs.front(), rewriter);
     outputs[extent / 2] = canonicalizePackedQ15Real(loc, outputs[extent / 2], rewriter);
 
@@ -1120,11 +1120,15 @@ public:
     rewriter.replaceOp(op, result);
     return success();
   }
+
+private:
+  bool vectorizeStaticCfft;
 };
 
 class IrfftOpLowering final : public OpConversionPattern<ondrix::ir::IrfftOp> {
 public:
-  using OpConversionPattern<ondrix::ir::IrfftOp>::OpConversionPattern;
+  IrfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft)
+      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft) {}
 
   LogicalResult matchAndRewrite(ondrix::ir::IrfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -1148,8 +1152,7 @@ public:
 
     SmallVector<Value> outputs = lowerPackedQ15Cfft(
         loc, spectrum, ondrix::ir::CfftDirection::Inverse, op.getLayout(), op.getNumeric(),
-        op.getProduct(), op.getProductScale(), op.getOutputScale(),
-        /*vectorizeStaticCfft=*/false, rewriter);
+        op.getProduct(), op.getProductScale(), op.getOutputScale(), vectorizeStaticCfft, rewriter);
     RankedTensorType resultType = op.getResult().getType();
     Value result =
         rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
@@ -1161,6 +1164,9 @@ public:
     rewriter.replaceOp(op, result);
     return success();
   }
+
+private:
+  bool vectorizeStaticCfft;
 };
 
 class QuantizeOpLowering final : public OpConversionPattern<ondrix::ir::QuantizeOp> {
@@ -1184,12 +1190,13 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns.add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering,
-                 FirInterpolateOpLowering, Conv1DOpLowering, FirStreamOpLowering,
-                 SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
-                 ButterflyOpLowering, RfftOpLowering, IrfftOpLowering, QuantizeOpLowering>(
-        &getContext());
-    patterns.add<CfftOpLowering>(&getContext(), vectorizeStaticCfft);
+    patterns
+        .add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
+             Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
+             SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering>(
+            &getContext());
+    patterns.add<CfftOpLowering, RfftOpLowering, IrfftOpLowering>(&getContext(),
+                                                                  vectorizeStaticCfft);
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,

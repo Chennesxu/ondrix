@@ -1,4 +1,5 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="vectorize-static-cfft" | FileCheck %s --check-prefix=VECTOR
 
 func.func @rfft8_q15(%input: tensor<8xi16>) -> tensor<5xi32> {
   %result = ondrix.rfft %input {
@@ -33,6 +34,10 @@ func.func @rfft16_q15(%input: tensor<16xi16>) -> tensor<9xi32> {
 // CHECK-NOT: ondrix.rfft
 // CHECK-COUNT-32: ondsp.cx_butterfly
 // CHECK: tensor.insert {{.*}} : tensor<9xi32>
+// VECTOR-LABEL: func.func @rfft16_q15
+// VECTOR: ondsp.cx_butterfly {{.*}} : (vector<2xi32>, vector<2xi32>, vector<2xi32>) -> (vector<2xi32>, vector<2xi32>)
+// VECTOR: ondsp.cx_butterfly {{.*}} : (vector<4xi32>, vector<4xi32>, vector<4xi32>) -> (vector<4xi32>, vector<4xi32>)
+// VECTOR: ondsp.cx_butterfly {{.*}} : (vector<8xi32>, vector<8xi32>, vector<8xi32>) -> (vector<8xi32>, vector<8xi32>)
 
 func.func @irfft8_q15(%input: tensor<5xi32>) -> tensor<8xi16> {
   %result = ondrix.irfft %input {
@@ -67,3 +72,5 @@ func.func @irfft16_q15(%input: tensor<9xi32>) -> tensor<16xi16> {
 // CHECK-NOT: ondrix.irfft
 // CHECK-COUNT-32: ondsp.cx_butterfly
 // CHECK: tensor.insert {{.*}} : tensor<16xi16>
+// VECTOR-LABEL: func.func @irfft16_q15
+// VECTOR: ondsp.cx_butterfly {{.*}} : (vector<8xi32>, vector<8xi32>, vector<8xi32>) -> (vector<8xi32>, vector<8xi32>)
