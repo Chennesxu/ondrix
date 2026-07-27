@@ -41,5 +41,5 @@
 // NAMED-SAME: direction = #ondrix.cfft_direction<inverse>
 // NAMED: return %[[RESULT]] : tensor<8xi32>
 
-// DYNAMIC: invalid_cfft_dynamic.ox:2:10: error: cfft currently requires static input and result extents
+// DYNAMIC: invalid_cfft_dynamic.ox:2:15: error: FFT-family builtins currently require static operand extents
 // EXTENT: invalid_cfft_extent.ox:2:10: error: cfft currently supports only four or eight points

@@ -3,7 +3,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
+#ifndef ONDRIX_OX_RFFT_ROUND_TRIP
 extern int32_t rfft8_q15_value(int16_t, int16_t, int16_t, int16_t, int16_t, int16_t, int16_t,
                                int16_t, int64_t);
 extern int32_t rfft16_q15_value(int16_t, int16_t, int16_t, int16_t, int16_t, int16_t, int16_t,
@@ -17,6 +19,17 @@ extern int16_t rfft_round_trip8_q15_value(int16_t, int16_t, int16_t, int16_t, in
 extern int16_t rfft_round_trip16_q15_value(int16_t, int16_t, int16_t, int16_t, int16_t, int16_t,
                                            int16_t, int16_t, int16_t, int16_t, int16_t, int16_t,
                                            int16_t, int16_t, int16_t, int16_t, int64_t);
+#else
+typedef struct {
+  int16_t *allocated;
+  int16_t *aligned;
+  int64_t offset;
+  int64_t sizes[1];
+  int64_t strides[1];
+} MemRefI16;
+
+extern void _mlir_ciface_q15_rfft_round_trip(MemRefI16 *result, MemRefI16 *input);
+#endif
 
 struct Complex {
   int16_t real;
@@ -149,6 +162,7 @@ static void referenceIrfft(const int32_t *input, unsigned size, int16_t *output)
     output[i] = unpack(transformed[i]).real;
 }
 
+#ifndef ONDRIX_OX_RFFT_ROUND_TRIP
 static int32_t callRfft8(const int16_t *x, unsigned index) {
   return rfft8_q15_value(x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7], (int64_t)index);
 }
@@ -266,3 +280,44 @@ int main(void) {
     return 1;
   return 0;
 }
+#else
+int main(void) {
+  static const int16_t cases[][16] = {
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {INT16_MAX, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {12000, -16000, INT16_MIN, 9000, -4000, 30000, -22000, 14000, 7000, -25000, 31000, -1, 3, -5,
+       17, -32760},
+      {INT16_MAX, INT16_MIN, INT16_MAX, INT16_MIN, INT16_MAX, INT16_MIN, INT16_MAX, INT16_MIN,
+       INT16_MAX, INT16_MIN, INT16_MAX, INT16_MIN, INT16_MAX, INT16_MIN, INT16_MAX, INT16_MIN},
+      {1, -3, 5, -7, 9, -11, 13, -15, 17, -19, 21, -23, 25, -27, 29, -31},
+  };
+
+  for (unsigned caseIndex = 0; caseIndex < sizeof(cases) / sizeof(cases[0]); ++caseIndex) {
+    int32_t spectrum[9];
+    int16_t expected[16];
+    referenceRfft(cases[caseIndex], 16, spectrum);
+    referenceIrfft(spectrum, 16, expected);
+
+    MemRefI16 input = {(int16_t *)cases[caseIndex], (int16_t *)cases[caseIndex], 0, {16}, {1}};
+    MemRefI16 output;
+    _mlir_ciface_q15_rfft_round_trip(&output, &input);
+    if (output.sizes[0] != 16) {
+      fprintf(stderr, "round-trip case %u: expected extent 16, got %" PRId64 "\n", caseIndex,
+              output.sizes[0]);
+      free(output.allocated);
+      return 1;
+    }
+    for (unsigned i = 0; i < 16; ++i) {
+      int16_t actual = output.aligned[output.offset + i * output.strides[0]];
+      if (actual != expected[i]) {
+        fprintf(stderr, "round-trip case %u[%u]: expected %" PRId16 ", got %" PRId16 "\n",
+                caseIndex, i, expected[i], actual);
+        free(output.allocated);
+        return 1;
+      }
+    }
+    free(output.allocated);
+  }
+  return 0;
+}
+#endif

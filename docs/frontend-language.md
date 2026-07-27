@@ -192,7 +192,7 @@ order. Dynamic tensor extents are accepted when the result is also dynamic.
 Padding, stride, dilation, multidimensional/grouped forms, and constexpr
 kernels are not part of this source slice.
 
-Static packed-Q15 complex FFT uses an explicit experimental element spelling:
+Static packed-Q15 FFT uses an explicit experimental complex element spelling:
 
 ```python
 def q15_cfft8(input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
@@ -204,6 +204,15 @@ def q15_icfft8(input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
 def q15_cfft_round_trip(
     input: tensor[complex_q15,8]) -> tensor[complex_q15,8]:
   return icfft(cfft(input))
+
+def q15_rfft16(input: tensor[q15,16]) -> tensor[complex_q15,9]:
+  return rfft(input)
+
+def q15_irfft16(input: tensor[complex_q15,9]) -> tensor[q15,16]:
+  return irfft(input)
+
+def q15_rfft_round_trip(input: tensor[q15,16]) -> tensor[q15,16]:
+  return irfft(rfft(input))
 ```
 
 `complex_q15` is stored as one `i32` with the imaginary component in bits
@@ -215,10 +224,17 @@ and nearest-even saturating one-bit scaling at every butterfly stage. The
 per-stage scaling makes the inverse profile include the `1/N` normalization.
 This spelling does not imply a general source complex type; other sizes,
 dynamic planning, and configurable complex policies remain unsupported.
-As a bounded expression-composition slice, the unary `cfft` and `icfft`
-builtins may be nested. Each nested call emits a separate `ondrix.cfft`, so
-the intermediate stage-scaling and requantization boundaries remain
-observable. Other builtins still require direct parameter operands.
+`rfft` accepts static real extents 8 or 16 and returns the compact natural
+Hermitian bins 0 through N/2. `irfft` accepts the corresponding 5 or 9 packed
+bins and returns N real Q15 values. DC and Nyquist imaginary components are
+canonicalized to zero by the existing Ondrix contract.
+
+As a bounded expression-composition slice, the unary FFT-family builtins may
+be nested when every intermediate type and extent satisfies the next
+builtin's contract. Each nested call emits a separate Ondrix operation, so the
+intermediate stage-scaling and requantization boundaries remain observable;
+in particular, `irfft(rfft(input))` is not folded to an identity. Other
+builtins still require direct parameter operands.
 After source generation, the opt-in
 `--convert-ondrix-to-ondsp="vectorize-static-cfft"` mode maps independent
 combine-stage butterflies to fixed-length Vector arithmetic while preserving

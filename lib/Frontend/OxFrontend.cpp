@@ -212,11 +212,17 @@ enum class ReductionKind {
   Correlation,
   Butterfly,
   Cfft,
-  Icfft
+  Icfft,
+  Rfft,
+  Irfft
 };
 
 static bool isCfftKind(ReductionKind kind) {
   return kind == ReductionKind::Cfft || kind == ReductionKind::Icfft;
+}
+
+static bool isFftKind(ReductionKind kind) {
+  return isCfftKind(kind) || kind == ReductionKind::Rfft || kind == ReductionKind::Irfft;
 }
 
 struct ParameterAst {
@@ -388,12 +394,13 @@ public:
         !isIdentifier("fir_decimate") && !isIdentifier("fir_interpolate") &&
         !isIdentifier("fir_stream") && !isIdentifier("sos_df2_fixed") &&
         !isIdentifier("convolution") && !isIdentifier("correlation") &&
-        !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft")) {
+        !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft") &&
+        !isIdentifier("rfft") && !isIdentifier("irfft")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
                         "convolution(...), correlation(...), butterfly(...), cfft(...), or "
-                        "icfft(...) return expression");
+                        "icfft(...), rfft(...), or irfft(...) return expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -418,18 +425,22 @@ public:
       kernel.result.kind = ReductionKind::Butterfly;
     else if (isIdentifier("cfft"))
       kernel.result.kind = ReductionKind::Cfft;
-    else
+    else if (isIdentifier("icfft"))
       kernel.result.kind = ReductionKind::Icfft;
+    else if (isIdentifier("rfft"))
+      kernel.result.kind = ReductionKind::Rfft;
+    else
+      kernel.result.kind = ReductionKind::Irfft;
     kernel.result.position = current.position;
     advance();
     if (!expect(TokenKind::LeftParen, "expected '(' after builtin"))
       return std::nullopt;
-    if (isCfftKind(kernel.result.kind)) {
-      std::optional<ExpressionAst> operand = parseCfftExpression();
+    if (isFftKind(kernel.result.kind)) {
+      std::optional<ExpressionAst> operand = parseFftExpression();
       if (!operand)
         return std::nullopt;
       kernel.result.operands.push_back(std::move(*operand));
-      if (!expect(TokenKind::RightParen, "expected ')' after cfft operand"))
+      if (!expect(TokenKind::RightParen, "expected ')' after FFT operand"))
         return std::nullopt;
       if (current.kind != TokenKind::Eof) {
         diagnostics.error(current.position, "only one kernel is supported per file in this slice");
@@ -572,9 +583,11 @@ public:
   }
 
 private:
-  std::optional<ExpressionAst> parseCfftExpression() {
-    if ((!isIdentifier("cfft") && !isIdentifier("icfft")) || next.kind != TokenKind::LeftParen) {
-      auto parameter = parseIdentifier("expected cfft operand expression");
+  std::optional<ExpressionAst> parseFftExpression() {
+    bool isFftCall = isIdentifier("cfft") || isIdentifier("icfft") || isIdentifier("rfft") ||
+                     isIdentifier("irfft");
+    if (!isFftCall || next.kind != TokenKind::LeftParen) {
+      auto parameter = parseIdentifier("expected FFT operand expression");
       if (!parameter)
         return std::nullopt;
       return ExpressionAst(parameter->spelling.str(), parameter->position);
@@ -582,15 +595,22 @@ private:
 
     BuiltinCallAst call;
     call.position = current.position;
-    call.kind = isIdentifier("cfft") ? ReductionKind::Cfft : ReductionKind::Icfft;
+    if (isIdentifier("cfft"))
+      call.kind = ReductionKind::Cfft;
+    else if (isIdentifier("icfft"))
+      call.kind = ReductionKind::Icfft;
+    else if (isIdentifier("rfft"))
+      call.kind = ReductionKind::Rfft;
+    else
+      call.kind = ReductionKind::Irfft;
     advance();
-    if (!expect(TokenKind::LeftParen, "expected '(' after nested cfft builtin"))
+    if (!expect(TokenKind::LeftParen, "expected '(' after nested FFT builtin"))
       return std::nullopt;
-    std::optional<ExpressionAst> operand = parseCfftExpression();
+    std::optional<ExpressionAst> operand = parseFftExpression();
     if (!operand)
       return std::nullopt;
     call.operands.push_back(std::move(*operand));
-    if (!expect(TokenKind::RightParen, "expected ')' after nested cfft operand"))
+    if (!expect(TokenKind::RightParen, "expected ')' after nested FFT operand"))
       return std::nullopt;
     return ExpressionAst(std::move(call));
   }
@@ -910,28 +930,28 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   bool hasThreeOperands =
       ast.result.kind == ReductionKind::Butterfly || ast.result.kind == ReductionKind::FirStream;
   bool hasFourOperands = ast.result.kind == ReductionKind::SosDf2Fixed;
-  size_t expectedOperandCount = isCfftKind(ast.result.kind) ? 1
-                                : hasFourOperands           ? 4
-                                : hasThreeOperands          ? 3
-                                                            : 2;
+  size_t expectedOperandCount = isFftKind(ast.result.kind) ? 1
+                                : hasFourOperands          ? 4
+                                : hasThreeOperands         ? 3
+                                                           : 2;
   if (ast.result.operands.size() != expectedOperandCount) {
     diagnostics.error(ast.result.position, "builtin operand count does not match its contract");
     return std::nullopt;
   }
-  if (!isCfftKind(ast.result.kind) &&
+  if (!isFftKind(ast.result.kind) &&
       llvm::any_of(ast.result.operands,
                    [](const ExpressionAst &operand) { return !operand.isParameterReference(); })) {
     diagnostics.error(ast.result.position,
-                      "nested calls are currently supported only by cfft and icfft");
+                      "nested calls are currently supported only by FFT-family builtins");
     return std::nullopt;
   }
-  size_t expectedParameterCount = isCfftKind(ast.result.kind) ? 1
-                                  : hasFourOperands           ? 4
-                                  : hasThreeOperands          ? 3
-                                                              : 2;
+  size_t expectedParameterCount = isFftKind(ast.result.kind) ? 1
+                                  : hasFourOperands          ? 4
+                                  : hasThreeOperands         ? 3
+                                                             : 2;
   if (ast.parameters.size() != expectedParameterCount) {
     diagnostics.error(ast.position,
-                      isCfftKind(ast.result.kind) ? "cfft kernels require exactly one parameter"
+                      isFftKind(ast.result.kind) ? "FFT kernels require exactly one parameter"
                       : hasFourOperands  ? "sos_df2_fixed kernels require exactly four parameters"
                       : hasThreeOperands ? "butterfly and fir_stream kernels require exactly three "
                                            "parameters"
@@ -968,7 +988,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         llvm::Twine("duplicate parameter '") + parameter.name + "'");
       return std::nullopt;
     }
-    if (parameter.type != ast.primaryResult().type) {
+    if (!isFftKind(ast.result.kind) && parameter.type != ast.primaryResult().type) {
       diagnostics.error(parameter.position,
                         "parameter element types must match the kernel result type");
       return std::nullopt;
@@ -985,12 +1005,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     if (fourthName && parameter.name == *fourthName)
       fourthParameter = &parameter;
   }
-  if (!isCfftKind(ast.result.kind) && (!lhsName || !parameterNames.contains(*lhsName))) {
+  if (!isFftKind(ast.result.kind) && (!lhsName || !parameterNames.contains(*lhsName))) {
     diagnostics.error(ast.result.position, llvm::Twine("unknown builtin operand '") +
                                                (lhsName ? *lhsName : "<nested call>") + "'");
     return std::nullopt;
   }
-  if (!isCfftKind(ast.result.kind) && (!rhsName || !parameterNames.contains(*rhsName))) {
+  if (!isFftKind(ast.result.kind) && (!rhsName || !parameterNames.contains(*rhsName))) {
     diagnostics.error(ast.result.position, llvm::Twine("unknown reduction operand '") +
                                                (rhsName ? *rhsName : "<nested call>") + "'");
     return std::nullopt;
@@ -1141,59 +1161,108 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                       "DSP builtins");
     return std::nullopt;
   }
-  if (isCfftKind(ast.result.kind)) {
-    std::function<const ParameterAst *(const BuiltinCallAst &)> checkCfftCall =
-        [&](const BuiltinCallAst &call) -> const ParameterAst * {
-      if (!isCfftKind(call.kind) || call.operands.size() != 1) {
-        diagnostics.error(call.position,
-                          "nested calls are currently supported only by unary cfft and icfft");
-        return nullptr;
-      }
-      const ExpressionAst &operand = call.operands.front();
-      if (operand.isParameterReference()) {
-        auto parameter = parametersByName.find(operand.parameter);
-        if (parameter == parametersByName.end()) {
-          diagnostics.error(operand.position,
-                            llvm::Twine("unknown cfft operand '") + operand.parameter + "'");
-          return nullptr;
-        }
-        return parameter->second;
-      }
-      return checkCfftCall(*operand.call);
+  if (isFftKind(ast.result.kind)) {
+    struct FftExpressionType {
+      SourceType elementType;
+      int64_t extent;
     };
-    lhsParameter = checkCfftCall(ast.result);
-    if (!lhsParameter)
+    std::function<std::optional<FftExpressionType>(const ExpressionAst &)> checkFftExpression;
+    std::function<std::optional<FftExpressionType>(const BuiltinCallAst &)> checkFftCall;
+    checkFftExpression = [&](const ExpressionAst &expression) -> std::optional<FftExpressionType> {
+      if (expression.isParameterReference()) {
+        auto parameter = parametersByName.find(expression.parameter);
+        if (parameter == parametersByName.end()) {
+          diagnostics.error(expression.position,
+                            llvm::Twine("unknown FFT operand '") + expression.parameter + "'");
+          return std::nullopt;
+        }
+        const ParameterAst *value = parameter->second;
+        if (!value->isTensor() || !hasRank(value->shape, 1)) {
+          diagnostics.error(expression.position,
+                            "FFT-family builtins currently require rank-1 tensor operands");
+          return std::nullopt;
+        }
+        const std::optional<int64_t> &extent = getRankOneExtent(value->shape);
+        if (!extent) {
+          diagnostics.error(expression.position,
+                            "FFT-family builtins currently require static operand extents");
+          return std::nullopt;
+        }
+        return FftExpressionType{value->type, *extent};
+      }
+
+      return checkFftCall(*expression.call);
+    };
+    checkFftCall = [&](const BuiltinCallAst &call) -> std::optional<FftExpressionType> {
+      if (!isFftKind(call.kind) || call.operands.size() != 1) {
+        diagnostics.error(call.position,
+                          "nested calls are currently supported only by unary FFT-family builtins");
+        return std::nullopt;
+      }
+      std::optional<FftExpressionType> input = checkFftExpression(call.operands.front());
+      if (!input)
+        return std::nullopt;
+
+      if (isCfftKind(call.kind)) {
+        if (input->elementType != SourceType::ComplexQ15) {
+          diagnostics.error(call.position, "cfft and icfft require complex_q15 operand elements");
+          return std::nullopt;
+        }
+        if (input->extent != 4 && input->extent != 8) {
+          diagnostics.error(call.position, "cfft currently supports only four or eight points");
+          return std::nullopt;
+        }
+        return *input;
+      }
+      if (call.kind == ReductionKind::Rfft) {
+        if (input->elementType != SourceType::Q15) {
+          diagnostics.error(call.position, "rfft requires Q15 real operand elements");
+          return std::nullopt;
+        }
+        if (input->extent != 8 && input->extent != 16) {
+          diagnostics.error(call.position, "rfft currently supports only eight or sixteen points");
+          return std::nullopt;
+        }
+        return FftExpressionType{SourceType::ComplexQ15, input->extent / 2 + 1};
+      }
+      if (input->elementType != SourceType::ComplexQ15) {
+        diagnostics.error(call.position, "irfft requires complex_q15 Hermitian operand elements");
+        return std::nullopt;
+      }
+      if (input->extent != 5 && input->extent != 9) {
+        diagnostics.error(call.position,
+                          "irfft currently supports only five or nine Hermitian bins");
+        return std::nullopt;
+      }
+      return FftExpressionType{SourceType::Q15, (input->extent - 1) * 2};
+    };
+
+    std::optional<FftExpressionType> inferred = checkFftCall(ast.result);
+    if (!inferred)
       return std::nullopt;
-    if (ast.primaryResult().type != SourceType::ComplexQ15) {
+    if (!ast.primaryResult().tensor || !hasRank(ast.primaryResult().shape, 1)) {
       diagnostics.error(ast.result.position,
-                        "cfft currently requires complex_q15 input and result elements");
+                        "FFT-family builtins currently require a rank-1 tensor result");
       return std::nullopt;
     }
-    if (!ast.primaryResult().tensor || !lhsParameter || !lhsParameter->isTensor()) {
-      diagnostics.error(ast.result.position, "cfft currently requires a tensor input and result");
-      return std::nullopt;
-    }
-    const std::optional<int64_t> &lhsExtent = getRankOneExtent(lhsParameter->shape);
     const std::optional<int64_t> &resultExtent = getRankOneExtent(ast.primaryResult().shape);
-    if (!lhsExtent || !resultExtent) {
+    if (!resultExtent) {
       diagnostics.error(ast.result.position,
-                        "cfft currently requires static input and result extents");
+                        "FFT-family builtins currently require a static result extent");
       return std::nullopt;
     }
-    if (*lhsExtent != *resultExtent) {
-      diagnostics.error(ast.result.position, "cfft input and result extents must match");
-      return std::nullopt;
-    }
-    if (*lhsExtent != 4 && *lhsExtent != 8) {
-      diagnostics.error(ast.result.position, "cfft currently supports only four or eight points");
+    if (ast.primaryResult().type != inferred->elementType || *resultExtent != inferred->extent) {
+      diagnostics.error(ast.result.position,
+                        "declared FFT result type does not match the builtin expression");
       return std::nullopt;
     }
     return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, std::nullopt};
   }
 
   if (ast.primaryResult().type == SourceType::ComplexQ15) {
-    diagnostics.error(ast.result.position,
-                      "complex_q15 is currently supported only by cfft and icfft");
+    diagnostics.error(
+        ast.result.position,
+        "complex_q15 is currently supported only by FFT-family and butterfly builtins");
     return std::nullopt;
   }
 
@@ -1524,14 +1593,14 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   Location kernelLocation = getLocation(context, sourceName, kernel.ast.position);
   OwningOpRef<ModuleOp> module = ModuleOp::create(kernelLocation);
 
-  Type elementType;
-  if (kernel.ast.primaryResult().type == SourceType::Q15)
-    elementType = builder.getI16Type();
-  else if (kernel.ast.primaryResult().type == SourceType::Q31 ||
-           kernel.ast.primaryResult().type == SourceType::ComplexQ15)
-    elementType = builder.getI32Type();
-  else
-    elementType = builder.getF32Type();
+  auto getStorageType = [&](SourceType type) -> Type {
+    if (type == SourceType::Q15)
+      return builder.getI16Type();
+    if (type == SourceType::Q31 || type == SourceType::ComplexQ15)
+      return builder.getI32Type();
+    return builder.getF32Type();
+  };
+  Type elementType = getStorageType(kernel.ast.primaryResult().type);
   auto materializeShape = [](llvm::ArrayRef<std::optional<int64_t>> shape) {
     SmallVector<int64_t> dimensions;
     dimensions.reserve(shape.size());
@@ -1543,25 +1612,25 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   for (const ParameterAst &parameter : kernel.ast.parameters) {
     if (parameter.isConstexpr())
       continue;
+    Type parameterElementType = getStorageType(parameter.type);
     if (parameter.isScalar())
-      inputTypes.push_back(elementType);
+      inputTypes.push_back(parameterElementType);
     else if (parameter.isTensor())
-      inputTypes.push_back(RankedTensorType::get(materializeShape(parameter.shape), elementType));
+      inputTypes.push_back(
+          RankedTensorType::get(materializeShape(parameter.shape), parameterElementType));
     else
-      inputTypes.push_back(MemRefType::get(materializeShape(parameter.shape), elementType));
+      inputTypes.push_back(
+          MemRefType::get(materializeShape(parameter.shape), parameterElementType));
   }
-  Type resultType = elementType;
-  if (kernel.ast.primaryResult().tensor)
-    resultType =
-        RankedTensorType::get(materializeShape(kernel.ast.primaryResult().shape), elementType);
-  SmallVector<Type> resultTypes{resultType};
-  if (kernel.ast.results.size() == 2) {
-    Type secondResultType = elementType;
-    if (kernel.ast.results[1].tensor)
-      secondResultType =
-          RankedTensorType::get(materializeShape(kernel.ast.results[1].shape), elementType);
-    resultTypes.push_back(secondResultType);
+  SmallVector<Type> resultTypes;
+  resultTypes.reserve(kernel.ast.results.size());
+  for (const ResultTypeAst &result : kernel.ast.results) {
+    Type resultElementType = getStorageType(result.type);
+    resultTypes.push_back(result.tensor ? Type(RankedTensorType::get(materializeShape(result.shape),
+                                                                     resultElementType))
+                                        : resultElementType);
   }
+  Type resultType = resultTypes.front();
   FunctionType functionType = builder.getFunctionType(inputTypes, resultTypes);
   auto function = func::FuncOp::create(kernelLocation, kernel.ast.name, functionType);
   function->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
@@ -1577,11 +1646,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     }
 
     int64_t extent = static_cast<int64_t>(parameter.constantValues.size());
-    MemRefType coefficientType = MemRefType::get({extent}, elementType);
-    RankedTensorType initializerType = RankedTensorType::get({extent}, elementType);
+    Type parameterElementType = getStorageType(parameter.type);
+    MemRefType coefficientType = MemRefType::get({extent}, parameterElementType);
+    RankedTensorType initializerType = RankedTensorType::get({extent}, parameterElementType);
     SmallVector<llvm::APInt> values;
     values.reserve(parameter.constantValues.size());
-    unsigned storageWidth = cast<IntegerType>(elementType).getWidth();
+    unsigned storageWidth = cast<IntegerType>(parameterElementType).getWidth();
     for (int64_t value : parameter.constantValues)
       values.emplace_back(storageWidth, static_cast<uint64_t>(value), true);
     auto initializer = DenseIntElementsAttr::get(initializerType, values);
@@ -1603,8 +1673,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
 
   Location expressionLocation = getLocation(context, sourceName, kernel.ast.result.position);
-  if (isCfftKind(kernel.ast.result.kind)) {
-    auto outputType = cast<RankedTensorType>(resultType);
+  if (isFftKind(kernel.ast.result.kind)) {
     auto layout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI16ImagHiRealLo);
     auto i16 = builder.getI16Type();
     auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, i16, 15);
@@ -1613,19 +1682,32 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                                               ondsp::OverflowMode::Saturate, i16);
     auto outputScale = ondsp::ScaleAttr::get(&context, 0, 1, ondsp::RoundingMode::NearestEven,
                                              ondsp::OverflowMode::Saturate, i16);
-    std::function<Value(const BuiltinCallAst &)> emitCfftCall =
+    std::function<Value(const BuiltinCallAst &)> emitFftCall =
         [&](const BuiltinCallAst &call) -> Value {
       const ExpressionAst &operand = call.operands.front();
       Value input = operand.isParameterReference() ? arguments.lookup(operand.parameter)
-                                                   : emitCfftCall(*operand.call);
-      auto direction = ir::CfftDirectionAttr::get(&context, call.kind == ReductionKind::Cfft
-                                                                ? ir::CfftDirection::Forward
-                                                                : ir::CfftDirection::Inverse);
-      return builder.create<ir::CfftOp>(getLocation(context, sourceName, call.position), outputType,
-                                        input, direction, layout, numeric, product, productScale,
-                                        outputScale);
+                                                   : emitFftCall(*operand.call);
+      auto inputType = cast<RankedTensorType>(input.getType());
+      Location callLocation = getLocation(context, sourceName, call.position);
+      if (isCfftKind(call.kind)) {
+        auto direction = ir::CfftDirectionAttr::get(&context, call.kind == ReductionKind::Cfft
+                                                                  ? ir::CfftDirection::Forward
+                                                                  : ir::CfftDirection::Inverse);
+        return builder.create<ir::CfftOp>(callLocation, inputType, input, direction, layout,
+                                          numeric, product, productScale, outputScale);
+      }
+      if (call.kind == ReductionKind::Rfft) {
+        int64_t realExtent = inputType.getDimSize(0);
+        auto outputType = RankedTensorType::get({realExtent / 2 + 1}, builder.getI32Type());
+        return builder.create<ir::RfftOp>(callLocation, outputType, input, layout, numeric, product,
+                                          productScale, outputScale);
+      }
+      int64_t realExtent = (inputType.getDimSize(0) - 1) * 2;
+      auto outputType = RankedTensorType::get({realExtent}, builder.getI16Type());
+      return builder.create<ir::IrfftOp>(callLocation, outputType, input, layout, numeric, product,
+                                         productScale, outputScale);
     };
-    Value result = emitCfftCall(kernel.ast.result);
+    Value result = emitFftCall(kernel.ast.result);
     builder.create<func::ReturnOp>(expressionLocation, result);
     module->push_back(function);
     if (failed(verify(*module)))
