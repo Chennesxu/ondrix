@@ -546,6 +546,91 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_RfftOp : Ondrix_Op<"rfft", [Pure]> {
+  let summary = "Static packed-Q15 real-to-Hermitian FFT";
+  let description = [{
+    Computes one static eight- or sixteen-point real FFT from signed-Q15
+    `tensor<Nxi16>` input to compact natural-order
+    `tensor<(N/2+1)xi32>` Hermitian bins. Each result uses the declared packed
+    complex layout.
+
+    The reference schedule embeds every real input `x[n]` as
+    `x[n] + j*0`, evaluates the size-N staged radix-2 CFFT equation, and
+    retains bins `0..N/2`. It uses the same frozen Q15 twiddles and the same
+    product and output requantization boundaries as `ondrix.cfft`. The
+    additional size-16 forward twiddle pairs `(real, imaginary)` are:
+
+    ```
+    [(32767, 0), (30274, -12540), (23170, -23170), (12540, -30274),
+     (0, -32768), (-12540, -30274), (-23170, -23170), (-30274, -12540)]
+    ```
+
+    The one-bit output scale at each of `log2(N)` stages has nominal cumulative
+    scale `1/N`. The sequence of nearest-even saturating stage operations is
+    the exact contract; it must not be collapsed into one final division.
+
+    The imaginary components of the DC and Nyquist results are canonically
+    zero. Half-size packing and real-pair recombination are optimizations of
+    this contract, not part of the reference schedule.
+
+    The executable profile is limited to static N=8 or N=16, the
+    imag-high/real-low packed layout, signed Q15, exact full products,
+    nearest-even saturating Q30-to-Q15 product scaling, and nearest-even
+    saturating one-bit output scaling.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_CxLayoutAttr:$layout,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_ProductAttr:$product,
+                   Ondsp_ScaleAttr:$product_scale,
+                   Ondsp_ScaleAttr:$output_scale);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondrix_IrfftOp : Ondrix_Op<"irfft", [Pure]> {
+  let summary = "Static packed-Q15 Hermitian-to-real inverse FFT";
+  let description = [{
+    Computes one static eight- or sixteen-point inverse real FFT from compact
+    natural-order `tensor<(N/2+1)xi32>` Hermitian bins to signed-Q15
+    `tensor<Nxi16>` output.
+
+    The reference schedule canonicalizes the imaginary components of the DC
+    and Nyquist bins to zero, copies bins `1..N/2-1`, and reconstructs bin
+    `N-k` by signed-Q15 saturating conjugation of bin `k`. Saturating
+    conjugation maps imaginary raw value -32768 to +32767. The reconstructed
+    size-N spectrum is evaluated by the staged inverse CFFT equation, and the
+    real component of each output is returned. The additional size-16 inverse
+    twiddle pairs `(real, imaginary)` are:
+
+    ```
+    [(32767, 0), (30274, 12540), (23170, 23170), (12540, 30274),
+     (0, 32767), (-12540, 30274), (-23170, 23170), (-30274, 12540)]
+    ```
+
+    Every inverse CFFT product and output requantization boundary remains
+    observable. The one-bit output scale at each stage has nominal cumulative
+    scale `1/N`, but the stage operations must not be collapsed. Consequently,
+    `irfft(rfft(x))` is the sequential finite-precision program and is not an
+    identity rewrite.
+
+    The executable profile is limited to static N=8 or N=16, the
+    imag-high/real-low packed layout, signed Q15, exact full products,
+    nearest-even saturating Q30-to-Q15 product scaling, and nearest-even
+    saturating one-bit output scaling.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_CxLayoutAttr:$layout,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_ProductAttr:$product,
+                   Ondsp_ScaleAttr:$product_scale,
+                   Ondsp_ScaleAttr:$output_scale);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_QuantizeOp : Ondrix_Op<"quantize", [Pure]> {
   let summary = "High-level numeric conversion intent";
   let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$src,

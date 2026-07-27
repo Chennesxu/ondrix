@@ -185,6 +185,31 @@ product with an explicit signed frac30 accumulator and export policy. It has a
 generic scalar consumer; source binding, stateful block processing, polyphase
 reassociation, and Vector or target consumers remain deferred.
 
+## Packed Q15 Real-Spectrum Transforms
+
+The experimental `ondrix.rfft` reference profile accepts a static
+`tensor<Nxi16>` for `N=8` or `N=16`. It embeds every real Q15 input as packed
+imaginary-zero complex data, executes the existing size-`N` radix-2 CFFT
+equation, and returns natural-order bins `0..N/2` in
+`tensor<(N/2+1)xi32>`. The imaginary fields of the DC and Nyquist bins are
+canonically zero.
+
+`ondrix.irfft` accepts the compact half spectrum, ignores the stored imaginary
+fields of its DC and Nyquist bins, and reconstructs bin `N-k` from bin `k`
+using signed-Q15 saturating conjugation. In particular, negating an imaginary
+raw value of `-32768` produces `32767`. It then executes the existing inverse
+CFFT equation and returns each real component.
+
+Both operations retain the packed-Q15 butterfly contract: exact i33/Q30
+complex cross-products, nearest-even saturating Q30-to-Q15 product scaling,
+and nearest-even saturating one-bit output scaling at every CFFT stage. The
+`log2(N)` output shifts have nominal cumulative scale `1/N`, but the exact
+contract is the sequence of nonlinear stage operations, not one final
+division. `irfft(rfft(x))` therefore denotes sequential finite-precision
+execution rather than an identity. The current full-length CFFT decomposition
+is the correctness authority; half-size packing and real-pair recombination
+remain future optimizations that must preserve these observable boundaries.
+
 ## Import and Export
 
 `ondsp.acc_import` is an exact value-preserving conversion into the

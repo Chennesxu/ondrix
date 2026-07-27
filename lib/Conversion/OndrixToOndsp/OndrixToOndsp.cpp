@@ -915,6 +915,140 @@ public:
   }
 };
 
+static std::optional<uint32_t> getPackedQ15TwiddleBits(ondrix::ir::CfftDirection direction,
+                                                       int64_t size, int64_t index) {
+  constexpr uint32_t one = 0x00007fffU;
+  constexpr uint32_t minusJ = 0x80000000U;
+  constexpr uint32_t plusJ = 0x7fff0000U;
+  if (size == 2 && index == 0)
+    return one;
+  if (size == 4) {
+    constexpr uint32_t forwardValues[] = {one, minusJ};
+    constexpr uint32_t inverseValues[] = {one, plusJ};
+    return direction == ondrix::ir::CfftDirection::Forward ? forwardValues[index]
+                                                           : inverseValues[index];
+  }
+  if (size == 8) {
+    constexpr uint32_t forwardValues[] = {one, 0xa57e5a82U, minusJ, 0xa57ea57eU};
+    constexpr uint32_t inverseValues[] = {one, 0x5a825a82U, plusJ, 0x5a82a57eU};
+    return direction == ondrix::ir::CfftDirection::Forward ? forwardValues[index]
+                                                           : inverseValues[index];
+  }
+  if (size == 16) {
+    constexpr uint32_t forwardValues[] = {one,    0xcf047642U, 0xa57e5a82U, 0x89be30fcU,
+                                          minusJ, 0x89becf04U, 0xa57ea57eU, 0xcf0489beU};
+    constexpr uint32_t inverseValues[] = {one,   0x30fc7642U, 0x5a825a82U, 0x764230fcU,
+                                          plusJ, 0x7642cf04U, 0x5a82a57eU, 0x30fc89beU};
+    return direction == ondrix::ir::CfftDirection::Forward ? forwardValues[index]
+                                                           : inverseValues[index];
+  }
+  return std::nullopt;
+}
+
+static SmallVector<Value>
+lowerPackedQ15Cfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirection direction,
+                   ondrix::ondsp::CxLayoutAttr layout, Attribute numeric,
+                   ondrix::ondsp::ProductAttr product, ondrix::ondsp::ScaleAttr productScale,
+                   ondrix::ondsp::ScaleAttr outputScale, bool vectorizeStaticCfft,
+                   ConversionPatternRewriter &rewriter) {
+  auto createPackedTwiddle = [&](uint32_t bits) {
+    IntegerType i32 = rewriter.getI32Type();
+    return rewriter.create<arith::ConstantOp>(loc, i32,
+                                              rewriter.getIntegerAttr(i32, llvm::APInt(32, bits)));
+  };
+  auto createButterfly = [&](Value a, Value b, Value twiddle) {
+    return rewriter.create<ondrix::ondsp::CxButterflyOp>(
+        loc, rewriter.getI32Type(), rewriter.getI32Type(), a, b, twiddle, layout, numeric, product,
+        productScale, outputScale);
+  };
+  auto buildVector = [&](ArrayRef<Value> values) {
+    assert(!values.empty() && "CFFT stage vector must contain at least one lane");
+    auto vectorType =
+        VectorType::get({static_cast<int64_t>(values.size())}, values.front().getType());
+    Value vector = rewriter.create<vector::BroadcastOp>(loc, vectorType, values.front());
+    for (auto [index, value] : llvm::enumerate(values.drop_front()))
+      vector = rewriter.create<vector::InsertOp>(
+          loc, value, vector, ArrayRef<int64_t>{static_cast<int64_t>(index + 1)});
+    return vector;
+  };
+
+  std::function<SmallVector<Value>(ArrayRef<Value>)> lowerCfft =
+      [&](ArrayRef<Value> values) -> SmallVector<Value> {
+    if (values.size() == 1)
+      return {values.front()};
+
+    SmallVector<Value> evenInputs;
+    SmallVector<Value> oddInputs;
+    evenInputs.reserve(values.size() / 2);
+    oddInputs.reserve(values.size() / 2);
+    for (auto [index, value] : llvm::enumerate(values))
+      (index % 2 == 0 ? evenInputs : oddInputs).push_back(value);
+
+    SmallVector<Value> even = lowerCfft(evenInputs);
+    SmallVector<Value> odd = lowerCfft(oddInputs);
+    SmallVector<Value> outputs(values.size());
+    if (vectorizeStaticCfft && even.size() > 1) {
+      SmallVector<Value> twiddles;
+      twiddles.reserve(even.size());
+      for (int64_t index = 0, end = even.size(); index < end; ++index) {
+        std::optional<uint32_t> twiddleBits =
+            getPackedQ15TwiddleBits(direction, values.size(), index);
+        assert(twiddleBits && "verified CFFT extent must have a static twiddle table");
+        twiddles.push_back(createPackedTwiddle(*twiddleBits));
+      }
+      Value evenVector = buildVector(even);
+      Value oddVector = buildVector(odd);
+      Value twiddleVector = buildVector(twiddles);
+      auto vectorType = cast<VectorType>(evenVector.getType());
+      auto butterfly = rewriter.create<ondrix::ondsp::CxButterflyOp>(
+          loc, vectorType, vectorType, evenVector, oddVector, twiddleVector, layout, numeric,
+          product, productScale, outputScale);
+      for (int64_t index = 0, end = even.size(); index < end; ++index) {
+        outputs[index] = rewriter.create<vector::ExtractOp>(loc, butterfly.getOut0(), index);
+        outputs[index + end] = rewriter.create<vector::ExtractOp>(loc, butterfly.getOut1(), index);
+      }
+      return outputs;
+    }
+    for (int64_t index = 0, end = values.size() / 2; index < end; ++index) {
+      std::optional<uint32_t> twiddleBits =
+          getPackedQ15TwiddleBits(direction, values.size(), index);
+      assert(twiddleBits && "verified CFFT extent must have a static twiddle table");
+      auto butterfly = createButterfly(even[index], odd[index], createPackedTwiddle(*twiddleBits));
+      outputs[index] = butterfly.getOut0();
+      outputs[index + end] = butterfly.getOut1();
+    }
+    return outputs;
+  };
+  return lowerCfft(inputs);
+}
+
+static Value canonicalizePackedQ15Real(Location loc, Value packed,
+                                       ConversionPatternRewriter &rewriter) {
+  Value real = rewriter.create<arith::TruncIOp>(loc, rewriter.getI16Type(), packed);
+  return rewriter.create<arith::ExtUIOp>(loc, rewriter.getI32Type(), real);
+}
+
+static Value conjugatePackedQ15Saturating(Location loc, Value packed,
+                                          ConversionPatternRewriter &rewriter) {
+  IntegerType i16 = rewriter.getI16Type();
+  IntegerType i32 = rewriter.getI32Type();
+  Value real = rewriter.create<arith::TruncIOp>(loc, i16, packed);
+  Value shift = rewriter.create<arith::ConstantIntOp>(loc, 16, 32);
+  Value high = rewriter.create<arith::ShRUIOp>(loc, packed, shift);
+  Value imaginary = rewriter.create<arith::TruncIOp>(loc, i16, high);
+  Value zero = rewriter.create<arith::ConstantIntOp>(loc, 0, 16);
+  Value minimum = rewriter.create<arith::ConstantIntOp>(loc, -32768, 16);
+  Value maximum = rewriter.create<arith::ConstantIntOp>(loc, 32767, 16);
+  Value isMinimum =
+      rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, imaginary, minimum);
+  Value negated = rewriter.create<arith::SubIOp>(loc, zero, imaginary);
+  Value conjugatedImaginary = rewriter.create<arith::SelectOp>(loc, isMinimum, maximum, negated);
+  Value realBits = rewriter.create<arith::ExtUIOp>(loc, i32, real);
+  Value imaginaryBits = rewriter.create<arith::ExtUIOp>(loc, i32, conjugatedImaginary);
+  Value shiftedImaginary = rewriter.create<arith::ShLIOp>(loc, imaginaryBits, shift);
+  return rewriter.create<arith::OrIOp>(loc, shiftedImaginary, realBits);
+}
+
 class CfftOpLowering final : public OpConversionPattern<ondrix::ir::CfftOp> {
 public:
   CfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft)
@@ -937,96 +1071,9 @@ public:
       indices.push_back(position);
       inputs.push_back(rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position));
     }
-
-    auto createPackedTwiddle = [&](uint32_t bits) {
-      IntegerType i32 = rewriter.getI32Type();
-      return rewriter.create<arith::ConstantOp>(
-          loc, i32, rewriter.getIntegerAttr(i32, llvm::APInt(32, bits)));
-    };
-    auto getTwiddleBits = [&](int64_t size, int64_t index) -> std::optional<uint32_t> {
-      constexpr uint32_t one = 0x00007fffU;
-      constexpr uint32_t minusJ = 0x80000000U;
-      constexpr uint32_t plusJ = 0x7fff0000U;
-      if (size == 2 && index == 0)
-        return one;
-      if (size == 4) {
-        constexpr uint32_t forwardValues[] = {one, minusJ};
-        constexpr uint32_t inverseValues[] = {one, plusJ};
-        return op.getDirection() == ondrix::ir::CfftDirection::Forward ? forwardValues[index]
-                                                                       : inverseValues[index];
-      }
-      if (size == 8) {
-        constexpr uint32_t forwardValues[] = {one, 0xa57e5a82U, minusJ, 0xa57ea57eU};
-        constexpr uint32_t inverseValues[] = {one, 0x5a825a82U, plusJ, 0x5a82a57eU};
-        return op.getDirection() == ondrix::ir::CfftDirection::Forward ? forwardValues[index]
-                                                                       : inverseValues[index];
-      }
-      return std::nullopt;
-    };
-    auto createButterfly = [&](Value a, Value b, Value twiddle) {
-      return rewriter.create<ondrix::ondsp::CxButterflyOp>(
-          loc, rewriter.getI32Type(), rewriter.getI32Type(), a, b, twiddle, layout, op.getNumeric(),
-          op.getProduct(), op.getProductScale(), op.getOutputScale());
-    };
-    auto buildVector = [&](ArrayRef<Value> values) {
-      assert(!values.empty() && "CFFT stage vector must contain at least one lane");
-      auto vectorType =
-          VectorType::get({static_cast<int64_t>(values.size())}, values.front().getType());
-      Value vector = rewriter.create<vector::BroadcastOp>(loc, vectorType, values.front());
-      for (auto [index, value] : llvm::enumerate(values.drop_front()))
-        vector = rewriter.create<vector::InsertOp>(
-            loc, value, vector, ArrayRef<int64_t>{static_cast<int64_t>(index + 1)});
-      return vector;
-    };
-
-    std::function<SmallVector<Value>(ArrayRef<Value>)> lowerCfft =
-        [&](ArrayRef<Value> values) -> SmallVector<Value> {
-      if (values.size() == 1)
-        return {values.front()};
-
-      SmallVector<Value> evenInputs;
-      SmallVector<Value> oddInputs;
-      evenInputs.reserve(values.size() / 2);
-      oddInputs.reserve(values.size() / 2);
-      for (auto [index, value] : llvm::enumerate(values))
-        (index % 2 == 0 ? evenInputs : oddInputs).push_back(value);
-
-      SmallVector<Value> even = lowerCfft(evenInputs);
-      SmallVector<Value> odd = lowerCfft(oddInputs);
-      SmallVector<Value> outputs(values.size());
-      if (vectorizeStaticCfft && even.size() > 1) {
-        SmallVector<Value> twiddles;
-        twiddles.reserve(even.size());
-        for (int64_t index = 0, end = even.size(); index < end; ++index) {
-          std::optional<uint32_t> twiddleBits = getTwiddleBits(values.size(), index);
-          assert(twiddleBits && "verified CFFT extent must have a static twiddle table");
-          twiddles.push_back(createPackedTwiddle(*twiddleBits));
-        }
-        Value evenVector = buildVector(even);
-        Value oddVector = buildVector(odd);
-        Value twiddleVector = buildVector(twiddles);
-        auto vectorType = cast<VectorType>(evenVector.getType());
-        auto butterfly = rewriter.create<ondrix::ondsp::CxButterflyOp>(
-            loc, vectorType, vectorType, evenVector, oddVector, twiddleVector, layout,
-            op.getNumeric(), op.getProduct(), op.getProductScale(), op.getOutputScale());
-        for (int64_t index = 0, end = even.size(); index < end; ++index) {
-          outputs[index] = rewriter.create<vector::ExtractOp>(loc, butterfly.getOut0(), index);
-          outputs[index + end] =
-              rewriter.create<vector::ExtractOp>(loc, butterfly.getOut1(), index);
-        }
-        return outputs;
-      }
-      for (int64_t index = 0, end = values.size() / 2; index < end; ++index) {
-        std::optional<uint32_t> twiddleBits = getTwiddleBits(values.size(), index);
-        assert(twiddleBits && "verified CFFT extent must have a static twiddle table");
-        auto butterfly =
-            createButterfly(even[index], odd[index], createPackedTwiddle(*twiddleBits));
-        outputs[index] = butterfly.getOut0();
-        outputs[index + end] = butterfly.getOut1();
-      }
-      return outputs;
-    };
-    SmallVector<Value> outputs = lowerCfft(inputs);
+    SmallVector<Value> outputs = lowerPackedQ15Cfft(
+        loc, inputs, op.getDirection(), layout, op.getNumeric(), op.getProduct(),
+        op.getProductScale(), op.getOutputScale(), vectorizeStaticCfft, rewriter);
 
     Value result = rewriter.create<tensor::EmptyOp>(loc, op.getResult().getType().getShape(),
                                                     op.getResult().getType().getElementType());
@@ -1038,6 +1085,82 @@ public:
 
 private:
   bool vectorizeStaticCfft;
+};
+
+class RfftOpLowering final : public OpConversionPattern<ondrix::ir::RfftOp> {
+public:
+  using OpConversionPattern<ondrix::ir::RfftOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::RfftOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    int64_t extent = op.getInput().getType().getDimSize(0);
+    SmallVector<Value> inputs;
+    inputs.reserve(extent);
+    for (int64_t index = 0; index < extent; ++index) {
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      Value real = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+      inputs.push_back(rewriter.create<arith::ExtUIOp>(loc, rewriter.getI32Type(), real));
+    }
+
+    SmallVector<Value> outputs = lowerPackedQ15Cfft(
+        loc, inputs, ondrix::ir::CfftDirection::Forward, op.getLayout(), op.getNumeric(),
+        op.getProduct(), op.getProductScale(), op.getOutputScale(),
+        /*vectorizeStaticCfft=*/false, rewriter);
+    outputs.front() = canonicalizePackedQ15Real(loc, outputs.front(), rewriter);
+    outputs[extent / 2] = canonicalizePackedQ15Real(loc, outputs[extent / 2], rewriter);
+
+    RankedTensorType resultType = op.getResult().getType();
+    Value result =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    for (int64_t index = 0, end = resultType.getDimSize(0); index < end; ++index) {
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      result = rewriter.create<tensor::InsertOp>(loc, outputs[index], result, position);
+    }
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+class IrfftOpLowering final : public OpConversionPattern<ondrix::ir::IrfftOp> {
+public:
+  using OpConversionPattern<ondrix::ir::IrfftOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::IrfftOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    int64_t extent = op.getResult().getType().getDimSize(0);
+    int64_t half = extent / 2;
+    SmallVector<Value> compact;
+    compact.reserve(half + 1);
+    for (int64_t index = 0; index <= half; ++index) {
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      compact.push_back(rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position));
+    }
+
+    SmallVector<Value> spectrum(extent);
+    spectrum.front() = canonicalizePackedQ15Real(loc, compact.front(), rewriter);
+    spectrum[half] = canonicalizePackedQ15Real(loc, compact[half], rewriter);
+    for (int64_t index = 1; index < half; ++index) {
+      spectrum[index] = compact[index];
+      spectrum[extent - index] = conjugatePackedQ15Saturating(loc, compact[index], rewriter);
+    }
+
+    SmallVector<Value> outputs = lowerPackedQ15Cfft(
+        loc, spectrum, ondrix::ir::CfftDirection::Inverse, op.getLayout(), op.getNumeric(),
+        op.getProduct(), op.getProductScale(), op.getOutputScale(),
+        /*vectorizeStaticCfft=*/false, rewriter);
+    RankedTensorType resultType = op.getResult().getType();
+    Value result =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    for (int64_t index = 0; index < extent; ++index) {
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      Value real = rewriter.create<arith::TruncIOp>(loc, rewriter.getI16Type(), outputs[index]);
+      result = rewriter.create<tensor::InsertOp>(loc, real, result, position);
+    }
+    rewriter.replaceOp(op, result);
+    return success();
+  }
 };
 
 class QuantizeOpLowering final : public OpConversionPattern<ondrix::ir::QuantizeOp> {
@@ -1061,11 +1184,11 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns
-        .add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
-             Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
-             SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering>(
-            &getContext());
+    patterns.add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering,
+                 FirInterpolateOpLowering, Conv1DOpLowering, FirStreamOpLowering,
+                 SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
+                 ButterflyOpLowering, RfftOpLowering, IrfftOpLowering, QuantizeOpLowering>(
+        &getContext());
     patterns.add<CfftOpLowering>(&getContext(), vectorizeStaticCfft);
 
     ConversionTarget target(getContext());

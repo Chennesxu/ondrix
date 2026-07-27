@@ -107,6 +107,42 @@ static LogicalResult verifyCfftValueDomain(CfftOp op) {
   return success();
 }
 
+static LogicalResult verifyRfftValueDomain(RfftOp op) {
+  if (op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
+    return op.emitOpError("executable RFFT requires packed_i16_imag_hi_real_lo layout");
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType resultType = op.getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
+    return failure();
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if ((inputExtent != 8 && inputExtent != 16) || resultExtent != inputExtent / 2 + 1 ||
+      !inputType.getElementType().isSignlessInteger(16) ||
+      !resultType.getElementType().isSignlessInteger(32))
+    return op.emitOpError("executable RFFT requires tensor<8xi16> to tensor<5xi32> or "
+                          "tensor<16xi16> to tensor<9xi32>");
+  return success();
+}
+
+static LogicalResult verifyIrfftValueDomain(IrfftOp op) {
+  if (op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
+    return op.emitOpError("executable IRFFT requires packed_i16_imag_hi_real_lo layout");
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType resultType = op.getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
+    return failure();
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if ((resultExtent != 8 && resultExtent != 16) || inputExtent != resultExtent / 2 + 1 ||
+      !inputType.getElementType().isSignlessInteger(32) ||
+      !resultType.getElementType().isSignlessInteger(16))
+    return op.emitOpError("executable IRFFT requires tensor<5xi32> to tensor<8xi16> or "
+                          "tensor<9xi32> to tensor<16xi16>");
+  return success();
+}
+
 static LogicalResult verifyQuantizeDomain(QuantizeOp op) {
   if (!ondrix::haveSameElementwiseShape(op.getInput().getType(), op.getResult().getType()))
     return op.emitOpError("input and result must use the same scalar or static shaped domain");
@@ -808,6 +844,20 @@ LogicalResult CfftOp::verify() {
                                                            getProductScale(), getOutputScale())))
     return failure();
   return verifyCfftValueDomain(*this);
+}
+
+LogicalResult RfftOp::verify() {
+  if (failed(ondrix::ondsp::verifyPackedQ15ButterflyPolicy(*this, getNumeric(), getProduct(),
+                                                           getProductScale(), getOutputScale())))
+    return failure();
+  return verifyRfftValueDomain(*this);
+}
+
+LogicalResult IrfftOp::verify() {
+  if (failed(ondrix::ondsp::verifyPackedQ15ButterflyPolicy(*this, getNumeric(), getProduct(),
+                                                           getProductScale(), getOutputScale())))
+    return failure();
+  return verifyIrfftValueDomain(*this);
 }
 
 LogicalResult QuantizeOp::verify() {
