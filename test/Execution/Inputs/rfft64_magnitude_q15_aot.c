@@ -56,8 +56,13 @@ static int16_t decodeSigned16(uint16_t bits) {
   return (int16_t)value;
 }
 
+static int32_t toSigned32(uint32_t bits) {
+  return bits <= (uint32_t)INT32_MAX ? (int32_t)bits
+                                     : (int32_t)((int64_t)bits - (INT64_C(1) << 32));
+}
+
 static int32_t pack(struct Complex value) {
-  return (int32_t)(((uint32_t)(uint16_t)value.imaginary << 16) | (uint32_t)(uint16_t)value.real);
+  return toSigned32(((uint32_t)(uint16_t)value.imaginary << 16) | (uint32_t)(uint16_t)value.real);
 }
 
 static struct Complex unpack(int32_t value) {

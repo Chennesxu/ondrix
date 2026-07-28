@@ -40,8 +40,13 @@ static int16_t isqrtNearestSat(int64_t s) {
   return (int16_t)root;
 }
 
+static int32_t toSigned32(uint32_t bits) {
+  return bits <= (uint32_t)INT32_MAX ? (int32_t)bits
+                                     : (int32_t)((int64_t)bits - (INT64_C(1) << 32));
+}
+
 static int32_t pack(int16_t real, int16_t imaginary) {
-  return (int32_t)(((uint32_t)(uint16_t)imaginary << 16) | (uint32_t)(uint16_t)real);
+  return toSigned32(((uint32_t)(uint16_t)imaginary << 16) | (uint32_t)(uint16_t)real);
 }
 
 static int16_t referenceFused(int16_t real, int16_t imaginary) {
