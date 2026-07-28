@@ -222,6 +222,21 @@ LogicalResult SatCastOp::verify() {
   return verifyResultElementType(*this, getResult().getType(), destination);
 }
 
+LogicalResult SqrtFixedOp::verify() {
+  if (failed(verifyValueOnlyTypes(*this)))
+    return failure();
+  if (failed(verifySameElementwiseShape(*this, {getInput().getType(), getResult().getType()})))
+    return failure();
+  if (failed(verifySignlessIntegerElementType(*this, getInput().getType(), "input")))
+    return failure();
+  if (failed(verifySignlessIntegerElementType(*this, getResult().getType(), "result")))
+    return failure();
+  RoundingMode rounding = getRounding();
+  if (rounding != RoundingMode::TowardNegative && rounding != RoundingMode::NearestEven)
+    return emitOpError("sqrt_fixed supports toward_negative or nearest_even rounding");
+  return success();
+}
+
 static LogicalResult verifyBinaryShiftValueDomain(Operation *op, Value lhs, Value rhs, Value result,
                                                   ScaleAttr scale) {
   if (failed(verifySameElementwiseShape(op, {lhs.getType(), rhs.getType(), result.getType()})))

@@ -914,6 +914,30 @@ LogicalResult RfftRadix4SplitOp::verify() {
   return verifyRfftRadix4SplitValueDomain(*this);
 }
 
+LogicalResult CxMagnitudeOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  if (getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
+    return emitOpError("executable magnitude requires packed_i16_imag_hi_real_lo layout");
+  ondrix::ondsp::RoundingMode rounding = getRounding();
+  if (rounding != ondrix::ondsp::RoundingMode::TowardNegative &&
+      rounding != ondrix::ondsp::RoundingMode::NearestEven)
+    return emitOpError("cx_magnitude supports toward_negative or nearest_even rounding");
+  RankedTensorType inputType = getInput().getType();
+  RankedTensorType resultType = getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
+    return failure();
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if (inputExtent == ShapedType::kDynamic || inputExtent < 1 || inputExtent > 4096 ||
+      resultExtent != inputExtent || !inputType.getElementType().isSignlessInteger(32) ||
+      !resultType.getElementType().isSignlessInteger(16))
+    return emitOpError("executable magnitude requires tensor<Nxi32> to tensor<Nxi16> "
+                       "with static N in [1, 4096]");
+  return success();
+}
+
 LogicalResult WindowHammingOp::verify() {
   if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
     return failure();

@@ -710,6 +710,57 @@ public:
   }
 };
 
+class SqrtFixedOpLowering final : public OpConversionPattern<ondrix::ondsp::SqrtFixedOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::SqrtFixedOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::SqrtFixedOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // The registered lowering implements only the proven profile: a scalar
+    // i64 sum of two Q1.15 squares (at most 2^31) to an i16 root. Other
+    // widths and vector forms fail closed until a real consumer defines
+    // their exact semantics and range proofs.
+    auto inputType = dyn_cast<IntegerType>(adaptor.getInput().getType());
+    if (!inputType || !inputType.isSignlessInteger(64))
+      return op.emitOpError("fixed scalar lowering supports scalar i64 sqrt_fixed input");
+    auto resultType = dyn_cast<IntegerType>(op.getResult().getType());
+    if (!resultType || !resultType.isSignlessInteger(16))
+      return op.emitOpError("fixed scalar lowering supports scalar i16 sqrt_fixed results");
+
+    Location loc = op.getLoc();
+    Value input = adaptor.getInput();
+    Value root = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
+    // Exact bit-by-bit integer square root: the root of an input bounded by
+    // 2^31 fits in 16 bits, so 16 unrolled candidate bits suffice.
+    for (int bit = 15; bit >= 0; --bit) {
+      Value candidateBit = rewriter.create<arith::ConstantIntOp>(loc, int64_t(1) << bit, 64);
+      Value candidate = rewriter.create<arith::AddIOp>(loc, root, candidateBit);
+      Value square = rewriter.create<arith::MulIOp>(loc, candidate, candidate);
+      Value fits =
+          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, square, input);
+      root = rewriter.create<arith::SelectOp>(loc, fits, candidate, root);
+    }
+    if (op.getRounding() == ondrix::ondsp::RoundingMode::NearestEven) {
+      // Round up when input - root^2 > root, i.e. sqrt(input) > root + 1/2.
+      // (root + 1/2)^2 is never an integer, so there is no reachable tie.
+      Value square = rewriter.create<arith::MulIOp>(loc, root, root);
+      Value remainder = rewriter.create<arith::SubIOp>(loc, input, square);
+      Value roundUp =
+          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, remainder, root);
+      Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
+      Value incremented = rewriter.create<arith::AddIOp>(loc, root, one);
+      root = rewriter.create<arith::SelectOp>(loc, roundUp, incremented, root);
+    }
+    Value maximum = rewriter.create<arith::ConstantIntOp>(loc, 32767, 64);
+    Value overflows =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, root, maximum);
+    Value clamped = rewriter.create<arith::SelectOp>(loc, overflows, maximum, root);
+    rewriter.replaceOp(
+        op, rewriter.create<arith::TruncIOp>(loc, rewriter.getI16Type(), clamped).getResult());
+    return success();
+  }
+};
+
 class ConvertOndspFixedToScalarPass final
     : public ondrix::impl::ConvertOndspFixedToScalarBase<ConvertOndspFixedToScalarPass> {
 public:
@@ -731,7 +782,7 @@ public:
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
                  MacOpLowering, MacSubOpLowering, ReduceMacOpLowering, RoundShiftOpLowering,
-                 SatCastOpLowering>(typeConverter, &getContext());
+                 SatCastOpLowering, SqrtFixedOpLowering>(typeConverter, &getContext());
     patterns.add<CxButterflyOpLowering>(typeConverter, &getContext(), specializeCanonicalTwiddles);
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);

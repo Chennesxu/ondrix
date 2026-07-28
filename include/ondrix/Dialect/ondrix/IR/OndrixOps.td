@@ -687,6 +687,41 @@ def Ondrix_RfftRadix4SplitOp : Ondrix_Op<"rfft_radix4_split", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_CxMagnitudeOp : Ondrix_Op<"cx_magnitude", [Pure]> {
+  let summary = "Fixed-point magnitude of a packed Q15 complex tensor";
+  let description = [{
+    `ondrix.cx_magnitude` computes the elementwise magnitude of a rank-1
+    packed signed-Q1.15 complex tensor. For each packed element with real
+    part `re` and imaginary part `im` (signed Q1.15):
+
+    ```
+    s      = re*re + im*im            (exact, at most 2^31)
+    result = sqrt_fixed(s)            per ondsp.sqrt_fixed with the
+                                      declared rounding, saturated to 32767
+    ```
+
+    The sum of squares is an exact integer carrying fraction 30, so the
+    integer square root is the exact Q1.15 magnitude before the declared
+    rounding; there is no intermediate requantization. Saturation is
+    declared and reachable only for magnitudes of at least +1.0 (for
+    example `re = im = -32768`). Composed after `ondrix.rfft`, this yields
+    the fixed-point magnitude spectrum of the staged-scaling contract.
+
+    The executable profile is limited to static rank-1 `tensor<Nxi32>`
+    packed input to `tensor<Nxi16>` output with `N` in `[1, 4096]`, the
+    imag-high/real-low packed layout, signed Q15, and `toward_negative` or
+    `nearest_even` rounding (the integer square root has no reachable
+    nearest ties).
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_CxLayoutAttr:$layout,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_RoundingModeAttr:$rounding);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_WindowHammingOp : Ondrix_Op<"window_hamming", [Pure]> {
   let summary = "Compile-time symmetric Hamming window coefficients";
   let description = [{

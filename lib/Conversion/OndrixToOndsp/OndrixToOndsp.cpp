@@ -1403,6 +1403,43 @@ public:
   }
 };
 
+class CxMagnitudeOpLowering final : public OpConversionPattern<ondrix::ir::CxMagnitudeOp> {
+public:
+  using OpConversionPattern<ondrix::ir::CxMagnitudeOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::CxMagnitudeOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    IntegerType i16 = rewriter.getI16Type();
+    IntegerType i64 = rewriter.getIntegerType(64);
+    auto roundingAttr =
+        ondrix::ondsp::RoundingModeAttr::get(rewriter.getContext(), op.getRounding());
+
+    int64_t extent = op.getInput().getType().getDimSize(0);
+    Value shift = rewriter.create<arith::ConstantIntOp>(loc, 16, 32);
+    RankedTensorType resultType = op.getResult().getType();
+    Value result =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    for (int64_t index = 0; index < extent; ++index) {
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      Value packed = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+      Value real = rewriter.create<arith::TruncIOp>(loc, i16, packed);
+      Value high = rewriter.create<arith::ShRUIOp>(loc, packed, shift);
+      Value imaginary = rewriter.create<arith::TruncIOp>(loc, i16, high);
+      Value realWide = rewriter.create<arith::ExtSIOp>(loc, i64, real);
+      Value imaginaryWide = rewriter.create<arith::ExtSIOp>(loc, i64, imaginary);
+      Value realSquare = rewriter.create<arith::MulIOp>(loc, realWide, realWide);
+      Value imaginarySquare = rewriter.create<arith::MulIOp>(loc, imaginaryWide, imaginaryWide);
+      Value sum = rewriter.create<arith::AddIOp>(loc, realSquare, imaginarySquare);
+      Value magnitude =
+          rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, i16, sum, roundingAttr);
+      result = rewriter.create<tensor::InsertOp>(loc, magnitude, result, position);
+    }
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 class ConvertOndrixToOndspPass final
     : public ondrix::impl::ConvertOndrixToOndspBase<ConvertOndrixToOndspPass> {
 public:
@@ -1414,7 +1451,8 @@ public:
     patterns.add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering,
                  FirInterpolateOpLowering, Conv1DOpLowering, FirStreamOpLowering,
                  SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
-                 ButterflyOpLowering, QuantizeOpLowering, RfftRadix4SplitOpLowering>(&getContext());
+                 ButterflyOpLowering, QuantizeOpLowering, RfftRadix4SplitOpLowering,
+                 CxMagnitudeOpLowering>(&getContext());
     patterns.add<CfftOpLowering, RfftOpLowering, IrfftOpLowering>(&getContext(),
                                                                   vectorizeStaticCfft);
 

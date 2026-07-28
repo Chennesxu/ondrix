@@ -72,6 +72,38 @@ def Ondsp_SatCastOp : Ondsp_Op<"sat_cast", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondsp_SqrtFixedOp : Ondsp_Op<"sqrt_fixed", [Pure]> {
+  let summary = "Explicit fixed-point integer square root";
+  let description = [{
+    Computes the square root of one non-negative signed integer carrying an
+    even-fraction fixed-point value. With input `s` interpreted as a
+    mathematical integer, the exact sequence is:
+
+    ```
+    root    = floor(sqrt(s))                    (exact integer square root)
+    rounded = per the rounding mode:
+      toward_negative: root
+      nearest_even:    root + 1 when s - root^2 > root, else root
+    result  = clamp(rounded, 0, smax(result storage)), then truncate
+    ```
+
+    Because `(root + 1/2)^2` is never an integer, the nearest rounding has
+    no reachable ties; `nearest_even` names the project-wide policy while
+    behaving as plain nearest here. Halving the input fraction position is
+    what makes the integer root the exact fixed-point root: an input
+    carrying fraction `2f` produces a result carrying fraction `f`.
+
+    A negative input is outside the value domain; producers must establish
+    non-negativity structurally (for example as a sum of squares). The
+    first executable profile takes `i64` input to `i16` result under the
+    two listed rounding modes; other widths fail closed in lowering.
+  }];
+  let arguments = (ins AnyType:$input, Ondsp_RoundingModeAttr:$rounding);
+  let results = (outs AnyType:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 class Ondsp_BinaryShiftOp<string mnemonic, string opSummary>
     : Ondsp_Op<mnemonic, [Pure]> {
   let summary = opSummary;
