@@ -4,14 +4,17 @@
 // RUN: cc %S/Inputs/legality_magnitude_fusion_q15_aot.c %t.o -o %t
 // RUN: %t
 
-// Legality counterexample: the real-arithmetic identity
-// sqrt(re^2 + im^2) == sqrt(q15(re^2) + q15(im^2)) is exact over the reals
-// but NOT under explicit Q1.15 requantization boundaries. Fusing (or
-// unfusing) an elementwise square/add/sqrt chain across a quantization
-// boundary is therefore not a legal rewrite of either program; each chain
-// is its own contract. Both sides compile through their explicit Ondsp
-// boundaries and are checked bit-exactly, including diverging witnesses
-// such as (200,100) -> 224 vs 181 and (50,20) -> 54 vs 0.
+// Legality counterexample for the candidate rewrite that fuses (or
+// unfuses) a square/add/sqrt chain across explicit Q1.15 requantization
+// boundaries. In exact real arithmetic, deleting the two intermediate
+// requantizations does not change the value — both graphs then compute
+// sqrt(re^2 + im^2) — so the rewrite is a valid real-arithmetic identity.
+// Under the Ondsp contract each intermediate rounding is an observable
+// boundary: the two programs below are distinct contracts and neither
+// direction of the rewrite is legal. Both sides compile through their
+// explicit Ondsp boundaries and are checked bit-exactly, including
+// diverging witnesses such as (200,100) -> 224 vs 181 and
+// (50,20) -> 54 vs 0.
 
 // The fused contract: one exact i64 sum of squares, one rounding boundary.
 func.func @magnitude_fused_q15(%bin: i32) -> i16 {

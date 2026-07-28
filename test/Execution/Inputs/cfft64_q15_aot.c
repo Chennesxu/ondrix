@@ -66,8 +66,12 @@ static int16_t decodeSigned16(uint16_t bits) {
   return (int16_t)value;
 }
 
+static int32_t toSigned32(uint32_t bits) {
+  return (int32_t)(bits < 0x80000000u ? (int64_t)bits : (int64_t)bits - 4294967296);
+}
+
 static int32_t pack(struct Complex value) {
-  return (int32_t)(((uint32_t)(uint16_t)value.imaginary << 16) | (uint32_t)(uint16_t)value.real);
+  return toSigned32(((uint32_t)(uint16_t)value.imaginary << 16) | (uint32_t)(uint16_t)value.real);
 }
 
 static struct Complex unpack(int32_t value) {
@@ -103,10 +107,6 @@ static void cfftRecursive(const int32_t *input, unsigned stride, unsigned offset
   cfftRecursive(input, stride * 2, offset + stride, n / 2, twiddles, odd);
   for (unsigned k = 0; k < n / 2; ++k)
     butterfly(even[k], odd[k], twiddles[k * (kExtent / n)], &output[k], &output[k + n / 2]);
-}
-
-static int32_t toSigned32(uint32_t bits) {
-  return (int32_t)(bits < 0x80000000u ? (int64_t)bits : (int64_t)bits - 4294967296);
 }
 
 static uint32_t nextState(uint32_t state) {
@@ -158,5 +158,30 @@ int main(void) {
     snprintf(label, sizeof label, "inverse trial %d", trial);
     failed |= check(_mlir_ciface_cfft64_inverse_q15, kInverseTwiddles64, input, label);
   }
+
+  /* Directed corpus: a full-scale real or imaginary impulse at EVERY
+   * position walks energy through every stage/twiddle index pair of both
+   * recursions (signs alternate to exercise both saturating directions),
+   * plus complex DC rails. */
+  int32_t directed[kExtent];
+  for (unsigned position = 0; position < kExtent; ++position) {
+    char label[48];
+    for (unsigned i = 0; i < kExtent; ++i)
+      directed[i] = 0;
+    directed[position] = pack((struct Complex){(position & 1) ? INT16_MIN : INT16_MAX, 0});
+    snprintf(label, sizeof label, "real impulse %u forward", position);
+    failed |= check(_mlir_ciface_cfft64_forward_q15, kForwardTwiddles64, directed, label);
+    snprintf(label, sizeof label, "real impulse %u inverse", position);
+    failed |= check(_mlir_ciface_cfft64_inverse_q15, kInverseTwiddles64, directed, label);
+    directed[position] = pack((struct Complex){0, (position & 1) ? INT16_MAX : INT16_MIN});
+    snprintf(label, sizeof label, "imag impulse %u forward", position);
+    failed |= check(_mlir_ciface_cfft64_forward_q15, kForwardTwiddles64, directed, label);
+    snprintf(label, sizeof label, "imag impulse %u inverse", position);
+    failed |= check(_mlir_ciface_cfft64_inverse_q15, kInverseTwiddles64, directed, label);
+  }
+  for (unsigned i = 0; i < kExtent; ++i)
+    directed[i] = pack((struct Complex){INT16_MAX, INT16_MIN});
+  failed |= check(_mlir_ciface_cfft64_forward_q15, kForwardTwiddles64, directed, "dc forward");
+  failed |= check(_mlir_ciface_cfft64_inverse_q15, kInverseTwiddles64, directed, "dc inverse");
   return failed;
 }

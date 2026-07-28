@@ -10,23 +10,26 @@ typedef struct {
   int64_t strides[1];
 } MemRefI16;
 
+extern void _mlir_ciface_moving_average2_q15(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_moving_average8_q15(MemRefI16 *, MemRefI16 *);
+extern void _mlir_ciface_moving_average64_q15(MemRefI16 *, MemRefI16 *);
 
-enum { kInputLength = 40, kWindow = 8, kOutputLength = 33, kTrialCount = 12 };
+enum { kMaxLength = 64, kTrialCount = 12 };
 
 /* Exact contract: window sum in i64, one round-half-even shift by
  * log2(K). The mean of Q1.15 values stays in Q1.15, so no saturation. */
-static int16_t referenceMean(const int16_t *input, int64_t index) {
+static int16_t referenceMean(const int16_t *input, int64_t index, int64_t window) {
   int64_t sum = 0;
-  for (int64_t i = 0; i < kWindow; ++i)
+  for (int64_t i = 0; i < window; ++i)
     sum += input[index + i];
-  int64_t quotient = sum / 8;
-  int64_t remainder = sum % 8;
+  int64_t quotient = sum / window;
+  int64_t remainder = sum % window;
   if (remainder < 0) {
     --quotient;
-    remainder += 8;
+    remainder += window;
   }
-  if (remainder > 4 || (remainder == 4 && (quotient & 1)))
+  int64_t half = window / 2;
+  if (remainder > half || (remainder == half && (quotient & 1)))
     ++quotient;
   return (int16_t)quotient;
 }
@@ -50,15 +53,17 @@ static int16_t toSigned16(uint32_t bits) {
   return (int16_t)(low < 32768u ? (int32_t)low : (int32_t)low - 65536);
 }
 
-static int check(const int16_t *input, const char *label) {
-  MemRefI16 inputRef = {(int16_t *)input, (int16_t *)input, 0, {kInputLength}, {1}};
+static int check(void (*kernel)(MemRefI16 *, MemRefI16 *), const int16_t *input,
+                 int64_t inputLength, int64_t window, const char *label) {
+  MemRefI16 inputRef = {(int16_t *)input, (int16_t *)input, 0, {inputLength}, {1}};
   MemRefI16 output;
-  _mlir_ciface_moving_average8_q15(&output, &inputRef);
+  kernel(&output, &inputRef);
 
-  int failed = output.sizes[0] != kOutputLength;
-  int64_t count = output.sizes[0] < kOutputLength ? output.sizes[0] : kOutputLength;
+  int64_t outputLength = inputLength - window + 1;
+  int failed = output.sizes[0] != outputLength;
+  int64_t count = output.sizes[0] < outputLength ? output.sizes[0] : outputLength;
   for (int64_t i = 0; i < count; ++i) {
-    int16_t expected = referenceMean(input, i);
+    int16_t expected = referenceMean(input, i, window);
     int16_t actual = output.aligned[output.offset + i * output.strides[0]];
     if (actual != expected) {
       fprintf(stderr, "%s output %lld: got %d, expected %d\n", label, (long long)i, actual,
@@ -74,20 +79,33 @@ int main(void) {
   int failed = 0;
   uint32_t state = 0x0A6EA6E5u;
   for (int trial = 0; trial < kTrialCount; ++trial) {
-    int16_t input[kInputLength];
-    char label[32];
-    for (int64_t i = 0; i < kInputLength; ++i) {
+    int16_t input[kMaxLength];
+    char label[40];
+    for (int64_t i = 0; i < kMaxLength; ++i) {
       state = nextState(state);
       input[i] = toSigned16(state);
     }
     if (trial == 0)
-      for (int64_t i = 0; i < kInputLength; ++i)
+      for (int64_t i = 0; i < kMaxLength; ++i)
         input[i] = (i & 1) ? INT16_MIN : INT16_MAX;
     if (trial == 1)
-      for (int64_t i = 0; i < kInputLength; ++i)
+      for (int64_t i = 0; i < kMaxLength; ++i)
         input[i] = INT16_MIN; /* mean is exactly -32768: fits i16 */
-    snprintf(label, sizeof label, "trial %d", trial);
-    failed |= check(input, label);
+    if (trial == 2)
+      for (int64_t i = 0; i < kMaxLength; ++i)
+        input[i] = INT16_MAX;
+    if (trial == 3)
+      /* K = 2 half-remainder ties with both quotient parities: {2k, 2k+1}
+       * windows land exactly on the rounding half and must round to even. */
+      for (int64_t i = 0; i < kMaxLength; ++i)
+        input[i] = (int16_t)(i - 32);
+    snprintf(label, sizeof label, "window2 trial %d", trial);
+    failed |= check(_mlir_ciface_moving_average2_q15, input, 40, 2, label);
+    snprintf(label, sizeof label, "window8 trial %d", trial);
+    failed |= check(_mlir_ciface_moving_average8_q15, input, 40, 8, label);
+    /* Maximum window with input length == window: exactly one output. */
+    snprintf(label, sizeof label, "window64 trial %d", trial);
+    failed |= check(_mlir_ciface_moving_average64_q15, input, 64, 64, label);
   }
   return failed;
 }

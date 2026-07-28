@@ -26,3 +26,21 @@ func.func @moving_average8_q15(%input: tensor<40xi16>) -> tensor<33xi16>
   } : (tensor<40xi16>) -> tensor<33xi16>
   return %result : tensor<33xi16>
 }
+
+func.func @moving_average2_q15(%input: tensor<40xi16>) -> tensor<39xi16>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.moving_average %input {
+    window = 2 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : (tensor<40xi16>) -> tensor<39xi16>
+  return %result : tensor<39xi16>
+}
+
+func.func @moving_average64_q15(%input: tensor<64xi16>) -> tensor<1xi16>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.moving_average %input {
+    window = 64 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : (tensor<64xi16>) -> tensor<1xi16>
+  return %result : tensor<1xi16>
+}

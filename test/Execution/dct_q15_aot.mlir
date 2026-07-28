@@ -4,7 +4,7 @@
 // RUN: cc %S/Inputs/dct_q15_aot.c %t.o -o %t
 // RUN: %t
 
-// Unnormalized type-II DCT at two extents against an independent exact
+// Unnormalized type-II DCT at three extents (including the maximum, 64) against an independent exact
 // reference embedding mpmath-derived coefficient tables. The i64 sums are
 // exact and the single boundary per output is the nearest-even export to
 // the frac = 14 - log2(N) reading, whose saturation is provably
@@ -26,4 +26,13 @@ func.func @dct32_q15(%input: tensor<32xi16>) -> tensor<32xi16>
     output_numeric = #ondsp.fixed<signed, storage = i16, frac = 9>
   } : (tensor<32xi16>) -> tensor<32xi16>
   return %result : tensor<32xi16>
+}
+
+func.func @dct64_q15(%input: tensor<64xi16>) -> tensor<64xi16>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.dct %input {
+    input_numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_numeric = #ondsp.fixed<signed, storage = i16, frac = 8>
+  } : (tensor<64xi16>) -> tensor<64xi16>
+  return %result : tensor<64xi16>
 }

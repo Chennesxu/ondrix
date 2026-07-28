@@ -83,8 +83,13 @@ static int16_t decodeSigned16(uint16_t bits) {
   return (int16_t)value;
 }
 
+static int32_t toSigned32(uint32_t bits) {
+  return bits <= (uint32_t)INT32_MAX ? (int32_t)bits
+                                     : (int32_t)((int64_t)bits - (INT64_C(1) << 32));
+}
+
 static int32_t pack(struct Complex value) {
-  return (int32_t)(((uint32_t)(uint16_t)value.imaginary << 16) | (uint32_t)(uint16_t)value.real);
+  return toSigned32(((uint32_t)(uint16_t)value.imaginary << 16) | (uint32_t)(uint16_t)value.real);
 }
 
 static struct Complex unpack(int32_t value) {
@@ -182,5 +187,29 @@ int main(void) {
     snprintf(label, sizeof label, "trial %d", trial);
     failed |= check(input, label);
   }
+
+  /* Directed corpus: a full-scale impulse at EVERY input position walks
+   * energy through every stage/twiddle index pair of the recursion (signs
+   * alternate so both saturating directions are exercised), plus DC rails
+   * and a single off-center extreme sample. */
+  int16_t directed[kExtent];
+  for (unsigned position = 0; position < kExtent; ++position) {
+    char label[40];
+    for (unsigned i = 0; i < kExtent; ++i)
+      directed[i] = 0;
+    directed[position] = (position & 1) ? INT16_MIN : INT16_MAX;
+    snprintf(label, sizeof label, "impulse %u", position);
+    failed |= check(directed, label);
+  }
+  for (unsigned i = 0; i < kExtent; ++i)
+    directed[i] = INT16_MAX;
+  failed |= check(directed, "dc max");
+  for (unsigned i = 0; i < kExtent; ++i)
+    directed[i] = INT16_MIN;
+  failed |= check(directed, "dc min");
+  for (unsigned i = 0; i < kExtent; ++i)
+    directed[i] = 0;
+  directed[kExtent / 2 + 1] = INT16_MIN;
+  failed |= check(directed, "single extreme");
   return failed;
 }
