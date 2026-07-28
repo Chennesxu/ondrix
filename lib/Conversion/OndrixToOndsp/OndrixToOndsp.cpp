@@ -942,12 +942,11 @@ static std::optional<uint32_t> getPackedQ15TwiddleBits(ondrix::ir::CfftDirection
   double angle = kTwoPi * static_cast<double>(index) / static_cast<double>(size);
   std::optional<int64_t> real = quantizeTwiddleComponentQ15(std::cos(angle));
   double sine = std::sin(angle);
-  std::optional<int64_t> imaginary = quantizeTwiddleComponentQ15(
-      direction == ondrix::ir::CfftDirection::Forward ? -sine : sine);
+  std::optional<int64_t> imaginary =
+      quantizeTwiddleComponentQ15(direction == ondrix::ir::CfftDirection::Forward ? -sine : sine);
   if (!real || !imaginary)
     return std::nullopt;
-  return (static_cast<uint32_t>(*imaginary & 0xFFFF) << 16) |
-         static_cast<uint32_t>(*real & 0xFFFF);
+  return (static_cast<uint32_t>(*imaginary & 0xFFFF) << 16) | static_cast<uint32_t>(*real & 0xFFFF);
 }
 
 // Fail-closed admissibility of every stage twiddle needed by the recursive
@@ -1407,8 +1406,7 @@ public:
 // same tie-guarded round-half-even quantization as the twiddle tables.
 static std::optional<int64_t> getDctCoefficientQ15(int64_t extent, int64_t k, int64_t n) {
   constexpr double kPi = 3.14159265358979323846264338327950288;
-  double angle =
-      kPi * static_cast<double>((2 * n + 1) * k) / (2.0 * static_cast<double>(extent));
+  double angle = kPi * static_cast<double>((2 * n + 1) * k) / (2.0 * static_cast<double>(extent));
   return quantizeTwiddleComponentQ15(std::cos(angle));
 }
 
@@ -1437,9 +1435,8 @@ public:
     Location loc = op.getLoc();
     int64_t extent = op.getInput().getType().getDimSize(0);
     if (!hasAdmissibleDctCoefficients(extent))
-      return rewriter.notifyMatchFailure(op,
-                                         "DCT coefficient quantization is not tie-guard "
-                                         "admissible");
+      return rewriter.notifyMatchFailure(op, "DCT coefficient quantization is not tie-guard "
+                                             "admissible");
     IntegerType i64 = rewriter.getIntegerType(64);
     unsigned stageCount = llvm::Log2_64(extent);
     ondrix::ondsp::ScaleAttr scale =
@@ -1463,13 +1460,13 @@ public:
       Value sum;
       for (int64_t n = 0; n < extent; ++n) {
         int64_t coefficient = *getDctCoefficientQ15(extent, k, n);
-        Value constant = rewriter.create<arith::ConstantOp>(
-            loc, i64, rewriter.getIntegerAttr(i64, coefficient));
+        Value constant =
+            rewriter.create<arith::ConstantOp>(loc, i64, rewriter.getIntegerAttr(i64, coefficient));
         Value product = rewriter.create<arith::MulIOp>(loc, inputs[n], constant);
         sum = sum ? rewriter.create<arith::AddIOp>(loc, sum, product).getResult() : product;
       }
-      Value exported = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, rewriter.getI16Type(),
-                                                                    sum, scale);
+      Value exported =
+          rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, rewriter.getI16Type(), sum, scale);
       Value position = rewriter.create<arith::ConstantIndexOp>(loc, k);
       result = rewriter.create<tensor::InsertOp>(loc, exported, result, position);
     }
@@ -1568,8 +1565,7 @@ public:
       Value realSquare = rewriter.create<arith::MulIOp>(loc, realWide, realWide);
       Value imaginarySquare = rewriter.create<arith::MulIOp>(loc, imaginaryWide, imaginaryWide);
       Value sum = rewriter.create<arith::AddIOp>(loc, realSquare, imaginarySquare);
-      Value magnitude =
-          rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, i16, sum, roundingAttr);
+      Value magnitude = rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, i16, sum, roundingAttr);
       result = rewriter.create<tensor::InsertOp>(loc, magnitude, result, position);
     }
     rewriter.replaceOp(op, result);
@@ -1585,11 +1581,11 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns.add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering,
-                 FirInterpolateOpLowering, Conv1DOpLowering, FirStreamOpLowering,
-                 SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
-                 ButterflyOpLowering, QuantizeOpLowering, RfftRadix4SplitOpLowering,
-                 CxMagnitudeOpLowering, DctOpLowering>(&getContext());
+    patterns
+        .add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
+             Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
+             SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering,
+             RfftRadix4SplitOpLowering, CxMagnitudeOpLowering, DctOpLowering>(&getContext());
     patterns.add<MovingAverageOpLowering>(&getContext(), slidingWindowReuse);
     patterns.add<CfftOpLowering, RfftOpLowering, IrfftOpLowering>(&getContext(),
                                                                   vectorizeStaticCfft);

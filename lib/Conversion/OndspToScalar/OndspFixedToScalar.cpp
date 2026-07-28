@@ -739,8 +739,7 @@ public:
       // direction give double the required margin and keep the result
       // bit-identical to the integer definition.
       Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
-      Value asFloat =
-          rewriter.create<arith::SIToFPOp>(loc, rewriter.getF64Type(), input);
+      Value asFloat = rewriter.create<arith::SIToFPOp>(loc, rewriter.getF64Type(), input);
       Value estimate = rewriter.create<math::SqrtOp>(loc, asFloat);
       root = rewriter.create<arith::FPToSIOp>(loc, rewriter.getIntegerType(64), estimate);
       // Clamp the estimate before squaring: every root of at least 2^16
@@ -760,8 +759,7 @@ public:
       for (int step = 0; step < 2; ++step) {
         Value next = rewriter.create<arith::AddIOp>(loc, root, one);
         Value square = rewriter.create<arith::MulIOp>(loc, next, next);
-        Value fits =
-            rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, square, input);
+        Value fits = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, square, input);
         root = rewriter.create<arith::SelectOp>(loc, fits, next, root);
       }
     } else {
@@ -772,8 +770,7 @@ public:
         Value candidateBit = rewriter.create<arith::ConstantIntOp>(loc, int64_t(1) << bit, 64);
         Value candidate = rewriter.create<arith::AddIOp>(loc, root, candidateBit);
         Value square = rewriter.create<arith::MulIOp>(loc, candidate, candidate);
-        Value fits =
-            rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, square, input);
+        Value fits = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, square, input);
         root = rewriter.create<arith::SelectOp>(loc, fits, candidate, root);
       }
     }
@@ -789,8 +786,7 @@ public:
       root = rewriter.create<arith::SelectOp>(loc, roundUp, incremented, root);
     }
     Value maximum = rewriter.create<arith::ConstantIntOp>(loc, 32767, 64);
-    Value overflows =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, root, maximum);
+    Value overflows = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, root, maximum);
     Value clamped = rewriter.create<arith::SelectOp>(loc, overflows, maximum, root);
     rewriter.replaceOp(
         op, rewriter.create<arith::TruncIOp>(loc, rewriter.getI16Type(), clamped).getResult());

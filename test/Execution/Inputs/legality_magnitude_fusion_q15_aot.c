@@ -90,8 +90,7 @@ int main(void) {
       failed = 1;
     }
     if (!kWitnesses[i].divergent && fused != chain) {
-      fprintf(stderr, "(%d,%d): expected agreement, got %d vs %d\n", real, imaginary, fused,
-              chain);
+      fprintf(stderr, "(%d,%d): expected agreement, got %d vs %d\n", real, imaginary, fused, chain);
       failed = 1;
     }
   }

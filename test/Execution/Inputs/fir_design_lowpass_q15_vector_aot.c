@@ -21,8 +21,7 @@ enum { kInputLength = 64, kTapCount = 9, kOutputLength = 56, kTrialCount = 16 };
  * gate. sum(|h|) = 35928, so |accumulator| <= 32768 * 35928 < 2^31 and the
  * i40 saturating accumulator can never clamp: exact int64_t accumulation
  * below is bit-equivalent to the contract. */
-static const int16_t kGoldenTaps[kTapCount] = {0,    -747,  0, 9025, 16384,
-                                               9025, 0,     -747, 0};
+static const int16_t kGoldenTaps[kTapCount] = {0, -747, 0, 9025, 16384, 9025, 0, -747, 0};
 
 static int16_t referenceOutput(const int16_t *input, int64_t index) {
   int64_t accumulator = 0;

@@ -23,13 +23,13 @@ struct Complex {
 /* Forward twiddles w_64^k, quantized to Q15 with round-half-even and
  * declared saturation, derived independently with 50-digit mpmath. */
 static const struct Complex kForwardTwiddles64[32] = {
-    {32767, 0}, {32610, -3212}, {32138, -6393}, {31357, -9512}, {30274, -12540}, {28899, -15447},
-    {27246, -18205}, {25330, -20788}, {23170, -23170}, {20788, -25330}, {18205, -27246}, {15447, -28899},
-    {12540, -30274}, {9512, -31357}, {6393, -32138}, {3212, -32610}, {0, -32768}, {-3212, -32610},
-    {-6393, -32138}, {-9512, -31357}, {-12540, -30274}, {-15447, -28899}, {-18205, -27246}, {-20788, -25330},
-    {-23170, -23170}, {-25330, -20788}, {-27246, -18205}, {-28899, -15447}, {-30274, -12540}, {-31357, -9512},
-    {-32138, -6393}, {-32610, -3212}
-};
+    {32767, 0},       {32610, -3212},   {32138, -6393},   {31357, -9512},   {30274, -12540},
+    {28899, -15447},  {27246, -18205},  {25330, -20788},  {23170, -23170},  {20788, -25330},
+    {18205, -27246},  {15447, -28899},  {12540, -30274},  {9512, -31357},   {6393, -32138},
+    {3212, -32610},   {0, -32768},      {-3212, -32610},  {-6393, -32138},  {-9512, -31357},
+    {-12540, -30274}, {-15447, -28899}, {-18205, -27246}, {-20788, -25330}, {-23170, -23170},
+    {-25330, -20788}, {-27246, -18205}, {-28899, -15447}, {-30274, -12540}, {-31357, -9512},
+    {-32138, -6393},  {-32610, -3212}};
 
 static int16_t requantize(int64_t value, unsigned shift) {
   const int64_t divisor = (int64_t)1 << shift;
@@ -146,8 +146,7 @@ static int check(const int16_t *input, const char *label) {
     int16_t expected = referenceMagnitude(spectrum[i]);
     int16_t actual = output.aligned[output.offset + i * output.strides[0]];
     if (actual != expected) {
-      fprintf(stderr, "%s bin %lld: got %d, expected %d\n", label, (long long)i, actual,
-              expected);
+      fprintf(stderr, "%s bin %lld: got %d, expected %d\n", label, (long long)i, actual, expected);
       failed = 1;
     }
   }

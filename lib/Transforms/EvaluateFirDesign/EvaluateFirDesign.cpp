@@ -66,8 +66,7 @@ FailureOr<QuantizedTable> quantizeSignedQ15(Operation *op, llvm::ArrayRef<double
 }
 
 double hammingReal(int64_t n, int64_t extent) {
-  return 0.54 -
-         0.46 * std::cos(kTwoPi * static_cast<double>(n) / static_cast<double>(extent - 1));
+  return 0.54 - 0.46 * std::cos(kTwoPi * static_cast<double>(n) / static_cast<double>(extent - 1));
 }
 
 double sincReal(double x) {
@@ -79,8 +78,7 @@ double sincReal(double x) {
 
 double lowpassReal(int64_t n, int64_t extent, int64_t cutoffNum, int64_t cutoffDen) {
   int64_t center = (extent - 1) / 2;
-  double doubledCutoff =
-      (2.0 * static_cast<double>(cutoffNum)) / static_cast<double>(cutoffDen);
+  double doubledCutoff = (2.0 * static_cast<double>(cutoffNum)) / static_cast<double>(cutoffDen);
   return doubledCutoff * sincReal(doubledCutoff * static_cast<double>(n - center)) *
          hammingReal(n, extent);
 }
@@ -94,8 +92,7 @@ LogicalResult replaceWithConstant(Operation *op, RankedTensorType type,
   auto elements = DenseElementsAttr::get(type, llvm::ArrayRef<int16_t>(table->values));
   auto constant = builder.create<arith::ConstantOp>(op->getLoc(), elements);
   provenance.append("saturated", builder.getI64IntegerAttr(table->saturated));
-  constant->setAttr("ondrix.design_provenance",
-                    provenance.getDictionary(builder.getContext()));
+  constant->setAttr("ondrix.design_provenance", provenance.getDictionary(builder.getContext()));
   op->getResult(0).replaceAllUsesWith(constant.getResult());
   op->erase();
   return success();
@@ -126,13 +123,13 @@ LogicalResult evaluateDesign(ondrix::ir::FirDesignWindowedSincOp op) {
   }
   NamedAttrList provenance;
   provenance.append("kind", StringAttr::get(op.getContext(), "fir_design_windowed_sinc"));
-  provenance.append("response",
-                    StringAttr::get(op.getContext(),
-                                    ondrix::ir::stringifyFirDesignResponse(op.getResponse())));
-  provenance.append("cutoff_num", IntegerAttr::get(IntegerType::get(op.getContext(), 64),
-                                                   op.getCutoffNum()));
-  provenance.append("cutoff_den", IntegerAttr::get(IntegerType::get(op.getContext(), 64),
-                                                   op.getCutoffDen()));
+  provenance.append(
+      "response",
+      StringAttr::get(op.getContext(), ondrix::ir::stringifyFirDesignResponse(op.getResponse())));
+  provenance.append("cutoff_num",
+                    IntegerAttr::get(IntegerType::get(op.getContext(), 64), op.getCutoffNum()));
+  provenance.append("cutoff_den",
+                    IntegerAttr::get(IntegerType::get(op.getContext(), 64), op.getCutoffDen()));
   return replaceWithConstant(op, type, reals, std::move(provenance));
 }
 
