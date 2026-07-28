@@ -11,6 +11,17 @@
 // RUN: cc %S/Inputs/rfft_q15_aot.c %t.vector.o -o %t.vector
 // RUN: %t.vector
 
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="fft-loops" --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --buffer-deallocation --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.loops.mlir
+// RUN: ondrix-translate %t.loops.mlir --mlir-to-llvmir > %t.loops.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.loops.ll -o %t.loops.o
+// RUN: cc %S/Inputs/rfft_q15_aot.c %t.loops.o -o %t.loops
+// RUN: %t.loops
+
+// The .loops pipeline exercises the opt-in fft-loops lowering for BOTH the
+// forward transform and the inverse reconstruction (loop-built Hermitian
+// mirror with saturating conjugation) against the same independent
+// reference and round-trip checks.
+
 // CHECK-NOT: ondrix.
 // CHECK-NOT: ondsp.
 

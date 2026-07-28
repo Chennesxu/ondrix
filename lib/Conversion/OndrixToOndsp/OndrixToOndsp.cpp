@@ -1037,14 +1037,103 @@ lowerPackedQ15Cfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirecti
   return lowerCfft(inputs);
 }
 
-static Value canonicalizePackedQ15Real(Location loc, Value packed,
-                                       ConversionPatternRewriter &rewriter) {
+// Loop-form lowering of the same recursive DIT dataflow with in-memory
+// tables. The recursive even/odd combine applied to natural-order input
+// computes exactly the butterflies of the iterative algorithm applied to
+// bit-reversed input: stage half-sizes H = 1, 2, ..., N/2, butterfly j of
+// group g pairing positions g*2H + j and g*2H + j + H under twiddle
+// W(2H, j). Every butterfly is the same scalar ondsp.cx_butterfly with the
+// same requantization attributes, so each output element passes through the
+// identical sequence of quantization boundaries in an equivalent order and
+// the two lowerings are bit-identical per element; only the code shape
+// changes (loops and constant tables instead of unrolled SSA butterflies).
+static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
+                                     ondrix::ir::CfftDirection direction,
+                                     ondrix::ondsp::CxLayoutAttr layout, Attribute numeric,
+                                     ondrix::ondsp::ProductAttr product,
+                                     ondrix::ondsp::ScaleAttr productScale,
+                                     ondrix::ondsp::ScaleAttr outputScale,
+                                     ConversionPatternRewriter &rewriter) {
+  IntegerType i32 = rewriter.getI32Type();
+  IntegerType i64 = rewriter.getI64Type();
+  int64_t stageCount = llvm::Log2_64(extent);
+
+  // twiddles[H + j] = W(2H, j) for H = 1, 2, ..., N/2; index 0 is unused.
+  SmallVector<int32_t> twiddleBits(extent, 0);
+  for (int64_t half = 1; half < extent; half *= 2)
+    for (int64_t index = 0; index < half; ++index) {
+      std::optional<uint32_t> bits = getPackedQ15TwiddleBits(direction, 2 * half, index);
+      assert(bits && "twiddle admissibility was checked before lowering");
+      twiddleBits[half + index] = static_cast<int32_t>(*bits);
+    }
+  SmallVector<int64_t> bitReversed(extent);
+  for (int64_t index = 0; index < extent; ++index) {
+    int64_t reversed = 0;
+    for (int64_t bit = 0; bit < stageCount; ++bit)
+      reversed |= ((index >> bit) & 1) << (stageCount - 1 - bit);
+    bitReversed[index] = reversed;
+  }
+  Value twiddleTable = rewriter.create<arith::ConstantOp>(
+      loc, DenseElementsAttr::get(RankedTensorType::get({extent}, i32),
+                                  llvm::ArrayRef<int32_t>(twiddleBits)));
+  Value reversalTable = rewriter.create<arith::ConstantOp>(
+      loc, DenseElementsAttr::get(RankedTensorType::get({extent}, i64),
+                                  llvm::ArrayRef<int64_t>(bitReversed)));
+
+  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+  Value halfExtent = rewriter.create<arith::ConstantIndexOp>(loc, extent / 2);
+  Value stages = rewriter.create<arith::ConstantIndexOp>(loc, stageCount);
+
+  Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{extent}, i32);
+  auto permuteLoop = rewriter.create<scf::ForOp>(
+      loc, zero, extentValue, one, ValueRange{empty},
+      [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+        Value source64 = builder.create<tensor::ExtractOp>(loc, reversalTable, position);
+        Value source = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), source64);
+        Value value = builder.create<tensor::ExtractOp>(loc, input, source);
+        Value inserted = builder.create<tensor::InsertOp>(loc, value, iterArgs.front(), position);
+        builder.create<scf::YieldOp>(loc, inserted);
+      });
+
+  auto stageLoop = rewriter.create<scf::ForOp>(
+      loc, zero, stages, one, ValueRange{permuteLoop.getResult(0)},
+      [&](OpBuilder &builder, Location loc, Value stage, ValueRange stageArgs) {
+        Value half = builder.create<arith::ShLIOp>(loc, one, stage);
+        auto butterflyLoop = builder.create<scf::ForOp>(
+            loc, zero, halfExtent, one, ValueRange{stageArgs.front()},
+            [&](OpBuilder &builder, Location loc, Value pair, ValueRange pairArgs) {
+              Value group = builder.create<arith::DivUIOp>(loc, pair, half);
+              Value phase = builder.create<arith::RemUIOp>(loc, pair, half);
+              Value doubled = builder.create<arith::AddIOp>(loc, half, half);
+              Value base = builder.create<arith::MulIOp>(loc, group, doubled);
+              Value upper = builder.create<arith::AddIOp>(loc, base, phase);
+              Value lower = builder.create<arith::AddIOp>(loc, upper, half);
+              Value twiddleIndex = builder.create<arith::AddIOp>(loc, half, phase);
+              Value a = builder.create<tensor::ExtractOp>(loc, pairArgs.front(), upper);
+              Value b = builder.create<tensor::ExtractOp>(loc, pairArgs.front(), lower);
+              Value twiddle = builder.create<tensor::ExtractOp>(loc, twiddleTable, twiddleIndex);
+              auto butterfly = builder.create<ondrix::ondsp::CxButterflyOp>(
+                  loc, i32, i32, a, b, twiddle, layout, numeric, product, productScale,
+                  outputScale);
+              Value insertUpper = builder.create<tensor::InsertOp>(loc, butterfly.getOut0(),
+                                                                   pairArgs.front(), upper);
+              Value insertLower =
+                  builder.create<tensor::InsertOp>(loc, butterfly.getOut1(), insertUpper, lower);
+              builder.create<scf::YieldOp>(loc, insertLower);
+            });
+        builder.create<scf::YieldOp>(loc, butterflyLoop.getResult(0));
+      });
+  return stageLoop.getResult(0);
+}
+
+static Value canonicalizePackedQ15Real(Location loc, Value packed, OpBuilder &rewriter) {
   Value real = rewriter.create<arith::TruncIOp>(loc, rewriter.getI16Type(), packed);
   return rewriter.create<arith::ExtUIOp>(loc, rewriter.getI32Type(), real);
 }
 
-static Value conjugatePackedQ15Saturating(Location loc, Value packed,
-                                          ConversionPatternRewriter &rewriter) {
+static Value conjugatePackedQ15Saturating(Location loc, Value packed, OpBuilder &rewriter) {
   IntegerType i16 = rewriter.getI16Type();
   IntegerType i32 = rewriter.getI32Type();
   Value real = rewriter.create<arith::TruncIOp>(loc, i16, packed);
@@ -1066,8 +1155,9 @@ static Value conjugatePackedQ15Saturating(Location loc, Value packed,
 
 class CfftOpLowering final : public OpConversionPattern<ondrix::ir::CfftOp> {
 public:
-  CfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft)
-      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft) {}
+  CfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops)
+      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft), fftLoops(fftLoops) {
+  }
 
   LogicalResult matchAndRewrite(ondrix::ir::CfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -1079,6 +1169,13 @@ public:
     int64_t extent = op.getInput().getType().getDimSize(0);
     if (!hasAdmissiblePackedQ15TwiddleTables(op.getDirection(), extent))
       return rewriter.notifyMatchFailure(op, "twiddle quantization is not tie-guard admissible");
+    if (fftLoops) {
+      Value result = lowerPackedQ15CfftLoops(loc, adaptor.getInput(), extent, op.getDirection(),
+                                             layout, op.getNumeric(), op.getProduct(),
+                                             op.getProductScale(), op.getOutputScale(), rewriter);
+      rewriter.replaceOp(op, result);
+      return success();
+    }
     SmallVector<Value> indices;
     SmallVector<Value> inputs;
     indices.reserve(extent);
@@ -1102,12 +1199,14 @@ public:
 
 private:
   bool vectorizeStaticCfft;
+  bool fftLoops;
 };
 
 class RfftOpLowering final : public OpConversionPattern<ondrix::ir::RfftOp> {
 public:
-  RfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft)
-      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft) {}
+  RfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops)
+      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft), fftLoops(fftLoops) {
+  }
 
   LogicalResult matchAndRewrite(ondrix::ir::RfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -1115,6 +1214,40 @@ public:
     int64_t extent = op.getInput().getType().getDimSize(0);
     if (!hasAdmissiblePackedQ15TwiddleTables(ondrix::ir::CfftDirection::Forward, extent))
       return rewriter.notifyMatchFailure(op, "twiddle quantization is not tie-guard admissible");
+    if (fftLoops) {
+      IntegerType i32 = rewriter.getI32Type();
+      Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+      Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+      Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{extent}, i32);
+      auto packLoop = rewriter.create<scf::ForOp>(
+          loc, zero, extentValue, one, ValueRange{empty},
+          [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+            Value real = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+            Value packed = builder.create<arith::ExtUIOp>(loc, builder.getI32Type(), real);
+            Value inserted =
+                builder.create<tensor::InsertOp>(loc, packed, iterArgs.front(), position);
+            builder.create<scf::YieldOp>(loc, inserted);
+          });
+      Value spectrum = lowerPackedQ15CfftLoops(
+          loc, packLoop.getResult(0), extent, ondrix::ir::CfftDirection::Forward, op.getLayout(),
+          op.getNumeric(), op.getProduct(), op.getProductScale(), op.getOutputScale(), rewriter);
+      RankedTensorType resultType = op.getResult().getType();
+      int64_t binCount = resultType.getDimSize(0);
+      Value compact = rewriter.create<tensor::ExtractSliceOp>(
+          loc, resultType, spectrum, ArrayRef<OpFoldResult>{rewriter.getIndexAttr(0)},
+          ArrayRef<OpFoldResult>{rewriter.getIndexAttr(binCount)},
+          ArrayRef<OpFoldResult>{rewriter.getIndexAttr(1)});
+      Value half = rewriter.create<arith::ConstantIndexOp>(loc, extent / 2);
+      Value dc = rewriter.create<tensor::ExtractOp>(loc, compact, zero);
+      compact = rewriter.create<tensor::InsertOp>(loc, canonicalizePackedQ15Real(loc, dc, rewriter),
+                                                  compact, zero);
+      Value nyquist = rewriter.create<tensor::ExtractOp>(loc, compact, half);
+      compact = rewriter.create<tensor::InsertOp>(
+          loc, canonicalizePackedQ15Real(loc, nyquist, rewriter), compact, half);
+      rewriter.replaceOp(op, compact);
+      return success();
+    }
     SmallVector<Value> inputs;
     inputs.reserve(extent);
     for (int64_t index = 0; index < extent; ++index) {
@@ -1142,12 +1275,14 @@ public:
 
 private:
   bool vectorizeStaticCfft;
+  bool fftLoops;
 };
 
 class IrfftOpLowering final : public OpConversionPattern<ondrix::ir::IrfftOp> {
 public:
-  IrfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft)
-      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft) {}
+  IrfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops)
+      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft), fftLoops(fftLoops) {
+  }
 
   LogicalResult matchAndRewrite(ondrix::ir::IrfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -1156,6 +1291,47 @@ public:
     if (!hasAdmissiblePackedQ15TwiddleTables(ondrix::ir::CfftDirection::Inverse, extent))
       return rewriter.notifyMatchFailure(op, "twiddle quantization is not tie-guard admissible");
     int64_t half = extent / 2;
+    if (fftLoops) {
+      IntegerType i32 = rewriter.getI32Type();
+      Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+      Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+      Value halfValue = rewriter.create<arith::ConstantIndexOp>(loc, half);
+      Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{extent}, i32);
+      Value dc = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), zero);
+      Value seeded = rewriter.create<tensor::InsertOp>(
+          loc, canonicalizePackedQ15Real(loc, dc, rewriter), empty, zero);
+      Value nyquist = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), halfValue);
+      seeded = rewriter.create<tensor::InsertOp>(
+          loc, canonicalizePackedQ15Real(loc, nyquist, rewriter), seeded, halfValue);
+      auto mirrorLoop = rewriter.create<scf::ForOp>(
+          loc, one, halfValue, one, ValueRange{seeded},
+          [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+            Value bin = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+            Value direct = builder.create<tensor::InsertOp>(loc, bin, iterArgs.front(), position);
+            Value mirrored = builder.create<arith::SubIOp>(loc, extentValue, position);
+            Value conjugated = conjugatePackedQ15Saturating(loc, bin, builder);
+            Value full = builder.create<tensor::InsertOp>(loc, conjugated, direct, mirrored);
+            builder.create<scf::YieldOp>(loc, full);
+          });
+      Value outputs = lowerPackedQ15CfftLoops(
+          loc, mirrorLoop.getResult(0), extent, ondrix::ir::CfftDirection::Inverse, op.getLayout(),
+          op.getNumeric(), op.getProduct(), op.getProductScale(), op.getOutputScale(), rewriter);
+      RankedTensorType resultType = op.getResult().getType();
+      Value resultEmpty =
+          rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+      auto truncateLoop = rewriter.create<scf::ForOp>(
+          loc, zero, extentValue, one, ValueRange{resultEmpty},
+          [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+            Value packed = builder.create<tensor::ExtractOp>(loc, outputs, position);
+            Value real = builder.create<arith::TruncIOp>(loc, builder.getI16Type(), packed);
+            Value inserted =
+                builder.create<tensor::InsertOp>(loc, real, iterArgs.front(), position);
+            builder.create<scf::YieldOp>(loc, inserted);
+          });
+      rewriter.replaceOp(op, truncateLoop.getResult(0));
+      return success();
+    }
     SmallVector<Value> compact;
     compact.reserve(half + 1);
     for (int64_t index = 0; index <= half; ++index) {
@@ -1188,6 +1364,7 @@ public:
 
 private:
   bool vectorizeStaticCfft;
+  bool fftLoops;
 };
 
 class QuantizeOpLowering final : public OpConversionPattern<ondrix::ir::QuantizeOp> {
@@ -1585,9 +1762,14 @@ public:
              Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
              SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering,
              RfftRadix4SplitOpLowering, CxMagnitudeOpLowering, DctOpLowering>(&getContext());
+    if (vectorizeStaticCfft && fftLoops) {
+      module.emitError("vectorize-static-cfft and fft-loops are mutually exclusive alternative "
+                       "FFT lowerings; select at most one");
+      return signalPassFailure();
+    }
     patterns.add<MovingAverageOpLowering>(&getContext(), slidingWindowReuse);
     patterns.add<CfftOpLowering, RfftOpLowering, IrfftOpLowering>(&getContext(),
-                                                                  vectorizeStaticCfft);
+                                                                  vectorizeStaticCfft, fftLoops);
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,

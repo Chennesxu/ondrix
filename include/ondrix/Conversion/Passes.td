@@ -19,6 +19,15 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
     A saturating-accumulator mean contract could not legally take this
     lowering; that contrast is the point of keeping it explicit and
     opt-in.
+
+    The opt-in fft-loops mode lowers static CFFT/RFFT/IRFFT through a
+    bit-reversal permutation and stage/butterfly loops over in-memory
+    twiddle tables instead of fully unrolled SSA butterflies. Every
+    butterfly executes the same scalar `ondsp.cx_butterfly` with the same
+    requantization attributes in an equivalent order, so results are
+    bit-identical to the default recursive lowering; only the code shape
+    changes (object footprint and compile time versus unrolled constant
+    propagation). It is mutually exclusive with vectorize-static-cfft.
   }];
   let constructor = "ondrix::createConvertOndrixToOndspPass()";
   let dependentDialects = [
@@ -38,6 +47,10 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
     Option<"slidingWindowReuse", "sliding-window-reuse",
            "bool", /*default=*/"false",
            "Reuse exact moving-average window sums incrementally across outputs">,
+    Option<"fftLoops", "fft-loops",
+           "bool", /*default=*/"false",
+           "Lower static FFTs with bit-reversal/stage loops over in-memory twiddle tables "
+           "(bit-identical to the unrolled lowering)">,
   ];
 }
 
