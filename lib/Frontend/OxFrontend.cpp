@@ -21,6 +21,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
 #include <cctype>
@@ -214,7 +215,12 @@ enum class ReductionKind {
   Cfft,
   Icfft,
   Rfft,
-  Irfft
+  Irfft,
+  Magnitude,
+  Dct,
+  MovingAverage,
+  Gain,
+  Rms
 };
 
 static bool isCfftKind(ReductionKind kind) {
@@ -223,6 +229,19 @@ static bool isCfftKind(ReductionKind kind) {
 
 static bool isFftKind(ReductionKind kind) {
   return isCfftKind(kind) || kind == ReductionKind::Rfft || kind == ReductionKind::Irfft;
+}
+
+static bool isFftComposableKind(ReductionKind kind) {
+  return isFftKind(kind) || kind == ReductionKind::Magnitude;
+}
+
+static bool isUnaryTensorKind(ReductionKind kind) {
+  return kind == ReductionKind::Dct || kind == ReductionKind::MovingAverage ||
+         kind == ReductionKind::Gain || kind == ReductionKind::Rms;
+}
+
+static bool isUnaryKind(ReductionKind kind) {
+  return isFftComposableKind(kind) || isUnaryTensorKind(kind);
 }
 
 struct ParameterAst {
@@ -271,6 +290,8 @@ struct BuiltinCallAst {
   std::string fpContract;
   std::string boundary;
   int64_t factor = 0;
+  int64_t window = 0;
+  int64_t gain = 0;
   SourcePosition position;
 };
 
@@ -395,12 +416,15 @@ public:
         !isIdentifier("fir_stream") && !isIdentifier("sos_df2_fixed") &&
         !isIdentifier("convolution") && !isIdentifier("correlation") &&
         !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft") &&
-        !isIdentifier("rfft") && !isIdentifier("irfft")) {
+        !isIdentifier("rfft") && !isIdentifier("irfft") && !isIdentifier("magnitude") &&
+        !isIdentifier("dct") && !isIdentifier("moving_average") && !isIdentifier("gain") &&
+        !isIdentifier("rms")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
                         "convolution(...), correlation(...), butterfly(...), cfft(...), or "
-                        "icfft(...), rfft(...), or irfft(...) return expression");
+                        "icfft(...), rfft(...), irfft(...), magnitude(...), dct(...), "
+                        "moving_average(...), gain(...), or rms(...) return expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -429,8 +453,18 @@ public:
       kernel.result.kind = ReductionKind::Icfft;
     else if (isIdentifier("rfft"))
       kernel.result.kind = ReductionKind::Rfft;
-    else
+    else if (isIdentifier("irfft"))
       kernel.result.kind = ReductionKind::Irfft;
+    else if (isIdentifier("magnitude"))
+      kernel.result.kind = ReductionKind::Magnitude;
+    else if (isIdentifier("dct"))
+      kernel.result.kind = ReductionKind::Dct;
+    else if (isIdentifier("moving_average"))
+      kernel.result.kind = ReductionKind::MovingAverage;
+    else if (isIdentifier("gain"))
+      kernel.result.kind = ReductionKind::Gain;
+    else
+      kernel.result.kind = ReductionKind::Rms;
     kernel.result.position = current.position;
     advance();
     if (!expect(TokenKind::LeftParen, "expected '(' after builtin"))
@@ -441,6 +475,19 @@ public:
         return std::nullopt;
       kernel.result.operands.push_back(std::move(*operand));
       if (!expect(TokenKind::RightParen, "expected ')' after FFT operand"))
+        return std::nullopt;
+      if (current.kind != TokenKind::Eof) {
+        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
+        return std::nullopt;
+      }
+      return kernel;
+    }
+    if (kernel.result.kind == ReductionKind::Magnitude) {
+      std::optional<ExpressionAst> operand = parseFftExpression();
+      if (!operand)
+        return std::nullopt;
+      kernel.result.operands.push_back(std::move(*operand));
+      if (!expect(TokenKind::RightParen, "expected ')' after magnitude operand"))
         return std::nullopt;
       if (current.kind != TokenKind::Eof) {
         diagnostics.error(current.position, "only one kernel is supported per file in this slice");
@@ -502,6 +549,41 @@ public:
         kernel.result.destinationOverflow = "saturate";
         kernel.result.updateOverflow = "wrap";
       }
+      if (current.kind != TokenKind::Eof) {
+        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
+        return std::nullopt;
+      }
+      return kernel;
+    }
+    if (kernel.result.kind == ReductionKind::Dct || kernel.result.kind == ReductionKind::Rms) {
+      llvm::StringRef builtin = kernel.result.kind == ReductionKind::Dct ? "dct" : "rms";
+      if (!expect(TokenKind::RightParen, llvm::Twine("expected ')' after ") + builtin + " operand"))
+        return std::nullopt;
+      if (current.kind != TokenKind::Eof) {
+        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
+        return std::nullopt;
+      }
+      return kernel;
+    }
+    if (kernel.result.kind == ReductionKind::MovingAverage ||
+        kernel.result.kind == ReductionKind::Gain) {
+      bool isGain = kernel.result.kind == ReductionKind::Gain;
+      llvm::StringRef builtin = isGain ? "gain" : "moving_average";
+      llvm::StringRef keyword = isGain ? "gain" : "window";
+      if (!expect(TokenKind::Comma, llvm::Twine("expected ',' before ") + builtin + " constant") ||
+          !expectIdentifier(keyword, llvm::Twine("expected ") + builtin + " constant") ||
+          !expect(TokenKind::Equal, llvm::Twine("expected '=' after ") + keyword))
+        return std::nullopt;
+      auto constant = parseSignedInteger(llvm::Twine("expected ") + builtin + " constant");
+      if (!constant)
+        return std::nullopt;
+      if (isGain)
+        kernel.result.gain = *constant;
+      else
+        kernel.result.window = *constant;
+      if (!expect(TokenKind::RightParen,
+                  llvm::Twine("expected ')' after ") + builtin + " expression"))
+        return std::nullopt;
       if (current.kind != TokenKind::Eof) {
         diagnostics.error(current.position, "only one kernel is supported per file in this slice");
         return std::nullopt;
@@ -930,28 +1012,30 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   bool hasThreeOperands =
       ast.result.kind == ReductionKind::Butterfly || ast.result.kind == ReductionKind::FirStream;
   bool hasFourOperands = ast.result.kind == ReductionKind::SosDf2Fixed;
-  size_t expectedOperandCount = isFftKind(ast.result.kind) ? 1
-                                : hasFourOperands          ? 4
-                                : hasThreeOperands         ? 3
-                                                           : 2;
+  size_t expectedOperandCount = isUnaryKind(ast.result.kind) ? 1
+                                : hasFourOperands            ? 4
+                                : hasThreeOperands           ? 3
+                                                             : 2;
   if (ast.result.operands.size() != expectedOperandCount) {
     diagnostics.error(ast.result.position, "builtin operand count does not match its contract");
     return std::nullopt;
   }
-  if (!isFftKind(ast.result.kind) &&
+  if (!isFftComposableKind(ast.result.kind) &&
       llvm::any_of(ast.result.operands,
                    [](const ExpressionAst &operand) { return !operand.isParameterReference(); })) {
     diagnostics.error(ast.result.position,
                       "nested calls are currently supported only by FFT-family builtins");
     return std::nullopt;
   }
-  size_t expectedParameterCount = isFftKind(ast.result.kind) ? 1
-                                  : hasFourOperands          ? 4
-                                  : hasThreeOperands         ? 3
-                                                             : 2;
+  size_t expectedParameterCount = isUnaryKind(ast.result.kind) ? 1
+                                  : hasFourOperands            ? 4
+                                  : hasThreeOperands           ? 3
+                                                               : 2;
   if (ast.parameters.size() != expectedParameterCount) {
     diagnostics.error(ast.position,
                       isFftKind(ast.result.kind) ? "FFT kernels require exactly one parameter"
+                      : isUnaryKind(ast.result.kind)
+                          ? "unary DSP kernels require exactly one parameter"
                       : hasFourOperands  ? "sos_df2_fixed kernels require exactly four parameters"
                       : hasThreeOperands ? "butterfly and fir_stream kernels require exactly three "
                                            "parameters"
@@ -988,7 +1072,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         llvm::Twine("duplicate parameter '") + parameter.name + "'");
       return std::nullopt;
     }
-    if (!isFftKind(ast.result.kind) && parameter.type != ast.primaryResult().type) {
+    if (!isFftComposableKind(ast.result.kind) && parameter.type != ast.primaryResult().type) {
       diagnostics.error(parameter.position,
                         "parameter element types must match the kernel result type");
       return std::nullopt;
@@ -1005,12 +1089,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     if (fourthName && parameter.name == *fourthName)
       fourthParameter = &parameter;
   }
-  if (!isFftKind(ast.result.kind) && (!lhsName || !parameterNames.contains(*lhsName))) {
+  if (!isFftComposableKind(ast.result.kind) && (!lhsName || !parameterNames.contains(*lhsName))) {
     diagnostics.error(ast.result.position, llvm::Twine("unknown builtin operand '") +
                                                (lhsName ? *lhsName : "<nested call>") + "'");
     return std::nullopt;
   }
-  if (!isFftKind(ast.result.kind) && (!rhsName || !parameterNames.contains(*rhsName))) {
+  if (!isUnaryKind(ast.result.kind) && (!rhsName || !parameterNames.contains(*rhsName))) {
     diagnostics.error(ast.result.position, llvm::Twine("unknown reduction operand '") +
                                                (rhsName ? *rhsName : "<nested call>") + "'");
     return std::nullopt;
@@ -1161,7 +1245,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                       "DSP builtins");
     return std::nullopt;
   }
-  if (isFftKind(ast.result.kind)) {
+  if (isFftComposableKind(ast.result.kind)) {
     struct FftExpressionType {
       SourceType elementType;
       int64_t extent;
@@ -1194,7 +1278,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       return checkFftCall(*expression.call);
     };
     checkFftCall = [&](const BuiltinCallAst &call) -> std::optional<FftExpressionType> {
-      if (!isFftKind(call.kind) || call.operands.size() != 1) {
+      if (!isFftComposableKind(call.kind) || call.operands.size() != 1) {
         diagnostics.error(call.position,
                           "nested calls are currently supported only by unary FFT-family builtins");
         return std::nullopt;
@@ -1203,6 +1287,18 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       if (!input)
         return std::nullopt;
 
+      if (call.kind == ReductionKind::Magnitude) {
+        if (input->elementType != SourceType::ComplexQ15) {
+          diagnostics.error(call.position, "magnitude requires complex_q15 operand elements");
+          return std::nullopt;
+        }
+        if (input->extent < 1 || input->extent > 4096) {
+          diagnostics.error(call.position,
+                            "magnitude currently requires an operand extent in [1, 4096]");
+          return std::nullopt;
+        }
+        return FftExpressionType{SourceType::Q15, input->extent};
+      }
       if (isCfftKind(call.kind)) {
         if (input->elementType != SourceType::ComplexQ15) {
           diagnostics.error(call.position, "cfft and icfft require complex_q15 operand elements");
@@ -1470,6 +1566,83 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         "fir_filter supports only boundary=valid or boundary=full");
       return std::nullopt;
     }
+  } else if (isUnaryTensorKind(ast.result.kind)) {
+    llvm::StringRef builtin = ast.result.kind == ReductionKind::Dct             ? "dct"
+                              : ast.result.kind == ReductionKind::MovingAverage ? "moving_average"
+                              : ast.result.kind == ReductionKind::Gain          ? "gain"
+                                                                                : "rms";
+    if (constexprCount != 0 || !ast.primaryResult().tensor ||
+        ast.primaryResult().type != SourceType::Q15 || !lhsParameter || !lhsParameter->isTensor()) {
+      diagnostics.error(ast.result.position,
+                        llvm::Twine(builtin) + " requires a Q15 tensor input and result");
+      return std::nullopt;
+    }
+    if (!hasRank(lhsParameter->shape, 1) || !hasRank(ast.primaryResult().shape, 1)) {
+      diagnostics.error(ast.result.position,
+                        llvm::Twine(builtin) + " currently requires rank-1 tensors");
+      return std::nullopt;
+    }
+    const std::optional<int64_t> &inputExtent = getRankOneExtent(lhsParameter->shape);
+    const std::optional<int64_t> &resultExtent = getRankOneExtent(ast.primaryResult().shape);
+    if (!inputExtent || !resultExtent) {
+      diagnostics.error(ast.result.position,
+                        llvm::Twine(builtin) + " currently requires static extents");
+      return std::nullopt;
+    }
+    if (ast.result.kind == ReductionKind::Dct) {
+      if (*inputExtent < 4 || *inputExtent > 64 || !llvm::isPowerOf2_64(*inputExtent)) {
+        diagnostics.error(ast.result.position,
+                          "dct currently requires a power-of-two input extent in [4, 64]");
+        return std::nullopt;
+      }
+      if (*resultExtent != *inputExtent) {
+        diagnostics.error(ast.result.position, "dct result extent must equal the input extent");
+        return std::nullopt;
+      }
+    } else if (ast.result.kind == ReductionKind::MovingAverage) {
+      int64_t window = ast.result.window;
+      if (window < 2 || window > 64 || !llvm::isPowerOf2_64(window)) {
+        diagnostics.error(ast.result.position,
+                          "moving_average currently requires a power-of-two window in [2, 64]");
+        return std::nullopt;
+      }
+      if (window > *inputExtent) {
+        diagnostics.error(ast.result.position, "moving_average input extent must cover the window");
+        return std::nullopt;
+      }
+      if (*resultExtent != *inputExtent - window + 1) {
+        diagnostics.error(ast.result.position, "static moving_average result extent is incorrect");
+        return std::nullopt;
+      }
+    } else if (ast.result.kind == ReductionKind::Gain) {
+      if (ast.result.gain < std::numeric_limits<int16_t>::min() ||
+          ast.result.gain > std::numeric_limits<int16_t>::max()) {
+        diagnostics.error(ast.result.position,
+                          "gain constant must be a raw signed Q1.15 value in [-32768, 32767]");
+        return std::nullopt;
+      }
+      if (*inputExtent > 4096) {
+        diagnostics.error(ast.result.position,
+                          "gain currently requires an input extent in [1, 4096]");
+        return std::nullopt;
+      }
+      if (*resultExtent != *inputExtent) {
+        diagnostics.error(ast.result.position, "gain result extent must equal the input extent");
+        return std::nullopt;
+      }
+    } else {
+      if (*inputExtent < 2 || *inputExtent > 4096 || !llvm::isPowerOf2_64(*inputExtent)) {
+        diagnostics.error(ast.result.position,
+                          "rms currently requires a power-of-two input extent in [2, 4096]");
+        return std::nullopt;
+      }
+      if (*resultExtent != 1) {
+        diagnostics.error(ast.result.position, "rms returns a single-element tensor");
+        return std::nullopt;
+      }
+    }
+    return CheckedKernel{std::move(ast), std::nullopt, ondsp::RoundingMode::NearestEven,
+                         std::nullopt, std::nullopt};
   } else {
     if (ast.primaryResult().tensor) {
       diagnostics.error(ast.result.position, "dot and fir return scalar values");
@@ -1673,7 +1846,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
 
   Location expressionLocation = getLocation(context, sourceName, kernel.ast.result.position);
-  if (isFftKind(kernel.ast.result.kind)) {
+  if (isFftComposableKind(kernel.ast.result.kind)) {
     auto layout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI16ImagHiRealLo);
     auto i16 = builder.getI16Type();
     auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, i16, 15);
@@ -1689,6 +1862,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                                                    : emitFftCall(*operand.call);
       auto inputType = cast<RankedTensorType>(input.getType());
       Location callLocation = getLocation(context, sourceName, call.position);
+      if (call.kind == ReductionKind::Magnitude) {
+        auto outputType = RankedTensorType::get({inputType.getDimSize(0)}, builder.getI16Type());
+        return builder.create<ir::CxMagnitudeOp>(
+            callLocation, outputType, input, layout, numeric,
+            ondsp::RoundingModeAttr::get(&context, ondsp::RoundingMode::NearestEven));
+      }
       if (isCfftKind(call.kind)) {
         auto direction = ir::CfftDirectionAttr::get(&context, call.kind == ReductionKind::Cfft
                                                                   ? ir::CfftDirection::Forward
@@ -1716,6 +1895,34 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
 
   Value lhs = arguments.lookup(*getParameterOperand(kernel.ast.result, 0));
+  if (isUnaryTensorKind(kernel.ast.result.kind)) {
+    auto outputType = cast<RankedTensorType>(resultType);
+    auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
+    auto rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
+    Value result;
+    if (kernel.ast.result.kind == ReductionKind::Dct) {
+      unsigned stageCount = llvm::Log2_64(outputType.getDimSize(0));
+      auto outputNumeric =
+          ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 14 - stageCount);
+      result =
+          builder.create<ir::DctOp>(expressionLocation, outputType, lhs, numeric, outputNumeric);
+    } else if (kernel.ast.result.kind == ReductionKind::MovingAverage) {
+      result = builder.create<ir::MovingAverageOp>(
+          expressionLocation, outputType, lhs, builder.getI64IntegerAttr(kernel.ast.result.window),
+          numeric);
+    } else if (kernel.ast.result.kind == ReductionKind::Gain) {
+      result = builder.create<ir::GainOp>(expressionLocation, outputType, lhs,
+                                          builder.getI64IntegerAttr(kernel.ast.result.gain),
+                                          numeric, rounding);
+    } else {
+      result = builder.create<ir::RmsOp>(expressionLocation, outputType, lhs, numeric, rounding);
+    }
+    builder.create<func::ReturnOp>(expressionLocation, result);
+    module->push_back(function);
+    if (failed(verify(*module)))
+      return {};
+    return module;
+  }
   if (kernel.ast.result.kind == ReductionKind::Butterfly) {
     Value rhs = arguments.lookup(*getParameterOperand(kernel.ast.result, 1));
     Value twiddle = arguments.lookup(*getParameterOperand(kernel.ast.result, 2));
