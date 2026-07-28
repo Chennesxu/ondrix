@@ -3,7 +3,16 @@
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc %S/Inputs/moving_average_q15_aot.c %t.o -o %t
 // RUN: %t
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="sliding-window-reuse" --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.sliding.mlir
+// RUN: ondrix-translate %t.sliding.mlir --mlir-to-llvmir > %t.sliding.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.sliding.ll -o %t.sliding.o
+// RUN: cc %S/Inputs/moving_average_q15_aot.c %t.sliding.o -o %t.sliding
+// RUN: %t.sliding
 
+// The second pipeline exercises the opt-in sliding-window-reuse lowering
+// against the SAME independent reference: exact sums make the incremental
+// reassociation value-neutral, so outputs must be bit-identical.
+//
 // Valid-boundary moving average: exact window sums with one nearest-even
 // rounding per output. The independent reference also witnesses that the
 // equal-tap Q15 FIR reformulation (quantize 1/K first) is a different

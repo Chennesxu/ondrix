@@ -1480,7 +1480,8 @@ public:
 
 class MovingAverageOpLowering final : public OpConversionPattern<ondrix::ir::MovingAverageOp> {
 public:
-  using OpConversionPattern<ondrix::ir::MovingAverageOp>::OpConversionPattern;
+  MovingAverageOpLowering(MLIRContext *context, bool slidingWindowReuse)
+      : OpConversionPattern(context), slidingWindowReuse(slidingWindowReuse) {}
 
   LogicalResult matchAndRewrite(ondrix::ir::MovingAverageOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -1502,18 +1503,41 @@ public:
     RankedTensorType resultType = op.getResult().getType();
     Value result =
         rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
-    for (int64_t n = 0, outputs = extent - window + 1; n < outputs; ++n) {
-      Value sum = inputs[n];
-      for (int64_t i = 1; i < window; ++i)
-        sum = rewriter.create<arith::AddIOp>(loc, sum, inputs[n + i]);
+    auto emitMean = [&](Value sum, int64_t n) {
       Value mean =
           rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, rewriter.getI16Type(), sum, scale);
       Value position = rewriter.create<arith::ConstantIndexOp>(loc, n);
       result = rewriter.create<tensor::InsertOp>(loc, mean, result, position);
+    };
+    int64_t outputs = extent - window + 1;
+    if (slidingWindowReuse) {
+      // Incremental running sum. Authorized by the contract: the window
+      // sums are exact i64 values with no per-update saturation, so this
+      // reassociation is value-neutral. A saturating-accumulator mean
+      // could not legally reuse partial sums this way.
+      Value sum = inputs[0];
+      for (int64_t i = 1; i < window; ++i)
+        sum = rewriter.create<arith::AddIOp>(loc, sum, inputs[i]);
+      emitMean(sum, 0);
+      for (int64_t n = 1; n < outputs; ++n) {
+        Value entered = rewriter.create<arith::AddIOp>(loc, sum, inputs[n + window - 1]);
+        sum = rewriter.create<arith::SubIOp>(loc, entered, inputs[n - 1]);
+        emitMean(sum, n);
+      }
+    } else {
+      for (int64_t n = 0; n < outputs; ++n) {
+        Value sum = inputs[n];
+        for (int64_t i = 1; i < window; ++i)
+          sum = rewriter.create<arith::AddIOp>(loc, sum, inputs[n + i]);
+        emitMean(sum, n);
+      }
     }
     rewriter.replaceOp(op, result);
     return success();
   }
+
+private:
+  bool slidingWindowReuse;
 };
 
 class CxMagnitudeOpLowering final : public OpConversionPattern<ondrix::ir::CxMagnitudeOp> {
@@ -1565,7 +1589,8 @@ public:
                  FirInterpolateOpLowering, Conv1DOpLowering, FirStreamOpLowering,
                  SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
                  ButterflyOpLowering, QuantizeOpLowering, RfftRadix4SplitOpLowering,
-                 CxMagnitudeOpLowering, DctOpLowering, MovingAverageOpLowering>(&getContext());
+                 CxMagnitudeOpLowering, DctOpLowering>(&getContext());
+    patterns.add<MovingAverageOpLowering>(&getContext(), slidingWindowReuse);
     patterns.add<CfftOpLowering, RfftOpLowering, IrfftOpLowering>(&getContext(),
                                                                   vectorizeStaticCfft);
 

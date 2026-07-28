@@ -10,6 +10,15 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
     The opt-in static CFFT Vector mode groups only independent butterflies
     within one combine stage. It preserves recursive stage order and every
     product/output requantization boundary.
+
+    The opt-in sliding-window-reuse mode lowers `ondrix.moving_average`
+    with an incremental running sum (add the entering sample, subtract the
+    leaving one) instead of recomputing each window. The rewrite is
+    authorized by the contract itself: window sums are exact i64 values
+    with no per-update saturation, so the reassociation is value-neutral.
+    A saturating-accumulator mean contract could not legally take this
+    lowering; that contrast is the point of keeping it explicit and
+    opt-in.
   }];
   let constructor = "ondrix::createConvertOndrixToOndspPass()";
   let dependentDialects = [
@@ -26,6 +35,9 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
     Option<"vectorizeStaticCfft", "vectorize-static-cfft",
            "bool", /*default=*/"false",
            "Use fixed-length Vector arithmetic for independent static CFFT stage butterflies">,
+    Option<"slidingWindowReuse", "sliding-window-reuse",
+           "bool", /*default=*/"false",
+           "Reuse exact moving-average window sums incrementally across outputs">,
   ];
 }
 

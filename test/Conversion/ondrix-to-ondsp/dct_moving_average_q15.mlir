@@ -1,5 +1,6 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s --check-prefix=COEFF
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="sliding-window-reuse" | FileCheck %s --check-prefix=SLIDING
 
 // The DCT8 lowering carries exact i64 products and sums; the only numeric
 // boundaries are eight nearest-even round_shift exports by 16 + log2(8).
@@ -24,6 +25,16 @@ func.func @dct8_q15(%input: tensor<8xi16>) -> tensor<8xi16> {
   } : (tensor<8xi16>) -> tensor<8xi16>
   return %result : tensor<8xi16>
 }
+
+// The sliding mode reuses the exact running sum: one initial window of
+// seven adds, then one add and one subtract per further output. The
+// rounding boundaries are unchanged.
+
+// SLIDING-LABEL: func.func @moving_average_q15
+// SLIDING-COUNT-4: arith.subi
+// SLIDING-NOT: arith.subi
+// SLIDING: ondsp.round_shift
+// SLIDING-NOT: ondrix.moving_average
 
 // CHECK-LABEL: func.func @moving_average_q15
 // CHECK-COUNT-5: ondsp.round_shift {{.*}}post_shift_right = 3, rounding = nearest_even{{.*}} (i64) -> i16
