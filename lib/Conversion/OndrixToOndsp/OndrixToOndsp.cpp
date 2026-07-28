@@ -1602,6 +1602,182 @@ static ondrix::ondsp::ScaleAttr getNearestEvenSaturatingShift(MLIRContext *conte
                                        IntegerType::get(context, 16));
 }
 
+class GoertzelOpLowering final : public OpConversionPattern<ondrix::ir::GoertzelOp> {
+public:
+  using OpConversionPattern<ondrix::ir::GoertzelOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::GoertzelOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    int64_t extent = op.getInput().getType().getDimSize(0);
+    // The recursion coefficient is one tie-guarded compile-time cosine
+    // (the same guarded quantizer as every generated table); inadmissible
+    // bins fail closed.
+    constexpr double kTwoPi = 6.28318530717958647692528676655900577;
+    std::optional<ondrix::GuardedQ15Value> coefficient = ondrix::quantizeGuardedQ15(
+        std::cos(kTwoPi * static_cast<double>(op.getBin()) / static_cast<double>(extent)));
+    if (!coefficient)
+      return rewriter.notifyMatchFailure(op, "bin coefficient is not tie-guard admissible");
+    IntegerType i16 = rewriter.getI16Type();
+    IntegerType i32 = rewriter.getIntegerType(32);
+    IntegerType i64 = rewriter.getIntegerType(64);
+    Attribute numeric = op.getNumeric();
+    ondrix::ondsp::ScaleAttr scale = getNearestEvenSaturatingShift(rewriter.getContext(), 15);
+    Value doubledCoefficient =
+        rewriter.create<arith::ConstantIntOp>(loc, 2 * int64_t(coefficient->value), 64);
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+    Value zero16 = rewriter.create<arith::ConstantIntOp>(loc, 0, 16);
+
+    // m = sat_i16(rhe(2*c*s1 / 2^15)) — the per-step product boundary.
+    auto stepProduct = [&](OpBuilder &builder, Location loc, Value s1) -> Value {
+      Value wide = builder.create<arith::ExtSIOp>(loc, i64, s1);
+      Value product = builder.create<arith::MulIOp>(loc, doubledCoefficient, wide);
+      return builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, product, scale);
+    };
+
+    auto sampleLoop = rewriter.create<scf::ForOp>(
+        loc, zero, extentValue, one, ValueRange{zero16, zero16},
+        [&](OpBuilder &builder, Location loc, Value sample, ValueRange states) {
+          Value s1 = states[0];
+          Value s2 = states[1];
+          Value m = stepProduct(builder, loc, s1);
+          Value x = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), sample);
+          Value xWide = builder.create<arith::ExtSIOp>(loc, i32, x);
+          Value mWide = builder.create<arith::ExtSIOp>(loc, i32, m);
+          Value s2Wide = builder.create<arith::ExtSIOp>(loc, i32, s2);
+          Value sum = builder.create<arith::AddIOp>(loc, xWide, mWide);
+          Value combined = builder.create<arith::SubIOp>(loc, sum, s2Wide);
+          Value s0 = builder.create<ondrix::ondsp::SatCastOp>(loc, i16, combined, numeric);
+          builder.create<scf::YieldOp>(loc, ValueRange{s0, s1});
+        });
+    Value s1 = sampleLoop.getResult(0);
+    Value s2 = sampleLoop.getResult(1);
+    Value mFinal = stepProduct(rewriter, loc, s1);
+
+    // energy = s1^2 + s2^2 - m*s2, exact in i64; no further boundary.
+    Value s1Wide = rewriter.create<arith::ExtSIOp>(loc, i64, s1);
+    Value s2Wide = rewriter.create<arith::ExtSIOp>(loc, i64, s2);
+    Value mWide = rewriter.create<arith::ExtSIOp>(loc, i64, mFinal);
+    Value s1Square = rewriter.create<arith::MulIOp>(loc, s1Wide, s1Wide);
+    Value s2Square = rewriter.create<arith::MulIOp>(loc, s2Wide, s2Wide);
+    Value cross = rewriter.create<arith::MulIOp>(loc, mWide, s2Wide);
+    Value sum = rewriter.create<arith::AddIOp>(loc, s1Square, s2Square);
+    Value energy = rewriter.create<arith::SubIOp>(loc, sum, cross);
+
+    RankedTensorType resultType = op.getEnergy().getType();
+    Value empty =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    Value result = rewriter.create<tensor::InsertOp>(loc, energy, empty, zero);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+class MatmulOpLowering final : public OpConversionPattern<ondrix::ir::MatmulOp> {
+public:
+  using OpConversionPattern<ondrix::ir::MatmulOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::MatmulOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    RankedTensorType lhsType = op.getLhs().getType();
+    RankedTensorType rhsType = op.getRhs().getType();
+    IntegerType i64 = rewriter.getIntegerType(64);
+    // Exact i64 K-sum per element (|sum| <= 64 * 2^30), one nearest-even
+    // saturating boundary. Loop-form over all three dimensions.
+    ondrix::ondsp::ScaleAttr scale = getNearestEvenSaturatingShift(rewriter.getContext(), 15);
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value rows = rewriter.create<arith::ConstantIndexOp>(loc, lhsType.getDimSize(0));
+    Value inner = rewriter.create<arith::ConstantIndexOp>(loc, lhsType.getDimSize(1));
+    Value columns = rewriter.create<arith::ConstantIndexOp>(loc, rhsType.getDimSize(1));
+    Value zero64 = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
+
+    RankedTensorType resultType = op.getResult().getType();
+    Value empty =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    auto rowLoop = rewriter.create<scf::ForOp>(
+        loc, zero, rows, one, ValueRange{empty},
+        [&](OpBuilder &builder, Location loc, Value row, ValueRange rowArgs) {
+          auto columnLoop = builder.create<scf::ForOp>(
+              loc, zero, columns, one, ValueRange{rowArgs.front()},
+              [&](OpBuilder &builder, Location loc, Value column, ValueRange columnArgs) {
+                auto accLoop = builder.create<scf::ForOp>(
+                    loc, zero, inner, one, ValueRange{zero64},
+                    [&](OpBuilder &builder, Location loc, Value index, ValueRange accArgs) {
+                      Value left = builder.create<tensor::ExtractOp>(loc, adaptor.getLhs(),
+                                                                     ValueRange{row, index});
+                      Value right = builder.create<tensor::ExtractOp>(loc, adaptor.getRhs(),
+                                                                      ValueRange{index, column});
+                      Value leftWide = builder.create<arith::ExtSIOp>(loc, i64, left);
+                      Value rightWide = builder.create<arith::ExtSIOp>(loc, i64, right);
+                      Value product = builder.create<arith::MulIOp>(loc, leftWide, rightWide);
+                      Value sum = builder.create<arith::AddIOp>(loc, accArgs.front(), product);
+                      builder.create<scf::YieldOp>(loc, sum);
+                    });
+                Value element = builder.create<ondrix::ondsp::RoundShiftOp>(
+                    loc, builder.getI16Type(), accLoop.getResult(0), scale);
+                Value inserted = builder.create<tensor::InsertOp>(loc, element, columnArgs.front(),
+                                                                  ValueRange{row, column});
+                builder.create<scf::YieldOp>(loc, inserted);
+              });
+          builder.create<scf::YieldOp>(loc, columnLoop.getResult(0));
+        });
+    rewriter.replaceOp(op, rowLoop.getResult(0));
+    return success();
+  }
+};
+
+class RmsOpLowering final : public OpConversionPattern<ondrix::ir::RmsOp> {
+public:
+  using OpConversionPattern<ondrix::ir::RmsOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::RmsOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    int64_t extent = op.getInput().getType().getDimSize(0);
+    IntegerType i32 = rewriter.getIntegerType(32);
+    IntegerType i64 = rewriter.getIntegerType(64);
+    MLIRContext *context = rewriter.getContext();
+    // The exact i64 sum of squares is bounded by 2^42; the nearest-even
+    // mean by 2^m is the first boundary (frac 30, at most 2^30, so the
+    // declared i32 saturation is unreachable) and the integer root the
+    // second. The mean of squares is nonnegative by construction, which
+    // establishes the sqrt_fixed value domain structurally.
+    auto meanScale = ondrix::ondsp::ScaleAttr::get(
+        context, /*preShiftLeft=*/0, /*postShiftRight=*/llvm::Log2_64(extent),
+        ondrix::ondsp::RoundingMode::NearestEven, ondrix::ondsp::OverflowMode::Saturate, i32);
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+    Value zero64 = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
+
+    auto accLoop = rewriter.create<scf::ForOp>(
+        loc, zero, extentValue, one, ValueRange{zero64},
+        [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+          Value element = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+          Value wide = builder.create<arith::ExtSIOp>(loc, i64, element);
+          Value square = builder.create<arith::MulIOp>(loc, wide, wide);
+          Value sum = builder.create<arith::AddIOp>(loc, iterArgs.front(), square);
+          builder.create<scf::YieldOp>(loc, sum);
+        });
+    Value mean =
+        rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, i32, accLoop.getResult(0), meanScale);
+    Value meanWide = rewriter.create<arith::ExtSIOp>(loc, i64, mean);
+    Value root = rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, rewriter.getI16Type(), meanWide,
+                                                             op.getRoundingAttr());
+
+    RankedTensorType resultType = op.getResult().getType();
+    Value empty =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    Value result = rewriter.create<tensor::InsertOp>(loc, root, empty, zero);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 class GainOpLowering final : public OpConversionPattern<ondrix::ir::GainOp> {
 public:
   using OpConversionPattern<ondrix::ir::GainOp>::OpConversionPattern;
@@ -1902,12 +2078,12 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns.add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering,
-                 FirInterpolateOpLowering, Conv1DOpLowering, FirStreamOpLowering,
-                 SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
-                 ButterflyOpLowering, QuantizeOpLowering, RfftRadix4SplitOpLowering,
-                 CxMagnitudeOpLowering, DctOpLowering, GainOpLowering, LmsOpLowering>(
-        &getContext());
+    patterns
+        .add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
+             Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
+             SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering,
+             RfftRadix4SplitOpLowering, CxMagnitudeOpLowering, DctOpLowering, GainOpLowering,
+             LmsOpLowering, RmsOpLowering, MatmulOpLowering, GoertzelOpLowering>(&getContext());
     if (vectorizeStaticCfft && fftLoops) {
       module.emitError("vectorize-static-cfft and fft-loops are mutually exclusive alternative "
                        "FFT lowerings; select at most one");

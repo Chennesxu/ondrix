@@ -70,3 +70,51 @@ func.func @lowpass_eighth() -> tensor<11xi16> {
   } : tensor<11xi16>
   return %coefficients : tensor<11xi16>
 }
+
+func.func @window_hann_odd() -> tensor<9xi16> {
+  // CHECK-LABEL: func.func @window_hann_odd
+  // CHECK-NOT: ondrix.window_hann
+  // CHECK: arith.constant
+  // CHECK-SAME: kind = "window_hann"
+  // CHECK-SAME: saturated = 1
+  // CHECK-SAME: dense<[0, 4799, 16384, 27969, 32767, 27969, 16384, 4799, 0]> : tensor<9xi16>
+  %window = ondrix.window_hann {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<9xi16>
+  return %window : tensor<9xi16>
+}
+
+func.func @window_hann_even() -> tensor<8xi16> {
+  // CHECK-LABEL: func.func @window_hann_even
+  // CHECK: arith.constant
+  // CHECK-SAME: saturated = 0
+  // CHECK-SAME: dense<[0, 6169, 20030, 31145, 31145, 20030, 6169, 0]> : tensor<8xi16>
+  %window = ondrix.window_hann {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<8xi16>
+  return %window : tensor<8xi16>
+}
+
+func.func @window_blackman_odd() -> tensor<9xi16> {
+  // CHECK-LABEL: func.func @window_blackman_odd
+  // CHECK-NOT: ondrix.window_blackman
+  // CHECK: arith.constant
+  // CHECK-SAME: kind = "window_blackman"
+  // CHECK-SAME: saturated = 1
+  // CHECK-SAME: dense<[0, 2177, 11141, 25348, 32767, 25348, 11141, 2177, 0]> : tensor<9xi16>
+  %window = ondrix.window_blackman {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<9xi16>
+  return %window : tensor<9xi16>
+}
+
+func.func @window_blackman_even() -> tensor<8xi16> {
+  // CHECK-LABEL: func.func @window_blackman_even
+  // CHECK: arith.constant
+  // CHECK-SAME: saturated = 0
+  // CHECK-SAME: dense<[0, 2964, 15047, 30158, 30158, 15047, 2964, 0]> : tensor<8xi16>
+  %window = ondrix.window_blackman {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<8xi16>
+  return %window : tensor<8xi16>
+}

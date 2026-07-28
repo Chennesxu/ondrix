@@ -758,6 +758,101 @@ def Ondrix_MovingAverageOp : Ondrix_Op<"moving_average", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
+  let summary = "Single-bin Goertzel energy with quantized recursion state";
+  let description = [{
+    `ondrix.goertzel` computes the squared magnitude of one DFT bin `k`
+    of a static rank-1 signed-Q1.15 tensor of length `N` in `[2, 4096]`
+    with `0 <= k <= N/2`, through the quantized Goertzel recursion:
+
+    ```text
+    c  = q15(cos(2*pi*k/N))       tie-guarded compile-time constant
+    s1 = s2 = 0
+    per sample n:
+      m  = sat_i16(round_half_even(2*c*s1 / 2^15))
+      s0 = sat_i16(x[n] + m - s2)
+      s2 = s1; s1 = s0
+    energy = s1*s1 + s2*s2 - sat_i16(round_half_even(2*c*s1 / 2^15)) * s2
+    ```
+
+    One product boundary and one saturating combine per sample are the
+    observable state quantization; the final energy is the exact i64
+    value of the integer expression (`|energy| < 3 * 2^30`), returned as
+    `tensor<1xi64>` with no further rounding. The coefficient is
+    admissible only under the `2^-20` quantization tie guard; other bins
+    fail closed in lowering. Detecting one tone this way takes O(N) state
+    memory instead of a full FFT, at the cost of a different (also
+    observable) quantization path — the Goertzel energy of a bin is NOT
+    the squared magnitude of the corresponding staged-scaling FFT bin.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   I64Attr:$bin,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_RoundingModeAttr:$rounding);
+  let results = (outs AnyRankedTensor:$energy);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondrix_MatmulOp : Ondrix_Op<"matmul", [Pure]> {
+  let summary = "Fixed-point matrix product with one boundary per element";
+  let description = [{
+    `ondrix.matmul` multiplies static signed-Q1.15 matrices
+    `tensor<MxKxi16> x tensor<KxNxi16> -> tensor<MxNxi16>` with all three
+    dimensions in `[1, 64]`, per output element:
+
+    ```text
+    C[i][j] = sat_i16(round_half_even(sum_k A[i][k] * B[k][j] / 2^15))
+    ```
+
+    Every full product and the K-term sum are exact in i64
+    (`|sum| <= 64 * 2^30 = 2^36`), so the single observable boundary per
+    element is the final nearest-even saturating requantization — the same
+    contract shape as the FIR dot product, extended to a rank-2 result.
+    Saturation is declared and reachable (for example a full row of
+    `-32768` against a matching column). Reassociating the exact K-sum is
+    value-neutral by construction; moving or splitting the requantization
+    boundary is not.
+  }];
+  let arguments = (ins AnyRankedTensor:$lhs,
+                   AnyRankedTensor:$rhs,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_RoundingModeAttr:$rounding);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondrix_RmsOp : Ondrix_Op<"rms", [Pure]> {
+  let summary = "Fixed-point root-mean-square with two explicit boundaries";
+  let description = [{
+    `ondrix.rms` reduces a static rank-1 signed-Q1.15 tensor with a
+    power-of-two extent `N = 2^m` in `[2, 4096]` to its root-mean-square:
+
+    ```text
+    sumsq = sum x[i]^2                          exact i64, <= 2^42
+    mean  = round_half_even(sumsq / 2^m)        first boundary, frac 30,
+                                                nonnegative by construction
+    rms   = sqrt_fixed(mean)                    second boundary, per the
+                                                declared rounding, Q1.15
+    ```
+
+    The sum of squares is exact, so the only observable boundaries are the
+    nearest-even mean and the integer square root. The mean is a sum of
+    squares divided by a positive constant and therefore establishes the
+    non-negative `ondsp.sqrt_fixed` domain structurally. The result is one
+    element (`tensor<1xi16>`); a mean of squares of Q1.15 values stays in
+    `[0, 1]`, so only the `x[i] = -32768` all-minimum corner reaches the
+    declared 32767 saturation of the root.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_RoundingModeAttr:$rounding);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_GainOp : Ondrix_Op<"gain", [Pure]> {
   let summary = "Elementwise constant Q15 gain with one explicit requantization";
   let description = [{
@@ -878,6 +973,54 @@ def Ondrix_WindowHammingOp : Ondrix_Op<"window_hamming", [Pure]> {
     coefficient tensor, and generation fails closed when any coefficient
     is closer than `2^-20` Q15 LSB to a rounding tie, so the emitted table
     provably equals the real-valued definition and is exactly symmetric.
+
+    The result is a static rank-1 `tensor<Nxi16>` with `2 <= N <= 4096` and
+    `numeric = #ondsp.fixed<signed, storage = i16, frac = 15>`.
+  }];
+  let arguments = (ins Ondsp_NumericAttr:$numeric);
+  let results = (outs AnyRankedTensor:$coefficients);
+  let hasVerifier = 1;
+  let assemblyFormat = "attr-dict `:` type($coefficients)";
+}
+
+def Ondrix_WindowHannOp : Ondrix_Op<"window_hann", [Pure]> {
+  let summary = "Compile-time symmetric Hann window coefficients";
+  let description = [{
+    `ondrix.window_hann` names the symmetric Hann window of static length
+    `N` taken from the result type:
+
+    ```text
+    w[n] = 1/2 - (1/2) * cos(2*pi*n / (N-1)),  n = 0..N-1
+    ```
+
+    The endpoints are exactly zero and the +1.0 center of odd lengths
+    saturates to 32767 by declared convention. Quantization, the
+    fail-closed `2^-20` tie guard, symmetry, and the
+    `evaluate-ondrix-fir-design` consumer follow `ondrix.window_hamming`.
+
+    The result is a static rank-1 `tensor<Nxi16>` with `2 <= N <= 4096` and
+    `numeric = #ondsp.fixed<signed, storage = i16, frac = 15>`.
+  }];
+  let arguments = (ins Ondsp_NumericAttr:$numeric);
+  let results = (outs AnyRankedTensor:$coefficients);
+  let hasVerifier = 1;
+  let assemblyFormat = "attr-dict `:` type($coefficients)";
+}
+
+def Ondrix_WindowBlackmanOp : Ondrix_Op<"window_blackman", [Pure]> {
+  let summary = "Compile-time symmetric Blackman window coefficients";
+  let description = [{
+    `ondrix.window_blackman` names the classic symmetric Blackman window
+    (alpha = 4/25) of static length `N` taken from the result type:
+
+    ```text
+    w[n] = 21/50 - (1/2) * cos(2*pi*n / (N-1))
+                 + (2/25) * cos(4*pi*n / (N-1)),  n = 0..N-1
+    ```
+
+    The endpoints are exactly zero (21/50 - 1/2 + 2/25 = 0). Quantization,
+    the fail-closed `2^-20` tie guard, symmetry, and the
+    `evaluate-ondrix-fir-design` consumer follow `ondrix.window_hamming`.
 
     The result is a static rank-1 `tensor<Nxi16>` with `2 <= N <= 4096` and
     `numeric = #ondsp.fixed<signed, storage = i16, frac = 15>`.

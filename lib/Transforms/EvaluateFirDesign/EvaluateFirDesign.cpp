@@ -62,6 +62,15 @@ double hammingReal(int64_t n, int64_t extent) {
   return 0.54 - 0.46 * std::cos(kTwoPi * static_cast<double>(n) / static_cast<double>(extent - 1));
 }
 
+double hannReal(int64_t n, int64_t extent) {
+  return 0.5 - 0.5 * std::cos(kTwoPi * static_cast<double>(n) / static_cast<double>(extent - 1));
+}
+
+double blackmanReal(int64_t n, int64_t extent) {
+  double phase = kTwoPi * static_cast<double>(n) / static_cast<double>(extent - 1);
+  return 0.42 - 0.5 * std::cos(phase) + 0.08 * std::cos(2.0 * phase);
+}
+
 double sincReal(double x) {
   if (x == 0.0)
     return 1.0;
@@ -91,15 +100,16 @@ LogicalResult replaceWithConstant(Operation *op, RankedTensorType type,
   return success();
 }
 
-LogicalResult evaluateWindow(ondrix::ir::WindowHammingOp op) {
+template <typename WindowOp>
+LogicalResult evaluateWindow(WindowOp op, double (*windowReal)(int64_t, int64_t), StringRef kind) {
   RankedTensorType type = op.getCoefficients().getType();
   int64_t extent = type.getDimSize(0);
   llvm::SmallVector<double> reals;
   reals.reserve(extent);
   for (int64_t n = 0; n < extent; ++n)
-    reals.push_back(hammingReal(n, extent));
+    reals.push_back(windowReal(n, extent));
   NamedAttrList provenance;
-  provenance.append("kind", StringAttr::get(op.getContext(), "window_hamming"));
+  provenance.append("kind", StringAttr::get(op.getContext(), kind));
   return replaceWithConstant(op, type, reals, std::move(provenance));
 }
 
@@ -135,16 +145,24 @@ public:
   void runOnOperation() override {
     llvm::SmallVector<Operation *> designs;
     getOperation().walk([&](Operation *op) {
-      if (isa<ondrix::ir::WindowHammingOp, ondrix::ir::FirDesignWindowedSincOp>(op))
+      if (isa<ondrix::ir::WindowHammingOp, ondrix::ir::WindowHannOp, ondrix::ir::WindowBlackmanOp,
+              ondrix::ir::FirDesignWindowedSincOp>(op))
         designs.push_back(op);
     });
     for (Operation *op : designs) {
-      LogicalResult result =
-          llvm::TypeSwitch<Operation *, LogicalResult>(op)
-              .Case<ondrix::ir::WindowHammingOp>([](auto window) { return evaluateWindow(window); })
-              .Case<ondrix::ir::FirDesignWindowedSincOp>(
-                  [](auto design) { return evaluateDesign(design); })
-              .Default([](Operation *) { return failure(); });
+      LogicalResult result = llvm::TypeSwitch<Operation *, LogicalResult>(op)
+                                 .Case<ondrix::ir::WindowHammingOp>([](auto window) {
+                                   return evaluateWindow(window, hammingReal, "window_hamming");
+                                 })
+                                 .Case<ondrix::ir::WindowHannOp>([](auto window) {
+                                   return evaluateWindow(window, hannReal, "window_hann");
+                                 })
+                                 .Case<ondrix::ir::WindowBlackmanOp>([](auto window) {
+                                   return evaluateWindow(window, blackmanReal, "window_blackman");
+                                 })
+                                 .Case<ondrix::ir::FirDesignWindowedSincOp>(
+                                     [](auto design) { return evaluateDesign(design); })
+                                 .Default([](Operation *) { return failure(); });
       if (failed(result))
         return signalPassFailure();
     }

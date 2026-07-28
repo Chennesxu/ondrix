@@ -107,6 +107,22 @@ def hamming(n, extent):
     return mpf("0.54") - mpf("0.46") * cos(2 * pi * n / (extent - 1))
 
 
+def hann(n, extent):
+    return mpf(1) / 2 - mpf(1) / 2 * cos(2 * pi * n / (extent - 1))
+
+
+def blackman(n, extent):
+    phase = 2 * pi * n / (extent - 1)
+    return mpf(21) / 50 - mpf(1) / 2 * cos(phase) + mpf(2) / 25 * cos(2 * phase)
+
+
+def window_profile(name, window, extent):
+    profile = Profile(f"window_{name}{extent}")
+    for n in range(extent):
+        profile.add(window(n, extent))
+    return profile
+
+
 def sinc(x):
     if x == 0:
         return mpf(1)
@@ -140,6 +156,9 @@ def main():
     profiles.append(fir_design_profile(9, 1, 4, "highpass"))
     profiles.append(fir_design_profile(11, 1, 8, "lowpass"))
     profiles.append(fir_design_profile(4095, 1, 4, "lowpass"))
+    for name, window in (("hamming", hamming), ("hann", hann), ("blackman", blackman)):
+        for extent in (8, 9, 64, 4096):
+            profiles.append(window_profile(name, window, extent))
 
     print(f"tie guard: {float(GUARD_LSB):.6e} Q15 LSB (2^-20)")
     if all([profile.report() for profile in profiles]):

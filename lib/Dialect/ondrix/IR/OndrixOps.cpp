@@ -955,6 +955,77 @@ LogicalResult MovingAverageOp::verify() {
   return success();
 }
 
+LogicalResult GoertzelOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  if (getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
+    return emitOpError("goertzel requires nearest_even rounding");
+  RankedTensorType inputType = getInput().getType();
+  RankedTensorType energyType = getEnergy().getType();
+  if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, energyType})))
+    return failure();
+  int64_t extent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t energyExtent =
+      energyType.getRank() == 1 ? energyType.getDimSize(0) : ShapedType::kDynamic;
+  if (extent == ShapedType::kDynamic || extent < 2 || extent > 4096 ||
+      !inputType.getElementType().isSignlessInteger(16) || energyExtent != 1 ||
+      !energyType.getElementType().isSignlessInteger(64))
+    return emitOpError("executable goertzel requires static tensor<Nxi16> input with N in "
+                       "[2, 4096] and tensor<1xi64> energy");
+  int64_t bin = getBin();
+  if (bin < 0 || bin > extent / 2)
+    return emitOpError("goertzel bin must lie in [0, N/2]");
+  return success();
+}
+
+LogicalResult MatmulOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  if (getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
+    return emitOpError("matmul requires nearest_even rounding");
+  RankedTensorType lhsType = getLhs().getType();
+  RankedTensorType rhsType = getRhs().getType();
+  RankedTensorType resultType = getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(getOperation(), {lhsType, rhsType, resultType})))
+    return failure();
+  auto isStaticI16Matrix = [](RankedTensorType type) {
+    return type.getRank() == 2 && type.hasStaticShape() &&
+           type.getElementType().isSignlessInteger(16);
+  };
+  auto inRange = [](int64_t dim) { return dim >= 1 && dim <= 64; };
+  if (!isStaticI16Matrix(lhsType) || !isStaticI16Matrix(rhsType) ||
+      !isStaticI16Matrix(resultType) || lhsType.getDimSize(1) != rhsType.getDimSize(0) ||
+      resultType.getDimSize(0) != lhsType.getDimSize(0) ||
+      resultType.getDimSize(1) != rhsType.getDimSize(1) || !inRange(lhsType.getDimSize(0)) ||
+      !inRange(lhsType.getDimSize(1)) || !inRange(rhsType.getDimSize(1)))
+    return emitOpError("executable matmul requires static tensor<MxKxi16> x tensor<KxNxi16> -> "
+                       "tensor<MxNxi16> with M, K, N in [1, 64]");
+  return success();
+}
+
+LogicalResult RmsOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  ondrix::ondsp::RoundingMode rounding = getRounding();
+  if (rounding != ondrix::ondsp::RoundingMode::TowardNegative &&
+      rounding != ondrix::ondsp::RoundingMode::NearestEven)
+    return emitOpError("rms supports toward_negative or nearest_even rounding");
+  RankedTensorType inputType = getInput().getType();
+  RankedTensorType resultType = getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
+    return failure();
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if (inputExtent == ShapedType::kDynamic || inputExtent < 2 || inputExtent > 4096 ||
+      !llvm::isPowerOf2_64(inputExtent) || resultExtent != 1 ||
+      !inputType.getElementType().isSignlessInteger(16) ||
+      !resultType.getElementType().isSignlessInteger(16))
+    return emitOpError("executable rms requires static tensor<Nxi16> input with power-of-two N "
+                       "in [2, 4096] and tensor<1xi16> result");
+  return success();
+}
+
 LogicalResult GainOp::verify() {
   if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
     return failure();
@@ -1036,6 +1107,18 @@ LogicalResult CxMagnitudeOp::verify() {
 }
 
 LogicalResult WindowHammingOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  return verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 2, 4096);
+}
+
+LogicalResult WindowHannOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  return verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 2, 4096);
+}
+
+LogicalResult WindowBlackmanOp::verify() {
   if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
     return failure();
   return verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 2, 4096);
