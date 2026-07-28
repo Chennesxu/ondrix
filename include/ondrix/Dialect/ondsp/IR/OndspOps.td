@@ -94,9 +94,13 @@ def Ondsp_SqrtFixedOp : Ondsp_Op<"sqrt_fixed", [Pure]> {
     carrying fraction `2f` produces a result carrying fraction `f`.
 
     A negative input is outside the value domain; producers must establish
-    non-negativity structurally (for example as a sum of squares). The
-    first executable profile takes `i64` input to `i16` result under the
-    two listed rounding modes; other widths fail closed in lowering.
+    non-negativity structurally (for example as a sum of squares). That
+    obligation is not decidable for arbitrary SSA input, so every lowering
+    clamps the runtime value to zero from below: an out-of-domain input
+    deterministically yields 0 (never an undefined value), and an input
+    that is provably negative at compile time fails closed in conversion.
+    The first executable profile takes `i64` input to `i16` result under
+    the two listed rounding modes; other widths fail closed in lowering.
   }];
   let arguments = (ins AnyType:$input, Ondsp_RoundingModeAttr:$rounding);
   let results = (outs AnyType:$result);

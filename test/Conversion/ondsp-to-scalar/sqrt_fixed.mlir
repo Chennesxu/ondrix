@@ -4,7 +4,9 @@
 // The scalar lowering is the exact unrolled bit-by-bit integer square root:
 // sixteen candidate bits, each with square, compare, select; the
 // nearest_even form adds one remainder-driven increment (no reachable tie),
-// and the result clamps to 32767 before narrowing.
+// and the result clamps to 32767 before narrowing. Both modes first clamp
+// the input to zero from below, so an out-of-domain negative input
+// deterministically yields 0 instead of an undefined value.
 
 // The opt-in estimate mode replaces the sixteen candidate bits with one
 // IEEE square root, an estimate ceiling (every root of at least 2^16
@@ -13,11 +15,13 @@
 // saturation are unchanged, so the result stays bit-identical.
 
 // ESTIMATE-LABEL: func.func @sqrt_nearest
+// ESTIMATE: arith.maxsi
 // ESTIMATE: math.sqrt {{.*}} : f64
 // ESTIMATE-COUNT-7: arith.select
 // ESTIMATE-NOT: arith.select
 
 // CHECK-LABEL: func.func @sqrt_nearest
+// CHECK: arith.maxsi
 // CHECK-COUNT-18: arith.select
 // CHECK-NOT: arith.select
 // CHECK-NOT: ondsp.sqrt_fixed
@@ -30,11 +34,13 @@ func.func @sqrt_nearest(%input: i64) -> i16 {
 }
 
 // ESTIMATE-LABEL: func.func @sqrt_floor
+// ESTIMATE: arith.maxsi
 // ESTIMATE: math.sqrt
 // ESTIMATE-COUNT-6: arith.select
 // ESTIMATE-NOT: arith.select
 
 // CHECK-LABEL: func.func @sqrt_floor
+// CHECK: arith.maxsi
 // CHECK-COUNT-17: arith.select
 // CHECK-NOT: arith.select
 // CHECK-NOT: ondsp.sqrt_fixed

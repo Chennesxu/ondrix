@@ -20,6 +20,7 @@
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
@@ -729,15 +730,36 @@ public:
     if (!resultType || !resultType.isSignlessInteger(16))
       return op.emitOpError("fixed scalar lowering supports scalar i16 sqrt_fixed results");
 
+    // The value domain is non-negative, but that producer obligation is not
+    // decidable for arbitrary SSA input. The lowering therefore rejects an
+    // input that is provably negative, and clamps the runtime value to zero
+    // from below so that every out-of-domain execution deterministically
+    // yields 0 — without the clamp the estimate branch would take the square
+    // root of a negative value (NaN, then poison at the integer conversion).
+    APInt constantInput;
+    if (matchPattern(adaptor.getInput(), m_ConstantInt(&constantInput)) &&
+        constantInput.isNegative())
+      return op.emitOpError("constant input is negative and outside the sqrt_fixed value domain");
+
     Location loc = op.getLoc();
-    Value input = adaptor.getInput();
+    Value zero = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
+    Value input = rewriter.create<arith::MaxSIOp>(loc, adaptor.getInput(), zero);
     Value root;
     if (sqrtEstimate) {
-      // IEEE 754 requires a correctly rounded square root, so the truncated
-      // binary64 estimate of an exactly representable input is within one
-      // of the exact floor. Two branchless correction steps in each
-      // direction give double the required margin and keep the result
-      // bit-identical to the integer definition.
+      // Bit-exact over the whole clamped i64 domain, in two cases. Below
+      // 2^32 the conversion to binary64 is exact and IEEE 754 requires a
+      // correctly rounded square root, so the truncated estimate is within
+      // one of the exact integer floor; two branchless correction steps in
+      // each direction give double that margin. At or above 2^32 the exact
+      // root is at least 2^16, the correctly rounded estimate is too, and
+      // the ceiling below pins the candidate at exactly 2^16 (its square,
+      // 2^32, never exceeds the input, so the downward corrections cannot
+      // fire); every final candidate then stays above the i16 maximum and
+      // the observable result is the saturated 32767 in both definitions.
+      // The inexact binary64 conversion of large inputs never reaches the
+      // output, so no exact-representability precondition is required. The
+      // opt-in pass option assumes the target provides an IEEE 754
+      // correctly rounded binary64 square root.
       Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
       Value asFloat = rewriter.create<arith::SIToFPOp>(loc, rewriter.getF64Type(), input);
       Value estimate = rewriter.create<math::SqrtOp>(loc, asFloat);
