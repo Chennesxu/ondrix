@@ -5,6 +5,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Support/FirStreamRuntimeShape.h"
+#include "ondrix/Support/GuardedQ15Quantization.h"
 
 #include "llvm/ADT/APInt.h"
 
@@ -918,22 +919,20 @@ public:
 };
 
 // One round-half-even signed Q1.15 quantization of a binary64 twiddle
-// component under the same 2^-20 rounding-tie guard as the FIR design
-// contract: a value admissible under the guard provably quantizes exactly
-// like the real-valued cos/sin definition regardless of host libm rounding.
-// +1.0 saturates to 32767 by declared convention; -1.0 is exact. A 50-digit
-// sweep of every stage twiddle component for power-of-two sizes up to 1024
-// shows a worst-case margin of 0.0036 LSB, so all supported extents are
-// admissible; the guard remains as the fail-closed backstop.
+// component through the shared guarded quantizer (the same 2^-20 tie guard
+// as the FIR design contract): an admissible value provably quantizes
+// exactly like the real-valued cos/sin definition for any evaluation chain
+// whose total error stays below the guard — the declared libm/binary64
+// budget is more than three orders of magnitude below it. +1.0 saturates to
+// 32767 by declared convention; -1.0 is exact. A 50-digit sweep of every
+// stage twiddle component for power-of-two sizes up to 1024 shows a
+// worst-case margin of 0.0036 LSB, so all supported extents are admissible;
+// the guard remains as the fail-closed backstop.
 static std::optional<int64_t> quantizeTwiddleComponentQ15(double value) {
-  constexpr double kTieGuardLsb = 9.5367431640625e-07; // 2^-20
-  double scaled = value * 32768.0;
-  double lower = std::floor(scaled);
-  double fraction = scaled - lower;
-  if (std::fabs(fraction - 0.5) < kTieGuardLsb)
+  std::optional<ondrix::GuardedQ15Value> quantized = ondrix::quantizeGuardedQ15(value);
+  if (!quantized)
     return std::nullopt;
-  int64_t quantized = static_cast<int64_t>(lower) + (fraction > 0.5 ? 1 : 0);
-  return std::clamp<int64_t>(quantized, -32768, 32767);
+  return quantized->value;
 }
 
 static std::optional<uint32_t> getPackedQ15TwiddleBits(ondrix::ir::CfftDirection direction,

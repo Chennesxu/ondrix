@@ -92,8 +92,9 @@ def EvaluateOndrixFirDesign
     round-half-even signed Q1.15 quantization with declared, counted
     saturation. Evaluation fails closed with an error on the operation when
     any coefficient lies closer than `2^-20` Q15 LSB to a rounding tie, so
-    an emitted table provably matches the real-valued definition
-    independent of host libm rounding and is exactly symmetric. The
+    an emitted table provably matches the real-valued definition under the
+    declared binary64/libm evaluation error budget (documented at more than
+    three orders of magnitude below the guard) and is exactly symmetric. The
     replacement constant carries an `ondrix.design_provenance` dictionary
     attribute recording the design kind, response, cutoff, and saturation
     count; downstream bufferization materializes it as a constant global

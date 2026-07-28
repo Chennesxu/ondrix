@@ -2,6 +2,7 @@
 
 #include "ondrix/Dialect/ondrix/IR/OndrixDialect.h"
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
+#include "ondrix/Support/GuardedQ15Quantization.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -26,38 +27,30 @@ namespace {
 constexpr double kPi = 3.14159265358979323846264338327950288;
 constexpr double kTwoPi = 6.28318530717958647692528676655900577;
 
-// Admissibility distance from a Q15 rounding tie, in LSB units (2^-20).
-constexpr double kTieGuardLsb = 9.5367431640625e-07;
-
 struct QuantizedTable {
   llvm::SmallVector<int16_t> values;
   int64_t saturated = 0;
 };
 
-// One round-half-even signed Q1.15 quantization per composite real value.
-// The guard rejects any coefficient whose binary64 estimate cannot prove the
-// real-valued rounding decision, so an emitted table is independent of host
-// libm rounding and inherits the exact real symmetry.
+// One round-half-even signed Q1.15 quantization per composite real value,
+// through the shared guarded quantizer. The guard rejects any coefficient
+// whose binary64 estimate cannot prove the real-valued rounding decision, so
+// under the declared evaluation error budget (libm sin/cos, the binary64 pi
+// constant, and ratio arithmetic; documented at more than three orders of
+// magnitude below the guard) an emitted table equals the quantization of the
+// real-valued definition and inherits its exact symmetry.
 FailureOr<QuantizedTable> quantizeSignedQ15(Operation *op, llvm::ArrayRef<double> reals) {
   QuantizedTable table;
   table.values.reserve(reals.size());
   for (size_t index = 0; index < reals.size(); ++index) {
-    double scaled = reals[index] * 32768.0;
-    double lower = std::floor(scaled);
-    double fraction = scaled - lower;
-    if (std::fabs(fraction - 0.5) < kTieGuardLsb)
+    std::optional<ondrix::GuardedQ15Value> quantized = ondrix::quantizeGuardedQ15(reals[index]);
+    if (!quantized)
       return op->emitOpError() << "coefficient " << index
                                << " lies inside the 2^-20 quantization tie guard; "
                                   "the design profile fails closed";
-    int64_t quantized = static_cast<int64_t>(lower) + (fraction > 0.5 ? 1 : 0);
-    if (quantized > 32767) {
-      quantized = 32767;
+    if (quantized->saturated)
       ++table.saturated;
-    } else if (quantized < -32768) {
-      quantized = -32768;
-      ++table.saturated;
-    }
-    table.values.push_back(static_cast<int16_t>(quantized));
+    table.values.push_back(quantized->value);
   }
   for (size_t index = 0, extent = table.values.size(); index < extent; ++index)
     if (table.values[index] != table.values[extent - 1 - index])

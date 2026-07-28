@@ -520,7 +520,9 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
     `-j` use raw value -32768), and generation is admissible only when the
     binary64 estimate is at least `2^-20` Q15 LSB away from every rounding
     tie, so the emitted constants provably equal the real-valued definition
-    independent of host libm. Four points use `[1, -j]` forward; eight
+    under the declared binary64/libm evaluation error budget (more than
+    three orders of magnitude below the guard). Four points use `[1, -j]`
+    forward; eight
     points use `[1, 23170-j23170, -j, -23170-j23170]` forward, with the
     conjugate tables in inverse direction.
 
