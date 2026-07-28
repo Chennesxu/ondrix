@@ -1182,6 +1182,204 @@ public:
   }
 };
 
+// One complex value of the half-size radix-4 split schedule, carried as two
+// i32 SSA components between the explicit ondsp requantization points.
+struct SplitComplexValue {
+  Value real;
+  Value imaginary;
+};
+
+class RfftRadix4SplitOpLowering final : public OpConversionPattern<ondrix::ir::RfftRadix4SplitOp> {
+public:
+  using OpConversionPattern<ondrix::ir::RfftRadix4SplitOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::RfftRadix4SplitOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    MLIRContext *context = rewriter.getContext();
+    IntegerType i16 = rewriter.getI16Type();
+    IntegerType i32 = rewriter.getI32Type();
+
+    auto constant = [&](int64_t value) -> Value {
+      return rewriter.create<arith::ConstantIntOp>(loc, value, 32);
+    };
+    // Every rounding decision of the schedule is an explicit toward-negative
+    // ondsp.round_shift; the i32 carrier width never narrows here, so the
+    // scale's overflow mode is unreachable.
+    auto floorShift = [&](Value value, unsigned shift) -> Value {
+      auto scale = ondrix::ondsp::ScaleAttr::get(context, 0, shift,
+                                                 ondrix::ondsp::RoundingMode::TowardNegative,
+                                                 ondrix::ondsp::OverflowMode::Wrap, i32);
+      return rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, i32, value, scale);
+    };
+    // The schedule's only reachable clamps: the stage-two saturating
+    // combines on 4.12-format values, widened back for exact arithmetic.
+    auto saturate16 = [&](Value value) -> Value {
+      auto numeric =
+          ondrix::ondsp::FixedAttr::get(context, ondrix::ondsp::Signedness::Signed, i16, 12);
+      Value clamped = rewriter.create<ondrix::ondsp::SatCastOp>(loc, i16, value, numeric);
+      return rewriter.create<arith::ExtSIOp>(loc, i32, clamped);
+    };
+    auto add = [&](Value lhs, Value rhs) -> Value {
+      return rewriter.create<arith::AddIOp>(loc, lhs, rhs);
+    };
+    auto sub = [&](Value lhs, Value rhs) -> Value {
+      return rewriter.create<arith::SubIOp>(loc, lhs, rhs);
+    };
+    auto mul = [&](int64_t coefficient, Value value) -> Value {
+      return rewriter.create<arith::MulIOp>(loc, constant(coefficient), value);
+    };
+    // out = (u + j*v) * (co - j*si): exact i32 cross products, then one
+    // sixteen-bit floor shift. The i16 narrowing recorded in the contract is
+    // proven exact (P2/P4), so the value legitimately stays in its carrier.
+    auto twiddle = [&](Value u, Value v, int64_t co, int64_t si) -> SplitComplexValue {
+      Value real = floorShift(add(mul(co, u), mul(si, v)), 16);
+      Value imaginary = floorShift(sub(mul(co, v), mul(si, u)), 16);
+      return {real, imaginary};
+    };
+
+    // Frozen Q15 twiddle pairs (pair index -> co, si); pairs 5, 7, and 8 are
+    // never consumed at this length and stay zero placeholders.
+    static constexpr int64_t kTwiddles[10][2] = {
+        {32767, 0}, {30273, 12539},  {23170, 23170}, {12539, 30273}, {0, 32767},
+        {0, 0},     {-23171, 23170}, {0, 0},         {0, 0},         {-30274, -12540}};
+    // Frozen split coefficients (bin -> Ar, Ai, Br, Bi); bin 0 is unused.
+    static constexpr int64_t kSplitCoefficients[16][4] = {{0, 0, 0, 0},
+                                                          {13188, -16069, 19580, 16069},
+                                                          {10114, -15137, 22654, 15137},
+                                                          {7282, -13623, 25486, 13623},
+                                                          {4799, -11585, 27969, 11585},
+                                                          {2761, -9102, 30007, 9102},
+                                                          {1247, -6270, 31521, 6270},
+                                                          {315, -3196, 32453, 3196},
+                                                          {0, 0, 32767, 0},
+                                                          {315, 3196, 32453, -3196},
+                                                          {1247, 6270, 31521, -6270},
+                                                          {2761, 9102, 30007, -9102},
+                                                          {4799, 11585, 27969, -11585},
+                                                          {7282, 13623, 25486, -13623},
+                                                          {10114, 15137, 22654, -15137},
+                                                          {13188, 16069, 19580, -16069}};
+
+    // View the 32 real Q1.15 samples as 16 complex values.
+    SmallVector<Value> samples;
+    samples.reserve(32);
+    for (int64_t index = 0; index < 32; ++index) {
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      Value element = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+      samples.push_back(rewriter.create<arith::ExtSIOp>(loc, i32, element));
+    }
+    SmallVector<SplitComplexValue> values(16);
+    for (int64_t m = 0; m < 16; ++m)
+      values[m] = {samples[2 * m], samples[2 * m + 1]};
+
+    // Stage 1: radix-4 groups (g, g+4, g+8, g+12), twiddle pair index g.
+    // The fourteen per-group clamps recorded in the contract are proven
+    // inactive (proof P1), so they are omitted without changing any bit.
+    for (int64_t group = 0; group < 4; ++group) {
+      int64_t a = group, b = group + 4, c = group + 8, d = group + 12;
+      Value t0 = floorShift(values[a].real, 2);
+      Value t1 = floorShift(values[a].imaginary, 2);
+      Value s0 = floorShift(values[c].real, 2);
+      Value s1 = floorShift(values[c].imaginary, 2);
+      Value sum0 = add(t0, s0);
+      Value sum1 = add(t1, s1);
+      Value diff0 = sub(t0, s0);
+      Value diff1 = sub(t1, s1);
+      Value tb0 = floorShift(values[b].real, 2);
+      Value tb1 = floorShift(values[b].imaginary, 2);
+      Value u0 = floorShift(values[d].real, 2);
+      Value u1 = floorShift(values[d].imaginary, 2);
+      Value tSum0 = add(tb0, u0);
+      Value tSum1 = add(tb1, u1);
+      values[a] = {add(floorShift(sum0, 1), floorShift(tSum0, 1)),
+                   add(floorShift(sum1, 1), floorShift(tSum1, 1))};
+      Value r0 = sub(sum0, tSum0);
+      Value r1 = sub(sum1, tSum1);
+      values[b] = twiddle(r0, r1, kTwiddles[2 * group][0], kTwiddles[2 * group][1]);
+      Value tDiff0 = sub(tb0, u0);
+      Value tDiff1 = sub(tb1, u1);
+      Value rr0 = sub(diff0, tDiff1);
+      Value rr1 = add(diff1, tDiff0);
+      Value ss0 = add(diff0, tDiff1);
+      Value ss1 = sub(diff1, tDiff0);
+      values[c] = twiddle(ss0, ss1, kTwiddles[group][0], kTwiddles[group][1]);
+      values[d] = twiddle(rr0, rr1, kTwiddles[3 * group][0], kTwiddles[3 * group][1]);
+    }
+
+    // Stage 2: unit-twiddle radix-4 groups (i, i+1, i+2, i+3). Saturating
+    // combine first, then independent one-bit floor shifts; these are the
+    // schedule's only reachable saturation points.
+    for (int64_t group = 0; group < 16; group += 4) {
+      SplitComplexValue za = values[group], zb = values[group + 1], zc = values[group + 2],
+                        zd = values[group + 3];
+      Value r0 = saturate16(add(za.real, zc.real));
+      Value r1 = saturate16(add(za.imaginary, zc.imaginary));
+      Value s0 = saturate16(sub(za.real, zc.real));
+      Value s1 = saturate16(sub(za.imaginary, zc.imaginary));
+      Value tSum0 = saturate16(add(zb.real, zd.real));
+      Value tSum1 = saturate16(add(zb.imaginary, zd.imaginary));
+      Value halfR0 = floorShift(r0, 1);
+      Value halfR1 = floorShift(r1, 1);
+      Value halfT0 = floorShift(tSum0, 1);
+      Value halfT1 = floorShift(tSum1, 1);
+      values[group] = {add(halfR0, halfT0), add(halfR1, halfT1)};
+      values[group + 1] = {sub(halfR0, halfT0), sub(halfR1, halfT1)};
+      Value tDiff0 = saturate16(sub(zb.real, zd.real));
+      Value tDiff1 = saturate16(sub(zb.imaginary, zd.imaginary));
+      Value halfS0 = floorShift(s0, 1);
+      Value halfS1 = floorShift(s1, 1);
+      Value halfD0 = floorShift(tDiff0, 1);
+      Value halfD1 = floorShift(tDiff1, 1);
+      values[group + 2] = {add(halfS0, halfD1), sub(halfS1, halfD0)};
+      values[group + 3] = {sub(halfS0, halfD1), add(halfS1, halfD0)};
+    }
+
+    // Binary bit reversal: swap the six non-fixed orbits.
+    static constexpr int64_t kBitReversalPairs[6][2] = {{1, 8},  {2, 4},  {3, 12},
+                                                        {5, 10}, {7, 14}, {11, 13}};
+    for (const auto &pair : kBitReversalPairs)
+      std::swap(values[pair[0]], values[pair[1]]);
+
+    auto packBin = [&](Value real, Value imaginary) -> Value {
+      Value realBits = rewriter.create<arith::ExtUIOp>(
+          loc, i32, rewriter.create<arith::TruncIOp>(loc, i16, real));
+      Value imaginaryBits = rewriter.create<arith::ExtUIOp>(
+          loc, i32, rewriter.create<arith::TruncIOp>(loc, i16, imaginary));
+      Value shifted = rewriter.create<arith::ShLIOp>(loc, imaginaryBits, constant(16));
+      return rewriter.create<arith::OrIOp>(loc, shifted, realBits);
+    };
+
+    // Split stage into compact natural-order bins 0..16; DC and Nyquist
+    // imaginary components are exactly zero by construction.
+    SmallVector<Value> bins(17);
+    bins[0] = packBin(floorShift(add(values[0].real, values[0].imaginary), 1), constant(0));
+    bins[16] = packBin(floorShift(sub(values[0].real, values[0].imaginary), 1), constant(0));
+    for (int64_t k = 1; k < 16; ++k) {
+      const auto &coefficient = kSplitCoefficients[k];
+      SplitComplexValue z = values[k];
+      SplitComplexValue w = values[16 - k];
+      Value accR = add(add(sub(mul(coefficient[0], z.real), mul(coefficient[1], z.imaginary)),
+                           mul(coefficient[2], w.real)),
+                       mul(coefficient[3], w.imaginary));
+      Value accI = add(add(sub(mul(coefficient[3], w.real), mul(coefficient[2], w.imaginary)),
+                           mul(coefficient[0], z.imaginary)),
+                       mul(coefficient[1], z.real));
+      bins[k] = packBin(floorShift(accR, 16), floorShift(accI, 16));
+    }
+
+    RankedTensorType resultType = op.getResult().getType();
+    Value result =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    for (int64_t index = 0; index < 17; ++index) {
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      result = rewriter.create<tensor::InsertOp>(loc, bins[index], result, position);
+    }
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 class ConvertOndrixToOndspPass final
     : public ondrix::impl::ConvertOndrixToOndspBase<ConvertOndrixToOndspPass> {
 public:
@@ -1190,11 +1388,10 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns
-        .add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
-             Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
-             SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering>(
-            &getContext());
+    patterns.add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering,
+                 FirInterpolateOpLowering, Conv1DOpLowering, FirStreamOpLowering,
+                 SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
+                 ButterflyOpLowering, QuantizeOpLowering, RfftRadix4SplitOpLowering>(&getContext());
     patterns.add<CfftOpLowering, RfftOpLowering, IrfftOpLowering>(&getContext(),
                                                                   vectorizeStaticCfft);
 

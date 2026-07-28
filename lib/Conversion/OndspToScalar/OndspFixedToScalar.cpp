@@ -640,6 +640,76 @@ public:
   }
 };
 
+static IntegerType getSignlessIntegerElementOrNull(Type type) {
+  if (auto vector = dyn_cast<VectorType>(type)) {
+    if (vector.isScalable())
+      return nullptr;
+    type = vector.getElementType();
+  }
+  auto element = dyn_cast<IntegerType>(type);
+  if (!element || !element.isSignless())
+    return nullptr;
+  return element;
+}
+
+class RoundShiftOpLowering final : public OpConversionPattern<ondrix::ondsp::RoundShiftOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::RoundShiftOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::RoundShiftOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    IntegerType inputElement = getSignlessIntegerElementOrNull(adaptor.getInput().getType());
+    if (!inputElement)
+      return op.emitOpError("fixed scalar lowering supports scalar or fixed-width vector "
+                            "signless integer round_shift values");
+    // The registered lowering implements only the proven subset: no
+    // pre-shift, an in-range shift amount, and same-or-narrower destination
+    // storage. Widening or overflowing forms fail closed until a real
+    // consumer defines their exact semantics.
+    ondrix::ondsp::ScaleAttr scale = op.getScale();
+    if (scale.getPreShiftLeft() != 0)
+      return op.emitOpError("fixed scalar lowering requires round_shift pre_shift_left = 0");
+    if (scale.getPostShiftRight() >= inputElement.getWidth())
+      return op.emitOpError(
+          "fixed scalar lowering requires round_shift post_shift_right narrower than the input "
+          "storage");
+    if (cast<IntegerType>(scale.getSaturateTo()).getWidth() > inputElement.getWidth())
+      return op.emitOpError("fixed scalar lowering does not widen round_shift results");
+    rewriter.replaceOp(
+        op, requantizeSignedValue(op.getLoc(), adaptor.getInput(), op.getScale(), rewriter));
+    return success();
+  }
+};
+
+class SatCastOpLowering final : public OpConversionPattern<ondrix::ondsp::SatCastOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::SatCastOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::SatCastOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto numeric = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    if (!numeric || numeric.getSignedness() != ondrix::ondsp::Signedness::Signed)
+      return op.emitOpError("fixed scalar lowering supports signed fixed sat_cast policies");
+    IntegerType inputElement = getSignlessIntegerElementOrNull(adaptor.getInput().getType());
+    if (!inputElement)
+      return op.emitOpError("fixed scalar lowering supports scalar or fixed-width vector "
+                            "signless integer sat_cast values");
+
+    Location loc = op.getLoc();
+    auto storage = cast<IntegerType>(numeric.getStorage());
+    Type destinationType =
+        getIntegerTypeLike(adaptor.getInput().getType(), storage.getWidth(), rewriter);
+    Value result;
+    if (storage.getWidth() > inputElement.getWidth())
+      result = rewriter.create<arith::ExtSIOp>(loc, destinationType, adaptor.getInput());
+    else
+      result = narrowSignedValue(loc, adaptor.getInput(), destinationType,
+                                 ondrix::ondsp::OverflowMode::Saturate, rewriter);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 class ConvertOndspFixedToScalarPass final
     : public ondrix::impl::ConvertOndspFixedToScalarBase<ConvertOndspFixedToScalarPass> {
 public:
@@ -660,8 +730,8 @@ public:
     OndspFixedToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
-                 MacOpLowering, MacSubOpLowering, ReduceMacOpLowering>(typeConverter,
-                                                                       &getContext());
+                 MacOpLowering, MacSubOpLowering, ReduceMacOpLowering, RoundShiftOpLowering,
+                 SatCastOpLowering>(typeConverter, &getContext());
     patterns.add<CxButterflyOpLowering>(typeConverter, &getContext(), specializeCanonicalTwiddles);
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);

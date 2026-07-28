@@ -25,6 +25,26 @@ def Ondsp_ConvertOp : Ondsp_Op<"convert", [Pure]> {
 
 def Ondsp_RoundShiftOp : Ondsp_Op<"round_shift", [Pure]> {
   let summary = "Apply an explicit rounding and shift policy";
+  let description = [{
+    Requantizes one signed integer value under the complete scale policy.
+    With signed input `x` interpreted as a mathematical integer, the exact
+    sequence is:
+
+    ```
+    shifted = x * 2^pre_shift_left                (exact)
+    rounded = round(shifted / 2^post_shift_right) per the rounding mode:
+      toward_negative: floor division
+      toward_zero:     floor division, +1 when negative with remainder
+      nearest_even:    floor division, +1 when remainder > half, or
+                       remainder == half and the floor quotient is odd
+    result  = narrow(rounded) to the saturate_to storage:
+      wrap:     two's-complement truncation
+      saturate: clamp to the signed range of saturate_to, then truncate
+    ```
+
+    When `saturate_to` matches the input storage width the narrowing step is
+    the identity and the operation is a pure explicit rounding shift.
+  }];
   let arguments = (ins AnyType:$input, Ondsp_ScaleAttr:$scale);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
@@ -33,6 +53,19 @@ def Ondsp_RoundShiftOp : Ondsp_Op<"round_shift", [Pure]> {
 
 def Ondsp_SatCastOp : Ondsp_Op<"sat_cast", [Pure]> {
   let summary = "Saturating cast under an explicit numeric policy";
+  let description = [{
+    Clamps one signed integer value to the signed range of the numeric
+    policy's storage type and produces that storage type:
+
+    ```
+    result = min(max(x, smin(storage)), smax(storage))   then truncate
+    ```
+
+    Widening a value into a strictly wider storage is exact sign extension.
+    The fractional position of the numeric policy documents the fixed-point
+    interpretation of the surrounding computation; it does not change the
+    clamp arithmetic.
+  }];
   let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$numeric);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;

@@ -631,6 +631,56 @@ def Ondrix_IrfftOp : Ondrix_Op<"irfft", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_RfftRadix4SplitOp : Ondrix_Op<"rfft_radix4_split", [Pure]> {
+  let summary = "Half-size radix-4 split real FFT with floor shifts";
+  let description = [{
+    Computes one static thirty-two-point forward real FFT from signed-Q1.15
+    `tensor<32xi16>` input to compact natural-order `tensor<17xi32>` Hermitian
+    bins in the declared packed complex layout, using the frozen half-size
+    schedule. This is a second, deliberately different real-spectrum contract
+    from `ondrix.rfft`; the two are not interchangeable.
+
+    The schedule views the input as sixteen complex values
+    `z[m] = x[2m] + j*x[2m+1]` and evaluates:
+
+    1. a length-16 complex FFT of exactly two radix-4 stages. Stage one
+       floor-shifts every input right by two, combines with exact widened
+       arithmetic, and requantizes each twiddled product by an exact i32
+       cross product followed by a floor shift right by sixteen. Stage two
+       combines with SATURATING i16 adds and subtracts (the only saturation
+       points in the schedule) followed by independent one-bit floor shifts.
+       Within each radix-4 group the W^1 and W^2 results swap positions so
+       plain binary bit reversal restores natural order;
+    2. binary bit reversal of the sixteen complex values;
+    3. a real split stage combining `Z[k]` and `Z[16-k]` with frozen Q15
+       coefficient tables through exact i32 four-term cross products and a
+       floor shift right by sixteen, producing bins `1..15`; DC and Nyquist
+       are the one-bit floor-shifted sum and difference of the components of
+       `Z[0]`, with imaginary parts exactly zero.
+
+    Every narrowing outside the stage-two saturating combines is proven
+    in-range by the recorded numeric-model analysis, so the lowering omits
+    those provably inactive clamps without changing any result bit. All
+    rounding in the schedule is floor (toward negative); nothing rounds to
+    nearest.
+
+    The output numeric interpretation is signed Q6.10: bins approximate the
+    unnormalized thirty-two-point DFT of the Q1.15 input. The executable
+    profile is limited to this exact schedule: static N=32, the
+    imag-high/real-low packed layout, signed Q1.15 input, signed Q6.10
+    output, and exact full products. Other extents, layouts, formats, and
+    inverse transforms fail closed.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_CxLayoutAttr:$layout,
+                   Ondsp_NumericAttr:$input_numeric,
+                   Ondsp_NumericAttr:$output_numeric,
+                   Ondsp_ProductAttr:$product);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_QuantizeOp : Ondrix_Op<"quantize", [Pure]> {
   let summary = "High-level numeric conversion intent";
   let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$src,

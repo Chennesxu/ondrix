@@ -143,6 +143,35 @@ static LogicalResult verifyIrfftValueDomain(IrfftOp op) {
   return success();
 }
 
+static LogicalResult verifySignedFixedFormat(Operation *op, Attribute numeric, unsigned width,
+                                             unsigned frac, StringRef name) {
+  auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric);
+  if (!fixed || fixed.getSignedness() != ondrix::ondsp::Signedness::Signed ||
+      !fixed.getStorage().isSignlessInteger(width) || fixed.getFrac() != frac)
+    return op->emitOpError() << name << " requires #ondsp.fixed<signed, storage = i" << width
+                             << ", frac = " << frac << ">";
+  return success();
+}
+
+static LogicalResult verifyRfftRadix4SplitValueDomain(RfftRadix4SplitOp op) {
+  if (op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
+    return op.emitOpError(
+        "executable radix-4 split RFFT requires packed_i16_imag_hi_real_lo layout");
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType resultType = op.getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
+    return failure();
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if (inputExtent != 32 || resultExtent != 17 ||
+      !inputType.getElementType().isSignlessInteger(16) ||
+      !resultType.getElementType().isSignlessInteger(32))
+    return op.emitOpError(
+        "executable radix-4 split RFFT requires tensor<32xi16> to tensor<17xi32>");
+  return success();
+}
+
 static LogicalResult verifyQuantizeDomain(QuantizeOp op) {
   if (!ondrix::haveSameElementwiseShape(op.getInput().getType(), op.getResult().getType()))
     return op.emitOpError("input and result must use the same scalar or static shaped domain");
@@ -858,6 +887,16 @@ LogicalResult IrfftOp::verify() {
                                                            getProductScale(), getOutputScale())))
     return failure();
   return verifyIrfftValueDomain(*this);
+}
+
+LogicalResult RfftRadix4SplitOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getInputNumeric(), 16, 15, "input_numeric")))
+    return failure();
+  if (failed(verifySignedFixedFormat(getOperation(), getOutputNumeric(), 16, 10, "output_numeric")))
+    return failure();
+  if (!ondrix::ondsp::isFullProduct(getProduct()))
+    return emitOpError("executable radix-4 split RFFT requires product = #ondsp.product<full>");
+  return verifyRfftRadix4SplitValueDomain(*this);
 }
 
 LogicalResult QuantizeOp::verify() {
