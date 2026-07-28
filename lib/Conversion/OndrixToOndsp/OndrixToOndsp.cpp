@@ -1642,6 +1642,111 @@ public:
   }
 };
 
+class LmsOpLowering final : public OpConversionPattern<ondrix::ir::LmsOp> {
+public:
+  using OpConversionPattern<ondrix::ir::LmsOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::LmsOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    int64_t samples = op.getInput().getType().getDimSize(0);
+    int64_t taps = op.getWeights().getType().getDimSize(0);
+    IntegerType i16 = rewriter.getI16Type();
+    IntegerType i32 = rewriter.getIntegerType(32);
+    IntegerType i64 = rewriter.getIntegerType(64);
+    Attribute numeric = op.getNumeric();
+    // Every rounding boundary of the recursion is one nearest-even
+    // saturating round_shift by 15; the error and weight updates use
+    // explicit saturating casts. The whole recursion is loop-form: the
+    // quantized weight state flows sample to sample as an iter_arg.
+    ondrix::ondsp::ScaleAttr scale = getNearestEvenSaturatingShift(rewriter.getContext(), 15);
+    Value mu = rewriter.create<arith::ConstantIntOp>(loc, op.getStepSize(), 64);
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value sampleCount = rewriter.create<arith::ConstantIndexOp>(loc, samples);
+    Value tapCount = rewriter.create<arith::ConstantIndexOp>(loc, taps);
+    Value zero64 = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
+    Value zero16 = rewriter.create<arith::ConstantIntOp>(loc, 0, 16);
+
+    // Zero-prehistory tap fetch: x[n - k], 0 for n < k.
+    auto guardedInput = [&](OpBuilder &builder, Location loc, Value sample, Value tap) -> Value {
+      Value offset = builder.create<arith::SubIOp>(loc, sample, tap);
+      Value valid = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, offset, zero);
+      Value clamped = builder.create<arith::MaxSIOp>(loc, offset, zero);
+      Value element = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), clamped);
+      return builder.create<arith::SelectOp>(loc, valid, element, zero16);
+    };
+
+    // Copy the initial weights into a fresh tensor before adapting: the
+    // recursion mutates its weight state per sample, and inserting into
+    // the function-argument tensor directly would let bufferization adapt
+    // the caller's buffer in place.
+    Value weightsEmpty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{taps}, i16);
+    auto copyLoop = rewriter.create<scf::ForOp>(
+        loc, zero, tapCount, one, ValueRange{weightsEmpty},
+        [&](OpBuilder &builder, Location loc, Value tap, ValueRange iterArgs) {
+          Value weight = builder.create<tensor::ExtractOp>(loc, adaptor.getWeights(), tap);
+          Value inserted = builder.create<tensor::InsertOp>(loc, weight, iterArgs.front(), tap);
+          builder.create<scf::YieldOp>(loc, inserted);
+        });
+
+    Value errorsEmpty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{samples}, i16);
+    auto sampleLoop = rewriter.create<scf::ForOp>(
+        loc, zero, sampleCount, one, ValueRange{copyLoop.getResult(0), errorsEmpty},
+        [&](OpBuilder &builder, Location loc, Value sample, ValueRange iterArgs) {
+          Value weights = iterArgs[0];
+          Value errors = iterArgs[1];
+
+          auto accLoop = builder.create<scf::ForOp>(
+              loc, zero, tapCount, one, ValueRange{zero64},
+              [&](OpBuilder &builder, Location loc, Value tap, ValueRange accArgs) {
+                Value term = guardedInput(builder, loc, sample, tap);
+                Value termWide = builder.create<arith::ExtSIOp>(loc, i64, term);
+                Value weight = builder.create<tensor::ExtractOp>(loc, weights, tap);
+                Value weightWide = builder.create<arith::ExtSIOp>(loc, i64, weight);
+                Value product = builder.create<arith::MulIOp>(loc, weightWide, termWide);
+                Value sum = builder.create<arith::AddIOp>(loc, accArgs.front(), product);
+                builder.create<scf::YieldOp>(loc, sum);
+              });
+          Value output =
+              builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, accLoop.getResult(0), scale);
+
+          Value desired = builder.create<tensor::ExtractOp>(loc, adaptor.getDesired(), sample);
+          Value desiredWide = builder.create<arith::ExtSIOp>(loc, i32, desired);
+          Value outputWide = builder.create<arith::ExtSIOp>(loc, i32, output);
+          Value difference = builder.create<arith::SubIOp>(loc, desiredWide, outputWide);
+          Value error = builder.create<ondrix::ondsp::SatCastOp>(loc, i16, difference, numeric);
+          Value nextErrors = builder.create<tensor::InsertOp>(loc, error, errors, sample);
+
+          Value errorWide = builder.create<arith::ExtSIOp>(loc, i64, error);
+          Value stepProduct = builder.create<arith::MulIOp>(loc, mu, errorWide);
+          Value step = builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, stepProduct, scale);
+          Value stepWide = builder.create<arith::ExtSIOp>(loc, i64, step);
+
+          auto updateLoop = builder.create<scf::ForOp>(
+              loc, zero, tapCount, one, ValueRange{weights},
+              [&](OpBuilder &builder, Location loc, Value tap, ValueRange updateArgs) {
+                Value term = guardedInput(builder, loc, sample, tap);
+                Value termWide = builder.create<arith::ExtSIOp>(loc, i64, term);
+                Value product = builder.create<arith::MulIOp>(loc, stepWide, termWide);
+                Value delta = builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, product, scale);
+                Value weight = builder.create<tensor::ExtractOp>(loc, updateArgs.front(), tap);
+                Value weightWide = builder.create<arith::ExtSIOp>(loc, i32, weight);
+                Value deltaWide = builder.create<arith::ExtSIOp>(loc, i32, delta);
+                Value updated = builder.create<arith::AddIOp>(loc, weightWide, deltaWide);
+                Value saturated =
+                    builder.create<ondrix::ondsp::SatCastOp>(loc, i16, updated, numeric);
+                Value inserted =
+                    builder.create<tensor::InsertOp>(loc, saturated, updateArgs.front(), tap);
+                builder.create<scf::YieldOp>(loc, inserted);
+              });
+          builder.create<scf::YieldOp>(loc, ValueRange{updateLoop.getResult(0), nextErrors});
+        });
+    rewriter.replaceOp(op, {sampleLoop.getResult(1), sampleLoop.getResult(0)});
+    return success();
+  }
+};
+
 class DctOpLowering final : public OpConversionPattern<ondrix::ir::DctOp> {
 public:
   using OpConversionPattern<ondrix::ir::DctOp>::OpConversionPattern;
@@ -1797,12 +1902,12 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns
-        .add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
-             Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
-             SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering,
-             RfftRadix4SplitOpLowering, CxMagnitudeOpLowering, DctOpLowering, GainOpLowering>(
-            &getContext());
+    patterns.add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering,
+                 FirInterpolateOpLowering, Conv1DOpLowering, FirStreamOpLowering,
+                 SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
+                 ButterflyOpLowering, QuantizeOpLowering, RfftRadix4SplitOpLowering,
+                 CxMagnitudeOpLowering, DctOpLowering, GainOpLowering, LmsOpLowering>(
+        &getContext());
     if (vectorizeStaticCfft && fftLoops) {
       module.emitError("vectorize-static-cfft and fft-loops are mutually exclusive alternative "
                        "FFT lowerings; select at most one");

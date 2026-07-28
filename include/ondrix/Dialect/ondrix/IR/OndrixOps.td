@@ -790,6 +790,42 @@ def Ondrix_GainOp : Ondrix_Op<"gain", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_LmsOp : Ondrix_Op<"lms", [Pure]> {
+  let summary = "Fixed-point LMS adaptive filter with quantized state";
+  let description = [{
+    `ondrix.lms` runs the least-mean-squares adaptation over a static
+    rank-1 signed-Q1.15 input `x` (`N` in [1, 4096]) and desired signal
+    `d`, starting from `K` initial weights (`K` in [1, 64]) with a raw
+    Q1.15 step size `mu` in [0, 32767]. Prehistory is zero. Per sample
+    `n`, in order:
+
+    ```text
+    acc     = sum_{k<K} w[k] * x[n-k]        exact i64 (x[m<0] = 0)
+    y       = sat_i16(round_half_even(acc / 2^15))
+    e[n]    = sat_i16(d[n] - y)
+    step    = sat_i16(round_half_even(mu * e[n] / 2^15))
+    w[k]   += round_half_even(step * x[n-k] / 2^15), saturated to i16
+    ```
+
+    Every sample takes `2 + K` observable rounding boundaries, and the
+    updated weights feed the next sample: the quantized state is part of
+    the contract. This is what makes the real-arithmetic rewrites of the
+    update (fusing `mu * e * x` into one rounding, or folding an input
+    gain into the step size) illegal — a one-LSB difference in one update
+    compounds through the feedback. The operation returns the error
+    signal and the final weights.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   AnyRankedTensor:$desired,
+                   AnyRankedTensor:$weights,
+                   I64Attr:$step_size,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_RoundingModeAttr:$rounding);
+  let results = (outs AnyRankedTensor:$error, AnyRankedTensor:$adapted);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_CxMagnitudeOp : Ondrix_Op<"cx_magnitude", [Pure]> {
   let summary = "Fixed-point magnitude of a packed Q15 complex tensor";
   let description = [{

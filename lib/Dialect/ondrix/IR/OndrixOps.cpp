@@ -978,6 +978,39 @@ LogicalResult GainOp::verify() {
   return success();
 }
 
+LogicalResult LmsOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  if (getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
+    return emitOpError("lms requires nearest_even rounding");
+  int64_t stepSize = getStepSize();
+  if (stepSize < 0 || stepSize > 32767)
+    return emitOpError("lms step size must be a raw signed Q1.15 value in [0, 32767]");
+  RankedTensorType inputType = getInput().getType();
+  RankedTensorType desiredType = getDesired().getType();
+  RankedTensorType weightsType = getWeights().getType();
+  RankedTensorType errorType = getError().getType();
+  RankedTensorType adaptedType = getAdapted().getType();
+  if (failed(verifyUnencodedTensorTypes(
+          getOperation(), {inputType, desiredType, weightsType, errorType, adaptedType})))
+    return failure();
+  auto staticExtent = [](RankedTensorType type) {
+    return type.getRank() == 1 && type.getElementType().isSignlessInteger(16)
+               ? type.getDimSize(0)
+               : ShapedType::kDynamic;
+  };
+  int64_t samples = staticExtent(inputType);
+  int64_t taps = staticExtent(weightsType);
+  if (samples == ShapedType::kDynamic || samples < 1 || samples > 4096 ||
+      staticExtent(desiredType) != samples || staticExtent(errorType) != samples)
+    return emitOpError("executable lms requires matching static tensor<Nxi16> input, desired, "
+                       "and error with N in [1, 4096]");
+  if (taps == ShapedType::kDynamic || taps < 1 || taps > 64 || staticExtent(adaptedType) != taps)
+    return emitOpError("executable lms requires matching static tensor<Kxi16> weights and "
+                       "adapted weights with K in [1, 64]");
+  return success();
+}
+
 LogicalResult CxMagnitudeOp::verify() {
   if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
     return failure();
