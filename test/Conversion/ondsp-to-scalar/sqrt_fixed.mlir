@@ -7,12 +7,14 @@
 // and the result clamps to 32767 before narrowing.
 
 // The opt-in estimate mode replaces the sixteen candidate bits with one
-// IEEE square root and four branchless correction steps; rounding and
+// IEEE square root, an estimate ceiling (every root of at least 2^16
+// saturates anyway, and the ceiling keeps the correction squares far from
+// i64 overflow), and four branchless correction steps; rounding and
 // saturation are unchanged, so the result stays bit-identical.
 
 // ESTIMATE-LABEL: func.func @sqrt_nearest
 // ESTIMATE: math.sqrt {{.*}} : f64
-// ESTIMATE-COUNT-6: arith.select
+// ESTIMATE-COUNT-7: arith.select
 // ESTIMATE-NOT: arith.select
 
 // CHECK-LABEL: func.func @sqrt_nearest
@@ -29,7 +31,7 @@ func.func @sqrt_nearest(%input: i64) -> i16 {
 
 // ESTIMATE-LABEL: func.func @sqrt_floor
 // ESTIMATE: math.sqrt
-// ESTIMATE-COUNT-5: arith.select
+// ESTIMATE-COUNT-6: arith.select
 // ESTIMATE-NOT: arith.select
 
 // CHECK-LABEL: func.func @sqrt_floor

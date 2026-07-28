@@ -743,6 +743,13 @@ public:
           rewriter.create<arith::SIToFPOp>(loc, rewriter.getF64Type(), input);
       Value estimate = rewriter.create<math::SqrtOp>(loc, asFloat);
       root = rewriter.create<arith::FPToSIOp>(loc, rewriter.getIntegerType(64), estimate);
+      // Clamp the estimate before squaring: every root of at least 2^16
+      // saturates to 32767 anyway, and the clamp keeps the correction
+      // squares far from i64 overflow for the whole i64 input domain.
+      Value ceiling = rewriter.create<arith::ConstantIntOp>(loc, 65536, 64);
+      Value overCeiling =
+          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, root, ceiling);
+      root = rewriter.create<arith::SelectOp>(loc, overCeiling, ceiling, root);
       for (int step = 0; step < 2; ++step) {
         Value square = rewriter.create<arith::MulIOp>(loc, root, root);
         Value tooHigh =
