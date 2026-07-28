@@ -3,7 +3,15 @@
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc %S/Inputs/rfft64_magnitude_q15_aot.c %t.o -o %t -lm
 // RUN: %t
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar="sqrt-estimate" --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.estimate.mlir
+// RUN: ondrix-translate %t.estimate.mlir --mlir-to-llvmir > %t.estimate.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.estimate.ll -o %t.estimate.o
+// RUN: cc %S/Inputs/rfft64_magnitude_q15_aot.c %t.estimate.o -o %t.estimate -lm
+// RUN: %t.estimate
 
+// The second pipeline exercises the opt-in sqrt-estimate lowering against
+// the SAME independent reference: both roots must be bit-identical.
+//
 // Fixed-point magnitude spectrum: 64 real Q15 samples through the staged
 // RFFT contract, then exact sums of squares and the explicit integer square
 // root, checked against an independent reference with its own

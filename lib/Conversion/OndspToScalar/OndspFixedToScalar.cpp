@@ -15,6 +15,7 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/AttrTypeSubElements.h"
@@ -712,7 +713,8 @@ public:
 
 class SqrtFixedOpLowering final : public OpConversionPattern<ondrix::ondsp::SqrtFixedOp> {
 public:
-  using OpConversionPattern<ondrix::ondsp::SqrtFixedOp>::OpConversionPattern;
+  SqrtFixedOpLowering(TypeConverter &typeConverter, MLIRContext *context, bool sqrtEstimate)
+      : OpConversionPattern(typeConverter, context), sqrtEstimate(sqrtEstimate) {}
 
   LogicalResult matchAndRewrite(ondrix::ondsp::SqrtFixedOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -729,16 +731,44 @@ public:
 
     Location loc = op.getLoc();
     Value input = adaptor.getInput();
-    Value root = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
-    // Exact bit-by-bit integer square root: the root of an input bounded by
-    // 2^31 fits in 16 bits, so 16 unrolled candidate bits suffice.
-    for (int bit = 15; bit >= 0; --bit) {
-      Value candidateBit = rewriter.create<arith::ConstantIntOp>(loc, int64_t(1) << bit, 64);
-      Value candidate = rewriter.create<arith::AddIOp>(loc, root, candidateBit);
-      Value square = rewriter.create<arith::MulIOp>(loc, candidate, candidate);
-      Value fits =
-          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, square, input);
-      root = rewriter.create<arith::SelectOp>(loc, fits, candidate, root);
+    Value root;
+    if (sqrtEstimate) {
+      // IEEE 754 requires a correctly rounded square root, so the truncated
+      // binary64 estimate of an exactly representable input is within one
+      // of the exact floor. Two branchless correction steps in each
+      // direction give double the required margin and keep the result
+      // bit-identical to the integer definition.
+      Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
+      Value asFloat =
+          rewriter.create<arith::SIToFPOp>(loc, rewriter.getF64Type(), input);
+      Value estimate = rewriter.create<math::SqrtOp>(loc, asFloat);
+      root = rewriter.create<arith::FPToSIOp>(loc, rewriter.getIntegerType(64), estimate);
+      for (int step = 0; step < 2; ++step) {
+        Value square = rewriter.create<arith::MulIOp>(loc, root, root);
+        Value tooHigh =
+            rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, square, input);
+        Value lowered = rewriter.create<arith::SubIOp>(loc, root, one);
+        root = rewriter.create<arith::SelectOp>(loc, tooHigh, lowered, root);
+      }
+      for (int step = 0; step < 2; ++step) {
+        Value next = rewriter.create<arith::AddIOp>(loc, root, one);
+        Value square = rewriter.create<arith::MulIOp>(loc, next, next);
+        Value fits =
+            rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, square, input);
+        root = rewriter.create<arith::SelectOp>(loc, fits, next, root);
+      }
+    } else {
+      root = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
+      // Exact bit-by-bit integer square root: the root of an input bounded by
+      // 2^31 fits in 16 bits, so 16 unrolled candidate bits suffice.
+      for (int bit = 15; bit >= 0; --bit) {
+        Value candidateBit = rewriter.create<arith::ConstantIntOp>(loc, int64_t(1) << bit, 64);
+        Value candidate = rewriter.create<arith::AddIOp>(loc, root, candidateBit);
+        Value square = rewriter.create<arith::MulIOp>(loc, candidate, candidate);
+        Value fits =
+            rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, square, input);
+        root = rewriter.create<arith::SelectOp>(loc, fits, candidate, root);
+      }
     }
     if (op.getRounding() == ondrix::ondsp::RoundingMode::NearestEven) {
       // Round up when input - root^2 > root, i.e. sqrt(input) > root + 1/2.
@@ -759,6 +789,9 @@ public:
         op, rewriter.create<arith::TruncIOp>(loc, rewriter.getI16Type(), clamped).getResult());
     return success();
   }
+
+private:
+  bool sqrtEstimate;
 };
 
 class ConvertOndspFixedToScalarPass final
@@ -782,7 +815,8 @@ public:
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
                  MacOpLowering, MacSubOpLowering, ReduceMacOpLowering, RoundShiftOpLowering,
-                 SatCastOpLowering, SqrtFixedOpLowering>(typeConverter, &getContext());
+                 SatCastOpLowering>(typeConverter, &getContext());
+    patterns.add<SqrtFixedOpLowering>(typeConverter, &getContext(), sqrtEstimate);
     patterns.add<CxButterflyOpLowering>(typeConverter, &getContext(), specializeCanonicalTwiddles);
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);

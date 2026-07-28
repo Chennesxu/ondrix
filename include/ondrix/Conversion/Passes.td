@@ -128,18 +128,31 @@ def ConvertOndspFixedToScalar
     identities. The plan rechecks the operation, twiddle SSA value, layout,
     numeric/product policy, and both scaling boundaries. Runtime and other
     twiddles retain the generic widened complex-product lowering.
+
+    The opt-in `sqrt-estimate` mode lowers `ondsp.sqrt_fixed` through a
+    floating-point square-root estimate plus branchless exact integer
+    correction instead of the default unrolled bit-by-bit root. IEEE 754
+    requires a correctly rounded square root, so the truncated estimate is
+    within one of the exact floor; the lowering applies two downward and
+    two upward correction steps (double the required margin) before the
+    declared rounding and saturation, keeping the result bit-identical to
+    the contract. The mode assumes an IEEE double square root exists on
+    the target; targets without one keep the default integer lowering.
   }];
   let constructor = "ondrix::createConvertOndspFixedToScalarPass()";
   let options = [
     Option<"specializeCanonicalTwiddles", "specialize-canonical-twiddles",
            "bool", /*default=*/"false",
            "Use exact packed-Q15 identities for supported canonical twiddles">,
+    Option<"sqrtEstimate", "sqrt-estimate", "bool", /*default=*/"false",
+           "Lower sqrt_fixed via an IEEE estimate plus exact integer correction">,
   ];
   let dependentDialects = [
     "ondrix::ondsp::OndspDialect",
     "mlir::arith::ArithDialect",
     "mlir::cf::ControlFlowDialect",
     "mlir::func::FuncDialect",
+    "mlir::math::MathDialect",
     "mlir::memref::MemRefDialect",
     "mlir::scf::SCFDialect",
   ];
