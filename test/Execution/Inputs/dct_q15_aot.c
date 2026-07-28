@@ -74,8 +74,9 @@ static int16_t roundHalfEvenShift(int64_t value, unsigned shift) {
   int64_t half = divisor >> 1;
   if (remainder > half || (remainder == half && (quotient & 1)))
     ++quotient;
-  /* |sum| <= N * 2^30, so the exported value is at most 16383 and the
-   * declared i16 saturation is unreachable. */
+  /* |sum| <= N * 2^30, so the exported value lies in [-16384, 16383]
+   * (the all-minimum k = 0 corner hits the -16383.5 half-even tie) and
+   * the declared i16 saturation is unreachable. */
   return (int16_t)quotient;
 }
 

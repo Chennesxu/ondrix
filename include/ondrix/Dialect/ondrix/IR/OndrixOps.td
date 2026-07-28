@@ -709,8 +709,10 @@ def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
     the single explicit boundary is the final nearest-even
     `ondsp.round_shift` by `16 + m`. The output reading is the
     unnormalized transform at `frac = 14 - m` (for example Q5.11 at
-    `N = 8`), where `|X[k]| <= 16383` makes the declared saturation
-    provably unreachable. Normalization conventions are the consumer's
+    `N = 8`). The exported value lies in `[-16384, 16383]` — the negative
+    bound is reached exactly once, by the all-minimum input on the `k = 0`
+    row through the `-16383.5` half-even tie — so the declared saturation
+    is provably unreachable. Normalization conventions are the consumer's
     explicit follow-up quantization, not part of this contract.
 
     The executable profile pins `input_numeric` to signed Q1.15 and
