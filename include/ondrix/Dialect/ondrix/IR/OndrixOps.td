@@ -687,6 +687,73 @@ def Ondrix_RfftRadix4SplitOp : Ondrix_Op<"rfft_radix4_split", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
+  let summary = "Static signed-Q15 type-II DCT";
+  let description = [{
+    `ondrix.dct` computes the unnormalized type-II discrete cosine
+    transform of a static rank-1 signed-Q1.15 tensor, for power-of-two
+    extents `N = 2^m` in `[4, 64]`:
+
+    ```text
+    X[k] = round_shift(sum_n x[n] * c[k][n], 16 + m),  k = 0..N-1
+    c[k][n] = q15(cos(pi * (2n+1) * k / (2N)))
+    ```
+
+    Coefficients are generated at compile time with the project-wide
+    tie-guarded round-half-even Q1.15 quantization (declared saturation at
+    the `k = 0` cosine of one; a 50-digit sweep of all 5456 coefficients
+    for the supported extents shows a worst tie margin of 0.0044 LSB, and
+    the guard remains the fail-closed backstop). Products and the sum are
+    exact in i64 — `|sum| <= N * 2^30 < 2^36` — so the reduction has no
+    reachable intermediate overflow and its association is value-neutral;
+    the single explicit boundary is the final nearest-even
+    `ondsp.round_shift` by `16 + m`. The output reading is the
+    unnormalized transform at `frac = 14 - m` (for example Q5.11 at
+    `N = 8`), where `|X[k]| <= 16383` makes the declared saturation
+    provably unreachable. Normalization conventions are the consumer's
+    explicit follow-up quantization, not part of this contract.
+
+    The executable profile pins `input_numeric` to signed Q1.15 and
+    `output_numeric` to signed i16 with `frac = 14 - m` derived from the
+    result extent.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_NumericAttr:$input_numeric,
+                   Ondsp_NumericAttr:$output_numeric);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondrix_MovingAverageOp : Ondrix_Op<"moving_average", [Pure]> {
+  let summary = "Valid-boundary moving average with one exact rounding";
+  let description = [{
+    `ondrix.moving_average` computes the valid-boundary sliding mean of a
+    static rank-1 signed-Q1.15 tensor with a static power-of-two window
+    `K = 2^m` in `[2, 64]`:
+
+    ```text
+    y[n] = round_shift(sum_{i=0}^{K-1} x[n + i], m),  n = 0..N-K
+    ```
+
+    The window sum is exact in i64 and the single explicit boundary is the
+    final nearest-even `ondsp.round_shift` by `m`; a mean of Q1.15 values
+    stays inside Q1.15, so the declared saturation is unreachable. This
+    contract is deliberately NOT the equal-tap FIR
+    `sum x[n+i] * q15(1/K)`: quantizing `1/K` first is a different
+    program with a different result (a gain-merge-class divergence), which
+    is why the operation exists instead of a rewrite onto `ondrix.fir`.
+    Non-power-of-two windows require a rounded-division primitive and fail
+    closed until one has a consumer.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   I64Attr:$window,
+                   Ondsp_NumericAttr:$numeric);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_CxMagnitudeOp : Ondrix_Op<"cx_magnitude", [Pure]> {
   let summary = "Fixed-point magnitude of a packed Q15 complex tensor";
   let description = [{

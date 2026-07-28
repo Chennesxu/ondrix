@@ -1403,6 +1403,119 @@ public:
   }
 };
 
+// Type-II DCT coefficient c[k][n] = q15(cos(pi*(2n+1)*k/(2N))) under the
+// same tie-guarded round-half-even quantization as the twiddle tables.
+static std::optional<int64_t> getDctCoefficientQ15(int64_t extent, int64_t k, int64_t n) {
+  constexpr double kPi = 3.14159265358979323846264338327950288;
+  double angle =
+      kPi * static_cast<double>((2 * n + 1) * k) / (2.0 * static_cast<double>(extent));
+  return quantizeTwiddleComponentQ15(std::cos(angle));
+}
+
+static bool hasAdmissibleDctCoefficients(int64_t extent) {
+  for (int64_t k = 0; k < extent; ++k)
+    for (int64_t n = 0; n < extent; ++n)
+      if (!getDctCoefficientQ15(extent, k, n))
+        return false;
+  return true;
+}
+
+static ondrix::ondsp::ScaleAttr getNearestEvenSaturatingShift(MLIRContext *context,
+                                                              unsigned shift) {
+  return ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, /*postShiftRight=*/shift,
+                                       ondrix::ondsp::RoundingMode::NearestEven,
+                                       ondrix::ondsp::OverflowMode::Saturate,
+                                       IntegerType::get(context, 16));
+}
+
+class DctOpLowering final : public OpConversionPattern<ondrix::ir::DctOp> {
+public:
+  using OpConversionPattern<ondrix::ir::DctOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::DctOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    int64_t extent = op.getInput().getType().getDimSize(0);
+    if (!hasAdmissibleDctCoefficients(extent))
+      return rewriter.notifyMatchFailure(op,
+                                         "DCT coefficient quantization is not tie-guard "
+                                         "admissible");
+    IntegerType i64 = rewriter.getIntegerType(64);
+    unsigned stageCount = llvm::Log2_64(extent);
+    ondrix::ondsp::ScaleAttr scale =
+        getNearestEvenSaturatingShift(rewriter.getContext(), 16 + stageCount);
+
+    SmallVector<Value> inputs;
+    inputs.reserve(extent);
+    for (int64_t index = 0; index < extent; ++index) {
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      Value element = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+      inputs.push_back(rewriter.create<arith::ExtSIOp>(loc, i64, element));
+    }
+
+    RankedTensorType resultType = op.getResult().getType();
+    Value result =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    for (int64_t k = 0; k < extent; ++k) {
+      // Products and the sum are exact in i64 (|sum| <= N * 2^30 < 2^36),
+      // so this reduction has no observable association; the single
+      // boundary is the final round_shift.
+      Value sum;
+      for (int64_t n = 0; n < extent; ++n) {
+        int64_t coefficient = *getDctCoefficientQ15(extent, k, n);
+        Value constant = rewriter.create<arith::ConstantOp>(
+            loc, i64, rewriter.getIntegerAttr(i64, coefficient));
+        Value product = rewriter.create<arith::MulIOp>(loc, inputs[n], constant);
+        sum = sum ? rewriter.create<arith::AddIOp>(loc, sum, product).getResult() : product;
+      }
+      Value exported = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, rewriter.getI16Type(),
+                                                                    sum, scale);
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, k);
+      result = rewriter.create<tensor::InsertOp>(loc, exported, result, position);
+    }
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+class MovingAverageOpLowering final : public OpConversionPattern<ondrix::ir::MovingAverageOp> {
+public:
+  using OpConversionPattern<ondrix::ir::MovingAverageOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::MovingAverageOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    int64_t extent = op.getInput().getType().getDimSize(0);
+    int64_t window = op.getWindow();
+    IntegerType i64 = rewriter.getIntegerType(64);
+    ondrix::ondsp::ScaleAttr scale =
+        getNearestEvenSaturatingShift(rewriter.getContext(), llvm::Log2_64(window));
+
+    SmallVector<Value> inputs;
+    inputs.reserve(extent);
+    for (int64_t index = 0; index < extent; ++index) {
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      Value element = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+      inputs.push_back(rewriter.create<arith::ExtSIOp>(loc, i64, element));
+    }
+
+    RankedTensorType resultType = op.getResult().getType();
+    Value result =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    for (int64_t n = 0, outputs = extent - window + 1; n < outputs; ++n) {
+      Value sum = inputs[n];
+      for (int64_t i = 1; i < window; ++i)
+        sum = rewriter.create<arith::AddIOp>(loc, sum, inputs[n + i]);
+      Value mean =
+          rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, rewriter.getI16Type(), sum, scale);
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, n);
+      result = rewriter.create<tensor::InsertOp>(loc, mean, result, position);
+    }
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 class CxMagnitudeOpLowering final : public OpConversionPattern<ondrix::ir::CxMagnitudeOp> {
 public:
   using OpConversionPattern<ondrix::ir::CxMagnitudeOp>::OpConversionPattern;
@@ -1452,7 +1565,7 @@ public:
                  FirInterpolateOpLowering, Conv1DOpLowering, FirStreamOpLowering,
                  SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
                  ButterflyOpLowering, QuantizeOpLowering, RfftRadix4SplitOpLowering,
-                 CxMagnitudeOpLowering>(&getContext());
+                 CxMagnitudeOpLowering, DctOpLowering, MovingAverageOpLowering>(&getContext());
     patterns.add<CfftOpLowering, RfftOpLowering, IrfftOpLowering>(&getContext(),
                                                                   vectorizeStaticCfft);
 

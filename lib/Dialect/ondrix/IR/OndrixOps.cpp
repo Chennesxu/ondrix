@@ -914,6 +914,47 @@ LogicalResult RfftRadix4SplitOp::verify() {
   return verifyRfftRadix4SplitValueDomain(*this);
 }
 
+LogicalResult DctOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getInputNumeric(), 16, 15, "input_numeric")))
+    return failure();
+  RankedTensorType inputType = getInput().getType();
+  RankedTensorType resultType = getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
+    return failure();
+  int64_t extent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  if (extent < 4 || extent > 64 || !llvm::isPowerOf2_64(extent) || inputType != resultType ||
+      !inputType.getElementType().isSignlessInteger(16))
+    return emitOpError("executable DCT requires matching tensor<Nxi16> input and result "
+                       "with power-of-two N in [4, 64]");
+  unsigned stageCount = llvm::Log2_64(extent);
+  if (failed(verifySignedFixedFormat(getOperation(), getOutputNumeric(), 16, 14 - stageCount,
+                                     "output_numeric")))
+    return failure();
+  return success();
+}
+
+LogicalResult MovingAverageOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  RankedTensorType inputType = getInput().getType();
+  RankedTensorType resultType = getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
+    return failure();
+  int64_t window = getWindow();
+  if (window < 2 || window > 64 || !llvm::isPowerOf2_64(window))
+    return emitOpError("executable moving average requires a power-of-two window in [2, 64]");
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if (inputExtent == ShapedType::kDynamic || inputExtent < window ||
+      resultExtent != inputExtent - window + 1 ||
+      !inputType.getElementType().isSignlessInteger(16) ||
+      !resultType.getElementType().isSignlessInteger(16))
+    return emitOpError("executable moving average requires static tensor<Nxi16> input and "
+                       "tensor<(N-K+1)xi16> result with N >= K");
+  return success();
+}
+
 LogicalResult CxMagnitudeOp::verify() {
   if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
     return failure();
