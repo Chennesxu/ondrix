@@ -1,3 +1,4 @@
 add_subdirectory(SpecializeConstantFir)
 add_subdirectory(TileFirFilter)
 add_subdirectory(DecomposeFirStream)
+add_subdirectory(EvaluateFirDesign)

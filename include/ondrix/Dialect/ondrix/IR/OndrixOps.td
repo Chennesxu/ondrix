@@ -681,6 +681,71 @@ def Ondrix_RfftRadix4SplitOp : Ondrix_Op<"rfft_radix4_split", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_WindowHammingOp : Ondrix_Op<"window_hamming", [Pure]> {
+  let summary = "Compile-time symmetric Hamming window coefficients";
+  let description = [{
+    `ondrix.window_hamming` names the symmetric Hamming window of static
+    length `N` taken from the result type:
+
+    ```text
+    w[n] = 27/50 - (23/50) * cos(2*pi*n / (N-1)),  n = 0..N-1
+    ```
+
+    Each real coefficient is quantized once to signed Q1.15 with
+    round-half-even and declared saturation at the +1.0 window center. The
+    operation is a compile-time design intent with no runtime form: the
+    opt-in `evaluate-ondrix-fir-design` pass replaces it with a constant
+    coefficient tensor, and generation fails closed when any coefficient
+    is closer than `2^-20` Q15 LSB to a rounding tie, so the emitted table
+    provably equals the real-valued definition and is exactly symmetric.
+
+    The result is a static rank-1 `tensor<Nxi16>` with `2 <= N <= 4096` and
+    `numeric = #ondsp.fixed<signed, storage = i16, frac = 15>`.
+  }];
+  let arguments = (ins Ondsp_NumericAttr:$numeric);
+  let results = (outs AnyRankedTensor:$coefficients);
+  let hasVerifier = 1;
+  let assemblyFormat = "attr-dict `:` type($coefficients)";
+}
+
+def Ondrix_FirDesignWindowedSincOp
+    : Ondrix_Op<"fir_design_windowed_sinc", [Pure]> {
+  let summary = "Compile-time Hamming-windowed sinc FIR design coefficients";
+  let description = [{
+    `ondrix.fir_design_windowed_sinc` names a linear-phase FIR design of
+    static odd length `N` (from the result type) obtained by truncating the
+    ideal response at rational cutoff `fc = cutoff_num / cutoff_den`
+    (relative to the sample rate, `0 < fc < 1/2` strictly) and applying the
+    symmetric Hamming window `w` of `ondrix.window_hamming`. With
+    `M = (N-1)/2` and `sinc(x) = sin(pi*x)/(pi*x)`, `sinc(0) = 1`:
+
+    ```text
+    lowpass:   h[n] = 2*fc * sinc(2*fc*(n-M)) * w[n]
+    highpass:  h[n] = delta[n-M] - lowpass[n]     (spectral inversion)
+    ```
+
+    Each composite real coefficient is quantized exactly once to signed
+    Q1.15 with round-half-even and declared saturation; there is no
+    quantize-then-combine step. The operation is a compile-time design
+    intent evaluated by the opt-in `evaluate-ondrix-fir-design` pass, which
+    fails closed when any coefficient is closer than `2^-20` Q15 LSB to a
+    rounding tie. Under that guard the emitted integer table equals the
+    real-valued definition and is exactly symmetric, so it feeds the
+    existing constant-coefficient analysis, symmetric-pairing proofs, and
+    proof-gated Vector paths unchanged.
+
+    The result is a static rank-1 `tensor<Nxi16>` with odd
+    `3 <= N <= 4095` and
+    `numeric = #ondsp.fixed<signed, storage = i16, frac = 15>`.
+  }];
+  let arguments = (ins Ondrix_FirDesignResponseAttr:$response,
+                   I64Attr:$cutoff_num, I64Attr:$cutoff_den,
+                   Ondsp_NumericAttr:$numeric);
+  let results = (outs AnyRankedTensor:$coefficients);
+  let hasVerifier = 1;
+  let assemblyFormat = "attr-dict `:` type($coefficients)";
+}
+
 def Ondrix_QuantizeOp : Ondrix_Op<"quantize", [Pure]> {
   let summary = "High-level numeric conversion intent";
   let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$src,

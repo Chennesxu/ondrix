@@ -172,6 +172,19 @@ static LogicalResult verifyRfftRadix4SplitValueDomain(RfftRadix4SplitOp op) {
   return success();
 }
 
+static LogicalResult verifyDesignCoefficientTensor(Operation *op, RankedTensorType type,
+                                                   int64_t minExtent, int64_t maxExtent) {
+  if (failed(verifyUnencodedTensorTypes(op, {type})))
+    return failure();
+  if (type.getRank() != 1 || !type.hasStaticShape() || !type.getElementType().isSignlessInteger(16))
+    return op->emitOpError("requires a static rank-1 i16 coefficient tensor");
+  int64_t extent = type.getDimSize(0);
+  if (extent < minExtent || extent > maxExtent)
+    return op->emitOpError() << "coefficient extent must be in [" << minExtent << ", " << maxExtent
+                             << "]";
+  return success();
+}
+
 static LogicalResult verifyQuantizeDomain(QuantizeOp op) {
   if (!ondrix::haveSameElementwiseShape(op.getInput().getType(), op.getResult().getType()))
     return op.emitOpError("input and result must use the same scalar or static shaped domain");
@@ -897,6 +910,26 @@ LogicalResult RfftRadix4SplitOp::verify() {
   if (!ondrix::ondsp::isFullProduct(getProduct()))
     return emitOpError("executable radix-4 split RFFT requires product = #ondsp.product<full>");
   return verifyRfftRadix4SplitValueDomain(*this);
+}
+
+LogicalResult WindowHammingOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  return verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 2, 4096);
+}
+
+LogicalResult FirDesignWindowedSincOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  if (failed(verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 3, 4095)))
+    return failure();
+  if (getCoefficients().getType().getDimSize(0) % 2 == 0)
+    return emitOpError("windowed-sinc design requires an odd coefficient extent");
+  int64_t num = getCutoffNum();
+  int64_t den = getCutoffDen();
+  if (num < 1 || den < 2 || num > (den - 1) / 2)
+    return emitOpError("cutoff requires 1 <= cutoff_num and 2 * cutoff_num < cutoff_den");
+  return success();
 }
 
 LogicalResult QuantizeOp::verify() {

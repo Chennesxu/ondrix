@@ -81,4 +81,30 @@ def DecomposeOndrixFirStream
   ];
 }
 
+def EvaluateOndrixFirDesign
+    : Pass<"evaluate-ondrix-fir-design", "::mlir::ModuleOp"> {
+  let summary = "Evaluate FIR design intent into constant Q15 coefficients";
+  let description = [{
+    Opt-in compile-time evaluation for `ondrix.window_hamming` and
+    `ondrix.fir_design_windowed_sinc`. Each design operation is replaced by
+    an `arith.constant` dense coefficient tensor produced by binary64
+    evaluation of the real-valued contract equation and a single
+    round-half-even signed Q1.15 quantization with declared, counted
+    saturation. Evaluation fails closed with an error on the operation when
+    any coefficient lies closer than `2^-20` Q15 LSB to a rounding tie, so
+    an emitted table provably matches the real-valued definition
+    independent of host libm rounding and is exactly symmetric. The
+    replacement constant carries an `ondrix.design_provenance` dictionary
+    attribute recording the design kind, response, cutoff, and saturation
+    count; downstream bufferization materializes it as a constant global
+    that the existing constant-coefficient analysis and proof-gated
+    transformations consume unchanged.
+  }];
+  let constructor = "ondrix::createEvaluateOndrixFirDesignPass()";
+  let dependentDialects = [
+    "ondrix::ir::OndrixDialect",
+    "mlir::arith::ArithDialect",
+  ];
+}
+
 #endif // ONDRIX_TRANSFORMS_PASSES

@@ -23,6 +23,15 @@ def Ondrix_Conv1DMode
   let genSpecializedAttr = 0;
 }
 
+def Ondrix_FirDesignLowpass : I32EnumAttrCase<"Lowpass", 0, "lowpass">;
+def Ondrix_FirDesignHighpass : I32EnumAttrCase<"Highpass", 1, "highpass">;
+def Ondrix_FirDesignResponse
+    : I32EnumAttr<"FirDesignResponse", "windowed-sinc FIR design response",
+                  [Ondrix_FirDesignLowpass, Ondrix_FirDesignHighpass]> {
+  let cppNamespace = "::ondrix::ir";
+  let genSpecializedAttr = 0;
+}
+
 def Ondrix_CfftForward : I32EnumAttrCase<"Forward", 0, "forward">;
 def Ondrix_CfftInverse : I32EnumAttrCase<"Inverse", 1, "inverse">;
 def Ondrix_CfftDirection

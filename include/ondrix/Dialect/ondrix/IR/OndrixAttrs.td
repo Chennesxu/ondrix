@@ -15,6 +15,11 @@ def Ondrix_Conv1DModeAttr
   let assemblyFormat = "`<` $value `>`";
 }
 
+def Ondrix_FirDesignResponseAttr
+    : EnumAttr<Ondrix_Dialect, Ondrix_FirDesignResponse, "fir_design_response"> {
+  let assemblyFormat = "`<` $value `>`";
+}
+
 def Ondrix_CfftDirectionAttr
     : EnumAttr<Ondrix_Dialect, Ondrix_CfftDirection, "cfft_direction"> {
   let assemblyFormat = "`<` $value `>`";
