@@ -502,24 +502,27 @@ def Ondrix_ButterflyOp : Ondrix_Op<"butterfly", [Pure]> {
 def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
   let summary = "Static packed-Q15 radix-2 CFFT";
   let description = [{
-    Computes one static four- or eight-point radix-2 decimation-in-time CFFT
-    over packed signed-Q15 complex values. The input and result use natural
-    index order and matching `tensor<Nxi32>` storage. Each packed element uses
-    the layout and finite-precision butterfly contract of
-    `ondrix.butterfly`.
+    Computes one static power-of-two radix-2 decimation-in-time CFFT over
+    packed signed-Q15 complex values, for extents `N` in `[4, 1024]`. The
+    input and result use natural index order and matching `tensor<Nxi32>`
+    storage. Each packed element uses the layout and finite-precision
+    butterfly contract of `ondrix.butterfly`.
 
     The transform recursively decomposes even and odd input indices, then
     combines the two half transforms in increasing frequency order:
 
       `(y[k], y[k + N/2]) = butterfly(even[k], odd[k], W_N^k)`
 
-    Forward direction uses `W_N^k = exp(-2*pi*j*k/N)`, frozen to signed-Q15
-    packed constants. Four points use `[1, -j]`. Eight points use
-    `[1, 23170-j23170, -j, -23170-j23170]`.
-
-    Inverse direction uses `conj(W_N^k)`. Four points use `[1, +j]`. Eight
-    points use `[1, 23170+j23170, +j, -23170+j23170]`. Q15 `1` and `+j`
-    use positive raw value 32767, while `-j` uses raw value -32768.
+    Forward direction uses `W_N^k = exp(-2*pi*j*k/N)`; inverse direction
+    uses `conj(W_N^k)`. Each twiddle component is quantized once from the
+    real-valued definition with round-half-even signed Q1.15 and declared
+    saturation (`+1.0` and `+j` use positive raw value 32767, `-1.0` and
+    `-j` use raw value -32768), and generation is admissible only when the
+    binary64 estimate is at least `2^-20` Q15 LSB away from every rounding
+    tie, so the emitted constants provably equal the real-valued definition
+    independent of host libm. Four points use `[1, -j]` forward; eight
+    points use `[1, 23170-j23170, -j, -23170-j23170]` forward, with the
+    conjugate tables in inverse direction.
 
     Each butterfly applies the declared product and output requantization
     independently. A size-N transform therefore has `log2(N)` observable
@@ -528,11 +531,12 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
     every stage, inverse direction includes the conventional `1/N`
     normalization.
 
-    The executable profile is deliberately limited to four or eight points,
-    explicit forward or inverse direction, the imag-high/real-low packed
-    layout, signed Q15, exact full products, and the same two scale policies
-    as the executable butterfly. Dynamic planning, other sizes and numeric
-    profiles require separate extensions.
+    The executable profile is deliberately limited to static power-of-two
+    extents in `[4, 1024]`, explicit forward or inverse direction, the
+    imag-high/real-low packed layout, signed Q15, exact full products, and
+    the same two scale policies as the executable butterfly. Dynamic
+    planning, other sizes, and other numeric profiles require separate
+    extensions.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondrix_CfftDirectionAttr:$direction,
@@ -549,16 +553,17 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
 def Ondrix_RfftOp : Ondrix_Op<"rfft", [Pure]> {
   let summary = "Static packed-Q15 real-to-Hermitian FFT";
   let description = [{
-    Computes one static eight- or sixteen-point real FFT from signed-Q15
-    `tensor<Nxi16>` input to compact natural-order
-    `tensor<(N/2+1)xi32>` Hermitian bins. Each result uses the declared packed
-    complex layout.
+    Computes one static power-of-two real FFT, for extents `N` in
+    `[8, 1024]`, from signed-Q15 `tensor<Nxi16>` input to compact
+    natural-order `tensor<(N/2+1)xi32>` Hermitian bins. Each result uses the
+    declared packed complex layout.
 
     The reference schedule embeds every real input `x[n]` as
     `x[n] + j*0`, evaluates the size-N staged radix-2 CFFT equation, and
-    retains bins `0..N/2`. It uses the same frozen Q15 twiddles and the same
-    product and output requantization boundaries as `ondrix.cfft`. The
-    additional size-16 forward twiddle pairs `(real, imaginary)` are:
+    retains bins `0..N/2`. It uses the same tie-guarded generated Q15
+    twiddles and the same product and output requantization boundaries as
+    `ondrix.cfft`. For example, the size-16 forward twiddle pairs
+    `(real, imaginary)` are:
 
     ```
     [(32767, 0), (30274, -12540), (23170, -23170), (12540, -30274),
@@ -573,10 +578,10 @@ def Ondrix_RfftOp : Ondrix_Op<"rfft", [Pure]> {
     zero. Half-size packing and real-pair recombination are optimizations of
     this contract, not part of the reference schedule.
 
-    The executable profile is limited to static N=8 or N=16, the
-    imag-high/real-low packed layout, signed Q15, exact full products,
-    nearest-even saturating Q30-to-Q15 product scaling, and nearest-even
-    saturating one-bit output scaling.
+    The executable profile is limited to static power-of-two N in
+    `[8, 1024]`, the imag-high/real-low packed layout, signed Q15, exact
+    full products, nearest-even saturating Q30-to-Q15 product scaling, and
+    nearest-even saturating one-bit output scaling.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_CxLayoutAttr:$layout,
@@ -592,17 +597,18 @@ def Ondrix_RfftOp : Ondrix_Op<"rfft", [Pure]> {
 def Ondrix_IrfftOp : Ondrix_Op<"irfft", [Pure]> {
   let summary = "Static packed-Q15 Hermitian-to-real inverse FFT";
   let description = [{
-    Computes one static eight- or sixteen-point inverse real FFT from compact
-    natural-order `tensor<(N/2+1)xi32>` Hermitian bins to signed-Q15
-    `tensor<Nxi16>` output.
+    Computes one static power-of-two inverse real FFT, for extents `N` in
+    `[8, 1024]`, from compact natural-order `tensor<(N/2+1)xi32>` Hermitian
+    bins to signed-Q15 `tensor<Nxi16>` output.
 
     The reference schedule canonicalizes the imaginary components of the DC
     and Nyquist bins to zero, copies bins `1..N/2-1`, and reconstructs bin
     `N-k` by signed-Q15 saturating conjugation of bin `k`. Saturating
     conjugation maps imaginary raw value -32768 to +32767. The reconstructed
     size-N spectrum is evaluated by the staged inverse CFFT equation, and the
-    real component of each output is returned. The additional size-16 inverse
-    twiddle pairs `(real, imaginary)` are:
+    real component of each output is returned. Inverse twiddles use the same
+    tie-guarded generation as `ondrix.cfft`; for example, the size-16
+    inverse twiddle pairs `(real, imaginary)` are:
 
     ```
     [(32767, 0), (30274, 12540), (23170, 23170), (12540, 30274),
@@ -615,10 +621,10 @@ def Ondrix_IrfftOp : Ondrix_Op<"irfft", [Pure]> {
     `irfft(rfft(x))` is the sequential finite-precision program and is not an
     identity rewrite.
 
-    The executable profile is limited to static N=8 or N=16, the
-    imag-high/real-low packed layout, signed Q15, exact full products,
-    nearest-even saturating Q30-to-Q15 product scaling, and nearest-even
-    saturating one-bit output scaling.
+    The executable profile is limited to static power-of-two N in
+    `[8, 1024]`, the imag-high/real-low packed layout, signed Q15, exact
+    full products, nearest-even saturating Q30-to-Q15 product scaling, and
+    nearest-even saturating one-bit output scaling.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_CxLayoutAttr:$layout,

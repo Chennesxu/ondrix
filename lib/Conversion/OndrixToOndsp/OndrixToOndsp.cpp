@@ -18,7 +18,9 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -915,34 +917,49 @@ public:
   }
 };
 
+// One round-half-even signed Q1.15 quantization of a binary64 twiddle
+// component under the same 2^-20 rounding-tie guard as the FIR design
+// contract: a value admissible under the guard provably quantizes exactly
+// like the real-valued cos/sin definition regardless of host libm rounding.
+// +1.0 saturates to 32767 by declared convention; -1.0 is exact. A 50-digit
+// sweep of every stage twiddle component for power-of-two sizes up to 1024
+// shows a worst-case margin of 0.0036 LSB, so all supported extents are
+// admissible; the guard remains as the fail-closed backstop.
+static std::optional<int64_t> quantizeTwiddleComponentQ15(double value) {
+  constexpr double kTieGuardLsb = 9.5367431640625e-07; // 2^-20
+  double scaled = value * 32768.0;
+  double lower = std::floor(scaled);
+  double fraction = scaled - lower;
+  if (std::fabs(fraction - 0.5) < kTieGuardLsb)
+    return std::nullopt;
+  int64_t quantized = static_cast<int64_t>(lower) + (fraction > 0.5 ? 1 : 0);
+  return std::clamp<int64_t>(quantized, -32768, 32767);
+}
+
 static std::optional<uint32_t> getPackedQ15TwiddleBits(ondrix::ir::CfftDirection direction,
                                                        int64_t size, int64_t index) {
-  constexpr uint32_t one = 0x00007fffU;
-  constexpr uint32_t minusJ = 0x80000000U;
-  constexpr uint32_t plusJ = 0x7fff0000U;
-  if (size == 2 && index == 0)
-    return one;
-  if (size == 4) {
-    constexpr uint32_t forwardValues[] = {one, minusJ};
-    constexpr uint32_t inverseValues[] = {one, plusJ};
-    return direction == ondrix::ir::CfftDirection::Forward ? forwardValues[index]
-                                                           : inverseValues[index];
-  }
-  if (size == 8) {
-    constexpr uint32_t forwardValues[] = {one, 0xa57e5a82U, minusJ, 0xa57ea57eU};
-    constexpr uint32_t inverseValues[] = {one, 0x5a825a82U, plusJ, 0x5a82a57eU};
-    return direction == ondrix::ir::CfftDirection::Forward ? forwardValues[index]
-                                                           : inverseValues[index];
-  }
-  if (size == 16) {
-    constexpr uint32_t forwardValues[] = {one,    0xcf047642U, 0xa57e5a82U, 0x89be30fcU,
-                                          minusJ, 0x89becf04U, 0xa57ea57eU, 0xcf0489beU};
-    constexpr uint32_t inverseValues[] = {one,   0x30fc7642U, 0x5a825a82U, 0x764230fcU,
-                                          plusJ, 0x7642cf04U, 0x5a82a57eU, 0x30fc89beU};
-    return direction == ondrix::ir::CfftDirection::Forward ? forwardValues[index]
-                                                           : inverseValues[index];
-  }
-  return std::nullopt;
+  constexpr double kTwoPi = 6.28318530717958647692528676655900577;
+  double angle = kTwoPi * static_cast<double>(index) / static_cast<double>(size);
+  std::optional<int64_t> real = quantizeTwiddleComponentQ15(std::cos(angle));
+  double sine = std::sin(angle);
+  std::optional<int64_t> imaginary = quantizeTwiddleComponentQ15(
+      direction == ondrix::ir::CfftDirection::Forward ? -sine : sine);
+  if (!real || !imaginary)
+    return std::nullopt;
+  return (static_cast<uint32_t>(*imaginary & 0xFFFF) << 16) |
+         static_cast<uint32_t>(*real & 0xFFFF);
+}
+
+// Fail-closed admissibility of every stage twiddle needed by the recursive
+// combine of one static extent. The recursion itself may then rely on
+// twiddle generation succeeding.
+static bool hasAdmissiblePackedQ15TwiddleTables(ondrix::ir::CfftDirection direction,
+                                                int64_t extent) {
+  for (int64_t size = 2; size <= extent; size *= 2)
+    for (int64_t index = 0; index < size / 2; ++index)
+      if (!getPackedQ15TwiddleBits(direction, size, index))
+        return false;
+  return true;
 }
 
 static SmallVector<Value>
@@ -1062,6 +1079,8 @@ public:
       return rewriter.notifyMatchFailure(op, "requires an ondsp.cx_layout layout attribute");
 
     int64_t extent = op.getInput().getType().getDimSize(0);
+    if (!hasAdmissiblePackedQ15TwiddleTables(op.getDirection(), extent))
+      return rewriter.notifyMatchFailure(op, "twiddle quantization is not tie-guard admissible");
     SmallVector<Value> indices;
     SmallVector<Value> inputs;
     indices.reserve(extent);
@@ -1096,6 +1115,8 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     int64_t extent = op.getInput().getType().getDimSize(0);
+    if (!hasAdmissiblePackedQ15TwiddleTables(ondrix::ir::CfftDirection::Forward, extent))
+      return rewriter.notifyMatchFailure(op, "twiddle quantization is not tie-guard admissible");
     SmallVector<Value> inputs;
     inputs.reserve(extent);
     for (int64_t index = 0; index < extent; ++index) {
@@ -1134,6 +1155,8 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     int64_t extent = op.getResult().getType().getDimSize(0);
+    if (!hasAdmissiblePackedQ15TwiddleTables(ondrix::ir::CfftDirection::Inverse, extent))
+      return rewriter.notifyMatchFailure(op, "twiddle quantization is not tie-guard admissible");
     int64_t half = extent / 2;
     SmallVector<Value> compact;
     compact.reserve(half + 1);

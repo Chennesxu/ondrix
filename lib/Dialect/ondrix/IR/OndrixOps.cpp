@@ -5,6 +5,8 @@
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 #include "ondrix/Support/DSPTypeUtils.h"
 
+#include "llvm/Support/MathExtras.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -100,10 +102,10 @@ static LogicalResult verifyCfftValueDomain(CfftOp op) {
   if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
     return failure();
   int64_t extent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
-  if (inputType != resultType || inputType.getRank() != 1 || (extent != 4 && extent != 8) ||
-      !inputType.getElementType().isSignlessInteger(32))
-    return op.emitOpError(
-        "executable CFFT requires matching tensor<4xi32> or tensor<8xi32> input and result");
+  if (inputType != resultType || inputType.getRank() != 1 || extent < 4 || extent > 1024 ||
+      !llvm::isPowerOf2_64(extent) || !inputType.getElementType().isSignlessInteger(32))
+    return op.emitOpError("executable CFFT requires matching tensor<Nxi32> input and result "
+                          "with power-of-two N in [4, 1024]");
   return success();
 }
 
@@ -117,11 +119,11 @@ static LogicalResult verifyRfftValueDomain(RfftOp op) {
   int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
-  if ((inputExtent != 8 && inputExtent != 16) || resultExtent != inputExtent / 2 + 1 ||
-      !inputType.getElementType().isSignlessInteger(16) ||
+  if (inputExtent < 8 || inputExtent > 1024 || !llvm::isPowerOf2_64(inputExtent) ||
+      resultExtent != inputExtent / 2 + 1 || !inputType.getElementType().isSignlessInteger(16) ||
       !resultType.getElementType().isSignlessInteger(32))
-    return op.emitOpError("executable RFFT requires tensor<8xi16> to tensor<5xi32> or "
-                          "tensor<16xi16> to tensor<9xi32>");
+    return op.emitOpError("executable RFFT requires tensor<Nxi16> to tensor<(N/2+1)xi32> "
+                          "with power-of-two N in [8, 1024]");
   return success();
 }
 
@@ -135,11 +137,11 @@ static LogicalResult verifyIrfftValueDomain(IrfftOp op) {
   int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
-  if ((resultExtent != 8 && resultExtent != 16) || inputExtent != resultExtent / 2 + 1 ||
-      !inputType.getElementType().isSignlessInteger(32) ||
+  if (resultExtent < 8 || resultExtent > 1024 || !llvm::isPowerOf2_64(resultExtent) ||
+      inputExtent != resultExtent / 2 + 1 || !inputType.getElementType().isSignlessInteger(32) ||
       !resultType.getElementType().isSignlessInteger(16))
-    return op.emitOpError("executable IRFFT requires tensor<5xi32> to tensor<8xi16> or "
-                          "tensor<9xi32> to tensor<16xi16>");
+    return op.emitOpError("executable IRFFT requires tensor<(N/2+1)xi32> to tensor<Nxi16> "
+                          "with power-of-two N in [8, 1024]");
   return success();
 }
 
