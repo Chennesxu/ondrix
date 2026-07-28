@@ -47,6 +47,7 @@ add_ondrix_library(OndrixSupport
   OndspToOrtumCore
   OndrixDecomposeFirStream
   OndrixEvaluateFirDesign
+  OndrixMergeGainCascades
   OndrixSpecializeConstantFir
   OndrixTileFirFilter
   OrtumCoreIR

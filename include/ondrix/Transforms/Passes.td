@@ -108,4 +108,28 @@ def EvaluateOndrixFirDesign
   ];
 }
 
+def MergeOndrixGainCascades
+    : Pass<"merge-ondrix-gain-cascades", "::mlir::ModuleOp"> {
+  let summary = "Merge gain cascades proven equivalent by exhaustive certificate";
+  let description = [{
+    Opt-in rewrite of `ondrix.gain(ondrix.gain(x, g1), g2)` cascades into a
+    single gain carrying the round-half-even quantized constant product
+    `q15(g1 * g2 / 2^15)`. Merging two Q1.15 requantization boundaries into
+    one is NOT a real-arithmetic identity under the contract — most
+    constant pairs produce a bit-different program — so each candidate is
+    authorized only by an exhaustive compile-time certificate: both
+    programs are evaluated on every one of the 65536 possible i16 inputs
+    and the rewrite proceeds only when they are bit-identical everywhere.
+    Cascades whose certificate fails, whose intermediate value has other
+    uses, or whose numeric policies differ are left untouched (the safe
+    state is the unmerged program). A merged operation records the
+    original constants and the certificate domain in an
+    `ondrix.gain_merge_provenance` attribute.
+  }];
+  let constructor = "ondrix::createMergeOndrixGainCascadesPass()";
+  let dependentDialects = [
+    "ondrix::ir::OndrixDialect",
+  ];
+}
+
 #endif // ONDRIX_TRANSFORMS_PASSES

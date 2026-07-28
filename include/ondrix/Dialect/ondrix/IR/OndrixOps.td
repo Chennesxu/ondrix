@@ -758,6 +758,38 @@ def Ondrix_MovingAverageOp : Ondrix_Op<"moving_average", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_GainOp : Ondrix_Op<"gain", [Pure]> {
+  let summary = "Elementwise constant Q15 gain with one explicit requantization";
+  let description = [{
+    `ondrix.gain` scales a static rank-1 signed-Q1.15 tensor by one raw
+    Q1.15 constant `gain` in `[-32768, 32767]`, with per-element semantics:
+
+    ```text
+    y[i] = saturate_i16(round_half_even(x[i] * gain / 2^15))
+    ```
+
+    The product is exact (`|x * gain| <= 2^30`) and the single explicit
+    boundary is the nearest-even requantization back to Q1.15; saturation
+    is declared and reachable only for `x = gain = -32768`.
+
+    A cascade of two gain operations is in general a DIFFERENT program
+    from one gain carrying the quantized product of the constants: with
+    `g2 = 22938` then `g1 = 19661`, the cascade and the merged
+    `q15(g1*g2/2^15) = 13763` differ on 10038 of the 65536 possible
+    inputs, and the two cascade orders even differ from each other. The
+    opt-in `merge-ondrix-gain-cascades` pass therefore rewrites a cascade
+    only under an exhaustive compile-time certificate that evaluates both
+    programs on all 65536 inputs and proves them bit-identical.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   I64Attr:$gain,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_RoundingModeAttr:$rounding);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_CxMagnitudeOp : Ondrix_Op<"cx_magnitude", [Pure]> {
   let summary = "Fixed-point magnitude of a packed Q15 complex tensor";
   let description = [{

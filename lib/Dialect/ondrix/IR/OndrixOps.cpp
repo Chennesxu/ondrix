@@ -955,6 +955,29 @@ LogicalResult MovingAverageOp::verify() {
   return success();
 }
 
+LogicalResult GainOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  if (getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
+    return emitOpError("gain requires nearest_even rounding");
+  int64_t gain = getGain();
+  if (gain < -32768 || gain > 32767)
+    return emitOpError("gain constant must be a raw signed Q1.15 value in [-32768, 32767]");
+  RankedTensorType inputType = getInput().getType();
+  RankedTensorType resultType = getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
+    return failure();
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if (inputExtent == ShapedType::kDynamic || inputExtent < 1 || inputExtent > 4096 ||
+      resultExtent != inputExtent || !inputType.getElementType().isSignlessInteger(16) ||
+      !resultType.getElementType().isSignlessInteger(16))
+    return emitOpError("executable gain requires matching static tensor<Nxi16> input and result "
+                       "with N in [1, 4096]");
+  return success();
+}
+
 LogicalResult CxMagnitudeOp::verify() {
   if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
     return failure();

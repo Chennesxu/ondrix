@@ -21,6 +21,7 @@ createTileOndrixFirFilterPass(const TileOndrixFirFilterOptions &options);
 std::unique_ptr<mlir::Pass> createDecomposeOndrixFirStreamPass();
 
 std::unique_ptr<mlir::Pass> createEvaluateOndrixFirDesignPass();
+std::unique_ptr<mlir::Pass> createMergeOndrixGainCascadesPass();
 
 #define GEN_PASS_REGISTRATION
 #include "ondrix/Transforms/Passes.h.inc"

@@ -1602,6 +1602,46 @@ static ondrix::ondsp::ScaleAttr getNearestEvenSaturatingShift(MLIRContext *conte
                                        IntegerType::get(context, 16));
 }
 
+class GainOpLowering final : public OpConversionPattern<ondrix::ir::GainOp> {
+public:
+  using OpConversionPattern<ondrix::ir::GainOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::GainOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    int64_t extent = op.getInput().getType().getDimSize(0);
+    IntegerType i64 = rewriter.getIntegerType(64);
+    // The product of two Q1.15 values is exact in i64; the single declared
+    // boundary is the nearest-even saturating requantization by 15. One
+    // elementwise loop instead of unrolled inserts: the operation admits
+    // extents up to 4096, where a long tensor.insert chain is quadratic in
+    // one-shot bufferization.
+    ondrix::ondsp::ScaleAttr scale = getNearestEvenSaturatingShift(rewriter.getContext(), 15);
+    Value gain = rewriter.create<arith::ConstantIntOp>(loc, op.getGain(), 64);
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+
+    RankedTensorType resultType = op.getResult().getType();
+    Value empty =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    auto loop = rewriter.create<scf::ForOp>(
+        loc, zero, extentValue, one, ValueRange{empty},
+        [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+          Value element = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+          Value wide = builder.create<arith::ExtSIOp>(loc, i64, element);
+          Value product = builder.create<arith::MulIOp>(loc, wide, gain);
+          Value scaled = builder.create<ondrix::ondsp::RoundShiftOp>(loc, builder.getI16Type(),
+                                                                     product, scale);
+          Value inserted =
+              builder.create<tensor::InsertOp>(loc, scaled, iterArgs.front(), position);
+          builder.create<scf::YieldOp>(loc, inserted);
+        });
+    rewriter.replaceOp(op, loop.getResult(0));
+    return success();
+  }
+};
+
 class DctOpLowering final : public OpConversionPattern<ondrix::ir::DctOp> {
 public:
   using OpConversionPattern<ondrix::ir::DctOp>::OpConversionPattern;
@@ -1761,7 +1801,8 @@ public:
         .add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
              Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
              SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering,
-             RfftRadix4SplitOpLowering, CxMagnitudeOpLowering, DctOpLowering>(&getContext());
+             RfftRadix4SplitOpLowering, CxMagnitudeOpLowering, DctOpLowering, GainOpLowering>(
+            &getContext());
     if (vectorizeStaticCfft && fftLoops) {
       module.emitError("vectorize-static-cfft and fft-loops are mutually exclusive alternative "
                        "FFT lowerings; select at most one");
