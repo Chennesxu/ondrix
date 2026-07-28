@@ -1590,6 +1590,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       return std::nullopt;
     }
     if (ast.result.kind == ReductionKind::Dct) {
+      // The source type system only names the i16 storage: the declared
+      // result reads as q15 while the emitted operation carries the
+      // derived frac = 14 - log2(N) output reading in its attribute. The
+      // projection is lossy but currently safe — dct does not compose, so
+      // no in-language consumer can misread the scale.
       if (*inputExtent < 4 || *inputExtent > 64 || !llvm::isPowerOf2_64(*inputExtent)) {
         diagnostics.error(ast.result.position,
                           "dct currently requires a power-of-two input extent in [4, 64]");

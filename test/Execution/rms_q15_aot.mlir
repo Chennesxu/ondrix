@@ -8,8 +8,8 @@
 // exact sum of squares, the nearest-even mean, and a correction-looped
 // integer square root (a different algorithm than the compiled bit-by-bit
 // form). Directed corpus: zero (rms 0), all-maximum, the all-minimum
-// corner (mean exactly 2^30, root saturates to 32767 — the only reachable
-// saturation), single full-scale samples, and constant DC levels whose
+// corner and the mixed 63-minimum-plus-one-maximum witness (root rounds
+// up to 32768 before the clamp), single full-scale samples, and DC levels whose
 // mean is an exact square.
 
 func.func @rms64_q15(%input: tensor<64xi16>) -> tensor<1xi16>
@@ -27,5 +27,14 @@ func.func @rms2_q15(%input: tensor<2xi16>) -> tensor<1xi16>
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
     rounding = #ondsp.rounding<nearest_even>
   } : (tensor<2xi16>) -> tensor<1xi16>
+  return %result : tensor<1xi16>
+}
+
+func.func @rms64_floor_q15(%input: tensor<64xi16>) -> tensor<1xi16>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.rms %input {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<toward_negative>
+  } : (tensor<64xi16>) -> tensor<1xi16>
   return %result : tensor<1xi16>
 }

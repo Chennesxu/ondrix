@@ -13,6 +13,7 @@ typedef struct {
 
 extern void _mlir_ciface_rms64_q15(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_rms2_q15(MemRefI16 *, MemRefI16 *);
+extern void _mlir_ciface_rms64_floor_q15(MemRefI16 *, MemRefI16 *);
 
 enum { kExtent = 64, kTrialCount = 16 };
 
@@ -20,7 +21,7 @@ enum { kExtent = 64, kTrialCount = 16 };
  * mean by log2(N) in explicit floor-division form, then an exact floor
  * root from a corrected libm estimate (a different algorithm than the
  * compiled bit-by-bit root), nearest adjustment, and saturation. */
-static int16_t referenceRms(const int16_t *input, int64_t extent) {
+static int16_t referenceRms(const int16_t *input, int64_t extent, int nearest) {
   int64_t sumsq = 0;
   for (int64_t i = 0; i < extent; ++i)
     sumsq += (int64_t)input[i] * input[i];
@@ -34,7 +35,7 @@ static int16_t referenceRms(const int16_t *input, int64_t extent) {
     --root;
   while ((root + 1) * (root + 1) <= quotient)
     ++root;
-  if (quotient - root * root > root)
+  if (nearest && quotient - root * root > root)
     ++root;
   if (root > 32767)
     root = 32767;
@@ -54,12 +55,12 @@ static int16_t toSigned16(uint32_t bits) {
 }
 
 static int check(void (*kernel)(MemRefI16 *, MemRefI16 *), const int16_t *input, int64_t extent,
-                 const char *label) {
+                 int nearest, const char *label) {
   MemRefI16 inputRef = {(int16_t *)input, (int16_t *)input, 0, {extent}, {1}};
   MemRefI16 output;
   kernel(&output, &inputRef);
 
-  int16_t expected = referenceRms(input, extent);
+  int16_t expected = referenceRms(input, extent, nearest);
   int failed = output.sizes[0] != 1;
   if (!failed) {
     int16_t actual = output.aligned[output.offset];
@@ -78,31 +79,37 @@ int main(void) {
 
   for (int64_t i = 0; i < kExtent; ++i)
     input[i] = 0;
-  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, "zero");
+  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, 1, "zero");
 
   for (int64_t i = 0; i < kExtent; ++i)
     input[i] = INT16_MAX;
-  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, "all max");
+  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, 1, "all max");
 
-  /* All-minimum: mean is exactly 2^30 and the root saturates to 32767 —
-   * the only reachable saturation of the contract. */
+  /* All-minimum: mean is exactly 2^30 and the root saturates to 32767. */
   for (int64_t i = 0; i < kExtent; ++i)
     input[i] = INT16_MIN;
-  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, "all min saturates");
+  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, 1, "all min saturates");
+
+  /* Saturation is NOT unique to the all-minimum corner: sixty-three
+   * minimum samples and one maximum leave the mean just below 2^30, but
+   * the nearest adjustment lifts the floor root 32767 to 32768 before
+   * the clamp (the review witness for the corrected contract text). */
+  input[0] = INT16_MAX;
+  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, 1, "mixed saturates");
 
   for (int64_t i = 0; i < kExtent; ++i)
     input[i] = (i & 1) ? INT16_MIN : INT16_MAX;
-  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, "alternating");
+  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, 1, "alternating");
 
   for (int64_t i = 0; i < kExtent; ++i)
     input[i] = 0;
   input[0] = INT16_MAX;
-  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, "single impulse");
+  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, 1, "single impulse");
 
   /* Constant DC: mean of squares is the exact square 8192^2. */
   for (int64_t i = 0; i < kExtent; ++i)
     input[i] = 8192;
-  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, "exact-square dc");
+  failed |= check(_mlir_ciface_rms64_q15, input, kExtent, 1, "exact-square dc");
 
   uint32_t state = 0x0A15A75Cu;
   for (int trial = 0; trial < kTrialCount; ++trial) {
@@ -112,9 +119,11 @@ int main(void) {
       input[i] = toSigned16(state);
     }
     snprintf(label, sizeof label, "rms64 trial %d", trial);
-    failed |= check(_mlir_ciface_rms64_q15, input, kExtent, label);
+    failed |= check(_mlir_ciface_rms64_q15, input, kExtent, 1, label);
     snprintf(label, sizeof label, "rms2 trial %d", trial);
-    failed |= check(_mlir_ciface_rms2_q15, input, 2, label);
+    failed |= check(_mlir_ciface_rms2_q15, input, 2, 1, label);
+    snprintf(label, sizeof label, "rms64 floor trial %d", trial);
+    failed |= check(_mlir_ciface_rms64_floor_q15, input, kExtent, 0, label);
   }
   return failed;
 }

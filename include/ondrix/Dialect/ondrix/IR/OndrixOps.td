@@ -780,10 +780,11 @@ def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
     value of the integer expression (`|energy| < 3 * 2^30`), returned as
     `tensor<1xi64>` with no further rounding. The coefficient is
     admissible only under the `2^-20` quantization tie guard; other bins
-    fail closed in lowering. Detecting one tone this way takes O(N) state
-    memory instead of a full FFT, at the cost of a different (also
-    observable) quantization path — the Goertzel energy of a bin is NOT
-    the squared magnitude of the corresponding staged-scaling FFT bin.
+    fail closed in lowering. Detecting one tone this way takes two words
+    of recursion state instead of a full FFT's O(N) storage, at the cost
+    of a different (also observable) quantization path — the Goertzel
+    energy of a bin is NOT the squared magnitude of the corresponding
+    staged-scaling FFT bin.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    I64Attr:$bin,
@@ -841,9 +842,12 @@ def Ondrix_RmsOp : Ondrix_Op<"rms", [Pure]> {
     nearest-even mean and the integer square root. The mean is a sum of
     squares divided by a positive constant and therefore establishes the
     non-negative `ondsp.sqrt_fixed` domain structurally. The result is one
-    element (`tensor<1xi16>`); a mean of squares of Q1.15 values stays in
-    `[0, 1]`, so only the `x[i] = -32768` all-minimum corner reaches the
-    declared 32767 saturation of the root.
+    element (`tensor<1xi16>`). The declared 32767 saturation of the root
+    is reachable whenever the mean rounds to the top of the Q30 range:
+    the all-minimum corner (mean exactly 2^30), but also mixed
+    near-full-scale inputs — for example sixty-three minimum samples and
+    one maximum, whose floor root 32767 takes the nearest adjustment to
+    32768 before the clamp.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_NumericAttr:$numeric,
