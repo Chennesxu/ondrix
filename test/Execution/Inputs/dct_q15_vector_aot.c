@@ -171,8 +171,10 @@ static int16_t toSigned16(uint32_t bits) {
 }
 
 /* Directed corner inputs. The all-maximum and all-minimum rails drive the
- * k = 0 row to its extreme sums near 2^36, which is the bound the prefix
- * proof relies on; the alternating rails do the same for the k = N/2 row. */
+ * k = 0 row to its extreme sums for the gated extents — about 2^33 for
+ * N = 8 and 2^35 for N = 32 (the 2^36 rail of the prefix bound is reached
+ * only at N = 64, which this gate does not run); the alternating rails do
+ * the same for the k = N/2 row. */
 static void fillDirected(int trial, int16_t *input, unsigned extent) {
   for (unsigned i = 0; i < extent; ++i)
     input[i] = 0;

@@ -640,7 +640,17 @@ static Value getOrCreateDctRowTable(RewriterBase &rewriter, Location loc, Module
   IntegerType elementType = rewriter.getI16Type();
   auto tableType = MemRefType::get({extent}, elementType);
   std::string symbol = ("__ondrix_dct" + Twine(extent) + "_row" + Twine(row)).str();
-  if (!SymbolTable::lookupSymbolIn(module, symbol)) {
+  if (Operation *existing = SymbolTable::lookupSymbolIn(module, symbol)) {
+    // Reuse only a table this interface itself emitted: a same-named symbol
+    // of another kind, a mutable global, or one of a different type would be
+    // silently consumed as coefficient data otherwise. Anything else in the
+    // reserved __ondrix_ namespace fails closed.
+    auto global = dyn_cast<memref::GlobalOp>(existing);
+    if (global && global.getConstant() && global.getType() == tableType && global.getInitialValue())
+      return rewriter.create<memref::GetGlobalOp>(loc, tableType, symbol);
+    return nullptr;
+  }
+  {
     SmallVector<llvm::APInt> coefficients;
     coefficients.reserve(extent);
     for (int64_t column = 0; column < extent; ++column) {
@@ -740,6 +750,8 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
     // verifier admits at most 64 rows.
     for (int64_t k = 0; k < extent; ++k) {
       Value row = getOrCreateDctRowTable(rewriter, loc, module, extent, k);
+      if (!row)
+        return op.emitOpError("a foreign symbol occupies the reserved DCT coefficient table name");
       Value initial = rewriter.create<ondrix::ondsp::AccZeroOp>(loc, accumulatorType);
       Value reduced = rewriter.create<ondrix::ondsp::ReduceMacOp>(loc, accumulatorType, initial,
                                                                   *input, row, numeric, product);

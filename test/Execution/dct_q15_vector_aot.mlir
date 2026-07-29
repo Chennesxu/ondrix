@@ -1,6 +1,6 @@
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --cse --canonicalize > %t.bufferized.mlir
 // RUN: ondrix-opt %t.bufferized.mlir --vectorize-ondsp-constant-saturating-memref-reduce="vector-width=8 max-elements=64 proof-trace-output=%t.proof.json" > %t.proven.mlir
-// RUN: FileCheck %s --check-prefix=PROVEN < %t.proven.mlir
+// RUN: FileCheck %s --check-prefix=PROVEN --implicit-check-not=ondsp.reduce_mac < %t.proven.mlir
 // RUN: ondrix-opt %t.bufferized.mlir --verify-ondsp-constant-reassociation-proof-trace="proof-trace-input=%t.proof.json max-elements=64" > /dev/null
 // RUN: ondrix-opt %t.proven.mlir --normalize-ondsp-fixed-vector-reduce --convert-ondsp-fixed-to-scalar --expand-strided-metadata --lower-affine --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
 // RUN: FileCheck %s --check-prefix=VECTOR < %t.mlir
@@ -28,7 +28,6 @@
 // PROVEN: vector.reduction <add>, {{.*}} : vector<8xi64> into i64
 // PROVEN-LABEL: func.func @dct32_q15_vector
 // PROVEN: vector.reduction <add>, {{.*}} : vector<8xi64> into i64
-// PROVEN-NOT: = ondsp.reduce_mac
 
 // No ondsp operation may survive the pipeline.
 // VECTOR-NOT: ondsp.
