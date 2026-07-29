@@ -4,6 +4,7 @@
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
+#include "ondrix/Support/DctCoefficients.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
@@ -13,8 +14,14 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/DialectRegistry.h"
+#include "mlir/IR/SymbolTable.h"
+
+#include "llvm/ADT/Twine.h"
+
+#include <string>
 
 using namespace mlir;
 using namespace mlir::bufferization;
@@ -607,6 +614,148 @@ struct RmsOpInterface : public BufferizableOpInterface::ExternalModel<RmsOpInter
   }
 };
 
+/// Signed frac-30 saturating accumulator of the requested width. Saturate is
+/// NOT the exact-modulo reassociation class: a saturating update sequence is
+/// order dependent in general, so a consumer that reassociates it must first
+/// prove that no prefix of either schedule can reach the accumulator bounds.
+static ondrix::ondsp::AccType getSaturatingAccumulator(MLIRContext *context, unsigned width) {
+  return ondrix::ondsp::AccType::get(context, IntegerType::get(context, width), /*frac=*/30,
+                                     ondrix::ondsp::Signedness::Signed,
+                                     ondrix::ondsp::OverflowMode::Saturate);
+}
+
+/// Immutable Q15 table holding one row of the DCT coefficient matrix, named
+/// deterministically so that repeated `ondrix.dct` operations of the same
+/// extent share it.
+///
+/// One rank-1 global per row is what the constant analysis accepts, not a
+/// choice of convenience: `resolveConstantGlobalRoot` walks only rank-1
+/// `memref.subview`/`memref.cast` views back to a `memref.get_global`, and
+/// `isFullRangeUnitStrideSubview` refuses any view whose source or result
+/// rank is not one. A single rank-2 table plus per-row rank-reducing
+/// subviews would therefore never resolve to its constant initializer, and
+/// the reduction would silently lose the constant-coefficient route.
+static Value getOrCreateDctRowTable(RewriterBase &rewriter, Location loc, ModuleOp module,
+                                    int64_t extent, int64_t row) {
+  IntegerType elementType = rewriter.getI16Type();
+  auto tableType = MemRefType::get({extent}, elementType);
+  std::string symbol = ("__ondrix_dct" + Twine(extent) + "_row" + Twine(row)).str();
+  if (!SymbolTable::lookupSymbolIn(module, symbol)) {
+    SmallVector<llvm::APInt> coefficients;
+    coefficients.reserve(extent);
+    for (int64_t column = 0; column < extent; ++column) {
+      // The caller checked complete admissibility before emitting any table.
+      int64_t coefficient = *ondrix::getDctCoefficientQ15(extent, row, column);
+      coefficients.emplace_back(elementType.getWidth(), static_cast<uint64_t>(coefficient),
+                                /*isSigned=*/true);
+    }
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(module.getBody());
+    rewriter.create<memref::GlobalOp>(
+        loc, symbol, rewriter.getStringAttr("private"), tableType,
+        DenseIntElementsAttr::get(RankedTensorType::get({extent}, elementType), coefficients),
+        /*constant=*/true, IntegerAttr());
+  }
+  return rewriter.create<memref::GetGlobalOp>(loc, tableType, symbol);
+}
+
+struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInterface, DctOp> {
+  bool bufferizesToAllocation(Operation *, OpResult) const { return true; }
+
+  bool bufferizesToMemoryRead(Operation *, OpOperand &, const AnalysisState &) const {
+    return true;
+  }
+
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &, const AnalysisState &) const {
+    return false;
+  }
+
+  AliasingOpResultList getAliasingOpResults(Operation *, OpOperand &, const AnalysisState &) const {
+    return {};
+  }
+
+  LogicalResult bufferize(Operation *operation, RewriterBase &rewriter,
+                          const BufferizationOptions &options) const {
+    auto op = cast<DctOp>(operation);
+    int64_t extent = op.getInput().getType().getDimSize(0);
+    // Same fail-closed admissibility gate as the tensor lowering, through the
+    // one shared table generator. Bufferization has no alternative pattern to
+    // fall back to, so the refusal is a diagnostic rather than a silent match
+    // failure.
+    if (!ondrix::hasAdmissibleDctCoefficients(extent))
+      return op.emitOpError("DCT coefficient quantization is not tie-guard admissible");
+
+    FailureOr<Value> input = getBuffer(rewriter, op.getInput(), options);
+    if (failed(input))
+      return failure();
+    auto module = op->getParentOfType<ModuleOp>();
+    if (!module)
+      return op.emitOpError("bufferized DCT requires an enclosing module for its coefficient "
+                            "tables");
+
+    rewriter.setInsertionPoint(op);
+    Location loc = op.getLoc();
+    MLIRContext *context = rewriter.getContext();
+    FailureOr<Value> output = createProducedResultBuffer(rewriter, op.getResult(), options);
+    if (failed(output))
+      return failure();
+
+    IntegerType i16 = rewriter.getI16Type();
+    IntegerType i64 = rewriter.getIntegerType(64);
+    auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getInputNumeric());
+    auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
+    // Unlike matmul and rms, both operands of a DCT row product are NOT
+    // runtime values: the right operand is a compile-time constant table.
+    // That is why this reduction declares a SATURATING accumulator instead of
+    // the wrapping one. Two independent arguments meet here.
+    //
+    // (a) Value: every ordered prefix of a row is bounded by
+    //     sum_n |c[k][n]| * 32768 <= 64 * 32767 * 32768 < 2^39, so no prefix
+    //     can reach the i40 bounds, saturation is unreachable, and the
+    //     saturating fold equals the exact i64 contract sum of the tensor
+    //     lowering.
+    // (b) Legality: Saturate is chosen deliberately. Saturating updates are
+    //     not exact-modulo, so the horizontal Vector consumer cannot take the
+    //     wrap shortcut and must instead route through the
+    //     constant-coefficient prefix-range proof
+    //     (`planConstantSaturatingReduction`), which re-derives (a) from the
+    //     materialized table. Demonstrating that second legality route on a
+    //     real algorithm is the point of this consumer.
+    ondrix::ondsp::AccType accumulatorType = getSaturatingAccumulator(context, /*width=*/40);
+    // Identity materialization of the raw frac-30 accumulator. This is a
+    // WIDENING export (i40 -> i64 at the same frac), the exact
+    // sign-extension leg of `acc_export`, and this is its first in-tree
+    // producer. The declared reading is unchanged, so the value-changing
+    // scaling below stays where it belongs: in the arithmetic `round_shift`.
+    auto rawFormat = ondrix::ondsp::FixedAttr::get(context, ondrix::ondsp::Signedness::Signed, i64,
+                                                   /*frac=*/30);
+    // Bit-identical to the tensor lowering's single boundary: one nearest-even
+    // saturating shift by 16 + log2(N) onto the unnormalized frac = 14 - m
+    // reading, whose saturation the contract proves unreachable.
+    auto exportScale = ondrix::ondsp::ScaleAttr::get(
+        context, /*preShiftLeft=*/0, /*postShiftRight=*/16 + llvm::Log2_64(extent),
+        ondrix::ondsp::RoundingMode::NearestEven, ondrix::ondsp::OverflowMode::Saturate, i16);
+
+    // Unrolled over the output index, matching the tensor-form authority: the
+    // verifier admits at most 64 rows.
+    for (int64_t k = 0; k < extent; ++k) {
+      Value row = getOrCreateDctRowTable(rewriter, loc, module, extent, k);
+      Value initial = rewriter.create<ondrix::ondsp::AccZeroOp>(loc, accumulatorType);
+      Value reduced = rewriter.create<ondrix::ondsp::ReduceMacOp>(loc, accumulatorType, initial,
+                                                                  *input, row, numeric, product);
+      Value raw = rewriter.create<ondrix::ondsp::AccExportOp>(
+          loc, i64, reduced, rawFormat, ondrix::ondsp::RoundingMode::NearestEven,
+          ondrix::ondsp::OverflowMode::Saturate);
+      Value element = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, i16, raw, exportScale);
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, k);
+      rewriter.create<memref::StoreOp>(loc, element, *output, position);
+    }
+
+    replaceOpWithBufferizedValues(rewriter, op, *output);
+    return success();
+  }
+};
+
 struct Conv1DOpInterface
     : public DstBufferizableOpInterfaceExternalModel<Conv1DOpInterface, Conv1DOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand, const AnalysisState &) const {
@@ -668,6 +817,7 @@ void registerBufferizableOpInterfaceExternalModels(DialectRegistry &registry) {
     Conv1DOp::attachInterface<Conv1DOpInterface>(*context);
     MatmulOp::attachInterface<MatmulOpInterface>(*context);
     RmsOp::attachInterface<RmsOpInterface>(*context);
+    DctOp::attachInterface<DctOpInterface>(*context);
 
     // Bufferization materializes these dialects even when the input module
     // contains only tensor-form Ondrix operations.

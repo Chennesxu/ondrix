@@ -4,6 +4,7 @@
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
+#include "ondrix/Support/DctCoefficients.h"
 #include "ondrix/Support/FirStreamRuntimeShape.h"
 #include "ondrix/Support/GuardedQ15Quantization.h"
 
@@ -1578,22 +1579,6 @@ public:
   }
 };
 
-// Type-II DCT coefficient c[k][n] = q15(cos(pi*(2n+1)*k/(2N))) under the
-// same tie-guarded round-half-even quantization as the twiddle tables.
-static std::optional<int64_t> getDctCoefficientQ15(int64_t extent, int64_t k, int64_t n) {
-  constexpr double kPi = 3.14159265358979323846264338327950288;
-  double angle = kPi * static_cast<double>((2 * n + 1) * k) / (2.0 * static_cast<double>(extent));
-  return quantizeTwiddleComponentQ15(std::cos(angle));
-}
-
-static bool hasAdmissibleDctCoefficients(int64_t extent) {
-  for (int64_t k = 0; k < extent; ++k)
-    for (int64_t n = 0; n < extent; ++n)
-      if (!getDctCoefficientQ15(extent, k, n))
-        return false;
-  return true;
-}
-
 static ondrix::ondsp::ScaleAttr getNearestEvenSaturatingShift(MLIRContext *context,
                                                               unsigned shift) {
   return ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, /*postShiftRight=*/shift,
@@ -2027,7 +2012,7 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     int64_t extent = op.getInput().getType().getDimSize(0);
-    if (!hasAdmissibleDctCoefficients(extent))
+    if (!ondrix::hasAdmissibleDctCoefficients(extent))
       return rewriter.notifyMatchFailure(op, "DCT coefficient quantization is not tie-guard "
                                              "admissible");
     IntegerType i64 = rewriter.getIntegerType(64);
@@ -2052,7 +2037,7 @@ public:
       // boundary is the final round_shift.
       Value sum;
       for (int64_t n = 0; n < extent; ++n) {
-        int64_t coefficient = *getDctCoefficientQ15(extent, k, n);
+        int64_t coefficient = *ondrix::getDctCoefficientQ15(extent, k, n);
         Value constant =
             rewriter.create<arith::ConstantOp>(loc, i64, rewriter.getIntegerAttr(i64, coefficient));
         Value product = rewriter.create<arith::MulIOp>(loc, inputs[n], constant);
