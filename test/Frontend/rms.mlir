@@ -19,4 +19,4 @@
 
 // EXTENT: invalid_rms_extent.ox:2:10: error: rms currently requires a power-of-two input extent in [2, 4096]
 // SINGLETON: invalid_rms_result.ox:2:10: error: rms returns a single-element tensor
-// ROUNDING: invalid_rms_rounding.ox:2:10: error: rms rounding must be nearest_even or toward_negative
+// ROUNDING: invalid_rms_rounding.ox:2:10: error: rms root_rounding must be nearest_even or toward_negative

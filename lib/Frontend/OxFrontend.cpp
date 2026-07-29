@@ -503,6 +503,19 @@ public:
       if (!operand)
         return std::nullopt;
       kernel.result.operands.push_back(std::move(*operand));
+      if (current.kind == TokenKind::Comma) {
+        // The magnitude contract admits a declared root rounding mode;
+        // omission keeps the nearest_even default. The parameter names the
+        // ROOT boundary — the sum of squares stays exact.
+        if (!expect(TokenKind::Comma, "expected ',' before root rounding policy") ||
+            !expectIdentifier("root_rounding", "expected root rounding policy") ||
+            !expect(TokenKind::Equal, "expected '=' after root_rounding"))
+          return std::nullopt;
+        auto rounding = parseIdentifier("expected rounding mode");
+        if (!rounding)
+          return std::nullopt;
+        kernel.result.rounding = rounding->spelling.str();
+      }
       if (!expect(TokenKind::RightParen, "expected ')' after magnitude operand"))
         return std::nullopt;
       if (current.kind != TokenKind::Eof) {
@@ -603,10 +616,12 @@ public:
       if (kernel.result.kind == ReductionKind::Rms && current.kind == TokenKind::Comma) {
         // The rms contract admits a declared root rounding mode while the
         // mean boundary stays nearest even; omission keeps the nearest_even
-        // default. Bindings must expose every choice their contract admits.
-        if (!expect(TokenKind::Comma, "expected ',' before rounding policy") ||
-            !expectIdentifier("rounding", "expected rounding policy") ||
-            !expect(TokenKind::Equal, "expected '=' after rounding"))
+        // default. The parameter names the specific boundary (`root_`)
+        // because rms carries two rounding boundaries. Bindings must expose
+        // every choice their contract admits.
+        if (!expect(TokenKind::Comma, "expected ',' before root rounding policy") ||
+            !expectIdentifier("root_rounding", "expected root rounding policy") ||
+            !expect(TokenKind::Equal, "expected '=' after root_rounding"))
           return std::nullopt;
         auto rounding = parseIdentifier("expected rounding mode");
         if (!rounding)
@@ -1457,6 +1472,15 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                             "magnitude currently requires an operand extent in [1, 4096]");
           return std::nullopt;
         }
+        if (!call.rounding.empty()) {
+          std::optional<ondsp::RoundingMode> parsed = parseRounding(call.rounding);
+          if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven &&
+                          *parsed != ondsp::RoundingMode::TowardNegative)) {
+            diagnostics.error(call.position,
+                              "magnitude root_rounding must be nearest_even or toward_negative");
+            return std::nullopt;
+          }
+        }
         return FftExpressionType{SourceType::Q15, input->extent};
       }
       if (isCfftKind(call.kind)) {
@@ -1828,7 +1852,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven &&
                       *parsed != ondsp::RoundingMode::TowardNegative)) {
         diagnostics.error(ast.result.position,
-                          "rms rounding must be nearest_even or toward_negative");
+                          "rms root_rounding must be nearest_even or toward_negative");
         return std::nullopt;
       }
       rounding = *parsed;
@@ -2055,9 +2079,14 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       Location callLocation = getLocation(context, sourceName, call.position);
       if (call.kind == ReductionKind::Magnitude) {
         auto outputType = RankedTensorType::get({inputType.getDimSize(0)}, builder.getI16Type());
+        // The declared root rounding was validated in sema; omission keeps
+        // the nearest_even default.
+        ondsp::RoundingMode rootRounding = ondsp::RoundingMode::NearestEven;
+        if (!call.rounding.empty())
+          rootRounding = *parseRounding(call.rounding);
         return builder.create<ir::CxMagnitudeOp>(
             callLocation, outputType, input, layout, numeric,
-            ondsp::RoundingModeAttr::get(&context, ondsp::RoundingMode::NearestEven));
+            ondsp::RoundingModeAttr::get(&context, rootRounding));
       }
       if (isCfftKind(call.kind)) {
         auto direction = ir::CfftDirectionAttr::get(&context, call.kind == ReductionKind::Cfft
