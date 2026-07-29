@@ -1162,11 +1162,16 @@ LogicalResult WindowKaiserOp::verify() {
   int64_t den = getBetaDen();
   // beta in (0, 50]: positive rational, bounded so the binary64 I0 series
   // stays far from overflow (I0(50) ~ 3e20) and the documented evaluation
-  // error budget holds. When 50 * den would overflow i64, num (at most
-  // INT64_MAX) is necessarily below the true product and the beta is in
-  // range — compare only when the product is representable.
+  // error budget holds. The sign check must run FIRST: `50 * den` on a
+  // negative denominator is signed overflow (UB) long before any range
+  // logic, so only proven-positive values reach the product below.
+  if (num < 1 || den < 1)
+    return emitOpError("kaiser beta must be a positive rational in (0, 50]");
+  // When 50 * den would overflow i64, num (at most INT64_MAX) is
+  // necessarily below the true product and the beta is in range — compare
+  // only when the product is representable.
   bool aboveFifty = den <= std::numeric_limits<int64_t>::max() / 50 && num > 50 * den;
-  if (num < 1 || den < 1 || aboveFifty)
+  if (aboveFifty)
     return emitOpError("kaiser beta must be a positive rational in (0, 50]");
   return verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 2, 4096);
 }

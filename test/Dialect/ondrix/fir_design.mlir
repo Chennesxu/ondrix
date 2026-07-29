@@ -42,3 +42,18 @@ func.func @fir_design_highpass() -> tensor<11xi16> {
   } : tensor<11xi16>
   return %coefficients : tensor<11xi16>
 }
+
+// Verifier acceptance witness at both attribute extremes: beta =
+// INT64_MAX / INT64_MAX = 1 is inside (0, 50] and exercises the
+// representability shortcut (50 * den is not representable, so the bound
+// holds without evaluating the product).
+func.func @kaiser_maximum_ratio_beta() -> tensor<9xi16> {
+  // CHECK: ondrix.window_kaiser
+  // CHECK-SAME: beta_den = 9223372036854775807
+  // CHECK-SAME: beta_num = 9223372036854775807
+  %window = ondrix.window_kaiser {
+    beta_num = 9223372036854775807 : i64, beta_den = 9223372036854775807 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<9xi16>
+  return %window : tensor<9xi16>
+}

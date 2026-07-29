@@ -28,8 +28,18 @@ struct GuardedQ15Value {
 // count declared saturation. Because admissible ties are unreachable, the
 // half-even branch never needs a parity decision.
 inline std::optional<GuardedQ15Value> quantizeGuardedQ15(double real) {
+  // Shared fail-closed infrastructure must be total on its own: a NaN,
+  // infinity, or astronomically out-of-range estimate indicates a broken
+  // producer, not declared saturation, and must never reach the
+  // floating-point-to-integer conversion below (undefined outside the
+  // destination range). Every legitimate design value is orders of
+  // magnitude inside the 2^62 bound.
+  if (!std::isfinite(real))
+    return std::nullopt;
   double scaled = real * 32768.0;
   double lower = std::floor(scaled);
+  if (std::fabs(lower) >= 4611686018427387904.0)
+    return std::nullopt;
   double fraction = scaled - lower;
   if (std::fabs(fraction - 0.5) < kQ15TieGuardLsb)
     return std::nullopt;

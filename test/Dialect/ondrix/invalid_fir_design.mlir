@@ -109,3 +109,39 @@ func.func @kaiser_oversized_beta() -> tensor<9xi16> {
   } : tensor<9xi16>
   return %window : tensor<9xi16>
 }
+
+// -----
+
+// The sign checks must reject extreme negative attributes before any
+// multiplied bound is evaluated (a negative denominator reaching `50 * den`
+// would be signed overflow in the verifier itself).
+func.func @kaiser_most_negative_denominator() -> tensor<9xi16> {
+  // expected-error@+1 {{kaiser beta must be a positive rational in (0, 50]}}
+  %window = ondrix.window_kaiser {
+    beta_num = 1 : i64, beta_den = -9223372036854775808 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<9xi16>
+  return %window : tensor<9xi16>
+}
+
+// -----
+
+func.func @kaiser_most_negative_numerator() -> tensor<9xi16> {
+  // expected-error@+1 {{kaiser beta must be a positive rational in (0, 50]}}
+  %window = ondrix.window_kaiser {
+    beta_num = -9223372036854775808 : i64, beta_den = 1 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<9xi16>
+  return %window : tensor<9xi16>
+}
+
+// -----
+
+func.func @kaiser_maximum_numerator_unit_denominator() -> tensor<9xi16> {
+  // expected-error@+1 {{kaiser beta must be a positive rational in (0, 50]}}
+  %window = ondrix.window_kaiser {
+    beta_num = 9223372036854775807 : i64, beta_den = 1 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<9xi16>
+  return %window : tensor<9xi16>
+}
