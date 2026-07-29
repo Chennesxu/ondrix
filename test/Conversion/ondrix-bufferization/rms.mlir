@@ -16,7 +16,8 @@
 // CHECK: %[[OUTPUT:.*]] = memref.alloc() {{.*}} : memref<1xi16>
 // CHECK: %[[INITIAL:.*]] = ondsp.acc_zero : <storage = i64, frac = 30, signed, update_overflow = wrap>
 // CHECK: %[[REDUCED:.*]] = ondsp.reduce_mac %[[INITIAL]], %[[INPUT]], %[[INPUT]] {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>}
-// CHECK: %[[MEAN:.*]] = ondsp.acc_export %[[REDUCED]] {dst = #ondsp.fixed<signed, storage = i32, frac = 24>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<nearest_even>} : (!ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>) -> i32
+// CHECK: %[[SUM:.*]] = ondsp.acc_export %[[REDUCED]] {dst = #ondsp.fixed<signed, storage = i64, frac = 30>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<nearest_even>} : (!ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>) -> i64
+// CHECK: %[[MEAN:.*]] = ondsp.round_shift %[[SUM]] {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 6, rounding = nearest_even, overflow = saturate, saturate_to = i32>} : (i64) -> i32
 // CHECK: %[[WIDE:.*]] = arith.extsi %[[MEAN]] : i32 to i64
 // CHECK: %[[ROOT:.*]] = ondsp.sqrt_fixed %[[WIDE]] {rounding = #ondsp.rounding<nearest_even>} : (i64) -> i16
 // CHECK: memref.store %[[ROOT]], %[[OUTPUT]]
@@ -33,7 +34,8 @@ func.func @rms64_q15(%input: tensor<64xi16>) -> tensor<1xi16> {
 // The op's rounding attribute routes to the root, never to the mean: the mean
 // stays nearest-even while the root takes the declared floor mode.
 // CHECK-LABEL: func.func @rms64_floor_q15(
-// CHECK: ondsp.acc_export {{.*}} {dst = #ondsp.fixed<signed, storage = i32, frac = 24>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<nearest_even>}
+// CHECK: ondsp.acc_export {{.*}} {dst = #ondsp.fixed<signed, storage = i64, frac = 30>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<nearest_even>}
+// CHECK: ondsp.round_shift {{.*}} {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 6, rounding = nearest_even, overflow = saturate, saturate_to = i32>}
 // CHECK: ondsp.sqrt_fixed {{.*}} {rounding = #ondsp.rounding<toward_negative>} : (i64) -> i16
 
 func.func @rms64_floor_q15(%input: tensor<64xi16>) -> tensor<1xi16> {
@@ -44,9 +46,11 @@ func.func @rms64_floor_q15(%input: tensor<64xi16>) -> tensor<1xi16> {
   return %result : tensor<1xi16>
 }
 
-// The mean shift tracks the extent: N = 2 exports at frac 29.
+// The mean shift tracks the extent: N = 2 divides by 2^1 in the arithmetic
+// round_shift while the export reading stays frac 30.
 // CHECK-LABEL: func.func @rms2_q15(
-// CHECK: ondsp.acc_export {{.*}} {dst = #ondsp.fixed<signed, storage = i32, frac = 29>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<nearest_even>}
+// CHECK: ondsp.acc_export {{.*}} {dst = #ondsp.fixed<signed, storage = i64, frac = 30>
+// CHECK: ondsp.round_shift {{.*}} {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>}
 
 func.func @rms2_q15(%input: tensor<2xi16>) -> tensor<1xi16> {
   %result = ondrix.rms %input {
@@ -77,7 +81,8 @@ func.func @rms2_q15(%input: tensor<2xi16>) -> tensor<1xi16> {
 // DYNAMIC-LAYOUT-LABEL: func.func @rms64_q15(
 // DYNAMIC-LAYOUT-SAME: memref<64xi16, strided<[?], offset: ?>>
 // DYNAMIC-LAYOUT: ondsp.reduce_mac
-// DYNAMIC-LAYOUT: ondsp.acc_export {{.*}} frac = 24
+// DYNAMIC-LAYOUT: ondsp.acc_export {{.*}} frac = 30
+// DYNAMIC-LAYOUT: ondsp.round_shift
 // DYNAMIC-LAYOUT: ondsp.sqrt_fixed
 // DYNAMIC-LAYOUT-LABEL: func.func @rms64_floor_q15(
 // DYNAMIC-LAYOUT: ondsp.reduce_mac

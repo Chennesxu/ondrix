@@ -1,10 +1,10 @@
 // RUN: ondrix-opt %s --convert-ondsp-fixed-to-scalar | FileCheck %s
 
 // A signed i32 destination lowers at any fractional position the verifier
-// admits, not only at frac 30. The shift is `acc.frac - dst.frac`, so a
-// requantization whose divisor is not the Q-format difference — such as the
-// mean boundary of `ondrix.rms`, which divides the exact sum of squares by
-// the extent — reaches the same rounding and saturation sequence.
+// admits, not only at frac 30. Every export is a value-preserving format
+// conversion: the shift is `acc.frac - dst.frac` and the destination frac is
+// the reading of the result. Arithmetic scalings that change the value
+// (such as a mean by a power of two) belong to `round_shift`, not here.
 
 func.func @export_mean_nearest_even_saturate(
     %acc: !ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>)
@@ -65,4 +65,40 @@ func.func @export_mean_floor_saturate(
 // CHECK: %[[FLOOR_CLAMPED:.*]] = arith.select
 // CHECK: %[[FLOOR_RESULT:.*]] = arith.trunci %[[FLOOR_CLAMPED]] : i64 to i32
 // CHECK: return %[[FLOOR_RESULT]] : i32
+// CHECK-NOT: ondsp.
+
+// The identity signed i64/frac30 destination materializes the raw
+// accumulator value unchanged: zero shift, same storage, no clamp.
+// CHECK-LABEL: func.func @export_identity_sum(
+// CHECK-SAME: %[[IDENTITY_ACC:.*]]: i64) -> i64
+// CHECK-NEXT: return %[[IDENTITY_ACC]] : i64
+func.func @export_identity_sum(
+    %acc: !ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>)
+    -> i64 {
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i64, frac = 30>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (!ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>) -> i64
+  return %result : i64
+}
+
+// The frac 0 endpoint of the widened domain: the full 30-position shift with
+// the nearest-even half constant 2^29.
+// CHECK-LABEL: func.func @export_integer_reading(
+// CHECK: arith.constant 30 : i64
+// CHECK: arith.shrsi
+// CHECK: arith.constant 536870912 : i64
+// CHECK: arith.trunci {{.*}} : i64 to i32
+func.func @export_integer_reading(
+    %acc: !ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>)
+    -> i32 {
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i32, frac = 0>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (!ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>) -> i32
+  return %result : i32
+}
+
 // CHECK-NOT: ondsp.

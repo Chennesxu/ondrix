@@ -75,11 +75,16 @@ static bool isSupportedExport(ondrix::ondsp::AccType accumulator,
   // `roundSignedRightShift` and `narrowSignedValue`. This gate used to be
   // narrower than the body and admitted only frac 30 for an i32 destination,
   // so any signed i32 destination whose fractional position the verifier
-  // already admits (`dst.frac <= acc.frac`) now lowers as well. That widened
-  // domain carries requantizations whose shift is not the Q-format difference,
-  // such as the mean boundary of `ondrix.rms`, and is covered by an
-  // object-level differential gate. Every other destination stays refused.
-  return ondrix::ondsp::isSignedQ15(destination) || isSignedFixedStorage(destination, 32);
+  // already admits (`dst.frac <= acc.frac`) now lowers as well. Every
+  // export is a value-preserving format conversion — the destination frac
+  // is the reading of the result, never an unrelated shift selector; a
+  // boundary that changes the VALUE (such as a mean by a power of two)
+  // belongs to `round_shift`, whose scale is declared as arithmetic. The
+  // signed i64 frac-30 destination is the identity materialization of a
+  // frac-30 accumulator's raw value for exactly such downstream arithmetic
+  // boundaries. Every other destination stays refused.
+  return ondrix::ondsp::isSignedQ15(destination) || isSignedFixedStorage(destination, 32) ||
+         (isSignedFixedStorage(destination, 64) && destination.getFrac() == 30);
 }
 
 static bool isSupportedAccumulatorTerm(ondrix::ondsp::AccType accumulator,
@@ -644,7 +649,8 @@ public:
     if (!isSupportedExport(accumulator, op.getDst()))
       return op.emitOpError(
           "fixed scalar lowering supports a signed frac30 accumulator of at least 32 bits to a "
-          "signed Q15 or signed i32 destination, and i64/frac62 to Q31 export");
+          "signed Q15, signed i32, or identity signed i64/frac30 destination, and i64/frac62 to "
+          "Q31 export");
 
     // The op verifier already rejects destinations whose frac exceeds the
     // accumulator frac, but this lowering must not turn an unverified

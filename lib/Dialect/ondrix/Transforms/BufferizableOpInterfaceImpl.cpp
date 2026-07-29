@@ -579,17 +579,23 @@ struct RmsOpInterface : public BufferizableOpInterface::ExternalModel<RmsOpInter
     Value initial = rewriter.create<ondrix::ondsp::AccZeroOp>(loc, accumulatorType);
     Value reduced = rewriter.create<ondrix::ondsp::ReduceMacOp>(loc, accumulatorType, initial,
                                                                 *input, *input, numeric, product);
-    // Exporting to frac `30 - log2(N)` makes `acc_export` divide the raw
-    // accumulator by 2^(30 - (30 - log2 N)) = 2^log2(N), which is exactly the
-    // nearest-even saturating mean boundary of the tensor-form lowering. The
-    // destination frac is a shift-selection device: the exported raw integer
-    // is the same mean of squares, and its declared i32 saturation is
-    // unreachable because the mean is at most 2^30.
-    auto meanFormat = ondrix::ondsp::FixedAttr::get(context, ondrix::ondsp::Signedness::Signed, i32,
-                                                    /*frac=*/30 - meanShift);
-    Value mean = rewriter.create<ondrix::ondsp::AccExportOp>(
-        loc, i32, reduced, meanFormat, ondrix::ondsp::RoundingMode::NearestEven,
+    // Materialize the exact raw sum at its own reading (identity export at
+    // frac 30), then apply the nearest-even saturating mean by 2^m as a
+    // declared ARITHMETIC `round_shift` — the same boundary op the
+    // tensor-form lowering uses. `acc_export`'s destination frac is a
+    // value-preserving reading, never a shift selector; the mean changes
+    // the represented value and therefore must not be expressed through
+    // it. The declared i32 saturation of the mean is unreachable because
+    // the mean of squares is at most 2^30.
+    auto sumFormat = ondrix::ondsp::FixedAttr::get(context, ondrix::ondsp::Signedness::Signed, i64,
+                                                   /*frac=*/30);
+    Value sum = rewriter.create<ondrix::ondsp::AccExportOp>(
+        loc, i64, reduced, sumFormat, ondrix::ondsp::RoundingMode::NearestEven,
         ondrix::ondsp::OverflowMode::Saturate);
+    auto meanScale = ondrix::ondsp::ScaleAttr::get(
+        context, /*preShiftLeft=*/0, /*postShiftRight=*/meanShift,
+        ondrix::ondsp::RoundingMode::NearestEven, ondrix::ondsp::OverflowMode::Saturate, i32);
+    Value mean = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, i32, sum, meanScale);
     Value meanWide = rewriter.create<arith::ExtSIOp>(loc, i64, mean);
     Value root = rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, rewriter.getI16Type(), meanWide,
                                                              op.getRoundingAttr());
