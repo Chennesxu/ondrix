@@ -71,6 +71,33 @@ double blackmanReal(int64_t n, int64_t extent) {
   return 0.42 - 0.5 * std::cos(phase) + 0.08 * std::cos(2.0 * phase);
 }
 
+// Zeroth-order modified Bessel function of the first kind by its power
+// series: I0(x) = sum_k ((x/2)^k / k!)^2. Terms fall off factorially, so
+// the truncation error is far below one term at the stopping threshold;
+// together with binary64 evaluation error the total stays orders of
+// magnitude under the 2^-20 tie guard for beta <= 50 (I0(50) ~ 3e20 is
+// well inside binary64 range). The guard remains the fail-closed
+// backstop for the whole evaluation chain.
+double besselI0Real(double x) {
+  double term = 1.0;
+  double sum = 1.0;
+  for (int k = 1; k < 1000; ++k) {
+    double factor = x / (2.0 * static_cast<double>(k));
+    term *= factor * factor;
+    sum += term;
+    if (term < sum * 1e-30)
+      break;
+  }
+  return sum;
+}
+
+double kaiserReal(int64_t n, int64_t extent, int64_t betaNum, int64_t betaDen) {
+  double beta = static_cast<double>(betaNum) / static_cast<double>(betaDen);
+  double center = static_cast<double>(extent - 1) / 2.0;
+  double ratio = (static_cast<double>(n) - center) / center;
+  return besselI0Real(beta * std::sqrt(1.0 - ratio * ratio)) / besselI0Real(beta);
+}
+
 double sincReal(double x) {
   if (x == 0.0)
     return 1.0;
@@ -113,6 +140,22 @@ LogicalResult evaluateWindow(WindowOp op, double (*windowReal)(int64_t, int64_t)
   return replaceWithConstant(op, type, reals, std::move(provenance));
 }
 
+LogicalResult evaluateKaiser(ondrix::ir::WindowKaiserOp op) {
+  RankedTensorType type = op.getCoefficients().getType();
+  int64_t extent = type.getDimSize(0);
+  llvm::SmallVector<double> reals;
+  reals.reserve(extent);
+  for (int64_t n = 0; n < extent; ++n)
+    reals.push_back(kaiserReal(n, extent, op.getBetaNum(), op.getBetaDen()));
+  NamedAttrList provenance;
+  provenance.append("kind", StringAttr::get(op.getContext(), "window_kaiser"));
+  provenance.append("beta_num",
+                    IntegerAttr::get(IntegerType::get(op.getContext(), 64), op.getBetaNum()));
+  provenance.append("beta_den",
+                    IntegerAttr::get(IntegerType::get(op.getContext(), 64), op.getBetaDen()));
+  return replaceWithConstant(op, type, reals, std::move(provenance));
+}
+
 LogicalResult evaluateDesign(ondrix::ir::FirDesignWindowedSincOp op) {
   RankedTensorType type = op.getCoefficients().getType();
   int64_t extent = type.getDimSize(0);
@@ -146,23 +189,23 @@ public:
     llvm::SmallVector<Operation *> designs;
     getOperation().walk([&](Operation *op) {
       if (isa<ondrix::ir::WindowHammingOp, ondrix::ir::WindowHannOp, ondrix::ir::WindowBlackmanOp,
-              ondrix::ir::FirDesignWindowedSincOp>(op))
+              ondrix::ir::WindowKaiserOp, ondrix::ir::FirDesignWindowedSincOp>(op))
         designs.push_back(op);
     });
     for (Operation *op : designs) {
-      LogicalResult result = llvm::TypeSwitch<Operation *, LogicalResult>(op)
-                                 .Case<ondrix::ir::WindowHammingOp>([](auto window) {
-                                   return evaluateWindow(window, hammingReal, "window_hamming");
-                                 })
-                                 .Case<ondrix::ir::WindowHannOp>([](auto window) {
-                                   return evaluateWindow(window, hannReal, "window_hann");
-                                 })
-                                 .Case<ondrix::ir::WindowBlackmanOp>([](auto window) {
-                                   return evaluateWindow(window, blackmanReal, "window_blackman");
-                                 })
-                                 .Case<ondrix::ir::FirDesignWindowedSincOp>(
-                                     [](auto design) { return evaluateDesign(design); })
-                                 .Default([](Operation *) { return failure(); });
+      LogicalResult result =
+          llvm::TypeSwitch<Operation *, LogicalResult>(op)
+              .Case<ondrix::ir::WindowHammingOp>(
+                  [](auto window) { return evaluateWindow(window, hammingReal, "window_hamming"); })
+              .Case<ondrix::ir::WindowHannOp>(
+                  [](auto window) { return evaluateWindow(window, hannReal, "window_hann"); })
+              .Case<ondrix::ir::WindowBlackmanOp>([](auto window) {
+                return evaluateWindow(window, blackmanReal, "window_blackman");
+              })
+              .Case<ondrix::ir::WindowKaiserOp>([](auto window) { return evaluateKaiser(window); })
+              .Case<ondrix::ir::FirDesignWindowedSincOp>(
+                  [](auto design) { return evaluateDesign(design); })
+              .Default([](Operation *) { return failure(); });
       if (failed(result))
         return signalPassFailure();
     }

@@ -955,6 +955,37 @@ LogicalResult MovingAverageOp::verify() {
   return success();
 }
 
+static LogicalResult verifyTrigValueDomain(Operation *op, Attribute numeric,
+                                           ondrix::ondsp::RoundingMode rounding,
+                                           RankedTensorType inputType,
+                                           RankedTensorType resultType) {
+  if (failed(verifySignedFixedFormat(op, numeric, 16, 15, "numeric")))
+    return failure();
+  if (rounding != ondrix::ondsp::RoundingMode::NearestEven)
+    return op->emitOpError("trigonometric operations require nearest_even rounding");
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
+    return failure();
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if (inputExtent == ShapedType::kDynamic || inputExtent < 1 || inputExtent > 4096 ||
+      resultExtent != inputExtent || !inputType.getElementType().isSignlessInteger(16) ||
+      !resultType.getElementType().isSignlessInteger(16))
+    return op->emitOpError("executable trigonometric operations require matching static "
+                           "tensor<Nxi16> input and result with N in [1, 4096]");
+  return success();
+}
+
+LogicalResult SineOp::verify() {
+  return verifyTrigValueDomain(getOperation(), getNumeric(), getRounding(), getInput().getType(),
+                               getResult().getType());
+}
+
+LogicalResult CosineOp::verify() {
+  return verifyTrigValueDomain(getOperation(), getNumeric(), getRounding(), getInput().getType(),
+                               getResult().getType());
+}
+
 LogicalResult GoertzelOp::verify() {
   if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
     return failure();
@@ -1121,6 +1152,19 @@ LogicalResult WindowHannOp::verify() {
 LogicalResult WindowBlackmanOp::verify() {
   if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
     return failure();
+  return verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 2, 4096);
+}
+
+LogicalResult WindowKaiserOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  int64_t num = getBetaNum();
+  int64_t den = getBetaDen();
+  // beta in (0, 50]: positive rational, bounded so the binary64 I0 series
+  // stays far from overflow (I0(50) ~ 3e20) and the documented evaluation
+  // error budget holds.
+  if (num < 1 || den < 1 || num > 50 * den)
+    return emitOpError("kaiser beta must be a positive rational in (0, 50]");
   return verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 2, 4096);
 }
 

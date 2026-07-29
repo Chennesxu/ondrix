@@ -116,6 +116,21 @@ def blackman(n, extent):
     return mpf(21) / 50 - mpf(1) / 2 * cos(phase) + mpf(2) / 25 * cos(2 * phase)
 
 
+def kaiser(n, extent, beta):
+    from mpmath import besseli, sqrt as msqrt
+    center = mpf(extent - 1) / 2
+    ratio = (n - center) / center
+    return besseli(0, beta * msqrt(1 - ratio * ratio)) / besseli(0, beta)
+
+
+def kaiser_profile(extent, beta_num, beta_den):
+    profile = Profile(f"window_kaiser{extent}_beta{beta_num}_{beta_den}")
+    beta = mpf(beta_num) / beta_den
+    for n in range(extent):
+        profile.add(kaiser(n, extent, beta))
+    return profile
+
+
 def window_profile(name, window, extent):
     profile = Profile(f"window_{name}{extent}")
     for n in range(extent):
@@ -159,6 +174,12 @@ def main():
     for name, window in (("hamming", hamming), ("hann", hann), ("blackman", blackman)):
         for extent in (8, 9, 64, 4096):
             profiles.append(window_profile(name, window, extent))
+    for extent in (8, 9, 64, 4096):
+        profiles.append(kaiser_profile(extent, 6, 1))
+    sine_table = Profile("sine_table256")
+    for k in range(256):
+        sine_table.add(sin(2 * pi * k / 256))
+    profiles.append(sine_table)
 
     print(f"tie guard: {float(GUARD_LSB):.6e} Q15 LSB (2^-20)")
     if all([profile.report() for profile in profiles]):

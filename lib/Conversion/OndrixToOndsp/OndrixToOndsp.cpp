@@ -1602,6 +1602,99 @@ static ondrix::ondsp::ScaleAttr getNearestEvenSaturatingShift(MLIRContext *conte
                                        IntegerType::get(context, 16));
 }
 
+// Shared table-plus-interpolation lowering for ondrix.sine/cosine. The
+// phase offset is 0 for sine and 16384 (one exact quarter turn) for
+// cosine; everything else — the tie-guarded 256-entry table, the Q8
+// nearest-even interpolation boundary, and the saturating combine — is
+// identical by contract.
+static LogicalResult lowerQ15Trig(Operation *op, Value input, Value result, Attribute numeric,
+                                  int64_t phaseOffset, ConversionPatternRewriter &rewriter) {
+  // Compile-time table under the shared guarded quantizer; fail closed if
+  // any entry were inadmissible (the committed profile is, by margin
+  // evidence, but the guard stays as the backstop).
+  SmallVector<int16_t> table;
+  table.reserve(256);
+  constexpr double kTwoPi = 6.28318530717958647692528676655900577;
+  for (int64_t k = 0; k < 256; ++k) {
+    std::optional<ondrix::GuardedQ15Value> entry =
+        ondrix::quantizeGuardedQ15(std::sin(kTwoPi * static_cast<double>(k) / 256.0));
+    if (!entry)
+      return rewriter.notifyMatchFailure(op, "sine table entry is not tie-guard admissible");
+    table.push_back(entry->value);
+  }
+
+  Location loc = op->getLoc();
+  IntegerType i16 = rewriter.getI16Type();
+  IntegerType i32 = rewriter.getIntegerType(32);
+  int64_t extent = cast<RankedTensorType>(input.getType()).getDimSize(0);
+  auto interpolationScale = ondrix::ondsp::ScaleAttr::get(
+      rewriter.getContext(), /*preShiftLeft=*/0, /*postShiftRight=*/8,
+      ondrix::ondsp::RoundingMode::NearestEven, ondrix::ondsp::OverflowMode::Saturate, i16);
+  Value tableConstant = rewriter.create<arith::ConstantOp>(
+      loc,
+      DenseElementsAttr::get(RankedTensorType::get({256}, i16), llvm::ArrayRef<int16_t>(table)));
+  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+  Value offset = rewriter.create<arith::ConstantIntOp>(loc, phaseOffset, 32);
+  Value phaseMask = rewriter.create<arith::ConstantIntOp>(loc, 0xFFFF, 32);
+  Value indexShift = rewriter.create<arith::ConstantIntOp>(loc, 8, 32);
+  Value fractionMask = rewriter.create<arith::ConstantIntOp>(loc, 255, 32);
+  Value one32 = rewriter.create<arith::ConstantIntOp>(loc, 1, 32);
+
+  auto loop = rewriter.create<scf::ForOp>(
+      loc, zero, extentValue, one, ValueRange{result},
+      [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+        Value phase = builder.create<tensor::ExtractOp>(loc, input, position);
+        // Zero extension reads the raw bits as the unsigned turn phase;
+        // the offset add plus mask is the exact modular phase advance.
+        Value raw = builder.create<arith::ExtUIOp>(loc, i32, phase);
+        Value advanced = builder.create<arith::AddIOp>(loc, raw, offset);
+        Value turn = builder.create<arith::AndIOp>(loc, advanced, phaseMask);
+        Value tableIndex = builder.create<arith::ShRUIOp>(loc, turn, indexShift);
+        Value fraction = builder.create<arith::AndIOp>(loc, turn, fractionMask);
+        Value nextRaw = builder.create<arith::AddIOp>(loc, tableIndex, one32);
+        Value nextIndex = builder.create<arith::AndIOp>(loc, nextRaw, fractionMask);
+        Value lowerIdx =
+            builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), tableIndex);
+        Value upperIdx = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), nextIndex);
+        Value lower = builder.create<tensor::ExtractOp>(loc, tableConstant, lowerIdx);
+        Value upper = builder.create<tensor::ExtractOp>(loc, tableConstant, upperIdx);
+        Value lowerWide = builder.create<arith::ExtSIOp>(loc, i32, lower);
+        Value upperWide = builder.create<arith::ExtSIOp>(loc, i32, upper);
+        Value delta = builder.create<arith::SubIOp>(loc, upperWide, lowerWide);
+        Value product = builder.create<arith::MulIOp>(loc, delta, fraction);
+        Value interpolated = builder.create<ondrix::ondsp::RoundShiftOp>(
+            loc, builder.getI16Type(), product, interpolationScale);
+        Value interpolatedWide = builder.create<arith::ExtSIOp>(loc, i32, interpolated);
+        Value combined = builder.create<arith::AddIOp>(loc, lowerWide, interpolatedWide);
+        Value saturated =
+            builder.create<ondrix::ondsp::SatCastOp>(loc, builder.getI16Type(), combined, numeric);
+        Value inserted =
+            builder.create<tensor::InsertOp>(loc, saturated, iterArgs.front(), position);
+        builder.create<scf::YieldOp>(loc, inserted);
+      });
+  rewriter.replaceOp(op, loop.getResult(0));
+  return success();
+}
+
+template <typename TrigOp, int64_t PhaseOffset>
+class TrigOpLowering final : public OpConversionPattern<TrigOp> {
+public:
+  using OpConversionPattern<TrigOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(TrigOp op, typename TrigOp::Adaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType = op.getResult().getType();
+    Value empty = rewriter.create<tensor::EmptyOp>(op.getLoc(), resultType.getShape(),
+                                                   resultType.getElementType());
+    return lowerQ15Trig(op, adaptor.getInput(), empty, op.getNumeric(), PhaseOffset, rewriter);
+  }
+};
+
+using SineOpLowering = TrigOpLowering<ondrix::ir::SineOp, 0>;
+using CosineOpLowering = TrigOpLowering<ondrix::ir::CosineOp, 16384>;
+
 class GoertzelOpLowering final : public OpConversionPattern<ondrix::ir::GoertzelOp> {
 public:
   using OpConversionPattern<ondrix::ir::GoertzelOp>::OpConversionPattern;
@@ -2078,12 +2171,13 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns
-        .add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
-             Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
-             SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering,
-             RfftRadix4SplitOpLowering, CxMagnitudeOpLowering, DctOpLowering, GainOpLowering,
-             LmsOpLowering, RmsOpLowering, MatmulOpLowering, GoertzelOpLowering>(&getContext());
+    patterns.add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering,
+                 FirInterpolateOpLowering, Conv1DOpLowering, FirStreamOpLowering,
+                 SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
+                 ButterflyOpLowering, QuantizeOpLowering, RfftRadix4SplitOpLowering,
+                 CxMagnitudeOpLowering, DctOpLowering, GainOpLowering, LmsOpLowering, RmsOpLowering,
+                 MatmulOpLowering, GoertzelOpLowering, SineOpLowering, CosineOpLowering>(
+        &getContext());
     if (vectorizeStaticCfft && fftLoops) {
       module.emitError("vectorize-static-cfft and fft-loops are mutually exclusive alternative "
                        "FFT lowerings; select at most one");

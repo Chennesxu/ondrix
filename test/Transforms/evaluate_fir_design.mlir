@@ -118,3 +118,31 @@ func.func @window_blackman_even() -> tensor<8xi16> {
   } : tensor<8xi16>
   return %window : tensor<8xi16>
 }
+
+func.func @window_kaiser_odd() -> tensor<9xi16> {
+  // CHECK-LABEL: func.func @window_kaiser_odd
+  // CHECK-NOT: ondrix.window_kaiser
+  // CHECK: arith.constant
+  // CHECK-SAME: beta_den = 1
+  // CHECK-SAME: beta_num = 6
+  // CHECK-SAME: kind = "window_kaiser"
+  // CHECK-SAME: saturated = 1
+  // CHECK-SAME: dense<[487, 5361, 15825, 27548, 32767, 27548, 15825, 5361, 487]> : tensor<9xi16>
+  %window = ondrix.window_kaiser {
+    beta_num = 6 : i64, beta_den = 1 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<9xi16>
+  return %window : tensor<9xi16>
+}
+
+func.func @window_kaiser_even() -> tensor<8xi16> {
+  // CHECK-LABEL: func.func @window_kaiser_even
+  // CHECK: arith.constant
+  // CHECK-SAME: saturated = 0
+  // CHECK-SAME: dense<[487, 6546, 19376, 30980, 30980, 19376, 6546, 487]> : tensor<8xi16>
+  %window = ondrix.window_kaiser {
+    beta_num = 6 : i64, beta_den = 1 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<8xi16>
+  return %window : tensor<8xi16>
+}

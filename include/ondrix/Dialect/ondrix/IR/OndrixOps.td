@@ -758,6 +758,52 @@ def Ondrix_MovingAverageOp : Ondrix_Op<"moving_average", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+class Ondrix_TrigOp<string mnemonic> : Ondrix_Op<mnemonic, [Pure]> {
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_RoundingModeAttr:$rounding);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondrix_SineOp : Ondrix_TrigOp<"sine"> {
+  let summary = "Fixed-point sine over Q15 turn phases, table plus interpolation";
+  let description = [{
+    `ondrix.sine` maps a static rank-1 tensor of Q15 phases (`N` in
+    `[1, 4096]`) elementwise to Q1.15 sines. A raw phase `p` is read as
+    the unsigned 16-bit value `u = p mod 2^16` covering one full turn
+    (`angle = 2*pi*u/65536`), so two's-complement wraparound IS phase
+    wraparound and phase arithmetic stays exact. Per element:
+
+    ```text
+    i      = u >> 8              256-entry table index
+    f      = u & 255             Q8 interpolation fraction
+    t[k]   = q15(sin(2*pi*k/256))    tie-guarded compile-time table
+    y      = sat_i16(t[i] + round_half_even((t[(i+1) mod 256] - t[i]) * f / 2^8))
+    ```
+
+    One product boundary (the nearest-even interpolation rounding) and one
+    declared saturating combine per element; the table itself carries the
+    declared +1.0 saturation at the quarter turn and the exact -1.0 at
+    three quarters. The whole 65536-phase input domain is finite, so the
+    contract is gated exhaustively. Inadmissible tables fail closed in
+    lowering (the committed 256-entry profile is admissible with a
+    0.0044 LSB worst margin).
+  }];
+}
+
+def Ondrix_CosineOp : Ondrix_TrigOp<"cosine"> {
+  let summary = "Fixed-point cosine over Q15 turn phases, table plus interpolation";
+  let description = [{
+    `ondrix.cosine` is `ondrix.sine` evaluated at `u + 16384 mod 2^16`
+    (the exact quarter-turn phase advance): identical table, index and
+    interpolation contract, and boundaries — see `ondrix.sine`. The two
+    operations therefore agree bit-exactly under the phase identity
+    `cos(u) = sin(u + quarter turn)`, which the exhaustive gate checks.
+  }];
+}
+
 def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
   let summary = "Single-bin Goertzel energy with quantized recursion state";
   let description = [{
@@ -1030,6 +1076,36 @@ def Ondrix_WindowBlackmanOp : Ondrix_Op<"window_blackman", [Pure]> {
     `numeric = #ondsp.fixed<signed, storage = i16, frac = 15>`.
   }];
   let arguments = (ins Ondsp_NumericAttr:$numeric);
+  let results = (outs AnyRankedTensor:$coefficients);
+  let hasVerifier = 1;
+  let assemblyFormat = "attr-dict `:` type($coefficients)";
+}
+
+def Ondrix_WindowKaiserOp : Ondrix_Op<"window_kaiser", [Pure]> {
+  let summary = "Compile-time symmetric Kaiser window coefficients";
+  let description = [{
+    `ondrix.window_kaiser` names the symmetric Kaiser window of static
+    length `N` taken from the result type, with rational shape parameter
+    `beta = beta_num / beta_den` in `(0, 50]`:
+
+    ```text
+    r[n] = (2*n - (N-1)) / (N-1)
+    w[n] = I0(beta * sqrt(1 - r[n]^2)) / I0(beta)
+    ```
+
+    `I0` is the zeroth-order modified Bessel function of the first kind,
+    evaluated at compile time by its power series to a documented
+    binary64 error budget; the fail-closed `2^-20` quantization tie guard
+    backstops the whole evaluation chain exactly as for the other window
+    designs. The endpoints are `1 / I0(beta)` (nonzero) and the +1.0
+    center of odd lengths saturates to 32767 by declared convention.
+
+    The result is a static rank-1 `tensor<Nxi16>` with `2 <= N <= 4096`
+    and `numeric = #ondsp.fixed<signed, storage = i16, frac = 15>`.
+  }];
+  let arguments = (ins I64Attr:$beta_num,
+                   I64Attr:$beta_den,
+                   Ondsp_NumericAttr:$numeric);
   let results = (outs AnyRankedTensor:$coefficients);
   let hasVerifier = 1;
   let assemblyFormat = "attr-dict `:` type($coefficients)";

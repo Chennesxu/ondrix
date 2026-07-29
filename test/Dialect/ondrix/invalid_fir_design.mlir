@@ -87,3 +87,25 @@ func.func @design_too_long() -> tensor<4097xi16> {
   } : tensor<4097xi16>
   return %coefficients : tensor<4097xi16>
 }
+
+// -----
+
+func.func @kaiser_zero_beta() -> tensor<9xi16> {
+  // expected-error@+1 {{kaiser beta must be a positive rational in (0, 50]}}
+  %window = ondrix.window_kaiser {
+    beta_num = 0 : i64, beta_den = 1 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<9xi16>
+  return %window : tensor<9xi16>
+}
+
+// -----
+
+func.func @kaiser_oversized_beta() -> tensor<9xi16> {
+  // expected-error@+1 {{kaiser beta must be a positive rational in (0, 50]}}
+  %window = ondrix.window_kaiser {
+    beta_num = 101 : i64, beta_den = 2 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<9xi16>
+  return %window : tensor<9xi16>
+}
