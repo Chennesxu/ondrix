@@ -1,0 +1,68 @@
+// RUN: ondrix-opt %s --convert-ondsp-fixed-to-scalar | FileCheck %s
+
+// A signed i32 destination lowers at any fractional position the verifier
+// admits, not only at frac 30. The shift is `acc.frac - dst.frac`, so a
+// requantization whose divisor is not the Q-format difference — such as the
+// mean boundary of `ondrix.rms`, which divides the exact sum of squares by
+// the extent — reaches the same rounding and saturation sequence.
+
+func.func @export_mean_nearest_even_saturate(
+    %acc: !ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>)
+    -> i32 {
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i32, frac = 24>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (!ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>) -> i32
+  return %result : i32
+}
+
+func.func @export_mean_floor_saturate(
+    %acc: !ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>)
+    -> i32 {
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i32, frac = 29>,
+    rounding = #ondsp.rounding<toward_negative>,
+    overflow = #ondsp.overflow<saturate>
+  } : (!ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>) -> i32
+  return %result : i32
+}
+
+// Dividing by 2^(30 - 24) = 2^6 with a nearest-even tie at 2^5, then
+// saturating into the i32 destination range.
+// CHECK-LABEL: func.func @export_mean_nearest_even_saturate(
+// CHECK-SAME: %[[ACC:.*]]: i64) -> i32
+// CHECK: %[[SHIFT:.*]] = arith.constant 6 : i64
+// CHECK: %[[QUOTIENT:.*]] = arith.shrsi %[[ACC]], %[[SHIFT]] : i64
+// CHECK: %[[BITS:.*]] = arith.trunci %[[ACC]] : i64 to i6
+// CHECK: %[[REMAINDER:.*]] = arith.extui %[[BITS]] : i6 to i64
+// CHECK: %[[ZERO:.*]] = arith.constant 0 : i64
+// CHECK: %[[ONE:.*]] = arith.constant 1 : i64
+// CHECK: %[[HALF:.*]] = arith.constant 32 : i64
+// CHECK: %[[ABOVE:.*]] = arith.cmpi ugt, %[[REMAINDER]], %[[HALF]] : i64
+// CHECK: %[[EQUAL:.*]] = arith.cmpi eq, %[[REMAINDER]], %[[HALF]] : i64
+// CHECK: %[[LOW_BIT:.*]] = arith.andi %[[QUOTIENT]], %[[ONE]] : i64
+// CHECK: %[[ODD:.*]] = arith.cmpi ne, %[[LOW_BIT]], %[[ZERO]] : i64
+// CHECK: %[[TIE_ODD:.*]] = arith.andi %[[EQUAL]], %[[ODD]] : i1
+// CHECK: %[[INCREMENT_IF:.*]] = arith.ori %[[ABOVE]], %[[TIE_ODD]] : i1
+// CHECK: %[[INCREMENT:.*]] = arith.select %[[INCREMENT_IF]], %[[ONE]], %[[ZERO]] : i64
+// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[INCREMENT]] : i64
+// CHECK: %[[MIN:.*]] = arith.constant -2147483648 : i64
+// CHECK: %[[MAX:.*]] = arith.constant 2147483647 : i64
+// CHECK: %[[BELOW:.*]] = arith.cmpi slt, %[[ROUNDED]], %[[MIN]] : i64
+// CHECK: %[[OVER:.*]] = arith.cmpi sgt, %[[ROUNDED]], %[[MAX]] : i64
+// CHECK: %[[LOWER:.*]] = arith.select %[[BELOW]], %[[MIN]], %[[ROUNDED]] : i64
+// CHECK: %[[CLAMPED:.*]] = arith.select %[[OVER]], %[[MAX]], %[[LOWER]] : i64
+// CHECK: %[[RESULT:.*]] = arith.trunci %[[CLAMPED]] : i64 to i32
+// CHECK: return %[[RESULT]] : i32
+
+// Floor rounding at frac 29 is one arithmetic shift by 2^(30 - 29).
+// CHECK-LABEL: func.func @export_mean_floor_saturate(
+// CHECK-SAME: %[[FLOOR_ACC:.*]]: i64) -> i32
+// CHECK: %[[FLOOR_SHIFT:.*]] = arith.constant 1 : i64
+// CHECK: %[[FLOOR_ROUNDED:.*]] = arith.shrsi %[[FLOOR_ACC]], %[[FLOOR_SHIFT]] : i64
+// CHECK: arith.select
+// CHECK: %[[FLOOR_CLAMPED:.*]] = arith.select
+// CHECK: %[[FLOOR_RESULT:.*]] = arith.trunci %[[FLOOR_CLAMPED]] : i64 to i32
+// CHECK: return %[[FLOOR_RESULT]] : i32
+// CHECK-NOT: ondsp.

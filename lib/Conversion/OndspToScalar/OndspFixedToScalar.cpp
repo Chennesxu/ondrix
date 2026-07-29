@@ -58,13 +58,28 @@ static bool isSupportedImport(ondrix::ondsp::AccType accumulator, ondrix::ondsp:
   return ondrix::ondsp::isSignedQ15(source) || isSignedFixed(source, 32, 30);
 }
 
+static bool isSignedFixedStorage(ondrix::ondsp::FixedAttr numeric, unsigned width) {
+  auto storage = dyn_cast<IntegerType>(numeric.getStorage());
+  return storage && storage.isSignless() && storage.getWidth() == width &&
+         numeric.getSignedness() == ondrix::ondsp::Signedness::Signed;
+}
+
 static bool isSupportedExport(ondrix::ondsp::AccType accumulator,
                               ondrix::ondsp::FixedAttr destination) {
   if (ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator))
     return ondrix::ondsp::isSignedQ31(destination);
   if (!isSupportedAccumulator(accumulator) || accumulator.getFrac() != 30)
     return false;
-  return ondrix::ondsp::isSignedQ15(destination) || isSignedFixed(destination, 32, 30);
+  // The lowering body is already width and shift generic: it derives
+  // `shift = acc.frac - dst.frac` and routes it through
+  // `roundSignedRightShift` and `narrowSignedValue`. This gate used to be
+  // narrower than the body and admitted only frac 30 for an i32 destination,
+  // so any signed i32 destination whose fractional position the verifier
+  // already admits (`dst.frac <= acc.frac`) now lowers as well. That widened
+  // domain carries requantizations whose shift is not the Q-format difference,
+  // such as the mean boundary of `ondrix.rms`, and is covered by an
+  // object-level differential gate. Every other destination stays refused.
+  return ondrix::ondsp::isSignedQ15(destination) || isSignedFixedStorage(destination, 32);
 }
 
 static bool isSupportedAccumulatorTerm(ondrix::ondsp::AccType accumulator,
@@ -628,8 +643,8 @@ public:
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
     if (!isSupportedExport(accumulator, op.getDst()))
       return op.emitOpError(
-          "fixed scalar lowering supports a signed frac30 accumulator of at least 32 bits to Q15 "
-          "or Q30, and i64/frac62 to Q31 export");
+          "fixed scalar lowering supports a signed frac30 accumulator of at least 32 bits to a "
+          "signed Q15 or signed i32 destination, and i64/frac62 to Q31 export");
 
     unsigned shift = accumulator.getFrac() - op.getDst().getFrac();
     Value rounded =
