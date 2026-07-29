@@ -66,11 +66,15 @@ explicit target/library-compatible profile may use:
 The generic scalar consumer also accepts signed Q15 full-product accumulators
 with `frac = 30` and storage width at least 32. The fixed-Vector consumers
 accept widths from 32 through 64 for ordered lane updates. Horizontal Q15
-partial-sum consumers retain the closed i40 profile. This permits a frontend or
-analysis to derive a sufficient target-independent width for a statically
-bounded reduction without broadening reassociation legality. OrtumCore retains
-its stricter closed i40 profile; it must prove that a different accumulator
-domain is equivalent before claiming it.
+partial-sum consumers retain the closed i40 profile for saturating updates,
+whose reassociation legality rests on the prefix-range proof; wrapping
+updates additionally admit wider signed frac-30 accumulators up to i64,
+because exact-modulo reassociation is width-independent up to the i64 lane
+carrier. This permits a frontend or analysis to derive a sufficient
+target-independent width for a statically bounded reduction without
+broadening saturating reassociation legality. OrtumCore retains its stricter
+closed i40 profile; it must prove that a different accumulator domain is
+equivalent before claiming it.
 
 For accumulator raw value `a` and exact product `p`, `ondsp.mac` and
 `ondsp.mac_sub` first compute an unbounded mathematical update:
@@ -221,8 +225,14 @@ to leave that domain and explicitly declares:
 - destination overflow policy.
 
 The implemented export rounding modes are `toward_negative`,
-`toward_zero`, and `nearest_even`. Destination overflow is either `wrap`
-or `saturate`.
+`toward_zero`, `nearest_even`, and `nearest_ties_positive` (round to
+nearest with ties toward positive infinity: the floor-division remainder
+increments the quotient whenever it is at least half; the two nearest
+modes differ exactly on ties whose floor quotient is even, on both
+signs). Destination overflow is either `wrap` or `saturate`. The generic
+`round_shift`/`acc_export` primitives implement every declared mode;
+each named algorithm contract declares its own admissible subset and
+operations opt in individually.
 
 ## Vector Lowering
 

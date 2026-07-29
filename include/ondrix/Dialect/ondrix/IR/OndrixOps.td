@@ -920,10 +920,13 @@ def Ondrix_GainOp : Ondrix_Op<"gain", [Pure]> {
     Two tie rules are admissible at that boundary, and the choice is part
     of the contract: `nearest_even` (zero-biased) and
     `nearest_ties_positive` (add-half-then-shift, ties toward +infinity).
-    They agree everywhere except on exact half-way products, and only
-    NEGATIVE ties separate them: with `gain = 3`, the raw input `-16384`
-    gives the product `-49152 = -1.5 ulp`, which `nearest_even` requantizes
-    to `-2` and `nearest_ties_positive` to `-1`.
+    They agree everywhere except on exact half-way products, and among
+    those they differ exactly when the floor quotient is EVEN — which
+    happens at both signs. With `gain = 3`, the raw input `-16384` gives
+    the product `-49152 = -1.5 ulp` (floor quotient `-2`), requantized to
+    `-2` under `nearest_even` and `-1` under `nearest_ties_positive`; a
+    positive half whose floor quotient is `0` behaves the same way, giving
+    `0` versus `1`.
 
     A cascade of two gain operations is in general a DIFFERENT program
     from one gain carrying the quantized product of the constants: with

@@ -19,21 +19,29 @@ def Ondsp_ProductSelection
   let cppNamespace = "::ondrix::ondsp";
 }
 
-// Declared tie taxonomy for signed right shifts. All four modes agree on
-// non-tie inputs; they are distinguished only by the exact half-way case and
-// by the direction chosen for negative values:
+// Declared taxonomy for signed right shifts. The two directed modes and the
+// two nearest modes disagree on ordinary fractional inputs as well; it is
+// only the two NEAREST modes that agree everywhere except on exact halves:
 //
 //   nearest_even           ties go to the even quotient (zero-biased);
-//   nearest_ties_positive  ties go toward +infinity, i.e. add-half-then-shift
-//                          (ITU-T basicop `round`). Witnesses +1.5 -> +2 and
-//                          -1.5 -> -1. This is NOT ties-away-from-zero:
-//                          half-up and half-away agree on positive ties and
-//                          differ on every negative one;
+//   nearest_ties_positive  ties go toward +infinity, the add-half-then-shift
+//                          convention of common DSP hardware rounding
+//                          variants. Bit compatibility with a specific basic
+//                          operator library profile is NOT asserted here and
+//                          remains to be validated against that library's
+//                          official routines;
 //   toward_negative        floor, no tie case at all;
 //   toward_zero            truncation, no tie case at all.
 //
-// Only negative ties separate nearest_ties_positive from ties-away-from-zero,
-// so any evidence for this mode must exercise negative half-way values.
+// nearest_even and nearest_ties_positive differ exactly on the ties whose
+// floor quotient is EVEN, and that happens at both signs: +0.5 has floor
+// quotient 0 and gives 0 under nearest_even but 1 under ties-positive, while
+// -1.5 has floor quotient -2 and gives -2 versus -1. Evidence for this mode
+// must therefore cover even-quotient ties of both signs.
+//
+// What separates nearest_ties_positive from ties-AWAY-from-zero is a
+// different distinction: those two agree on every positive tie and differ on
+// every negative one.
 def Ondsp_RoundTowardNegative
     : I32EnumAttrCase<"TowardNegative", 0, "toward_negative">;
 def Ondsp_RoundNearestTiesPositive

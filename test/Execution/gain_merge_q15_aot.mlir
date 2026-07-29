@@ -48,6 +48,14 @@
 // MERGED: = ondrix.gain %
 // MERGED-SAME: gain = 19661
 
+// MERGED-LABEL: func.func @gain_cascade_reverse_certified
+// MERGED: = ondrix.gain %
+// MERGED-SAME: gain = -8192
+// MERGED-SAME: inner_gain = -16384
+// MERGED-SAME: outer_gain = 16384
+// MERGED-SAME: rounding = "nearest_even"
+// MERGED-NOT: = ondrix.gain %
+
 // MERGED-LABEL: func.func @gain_cascade_ties_positive
 // MERGED: = ondrix.gain %
 // MERGED-SAME: gain = 4096
@@ -90,6 +98,26 @@ func.func @gain_cascade_witness(%input: tensor<4096xi16>) -> tensor<4096xi16>
     rounding = #ondsp.rounding<nearest_even>
   } : (tensor<4096xi16>) -> tensor<4096xi16>
   return %second : tensor<4096xi16>
+}
+
+// The nearest_even-certified pair whose ties-positive counterpart is NOT
+// mergeable. Its constants are the reverse order of @gain_cascade_certified,
+// and that is a different witness rather than a restatement: finite-precision
+// gain cascades do not commute, so (-16384 then 16384) has to be certified
+// and replayed on its own.
+func.func @gain_cascade_reverse_certified(%input: tensor<4096xi16>) -> tensor<4096xi16>
+    attributes {llvm.emit_c_interface} {
+  %negated = ondrix.gain %input {
+    gain = -16384 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<4096xi16>) -> tensor<4096xi16>
+  %halved = ondrix.gain %negated {
+    gain = 16384 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<4096xi16>) -> tensor<4096xi16>
+  return %halved : tensor<4096xi16>
 }
 
 // Certified only under the ties-toward-positive rule: the nearest_even

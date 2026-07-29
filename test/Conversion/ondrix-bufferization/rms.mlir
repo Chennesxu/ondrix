@@ -7,8 +7,9 @@
 // exact sum is at most 2^42: the i64 wrapping accumulator never wraps. An i40
 // accumulator would not fit that range, which is why this reduction needs the
 // wider wrapping accumulator admitted by the horizontal-domain predicate.
-// Exporting to frac 30 - log2(N) makes acc_export divide by exactly 2^log2(N),
-// which is the nearest-even saturating mean boundary of the tensor lowering.
+// The export is the identity i64/frac30 materialization of the raw sum: its
+// declared frac stays the reading of the value, and the mean by 2^log2(N) is
+// the separate arithmetic round_shift below, exactly as in the tensor path.
 
 // CHECK-LABEL: func.func @rms64_q15(
 // CHECK-SAME: %[[INPUT:.*]]: memref<64xi16>)

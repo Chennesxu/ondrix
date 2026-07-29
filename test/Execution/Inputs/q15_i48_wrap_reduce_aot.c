@@ -19,6 +19,10 @@ extern int16_t q15_i48_wrap_horizontal(int16_t *, int16_t *, int64_t, int64_t, i
                                        int16_t *, int64_t, int64_t, int64_t);
 extern int16_t q15_i48_wrap_ordered(int16_t *, int16_t *, int64_t, int64_t, int64_t, int16_t *,
                                     int16_t *, int64_t, int64_t, int64_t);
+extern int64_t q15_i48_wrap_raw_horizontal(int16_t *, int16_t *, int64_t, int64_t, int64_t,
+                                           int16_t *, int16_t *, int64_t, int64_t, int64_t);
+extern int64_t q15_i48_wrap_raw_ordered(int16_t *, int16_t *, int64_t, int64_t, int64_t, int16_t *,
+                                        int16_t *, int64_t, int64_t, int64_t);
 
 enum { kMaxLength = 300100, kSparseStride = 3, kSparseOffset = 1 };
 
@@ -27,10 +31,12 @@ enum { kMaxLength = 300100, kSparseStride = 3, kSparseOffset = 1 };
  * nearest-even shift by 15 in explicit floor-division form, saturating to
  * i16. `wrapped` reports whether any ORDERED PREFIX of the exact sum left
  * the i48 range, which is when the ordered schedule actually wraps; the
- * final sum can walk back inside afterwards. */
+ * final sum can walk back inside afterwards. `raw` receives the sign-folded
+ * i48 accumulator itself, which the identity i64/frac30 export materializes
+ * unchanged. */
 static int16_t reference(const int16_t *lhs, int64_t lhsOffset, int64_t lhsStride,
                          const int16_t *rhs, int64_t rhsOffset, int64_t rhsStride, int64_t length,
-                         int *wrapped) {
+                         int *wrapped, int64_t *raw) {
   const __int128 half = (__int128)1 << 47;
   __int128 exact = 0;
   *wrapped = 0;
@@ -45,6 +51,7 @@ static int16_t reference(const int16_t *lhs, int64_t lhsOffset, int64_t lhsStrid
   __int128 folded = (__int128)bits;
   if (bits >> 47)
     folded -= (__int128)1 << 48;
+  *raw = (int64_t)folded;
 
   const __int128 divisor = (__int128)1 << 15;
   __int128 quotient = folded / divisor;
@@ -86,7 +93,8 @@ static int checkCase(const char *name, int16_t *lhs, int16_t *rhs, int64_t lengt
                      int16_t *sparseLhs, int16_t *sparseRhs, int expectWrap,
                      int expectNonSaturating) {
   int wrapped = 0;
-  const int16_t expected = reference(lhs, 0, 1, rhs, 0, 1, length, &wrapped);
+  int64_t expectedRaw = 0;
+  const int16_t expected = reference(lhs, 0, 1, rhs, 0, 1, length, &wrapped, &expectedRaw);
   materialize(lhs, rhs, length, sparseLhs, sparseRhs);
 
   const int16_t horizontal =
@@ -94,11 +102,24 @@ static int checkCase(const char *name, int16_t *lhs, int16_t *rhs, int64_t lengt
   const int16_t ordered =
       q15_i48_wrap_ordered(sparseLhs, sparseLhs, kSparseOffset, length, kSparseStride, sparseRhs,
                            sparseRhs, kSparseOffset, length, kSparseStride);
+  const int64_t rawHorizontal =
+      q15_i48_wrap_raw_horizontal(lhs, lhs, 0, length, 1, rhs, rhs, 0, length, 1);
+  const int64_t rawOrdered =
+      q15_i48_wrap_raw_ordered(sparseLhs, sparseLhs, kSparseOffset, length, kSparseStride,
+                               sparseRhs, sparseRhs, kSparseOffset, length, kSparseStride);
 
   int failed = 0;
   if (horizontal != expected || ordered != expected) {
     fprintf(stderr, "%s length %lld: reference %d, horizontal %d, ordered %d\n", name,
             (long long)length, expected, horizontal, ordered);
+    failed = 1;
+  }
+  /* The stronger equality: the folded i48 accumulator itself, before the
+   * Q15 destination can hide a difference behind its clamp. */
+  if (rawHorizontal != expectedRaw || rawOrdered != expectedRaw) {
+    fprintf(stderr, "%s length %lld: raw reference %lld, horizontal %lld, ordered %lld\n", name,
+            (long long)length, (long long)expectedRaw, (long long)rawHorizontal,
+            (long long)rawOrdered);
     failed = 1;
   }
   if (expectWrap && !wrapped) {
@@ -193,6 +214,28 @@ int main(void) {
     rhs[i] = INT16_MAX;
   }
   failed |= checkCase("walk-back", lhs, rhs, walkBackLength, sparseLhs, sparseRhs,
+                      /*expectWrap=*/1, /*expectNonSaturating=*/1);
+
+  /* (b3) The same crossing in the negative direction: 150004 terms of
+   * -32768 * 32767 take the running value below -2^47, then 150000 terms of
+   * +2^30 bring it back to 620363776 and three -1000 * 1000 products leave
+   * 617363776, exported as 18840. */
+  const int64_t negativeRun = 150004;
+  const int64_t negativeReturn = negativeRun + 150000;
+  const int64_t negativeLength = negativeReturn + 3;
+  for (int64_t i = 0; i < negativeRun; ++i) {
+    lhs[i] = INT16_MIN;
+    rhs[i] = INT16_MAX;
+  }
+  for (int64_t i = negativeRun; i < negativeReturn; ++i) {
+    lhs[i] = INT16_MIN;
+    rhs[i] = INT16_MIN;
+  }
+  for (int64_t i = negativeReturn; i < negativeLength; ++i) {
+    lhs[i] = 1000;
+    rhs[i] = -1000;
+  }
+  failed |= checkCase("negative crossing", lhs, rhs, negativeLength, sparseLhs, sparseRhs,
                       /*expectWrap=*/1, /*expectNonSaturating=*/1);
 
   /* (c) Deterministic pseudo-random trials. Each keeps the 2^48 full-turn

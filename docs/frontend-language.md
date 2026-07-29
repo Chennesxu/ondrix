@@ -309,8 +309,12 @@ fractional positions, emits an exact full product, materializes either an
 inferred exact Q15 accumulator or the declared i40/frac30 or i64/frac62
 accumulator policy, and emits an explicit export.
 Supported update and destination overflow modes are `wrap` and `saturate`.
-Supported rounding modes are `toward_negative`, `toward_zero`, and
-`nearest_even`.
+Supported rounding modes for this dot/FIR export policy are
+`toward_negative`, `toward_zero`, and `nearest_even`; other declared modes
+are rejected here until the corresponding contracts opt in. Individual
+catalog builtins expose their own admissible choices at the call site
+(for example `gain(..., rounding=...)` and the `root_rounding=` parameter
+of `rms` and `magnitude`).
 
 f32 dot and FIR support `contract=off`, `contract=fma`, and `contract=fast`.
 `off` preserves separate multiply and add operations, `fma` requires fused

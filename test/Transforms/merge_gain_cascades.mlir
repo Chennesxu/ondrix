@@ -108,6 +108,7 @@ func.func @multi_use_not_merged(%input: tensor<8xi16>) -> (tensor<8xi16>, tensor
 // CHECK-SAME: exhaustive_inputs = 65536
 // CHECK-SAME: inner_gain = -16384
 // CHECK-SAME: outer_gain = 16384
+// CHECK-SAME: rounding = "nearest_even"
 // CHECK-NOT: = ondrix.gain %
 func.func @tie_rule_split_nearest_even(%input: tensor<8xi16>) -> tensor<8xi16> {
   %negated = ondrix.gain %input {
@@ -153,6 +154,7 @@ func.func @tie_rule_split_ties_positive(%input: tensor<8xi16>) -> tensor<8xi16> 
 // CHECK-SAME: exhaustive_inputs = 65536
 // CHECK-SAME: inner_gain = -16384
 // CHECK-SAME: outer_gain = -8192
+// CHECK-SAME: rounding = "nearest_ties_positive"
 // CHECK-NOT: = ondrix.gain %
 func.func @tie_rule_mirror_ties_positive(%input: tensor<8xi16>) -> tensor<8xi16> {
   %negated = ondrix.gain %input {
@@ -196,6 +198,7 @@ func.func @tie_rule_mirror_nearest_even(%input: tensor<8xi16>) -> tensor<8xi16> 
 // CHECK-SAME: gain = 8192
 // CHECK-SAME: inner_gain = -32768
 // CHECK-SAME: outer_gain = -8192
+// CHECK-SAME: rounding = "nearest_even"
 // CHECK-NOT: = ondrix.gain %
 func.func @tie_rule_agnostic_nearest_even(%input: tensor<8xi16>) -> tensor<8xi16> {
   %inverted = ondrix.gain %input {
@@ -216,6 +219,7 @@ func.func @tie_rule_agnostic_nearest_even(%input: tensor<8xi16>) -> tensor<8xi16
 // CHECK-SAME: gain = 8192
 // CHECK-SAME: inner_gain = -32768
 // CHECK-SAME: outer_gain = -8192
+// CHECK-SAME: rounding = "nearest_ties_positive"
 // CHECK-NOT: = ondrix.gain %
 func.func @tie_rule_agnostic_ties_positive(%input: tensor<8xi16>) -> tensor<8xi16> {
   %inverted = ondrix.gain %input {

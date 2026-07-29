@@ -1,5 +1,11 @@
 // RUN: ondrix-compile %S/Inputs/q15_dot.ox --print-source-locations | FileCheck %s --check-prefix=MLIR
 // RUN: ondrix-compile %S/Inputs/q15_dot.ox | ondrix-opt --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar | FileCheck %s --check-prefix=SCALAR
+// RUN: not ondrix-compile %S/Inputs/invalid_dot_ties_positive.ox 2>&1 | FileCheck %s --check-prefix=TIES
+
+// The generic export policy exposes the three established tie rules. A
+// newly declared dialect mode is opted into per builtin together with its
+// contract and evidence, so it is refused here.
+// TIES: invalid_dot_ties_positive.ox:2:10: error: export rounding must be nearest_even, toward_negative, or toward_zero
 
 // MLIR: #loc = loc({{.*}}q15_dot.ox":1:1)
 // MLIR-LABEL: func.func @q15_dot

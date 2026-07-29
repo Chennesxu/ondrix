@@ -4,6 +4,7 @@
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
@@ -19,6 +20,13 @@ using namespace mlir;
 
 namespace {
 
+// The tie rules ondrix.gain admits, and therefore the only ones this
+// certificate models. Anything else is refused before any arithmetic runs.
+bool isAdmittedGainRounding(ondrix::ondsp::RoundingMode mode) {
+  return mode == ondrix::ondsp::RoundingMode::NearestEven ||
+         mode == ondrix::ondsp::RoundingMode::NearestTiesPositive;
+}
+
 // The exact ondrix.gain contract for one element: exact integer product,
 // requantization by 15 in explicit floor-division form under the declared
 // tie rule, i16 saturation. The operation admits two tie rules and they are
@@ -32,13 +40,22 @@ int64_t applyGainQ15(int64_t value, int64_t gain, ondrix::ondsp::RoundingMode mo
     --quotient;
     remainder += 32768;
   }
-  if (mode == ondrix::ondsp::RoundingMode::NearestTiesPositive) {
+  switch (mode) {
+  case ondrix::ondsp::RoundingMode::NearestTiesPositive:
     // Ties toward +infinity: every remainder of at least half steps up.
     if (remainder >= 16384)
       ++quotient;
-  } else {
+    break;
+  case ondrix::ondsp::RoundingMode::NearestEven:
     if (remainder > 16384 || (remainder == 16384 && (quotient & 1)))
       ++quotient;
+    break;
+  case ondrix::ondsp::RoundingMode::TowardNegative:
+  case ondrix::ondsp::RoundingMode::TowardZero:
+    // Unreachable: `isAdmittedGainRounding` gates every caller, so an
+    // unmodeled mode must abort rather than be silently reinterpreted as
+    // nearest_even and certify a rewrite the program never asked for.
+    llvm_unreachable("gain admits only the two nearest tie rules");
   }
   if (quotient > 32767)
     return 32767;
@@ -99,6 +116,8 @@ public:
         // Both operations agree on the tie rule, so the pair has one common
         // mode to compute and certify the merged constant under.
         ondrix::ondsp::RoundingMode mode = outer.getRounding();
+        if (!isAdmittedGainRounding(mode))
+          continue;
         int64_t merged = mergedGainQ15(inner.getGain(), outer.getGain(), mode);
         if (!certifyMerge(inner.getGain(), outer.getGain(), merged, mode))
           continue;
@@ -111,6 +130,10 @@ public:
         provenance.append("inner_gain", builder.getI64IntegerAttr(inner.getGain()));
         provenance.append("outer_gain", builder.getI64IntegerAttr(outer.getGain()));
         provenance.append("exhaustive_inputs", builder.getI64IntegerAttr(65536));
+        // The certificate is only valid under the tie rule it was evaluated
+        // with, so the provenance records which one that was.
+        provenance.append("rounding",
+                          builder.getStringAttr(ondrix::ondsp::stringifyRoundingMode(mode)));
         replacement->setAttr("ondrix.gain_merge_provenance",
                              provenance.getDictionary(builder.getContext()));
         outer.getResult().replaceAllUsesWith(replacement.getResult());

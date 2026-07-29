@@ -1,4 +1,8 @@
 // RUN: ondrix-compile %S/Inputs/q15_sos_df2_fixed.ox | FileCheck %s
+// RUN: not ondrix-compile %S/Inputs/invalid_sos_state_ties_positive.ox 2>&1 | FileCheck %s --check-prefix=TIES
+
+// Both recurrence boundaries expose only the three established tie rules.
+// TIES: invalid_sos_state_ties_positive.ox:7:10: error: sos_df2_fixed state_rounding must be nearest_even, toward_negative, or toward_zero
 
 // CHECK-LABEL: func.func @q15_sos_df2_fixed(
 // CHECK-SAME: tensor<?xi16>, %{{.*}}: tensor<1x5xi16>, %{{.*}}: tensor<1xi16>,

@@ -268,3 +268,25 @@ func.func @full_rejects_static_origin_beyond_dynamic_output(
   } : (tensor<4xf32>, tensor<3xf32>, tensor<?xf32>, index) -> tensor<?xf32>
   return
 }
+
+// -----
+
+// A newly declared dialect rounding mode does not silently widen this
+// contract: the admissible tie rules are per operation, and nearest_ties_
+// positive has no lowering or differential evidence here.
+
+func.func @rejects_unestablished_rounding(
+    %input: tensor<8xi16>, %coeffs: tensor<3xi16>, %init: tensor<6xi16>) {
+  // expected-error @+1 {{fixed FIR filter supports toward_negative, toward_zero, or nearest_even rounding}}
+  %0 = ondrix.fir_filter %input, %coeffs, %init {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    boundary = #ondrix.fir_boundary<valid>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<8xi16>, tensor<3xi16>, tensor<6xi16>) -> tensor<6xi16>
+  return
+}

@@ -12,6 +12,7 @@ typedef struct {
 
 extern void _mlir_ciface_gain_cascade_certified(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_gain_cascade_witness(MemRefI16 *, MemRefI16 *);
+extern void _mlir_ciface_gain_cascade_reverse_certified(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_gain_cascade_ties_positive(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_gain_scale_nearest_even(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_gain_scale_ties_positive(MemRefI16 *, MemRefI16 *);
@@ -69,12 +70,14 @@ int main(void) {
   int64_t swappedMergeDivergences = 0;
   int64_t orderDivergences = 0;
   int64_t tieRuleDivergences = 0;
+  int64_t reverseTieRuleDivergences = 0;
   int sawNegativeTieWitness = 0;
 
   for (int batch = 0; batch < kBatchCount; ++batch) {
     int16_t input[kBatch];
     int16_t certified[kBatch];
     int16_t witness[kBatch];
+    int16_t reverseCertified[kBatch];
     int16_t tiesPositiveCascade[kBatch];
     int16_t scaleEven[kBatch];
     int16_t scaleTiesPositive[kBatch];
@@ -86,6 +89,8 @@ int main(void) {
     runBatch(_mlir_ciface_gain_cascade_certified, input, certified, label, &failed);
     snprintf(label, sizeof label, "witness batch %d", batch);
     runBatch(_mlir_ciface_gain_cascade_witness, input, witness, label, &failed);
+    snprintf(label, sizeof label, "reverse certified batch %d", batch);
+    runBatch(_mlir_ciface_gain_cascade_reverse_certified, input, reverseCertified, label, &failed);
     snprintf(label, sizeof label, "ties-positive cascade batch %d", batch);
     runBatch(_mlir_ciface_gain_cascade_ties_positive, input, tiesPositiveCascade, label, &failed);
     snprintf(label, sizeof label, "nearest-even scale batch %d", batch);
@@ -95,6 +100,21 @@ int main(void) {
 
     for (int64_t i = 0; i < kBatch; ++i) {
       int16_t x = input[i];
+
+      /* The reverse-order nearest_even pair. Gain cascades do not commute
+       * under finite precision, so this is an independent witness from
+       * @gain_cascade_certified even though the constants are the same two
+       * values: it is certified under nearest_even and merges to -8192,
+       * while the identical constants under ties-toward-positive diverge. */
+      int16_t chainReverse = applyGain(applyGain(x, -16384), 16384);
+      int16_t mergedReverse = applyGain(x, -8192);
+      if (reverseCertified[i] != chainReverse || chainReverse != mergedReverse) {
+        fprintf(stderr, "reverse certified %d: compiled %d, chain %d, merged %d\n", x,
+                reverseCertified[i], chainReverse, mergedReverse);
+        failed = 1;
+      }
+      reverseTieRuleDivergences += applyGainTiesPositive(applyGainTiesPositive(x, -16384), 16384) !=
+                                   applyGainTiesPositive(x, -8192);
 
       /* Ties-toward-positive cascade: certified under this rule alone, so
        * the chain reference and the single merged 4096 must both match. */
@@ -170,6 +190,14 @@ int main(void) {
   if (tieRuleDivergences != 8192) {
     fprintf(stderr, "nearest-even divergence for the ties-positive pair %lld, pinned 8192\n",
             (long long)tieRuleDivergences);
+    failed = 1;
+  }
+  /* The mirror image: (-16384, 16384) -> -8192 is certified under
+   * nearest_even and diverges on exactly 16384 inputs under
+   * ties-toward-positive. Neither rule dominates the other. */
+  if (reverseTieRuleDivergences != 16384) {
+    fprintf(stderr, "ties-positive divergence for the nearest-even pair %lld, pinned 16384\n",
+            (long long)reverseTieRuleDivergences);
     failed = 1;
   }
   if (!sawNegativeTieWitness) {

@@ -155,6 +155,27 @@ static LogicalResult verifySignedFixedFormat(Operation *op, Attribute numeric, u
   return success();
 }
 
+// Rounding is a per-operation declared contract, never a mode that a new
+// dialect enum case silently extends. Operations that already pin their own
+// admissible tie rules keep doing so; this helper is the shared floor for
+// the remaining rounding-bearing operations, whose contracts, lowerings, and
+// differential evidence cover only the three established modes. A newly
+// declared mode has to be admitted deliberately, per operation, together
+// with its lowering and evidence.
+static LogicalResult verifyEstablishedRounding(Operation *op, ondrix::ondsp::RoundingMode rounding,
+                                               StringRef name) {
+  switch (rounding) {
+  case ondrix::ondsp::RoundingMode::TowardNegative:
+  case ondrix::ondsp::RoundingMode::TowardZero:
+  case ondrix::ondsp::RoundingMode::NearestEven:
+    return success();
+  case ondrix::ondsp::RoundingMode::NearestTiesPositive:
+    break;
+  }
+  return op->emitOpError() << name
+                           << " supports toward_negative, toward_zero, or nearest_even rounding";
+}
+
 static LogicalResult verifyRfftRadix4SplitValueDomain(RfftRadix4SplitOp op) {
   if (op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
     return op.emitOpError(
@@ -296,6 +317,8 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
     if (!op.getAccumulator() || !op.getDst() || !op.getRounding() || !op.getOverflow())
       return op.emitOpError(
           "fixed FIR filter requires accumulator, dst, rounding, and overflow attributes");
+    if (failed(verifyEstablishedRounding(op, *op.getRounding(), "fixed FIR filter")))
+      return failure();
     if (failed(verifyFixedReductionResult(op, *op.getAccumulator(), fixed, *op.getProduct())))
       return failure();
     if (op.getAccumulator()->getSignedness() != op.getDst()->getSignedness())
@@ -316,10 +339,14 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
   return success();
 }
 
-static LogicalResult verifyQ15ResamplingProfile(
-    Operation *op, RankedTensorType inputType, RankedTensorType coefficientType,
-    RankedTensorType initType, ondrix::ondsp::FixedAttr numeric, ondrix::ondsp::ProductAttr product,
-    ondrix::ondsp::AccType accumulator, ondrix::ondsp::FixedAttr destination) {
+static LogicalResult
+verifyQ15ResamplingProfile(Operation *op, RankedTensorType inputType,
+                           RankedTensorType coefficientType, RankedTensorType initType,
+                           ondrix::ondsp::FixedAttr numeric, ondrix::ondsp::ProductAttr product,
+                           ondrix::ondsp::AccType accumulator, ondrix::ondsp::FixedAttr destination,
+                           ondrix::ondsp::RoundingMode rounding) {
+  if (failed(verifyEstablishedRounding(op, rounding, "Q15 resampling")))
+    return failure();
   auto accumulatorStorage = dyn_cast<IntegerType>(accumulator.getStorage());
   if (!ondrix::ondsp::isSignedQ15(numeric) || !ondrix::ondsp::isFullProduct(product) ||
       !accumulatorStorage || accumulatorStorage.getWidth() < 32 ||
@@ -364,7 +391,8 @@ static LogicalResult verifyFirDecimateDomain(FirDecimateOp op) {
   }
 
   return verifyQ15ResamplingProfile(op, inputType, coefficientType, initType, op.getNumeric(),
-                                    op.getProduct(), op.getAccumulator(), op.getDst());
+                                    op.getProduct(), op.getAccumulator(), op.getDst(),
+                                    op.getRounding());
 }
 
 static LogicalResult verifyFirInterpolateDomain(FirInterpolateOp op) {
@@ -399,7 +427,8 @@ static LogicalResult verifyFirInterpolateDomain(FirInterpolateOp op) {
   }
 
   return verifyQ15ResamplingProfile(op, inputType, coefficientType, initType, op.getNumeric(),
-                                    op.getProduct(), op.getAccumulator(), op.getDst());
+                                    op.getProduct(), op.getAccumulator(), op.getDst(),
+                                    op.getRounding());
 }
 
 static LogicalResult verifyConv1DDomain(Conv1DOp op) {
@@ -434,6 +463,8 @@ static LogicalResult verifyConv1DDomain(Conv1DOp op) {
     if (!op.getAccumulator() || !op.getDst() || !op.getRounding() || !op.getOverflow())
       return op.emitOpError(
           "fixed conv1d requires accumulator, dst, rounding, and overflow attributes");
+    if (failed(verifyEstablishedRounding(op, *op.getRounding(), "fixed conv1d")))
+      return failure();
     if (failed(verifyFixedReductionResult(op, *op.getAccumulator(), fixed, *op.getProduct())))
       return failure();
     if (op.getAccumulator()->getSignedness() != op.getDst()->getSignedness())
@@ -501,6 +532,8 @@ static LogicalResult verifyFirStreamDomain(FirStreamOp op) {
     if (!op.getAccumulator() || !op.getDst() || !op.getRounding() || !op.getOverflow())
       return op.emitOpError(
           "fixed FIR stream requires accumulator, dst, rounding, and overflow attributes");
+    if (failed(verifyEstablishedRounding(op, *op.getRounding(), "fixed FIR stream")))
+      return failure();
     if (failed(verifyFixedReductionResult(op, *op.getAccumulator(), fixed, *op.getProduct())))
       return failure();
     if (op.getAccumulator()->getSignedness() != op.getDst()->getSignedness())
@@ -593,6 +626,9 @@ static LogicalResult verifySosFilterDf2FixedDomain(SosFilterDf2FixedOp op) {
     return op.emitOpError(
         "supports only signed Q15/full with i40/frac30 accumulator or signed Q31/full with "
         "i64/frac62 accumulator");
+  if (failed(verifyEstablishedRounding(op, op.getStateRounding(), "state_rounding")) ||
+      failed(verifyEstablishedRounding(op, op.getOutputRounding(), "output_rounding")))
+    return failure();
   return success();
 }
 

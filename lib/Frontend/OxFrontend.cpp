@@ -1081,6 +1081,15 @@ static std::optional<ondsp::RoundingMode> parseRounding(llvm::StringRef value) {
   return std::nullopt;
 }
 
+// The three tie rules every export-policy contract in the language already
+// covers. A newly declared dialect mode is opted into per builtin, together
+// with the operation contract and its differential evidence; it never
+// reaches a binding just because the enum grew a case.
+static bool isEstablishedRounding(ondsp::RoundingMode mode) {
+  return mode == ondsp::RoundingMode::TowardNegative || mode == ondsp::RoundingMode::TowardZero ||
+         mode == ondsp::RoundingMode::NearestEven;
+}
+
 static std::optional<ondsp::FpContractMode> parseFpContract(llvm::StringRef value) {
   if (value == "off")
     return ondsp::FpContractMode::Off;
@@ -1320,6 +1329,18 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     if (!updateOverflow || !stateRounding || !stateOverflow || !outputRounding || !outputOverflow) {
       diagnostics.error(ast.result.position,
                         "sos_df2_fixed contains an unsupported numeric policy");
+      return std::nullopt;
+    }
+    if (!isEstablishedRounding(*stateRounding)) {
+      diagnostics.error(
+          ast.result.position,
+          "sos_df2_fixed state_rounding must be nearest_even, toward_negative, or toward_zero");
+      return std::nullopt;
+    }
+    if (!isEstablishedRounding(*outputRounding)) {
+      diagnostics.error(
+          ast.result.position,
+          "sos_df2_fixed output_rounding must be nearest_even, toward_negative, or toward_zero");
       return std::nullopt;
     }
     return CheckedKernel{std::move(ast), *updateOverflow, *outputRounding, *outputOverflow,
@@ -1975,6 +1996,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   if (!rounding) {
     diagnostics.error(ast.result.position,
                       llvm::Twine("unsupported rounding mode '") + ast.result.rounding + "'");
+    return std::nullopt;
+  }
+  if (!isEstablishedRounding(*rounding)) {
+    diagnostics.error(ast.result.position,
+                      "export rounding must be nearest_even, toward_negative, or toward_zero");
     return std::nullopt;
   }
   auto destinationOverflow = parseOverflow(ast.result.destinationOverflow);

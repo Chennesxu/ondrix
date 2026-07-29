@@ -33,10 +33,11 @@ def Ondsp_RoundShiftOp : Ondsp_Op<"round_shift", [Pure]> {
     ```
     shifted = x * 2^pre_shift_left                (exact)
     rounded = round(shifted / 2^post_shift_right) per the rounding mode:
-      toward_negative: floor division
-      toward_zero:     floor division, +1 when negative with remainder
-      nearest_even:    floor division, +1 when remainder > half, or
-                       remainder == half and the floor quotient is odd
+      toward_negative:       floor division
+      toward_zero:           floor division, +1 when negative with remainder
+      nearest_even:          floor division, +1 when remainder > half, or
+                             remainder == half and the floor quotient is odd
+      nearest_ties_positive: floor division, +1 when remainder >= half
     result  = narrow(rounded) to the saturate_to storage:
       wrap:     two's-complement truncation
       saturate: clamp to the signed range of saturate_to, then truncate
