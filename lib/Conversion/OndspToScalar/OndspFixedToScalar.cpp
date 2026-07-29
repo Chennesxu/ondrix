@@ -326,6 +326,18 @@ static Value roundSignedRightShift(Location loc, Value input, unsigned shift,
     incrementCondition = rewriter.create<arith::AndIOp>(loc, isNegative, hasRemainder);
     break;
   }
+  case ondrix::ondsp::RoundingMode::NearestTiesPositive: {
+    // Ties toward +infinity. The textbook add-half-then-shift form is
+    // deliberately NOT used: adding 2^(shift-1) in the input width overflows
+    // near the maximum representable value, which would silently change the
+    // result of exactly the inputs a saturating boundary cares about. The
+    // quotient/remainder form is total: floor already happened, so a
+    // remainder of at least half moves the result one step up.
+    Value half = createIntegerConstant(loc, type, int64_t{1} << (shift - 1), rewriter);
+    incrementCondition =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, remainder, half);
+    break;
+  }
   case ondrix::ondsp::RoundingMode::NearestEven: {
     Value half = createIntegerConstant(loc, type, int64_t{1} << (shift - 1), rewriter);
     Value aboveHalf =

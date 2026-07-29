@@ -9,7 +9,13 @@ namespace ondrix::fixedpoint {
 
 enum class AccumulatorUpdateOperation { Add, Subtract };
 enum class AccumulatorOverflowMode { Wrap, Saturate };
-enum class RoundingMode { TowardNegative, NearestEven, TowardZero };
+/// Tie taxonomy of the reference oracle. This enum deliberately stays
+/// independent of `ondsp::RoundingMode`: the oracle must be able to disagree
+/// with the dialect, so there is intentionally no mapping function between
+/// them. The two case sets are kept aligned in spirit only —
+/// `NearestTiesPositive` is add-half-then-shift (ties toward +infinity, so
+/// -1.5 rounds to -1), not ties-away-from-zero.
+enum class RoundingMode { TowardNegative, NearestTiesPositive, NearestEven, TowardZero };
 
 /// Numeric policy for one signed fixed-point direct-form-II SOS section.
 /// Samples, coefficients, scale, state, and output use the same storage width

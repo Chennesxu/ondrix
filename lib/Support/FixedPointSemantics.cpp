@@ -22,6 +22,7 @@ bool isValidOverflowMode(AccumulatorOverflowMode mode) {
 bool isValidRoundingMode(RoundingMode mode) {
   switch (mode) {
   case RoundingMode::TowardNegative:
+  case RoundingMode::NearestTiesPositive:
   case RoundingMode::NearestEven:
   case RoundingMode::TowardZero:
     return true;
@@ -115,6 +116,16 @@ llvm::APInt exportSignedAccumulator(const llvm::APInt &accumulator,
       if (accumulator.isNegative() && !remainder.isZero())
         rounded += one;
       break;
+    case RoundingMode::NearestTiesPositive: {
+      // Ties toward +infinity on top of the floor already taken above: a
+      // remainder of at least half always steps up. Expressed on the
+      // remainder rather than as an in-width add of half, which would
+      // overflow near the accumulator maximum.
+      llvm::APInt half = one.shl(fractionalBitsToDiscard - 1);
+      if (remainder.uge(half))
+        rounded += one;
+      break;
+    }
     case RoundingMode::NearestEven: {
       llvm::APInt half = one.shl(fractionalBitsToDiscard - 1);
       if (remainder.ugt(half) || (remainder == half && rounded[0]))

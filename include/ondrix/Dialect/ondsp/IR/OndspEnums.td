@@ -19,15 +19,32 @@ def Ondsp_ProductSelection
   let cppNamespace = "::ondrix::ondsp";
 }
 
+// Declared tie taxonomy for signed right shifts. All four modes agree on
+// non-tie inputs; they are distinguished only by the exact half-way case and
+// by the direction chosen for negative values:
+//
+//   nearest_even           ties go to the even quotient (zero-biased);
+//   nearest_ties_positive  ties go toward +infinity, i.e. add-half-then-shift
+//                          (ITU-T basicop `round`). Witnesses +1.5 -> +2 and
+//                          -1.5 -> -1. This is NOT ties-away-from-zero:
+//                          half-up and half-away agree on positive ties and
+//                          differ on every negative one;
+//   toward_negative        floor, no tie case at all;
+//   toward_zero            truncation, no tie case at all.
+//
+// Only negative ties separate nearest_ties_positive from ties-away-from-zero,
+// so any evidence for this mode must exercise negative half-way values.
 def Ondsp_RoundTowardNegative
     : I32EnumAttrCase<"TowardNegative", 0, "toward_negative">;
+def Ondsp_RoundNearestTiesPositive
+    : I32EnumAttrCase<"NearestTiesPositive", 1, "nearest_ties_positive">;
 def Ondsp_RoundNearestEven : I32EnumAttrCase<"NearestEven", 2, "nearest_even">;
 def Ondsp_RoundTowardZero : I32EnumAttrCase<"TowardZero", 3, "toward_zero">;
 def Ondsp_RoundingMode : I32EnumAttr<
     "RoundingMode",
     "explicit signed right-shift rounding direction or tie rule",
-    [Ondsp_RoundTowardNegative, Ondsp_RoundNearestEven,
-     Ondsp_RoundTowardZero]> {
+    [Ondsp_RoundTowardNegative, Ondsp_RoundNearestTiesPositive,
+     Ondsp_RoundNearestEven, Ondsp_RoundTowardZero]> {
   let cppNamespace = "::ondrix::ondsp";
   let genSpecializedAttr = 0;
 }

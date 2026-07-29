@@ -320,6 +320,10 @@ int64_t roundReference(int64_t value, unsigned shift, RoundingMode mode) {
     return quotient;
   case RoundingMode::TowardZero:
     return value < 0 && remainder != 0 ? quotient + 1 : quotient;
+  case RoundingMode::NearestTiesPositive:
+    // Ties toward +infinity, so a negative half-way value keeps the larger
+    // (less negative) quotient. Independent of the quotient parity.
+    return remainder >= divisor / 2 ? quotient + 1 : quotient;
   case RoundingMode::NearestEven:
     return remainder > divisor / 2 || (remainder == divisor / 2 && quotient % 2 != 0) ? quotient + 1
                                                                                       : quotient;
@@ -335,8 +339,8 @@ bool testSmallWidthExportExhaustive() {
 
   for (int64_t value = -16; value <= 15; ++value) {
     for (unsigned shift : {1U, 2U, accumulatorWidth}) {
-      for (RoundingMode rounding :
-           {RoundingMode::TowardNegative, RoundingMode::NearestEven, RoundingMode::TowardZero}) {
+      for (RoundingMode rounding : {RoundingMode::TowardNegative, RoundingMode::NearestTiesPositive,
+                                    RoundingMode::NearestEven, RoundingMode::TowardZero}) {
         int64_t rounded = roundReference(value, shift, rounding);
         for (AccumulatorOverflowMode overflowMode :
              {AccumulatorOverflowMode::Wrap, AccumulatorOverflowMode::Saturate}) {
@@ -409,7 +413,7 @@ bool testSignedUniformSosDf2Validation() {
   if (evaluate(invalid, zero))
     return false;
   invalid = policy;
-  invalid.stateRounding = static_cast<RoundingMode>(3);
+  invalid.stateRounding = static_cast<RoundingMode>(4);
   if (evaluate(invalid, zero))
     return false;
   invalid = policy;
@@ -417,7 +421,7 @@ bool testSignedUniformSosDf2Validation() {
   if (evaluate(invalid, zero))
     return false;
   invalid = policy;
-  invalid.outputRounding = static_cast<RoundingMode>(3);
+  invalid.outputRounding = static_cast<RoundingMode>(4);
   if (evaluate(invalid, zero))
     return false;
   invalid = policy;
@@ -445,13 +449,14 @@ bool testSmallWidthSosDf2Exhaustive() {
       for (int64_t d2 = minimum; d2 <= maximum; ++d2) {
         for (AccumulatorOverflowMode updateOverflow :
              {AccumulatorOverflowMode::Wrap, AccumulatorOverflowMode::Saturate}) {
-          for (RoundingMode stateRounding : {RoundingMode::TowardNegative,
-                                             RoundingMode::NearestEven, RoundingMode::TowardZero}) {
+          for (RoundingMode stateRounding :
+               {RoundingMode::TowardNegative, RoundingMode::NearestTiesPositive,
+                RoundingMode::NearestEven, RoundingMode::TowardZero}) {
             for (AccumulatorOverflowMode stateOverflow :
                  {AccumulatorOverflowMode::Wrap, AccumulatorOverflowMode::Saturate}) {
               for (RoundingMode outputRounding :
-                   {RoundingMode::TowardNegative, RoundingMode::NearestEven,
-                    RoundingMode::TowardZero}) {
+                   {RoundingMode::TowardNegative, RoundingMode::NearestTiesPositive,
+                    RoundingMode::NearestEven, RoundingMode::TowardZero}) {
                 for (AccumulatorOverflowMode outputOverflow :
                      {AccumulatorOverflowMode::Wrap, AccumulatorOverflowMode::Saturate}) {
                   SignedUniformSosDf2Policy policy{storageWidth,   fractionalBits, accumulatorWidth,
