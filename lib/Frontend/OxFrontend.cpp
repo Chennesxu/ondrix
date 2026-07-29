@@ -600,6 +600,19 @@ public:
                                 : kernel.result.kind == ReductionKind::Rms  ? "rms"
                                 : kernel.result.kind == ReductionKind::Sine ? "sine"
                                                                             : "cosine";
+      if (kernel.result.kind == ReductionKind::Rms && current.kind == TokenKind::Comma) {
+        // The rms contract admits a declared root rounding mode while the
+        // mean boundary stays nearest even; omission keeps the nearest_even
+        // default. Bindings must expose every choice their contract admits.
+        if (!expect(TokenKind::Comma, "expected ',' before rounding policy") ||
+            !expectIdentifier("rounding", "expected rounding policy") ||
+            !expect(TokenKind::Equal, "expected '=' after rounding"))
+          return std::nullopt;
+        auto rounding = parseIdentifier("expected rounding mode");
+        if (!rounding)
+          return std::nullopt;
+        kernel.result.rounding = rounding->spelling.str();
+      }
       if (!expect(TokenKind::RightParen, llvm::Twine("expected ')' after ") + builtin + " operand"))
         return std::nullopt;
       if (current.kind != TokenKind::Eof) {
@@ -1807,8 +1820,20 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       }
     }
-    return CheckedKernel{std::move(ast), std::nullopt, ondsp::RoundingMode::NearestEven,
-                         std::nullopt, std::nullopt};
+    // Only the rms surface can declare a rounding mode in this branch, and
+    // its contract admits exactly the two root modes of ondrix.rms.
+    ondsp::RoundingMode rounding = ondsp::RoundingMode::NearestEven;
+    if (!ast.result.rounding.empty()) {
+      std::optional<ondsp::RoundingMode> parsed = parseRounding(ast.result.rounding);
+      if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven &&
+                      *parsed != ondsp::RoundingMode::TowardNegative)) {
+        diagnostics.error(ast.result.position,
+                          "rms rounding must be nearest_even or toward_negative");
+        return std::nullopt;
+      }
+      rounding = *parsed;
+    }
+    return CheckedKernel{std::move(ast), std::nullopt, rounding, std::nullopt, std::nullopt};
   } else {
     if (ast.primaryResult().tensor) {
       diagnostics.error(ast.result.position, "dot and fir return scalar values");

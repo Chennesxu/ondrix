@@ -9,8 +9,11 @@ Q15/Q31/f32 convolution/correlation, static four-/eight-point packed-Q15 CFFT,
 static eight-/sixteen-point packed-Q15 RFFT/IRFFT, Q15 streaming FIR, one
 static-section Q15 fixed DF-II SOS profile, unary bindings for the DCT,
 spectral magnitude (composable with `rfft`/`cfft` nesting), moving average,
-constant gain, RMS, sine, and cosine contracts, rank-2 `matmul`, and the two-result
-`lms(x, d, w, step_size=...)` adaptive filter.
+constant gain, RMS (with the declared root rounding exposed as
+`rms(x, rounding=nearest_even|toward_negative)`), sine, and cosine contracts,
+rank-2 `matmul`, and the two-result `lms(x, d, w, step_size=...)` adaptive
+filter. Bindings expose every declared choice their contract admits; a
+binding never narrows a contract silently.
 Dialect and source contracts may change while the numeric model is stabilized.
 
 | Capability | Status |
