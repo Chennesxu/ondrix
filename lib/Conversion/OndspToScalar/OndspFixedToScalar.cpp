@@ -646,6 +646,15 @@ public:
           "fixed scalar lowering supports a signed frac30 accumulator of at least 32 bits to a "
           "signed Q15 or signed i32 destination, and i64/frac62 to Q31 export");
 
+    // The op verifier already rejects destinations whose frac exceeds the
+    // accumulator frac, but this lowering must not turn an unverified
+    // pass-created op into an undefined shift; keep the same self-guard the
+    // round_shift lowering carries.
+    if (op.getDst().getFrac() > accumulator.getFrac())
+      return op.emitOpError(
+          "fixed scalar lowering requires the destination frac not to exceed the accumulator "
+          "frac");
+
     unsigned shift = accumulator.getFrac() - op.getDst().getFrac();
     Value rounded =
         roundSignedRightShift(op.getLoc(), adaptor.getAcc(), shift, op.getRounding(), rewriter);

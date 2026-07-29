@@ -65,8 +65,12 @@ bool isSupportedFixedHorizontalMacDomain(ondrix::ondsp::AccType accumulator,
     // bit of any accumulator at most 64 bits wide. The i40 restriction above
     // exists for the saturating prefix-proof path, which gates independently
     // on Saturate update overflow in `planConstantSaturatingReduction` and
-    // therefore cannot be widened here. Keep saturating Q15 accumulators
-    // exactly as before; admit only wider wrapping ones.
+    // therefore cannot be widened here. The `> 40` cut below is deliberately
+    // conservative, not a legality limit: it leaves the established i40
+    // branch above (which admits both overflow modes) untouched and admits
+    // only the wider wrapping accumulators that current producers need.
+    // Narrower wrapping accumulators such as i34 stay refused and pinned by
+    // the existing portable-profile negative.
     return accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Wrap &&
            accumulator.getStorage().cast<IntegerType>().getWidth() > 40;
   }

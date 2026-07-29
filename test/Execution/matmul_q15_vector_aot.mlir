@@ -17,11 +17,15 @@
 // No ondsp operation may survive the pipeline.
 // VECTOR-NOT: ondsp.
 
-// AVX2-LABEL: matmul8x8x8_q15_vector:
+// The labels are anchored to line start so they cannot match the
+// `_mlir_ciface_...` interface thunk emitted for the same kernel.
+// AVX2-LABEL: {{^}}matmul8x8x8_q15_vector:
 // AVX2: vpmulld
-// AVX2-LABEL: matmul4x16x3_q15_vector:
+// AVX2-LABEL: {{^}}matmul4x16x3_q15_vector:
 // AVX2: vpmulld
-// AVX2-LABEL: matmul1x64x1_q15_vector:
+// AVX2-LABEL: {{^}}matmul1x64x1_q15_vector:
+// AVX2: vpmulld
+// AVX2-LABEL: {{^}}matmul2x12x2_q15_vector:
 // AVX2: vpmulld
 
 func.func @matmul8x8x8_q15_vector(%a: tensor<8x8xi16>, %b: tensor<8x8xi16>) -> tensor<8x8xi16>
@@ -51,4 +55,18 @@ func.func @matmul1x64x1_q15_vector(%a: tensor<1x64xi16>, %b: tensor<64x1xi16>) -
     rounding = #ondsp.rounding<nearest_even>
   } : (tensor<1x64xi16>, tensor<64x1xi16>) -> tensor<1x1xi16>
   return %c : tensor<1x1xi16>
+}
+
+// A reduction length that is not a multiple of the vector width: K = 12 with
+// vector-width 8 executes one 8-lane horizontal chunk followed by a four-step
+// ordered scalar mac tail. The exact-modulo accumulator makes the mixed
+// schedule agree with the reference even though its summation order differs
+// from both the pure Vector and the pure scalar schedule.
+func.func @matmul2x12x2_q15_vector(%a: tensor<2x12xi16>, %b: tensor<12x2xi16>) -> tensor<2x2xi16>
+    attributes {llvm.emit_c_interface} {
+  %c = ondrix.matmul %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<2x12xi16>, tensor<12x2xi16>) -> tensor<2x2xi16>
+  return %c : tensor<2x2xi16>
 }

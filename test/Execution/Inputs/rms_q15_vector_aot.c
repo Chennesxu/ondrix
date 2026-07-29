@@ -14,6 +14,7 @@ typedef struct {
 extern void _mlir_ciface_rms64_q15_vector(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_rms64_floor_q15_vector(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_rms4096_q15_vector(MemRefI16 *, MemRefI16 *);
+extern void _mlir_ciface_rms2_q15_vector(MemRefI16 *, MemRefI16 *);
 
 enum { kExtent = 64, kMaxExtent = 4096, kTrialCount = 16 };
 
@@ -124,6 +125,20 @@ int main(void) {
     input[i] = INT16_MIN;
   failed |= check(_mlir_ciface_rms4096_q15_vector, input, kMaxExtent, 1, "max extent saturates");
 
+  /* Smallest admitted extent: the width-8 vector loop is empty, so the whole
+   * reduction is the ordered scalar tail and the mean shift is one bit. */
+  input[0] = 0;
+  input[1] = 0;
+  failed |= check(_mlir_ciface_rms2_q15_vector, input, 2, 1, "rms2 zero");
+  input[0] = INT16_MAX;
+  input[1] = INT16_MAX;
+  failed |= check(_mlir_ciface_rms2_q15_vector, input, 2, 1, "rms2 all max");
+  input[0] = INT16_MIN;
+  input[1] = INT16_MIN;
+  failed |= check(_mlir_ciface_rms2_q15_vector, input, 2, 1, "rms2 all min saturates");
+  input[1] = INT16_MAX;
+  failed |= check(_mlir_ciface_rms2_q15_vector, input, 2, 1, "rms2 mixed");
+
   uint32_t state = 0x27B5C4E1u;
   for (int trial = 0; trial < kTrialCount; ++trial) {
     char label[40];
@@ -137,6 +152,8 @@ int main(void) {
     failed |= check(_mlir_ciface_rms64_floor_q15_vector, input, kExtent, 0, label);
     snprintf(label, sizeof label, "rms4096 trial %d", trial);
     failed |= check(_mlir_ciface_rms4096_q15_vector, input, kMaxExtent, 1, label);
+    snprintf(label, sizeof label, "rms2 trial %d", trial);
+    failed |= check(_mlir_ciface_rms2_q15_vector, input, 2, 1, label);
   }
   return failed;
 }

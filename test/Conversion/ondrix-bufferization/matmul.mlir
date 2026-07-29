@@ -1,5 +1,6 @@
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" | FileCheck %s
-// RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fixed-memref-reduce="vector-width=4" --parallelize-ondsp-fixed-wrap-vector-reduce --normalize-ondsp-fixed-vector-reduce | FileCheck %s --check-prefix=FULL-VECTOR
+// RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fixed-memref-reduce="vector-width=4" --parallelize-ondsp-fixed-wrap-vector-reduce --normalize-ondsp-fixed-vector-reduce | FileCheck %s --check-prefix=FULL-VECTOR --implicit-check-not=ondsp.reduce_mac
+// RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries allow-return-allocs" --canonicalize --vectorize-ondsp-fixed-memref-reduce="vector-width=4" --parallelize-ondsp-fixed-wrap-vector-reduce --normalize-ondsp-fixed-vector-reduce | FileCheck %s --check-prefix=DYNAMIC-LAYOUT --implicit-check-not=vector.load --implicit-check-not=vector.reduction
 
 // The bufferized form is a second consumer of the same matmul contract: one
 // zero-seeded ordered reduction and one nearest-even saturating boundary per
@@ -63,4 +64,19 @@ func.func @matmul4x16x3_q15(%a: tensor<4x16xi16>, %b: tensor<16x3xi16>) -> tenso
 // FULL-VECTOR: ondsp.acc_export
 // FULL-VECTOR-LABEL: func.func @matmul4x16x3_q15
 // FULL-VECTOR: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
-// FULL-VECTOR-NOT: ondsp.reduce_mac
+
+// Unit-stride views are a precondition of the Vector path, not a property of
+// the interface: the A-row view inherits the layout of the incoming buffer,
+// so under the default fully dynamic function-boundary layout it becomes
+// strided<[?], offset: ?>, the legality gate refuses the reduction, and the
+// memref-form ondsp.reduce_mac survives all three Vector passes untouched.
+// That is an ordered scalar fallback, never a semantic change.
+// DYNAMIC-LAYOUT-LABEL: func.func @matmul8x8x8_q15(
+// DYNAMIC-LAYOUT-SAME: memref<8x8xi16, strided<[?, ?], offset: ?>>
+// DYNAMIC-LAYOUT: memref.subview %{{.*}}[%{{.*}}, 0] [1, 8] [1, 1] : memref<8x8xi16, strided<[?, ?], offset: ?>> to memref<8xi16, strided<[?], offset: ?>>
+// DYNAMIC-LAYOUT: ondsp.reduce_mac
+// DYNAMIC-LAYOUT: ondsp.acc_export
+// DYNAMIC-LAYOUT-LABEL: func.func @matmul4x16x3_q15(
+// DYNAMIC-LAYOUT: ondsp.reduce_mac
+// DYNAMIC-LAYOUT-NOT: vector.reduction
+// DYNAMIC-LAYOUT-NOT: vector.load

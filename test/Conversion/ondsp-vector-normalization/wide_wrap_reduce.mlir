@@ -26,6 +26,27 @@ func.func @parallel_wide_wrap(
 // CHECK-NOT: vector.extract
 // CHECK-NOT: ondsp.reduce_mac
 
+// An interior width of the newly opened (40, 64] interval, not just the i64
+// endpoint: the horizontal sum runs in i64 regardless, and modular addition
+// preserves every low bit of the i48 accumulator.
+func.func @parallel_intermediate_wrap(
+    %initial: !ondsp.acc<storage = i48, frac = 30, signed, update_overflow = wrap>,
+    %lhs: vector<8xi16>, %rhs: vector<8xi16>)
+    -> !ondsp.acc<storage = i48, frac = 30, signed, update_overflow = wrap> {
+  %result = ondsp.reduce_mac %initial, %lhs, %rhs {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i48, frac = 30, signed, update_overflow = wrap>, vector<8xi16>, vector<8xi16>) -> !ondsp.acc<storage = i48, frac = 30, signed, update_overflow = wrap>
+  return %result : !ondsp.acc<storage = i48, frac = 30, signed, update_overflow = wrap>
+}
+
+// CHECK-LABEL: func.func @parallel_intermediate_wrap
+// CHECK: %[[MID_WIDE:.*]] = arith.extsi {{.*}} : vector<8xi32> to vector<8xi64>
+// CHECK: %[[MID_SUM:.*]] = vector.reduction <add>, %[[MID_WIDE]] : vector<8xi64> into i64
+// CHECK: ondsp.acc_add_term {{.*}}, %[[MID_SUM]] {term_numeric = #ondsp.fixed<signed, storage = i64, frac = 30>} : (!ondsp.acc<storage = i48, frac = 30, signed, update_overflow = wrap>, i64) -> !ondsp.acc<storage = i48, frac = 30, signed, update_overflow = wrap>
+// CHECK-NOT: vector.extract
+// CHECK-NOT: ondsp.reduce_mac
+
 func.func @preserve_wide_saturate(
     %initial: !ondsp.acc<storage = i64, frac = 30, signed, update_overflow = saturate>,
     %lhs: vector<8xi16>, %rhs: vector<8xi16>)

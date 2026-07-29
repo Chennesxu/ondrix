@@ -13,6 +13,7 @@ typedef struct {
 extern void _mlir_ciface_matmul8x8x8_q15_vector(MemRefI16x2 *, MemRefI16x2 *, MemRefI16x2 *);
 extern void _mlir_ciface_matmul4x16x3_q15_vector(MemRefI16x2 *, MemRefI16x2 *, MemRefI16x2 *);
 extern void _mlir_ciface_matmul1x64x1_q15_vector(MemRefI16x2 *, MemRefI16x2 *, MemRefI16x2 *);
+extern void _mlir_ciface_matmul2x12x2_q15_vector(MemRefI16x2 *, MemRefI16x2 *, MemRefI16x2 *);
 
 enum { kMaxDim = 64, kTrialCount = 12 };
 
@@ -115,6 +116,19 @@ int main(void) {
     b[i] = INT16_MAX;
   failed |= check(_mlir_ciface_matmul1x64x1_q15_vector, a, b, 1, 64, 1, "max inner opposite");
 
+  /* K = 12 splits into one eight-lane horizontal chunk and a four-step
+   * ordered scalar tail, so the mixed schedule is executed rather than only
+   * compiled. The all-minimum corner sums 12 * 2^30 and saturates; the
+   * min-times-max corner is the largest negative sum, -12 * 32768 * 32767. */
+  for (int64_t i = 0; i < 24; ++i) {
+    a[i] = INT16_MIN;
+    b[i] = INT16_MIN;
+  }
+  failed |= check(_mlir_ciface_matmul2x12x2_q15_vector, a, b, 2, 12, 2, "mixed schedule saturate");
+  for (int64_t i = 0; i < 24; ++i)
+    b[i] = INT16_MAX;
+  failed |= check(_mlir_ciface_matmul2x12x2_q15_vector, a, b, 2, 12, 2, "mixed schedule opposite");
+
   for (int trial = 0; trial < kTrialCount; ++trial) {
     char label[32];
     for (int64_t i = 0; i < kMaxDim * kMaxDim; ++i) {
@@ -131,6 +145,8 @@ int main(void) {
     failed |= check(_mlir_ciface_matmul4x16x3_q15_vector, a, b, 4, 16, 3, label);
     snprintf(label, sizeof label, "inner trial %d", trial);
     failed |= check(_mlir_ciface_matmul1x64x1_q15_vector, a, b, 1, 64, 1, label);
+    snprintf(label, sizeof label, "mixed schedule trial %d", trial);
+    failed |= check(_mlir_ciface_matmul2x12x2_q15_vector, a, b, 2, 12, 2, label);
   }
   return failed;
 }

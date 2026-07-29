@@ -454,12 +454,15 @@ struct MatmulOpInterface
     auto elementType = cast<IntegerType>(lhsType.getElementType());
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
-    // Every full product magnitude is at most 2^30 and K is at most 64, so
-    // |sum| <= 64 * 2^30 = 2^36 < 2^39: the i40 wrapping accumulator never
-    // wraps and equals the exact K-sum of the tensor-form lowering. Wrap is
-    // deliberate — it is the exact-modulo reassociation class, so the
-    // horizontal Vector consumer may reassociate the reduction with no
-    // constant-coefficient or prefix-range proof.
+    // Two independent arguments meet here. Reassociation legality needs only
+    // the wrap overflow mode: exact-modulo accumulation is associative at any
+    // width, so the horizontal Vector consumer may reassociate with no
+    // constant-coefficient or prefix-range proof and no range assumption.
+    // The range bound is what ties the wrapped value to the CONTRACT: every
+    // full product magnitude is at most 2^30 and K is at most 64, so
+    // |sum| <= 64 * 2^30 = 2^36 < 2^39 and the i40 wrapping accumulator never
+    // actually wraps — its value equals the exact K-sum of the tensor-form
+    // lowering.
     ondrix::ondsp::AccType accumulatorType = getExactWrapAccumulator(context, /*width=*/40);
 
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
@@ -470,8 +473,13 @@ struct MatmulOpInterface
 
     // The columns of B have stride N and would be refused by the unit-stride
     // Vector legality gate. Pack B once into a transposed scratch buffer so
-    // both reduction operands are unit-stride rank-1 views. The pack is pure
-    // data movement and crosses no numeric boundary.
+    // the packed operand is a unit-stride rank-1 view; the pack is pure data
+    // movement and crosses no numeric boundary. The A-row view below inherits
+    // the layout of the incoming buffer, so it is unit-stride only under
+    // identity-layout function boundaries — under fully dynamic layouts the
+    // Vector legality gate refuses both views and the reduction stays in its
+    // ordered scalar form, which is a performance fallback, never a semantic
+    // change.
     auto packedType = MemRefType::get({columnCount, innerCount}, elementType);
     FailureOr<Value> packed = options.createAlloc(rewriter, loc, packedType, /*dynShape=*/{});
     if (failed(packed))
@@ -560,9 +568,11 @@ struct RmsOpInterface : public BufferizableOpInterface::ExternalModel<RmsOpInter
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
     // Squaring the input is one reduction whose two operands are the same
-    // buffer. Every square is at most 2^30 and N is at most 4096, so the sum
-    // is at most 2^42 < 2^63: the i64 wrapping accumulator never wraps and
-    // equals the exact sum of squares. An i40 accumulator would NOT suffice
+    // buffer. As with matmul, wrap alone authorizes reassociation; the range
+    // bound is what ties the wrapped value to the contract: every square is
+    // at most 2^30 and N is at most 4096, so the sum is at most 2^42 < 2^63
+    // and the i64 wrapping accumulator never actually wraps — it equals the
+    // exact sum of squares. An i40 accumulator would NOT suffice
     // (2^42 > 2^39), which is why this reduction needs the wider wrapping
     // accumulator admitted by the horizontal-domain predicate.
     ondrix::ondsp::AccType accumulatorType = getExactWrapAccumulator(context, /*width=*/64);

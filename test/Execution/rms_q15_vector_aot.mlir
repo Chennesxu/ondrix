@@ -20,13 +20,20 @@
 // No ondsp operation may survive the pipeline.
 // VECTOR-NOT: ondsp.
 
-// AVX2-LABEL: rms64_q15_vector:
+// The labels are anchored to line start so they cannot match the
+// `_mlir_ciface_...` interface thunk emitted for the same kernel. There is
+// deliberately no entry for rms2_q15_vector: at N = 2 the width-8 vector loop
+// is provably zero-trip, but the pipeline runs llc directly with no earlier
+// LLVM optimization pass, so the guarded and unreachable vector body is still
+// emitted. Its presence in the assembly would say nothing about the schedule
+// that actually executes, which is the pure ordered scalar tail.
+// AVX2-LABEL: {{^}}rms64_q15_vector:
 // AVX2: vpmulld
 // AVX2: vpaddq
-// AVX2-LABEL: rms64_floor_q15_vector:
+// AVX2-LABEL: {{^}}rms64_floor_q15_vector:
 // AVX2: vpmulld
 // AVX2: vpaddq
-// AVX2-LABEL: rms4096_q15_vector:
+// AVX2-LABEL: {{^}}rms4096_q15_vector:
 // AVX2: vpmulld
 // AVX2: vpaddq
 
@@ -56,5 +63,18 @@ func.func @rms4096_q15_vector(%input: tensor<4096xi16>) -> tensor<1xi16>
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
     rounding = #ondsp.rounding<nearest_even>
   } : (tensor<4096xi16>) -> tensor<1xi16>
+  return %result : tensor<1xi16>
+}
+
+// The other end of the schedule: at the smallest admitted extent the width-8
+// vector loop covers no iteration, so the executed reduction is entirely the
+// ordered scalar tail and the same contract must hold with no horizontal step
+// at all.
+func.func @rms2_q15_vector(%input: tensor<2xi16>) -> tensor<1xi16>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.rms %input {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<2xi16>) -> tensor<1xi16>
   return %result : tensor<1xi16>
 }

@@ -1,5 +1,6 @@
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" | FileCheck %s
-// RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fixed-memref-reduce="vector-width=4" --parallelize-ondsp-fixed-wrap-vector-reduce --normalize-ondsp-fixed-vector-reduce | FileCheck %s --check-prefix=FULL-VECTOR
+// RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fixed-memref-reduce="vector-width=4" --parallelize-ondsp-fixed-wrap-vector-reduce --normalize-ondsp-fixed-vector-reduce | FileCheck %s --check-prefix=FULL-VECTOR --implicit-check-not=ondsp.reduce_mac
+// RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries allow-return-allocs" --canonicalize --vectorize-ondsp-fixed-memref-reduce="vector-width=4" --parallelize-ondsp-fixed-wrap-vector-reduce --normalize-ondsp-fixed-vector-reduce | FileCheck %s --check-prefix=DYNAMIC-LAYOUT --implicit-check-not=vector.load --implicit-check-not=vector.reduction
 
 // The bufferized form squares the input with one reduction whose two operands
 // are the same buffer. Squares are at most 2^30 and N is at most 4096, so the
@@ -66,4 +67,20 @@ func.func @rms2_q15(%input: tensor<2xi16>) -> tensor<1xi16> {
 // FULL-VECTOR-LABEL: func.func @rms64_floor_q15
 // FULL-VECTOR: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
 // FULL-VECTOR-LABEL: func.func @rms2_q15
-// FULL-VECTOR-NOT: ondsp.reduce_mac
+
+// Unit stride is a precondition of the Vector path, not a property of the
+// interface: under the default fully dynamic function-boundary layout the
+// input buffer becomes strided<[?], offset: ?>, the legality gate refuses the
+// reduction, and the memref-form ondsp.reduce_mac survives all three Vector
+// passes untouched. That is an ordered scalar fallback, never a semantic
+// change.
+// DYNAMIC-LAYOUT-LABEL: func.func @rms64_q15(
+// DYNAMIC-LAYOUT-SAME: memref<64xi16, strided<[?], offset: ?>>
+// DYNAMIC-LAYOUT: ondsp.reduce_mac
+// DYNAMIC-LAYOUT: ondsp.acc_export {{.*}} frac = 24
+// DYNAMIC-LAYOUT: ondsp.sqrt_fixed
+// DYNAMIC-LAYOUT-LABEL: func.func @rms64_floor_q15(
+// DYNAMIC-LAYOUT: ondsp.reduce_mac
+// DYNAMIC-LAYOUT-LABEL: func.func @rms2_q15(
+// DYNAMIC-LAYOUT: ondsp.reduce_mac
+// DYNAMIC-LAYOUT-NOT: vector.reduction
