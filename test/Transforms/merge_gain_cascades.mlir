@@ -93,6 +93,144 @@ func.func @multi_use_not_merged(%input: tensor<8xi16>) -> (tensor<8xi16>, tensor
   return %negated, %halved : tensor<8xi16>, tensor<8xi16>
 }
 
+// ---------------------------------------------------------------------
+// The certificate is per tie rule, and the certified-mergeable constant
+// set genuinely DIFFERS between the two rules that ondrix.gain admits.
+// Each pair below is stated twice with identical constants and only the
+// declared rounding changed; the exhaustively pre-computed divergences are
+// recorded in the comments.
+// ---------------------------------------------------------------------
+
+// (-16384, 16384) -> -8192 is certified under nearest_even.
+// CHECK-LABEL: func.func @tie_rule_split_nearest_even
+// CHECK: = ondrix.gain %
+// CHECK-SAME: gain = -8192
+// CHECK-SAME: exhaustive_inputs = 65536
+// CHECK-SAME: inner_gain = -16384
+// CHECK-SAME: outer_gain = 16384
+// CHECK-NOT: = ondrix.gain %
+func.func @tie_rule_split_nearest_even(%input: tensor<8xi16>) -> tensor<8xi16> {
+  %negated = ondrix.gain %input {
+    gain = -16384 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  %halved = ondrix.gain %negated {
+    gain = 16384 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return %halved : tensor<8xi16>
+}
+
+// The same constants under ties-toward-positive are NOT mergeable: the
+// cascade and the merged -8192 diverge on 16384 of 65536 inputs, first at
+// v = -32765 (cascade 8192, merged 8191). Both gains survive.
+// CHECK-LABEL: func.func @tie_rule_split_ties_positive
+// CHECK: = ondrix.gain %
+// CHECK-SAME: gain = -16384
+// CHECK: = ondrix.gain %
+// CHECK-SAME: gain = 16384
+func.func @tie_rule_split_ties_positive(%input: tensor<8xi16>) -> tensor<8xi16> {
+  %negated = ondrix.gain %input {
+    gain = -16384 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  %halved = ondrix.gain %negated {
+    gain = 16384 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return %halved : tensor<8xi16>
+}
+
+// The mirror image: (-16384, -8192) -> 4096 is certified under
+// nearest_ties_positive.
+// CHECK-LABEL: func.func @tie_rule_mirror_ties_positive
+// CHECK: = ondrix.gain %
+// CHECK-SAME: gain = 4096
+// CHECK-SAME: exhaustive_inputs = 65536
+// CHECK-SAME: inner_gain = -16384
+// CHECK-SAME: outer_gain = -8192
+// CHECK-NOT: = ondrix.gain %
+func.func @tie_rule_mirror_ties_positive(%input: tensor<8xi16>) -> tensor<8xi16> {
+  %negated = ondrix.gain %input {
+    gain = -16384 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  %scaled = ondrix.gain %negated {
+    gain = -8192 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return %scaled : tensor<8xi16>
+}
+
+// Under nearest_even the same pair diverges on 8192 of 65536 inputs, first
+// at v = -32763 (cascade -4096, merged -4095), so nothing merges.
+// CHECK-LABEL: func.func @tie_rule_mirror_nearest_even
+// CHECK: = ondrix.gain %
+// CHECK-SAME: gain = -16384
+// CHECK: = ondrix.gain %
+// CHECK-SAME: gain = -8192
+func.func @tie_rule_mirror_nearest_even(%input: tensor<8xi16>) -> tensor<8xi16> {
+  %negated = ondrix.gain %input {
+    gain = -16384 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  %scaled = ondrix.gain %negated {
+    gain = -8192 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return %scaled : tensor<8xi16>
+}
+
+// Legality under one rule neither implies nor forbids legality under the
+// other: (-32768, -8192) -> 8192 is certified under BOTH.
+// CHECK-LABEL: func.func @tie_rule_agnostic_nearest_even
+// CHECK: = ondrix.gain %
+// CHECK-SAME: gain = 8192
+// CHECK-SAME: inner_gain = -32768
+// CHECK-SAME: outer_gain = -8192
+// CHECK-NOT: = ondrix.gain %
+func.func @tie_rule_agnostic_nearest_even(%input: tensor<8xi16>) -> tensor<8xi16> {
+  %inverted = ondrix.gain %input {
+    gain = -32768 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  %scaled = ondrix.gain %inverted {
+    gain = -8192 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return %scaled : tensor<8xi16>
+}
+
+// CHECK-LABEL: func.func @tie_rule_agnostic_ties_positive
+// CHECK: = ondrix.gain %
+// CHECK-SAME: gain = 8192
+// CHECK-SAME: inner_gain = -32768
+// CHECK-SAME: outer_gain = -8192
+// CHECK-NOT: = ondrix.gain %
+func.func @tie_rule_agnostic_ties_positive(%input: tensor<8xi16>) -> tensor<8xi16> {
+  %inverted = ondrix.gain %input {
+    gain = -32768 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  %scaled = ondrix.gain %inverted {
+    gain = -8192 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return %scaled : tensor<8xi16>
+}
+
 // Fixpoint with fail-closed tail: three halvings merge the inner pair
 // (certified 8192) but the certificate rejects folding the third stage
 // (8192 then 16384 is NOT 4096 — 8192 inputs diverge), so exactly two

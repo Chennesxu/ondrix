@@ -1881,11 +1881,14 @@ public:
     int64_t extent = op.getInput().getType().getDimSize(0);
     IntegerType i64 = rewriter.getIntegerType(64);
     // The product of two Q1.15 values is exact in i64; the single declared
-    // boundary is the nearest-even saturating requantization by 15. One
-    // elementwise loop instead of unrolled inserts: the operation admits
-    // extents up to 4096, where a long tensor.insert chain is quadratic in
-    // one-shot bufferization.
-    ondrix::ondsp::ScaleAttr scale = getNearestEvenSaturatingShift(rewriter.getContext(), 15);
+    // boundary is the saturating requantization by 15, under the tie rule
+    // the operation declares (the verifier admits nearest_even and
+    // nearest_ties_positive). One elementwise loop instead of unrolled
+    // inserts: the operation admits extents up to 4096, where a long
+    // tensor.insert chain is quadratic in one-shot bufferization.
+    auto scale = ondrix::ondsp::ScaleAttr::get(
+        rewriter.getContext(), /*preShiftLeft=*/0, /*postShiftRight=*/15, op.getRounding(),
+        ondrix::ondsp::OverflowMode::Saturate, rewriter.getI16Type());
     Value gain = rewriter.create<arith::ConstantIntOp>(loc, op.getGain(), 64);
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);

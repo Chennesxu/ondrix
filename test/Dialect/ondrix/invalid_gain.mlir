@@ -12,8 +12,9 @@ func.func @gain_out_of_range(%input: tensor<8xi16>) -> tensor<8xi16> {
 
 // -----
 
+// gain admits the two nearest tie rules; a directed mode is still refused.
 func.func @gain_wrong_rounding(%input: tensor<8xi16>) -> tensor<8xi16> {
-  // expected-error @below {{gain requires nearest_even rounding}}
+  // expected-error @below {{gain requires nearest_even or nearest_ties_positive rounding}}
   %result = ondrix.gain %input {
     gain = 16384 : i64,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,

@@ -910,12 +910,20 @@ def Ondrix_GainOp : Ondrix_Op<"gain", [Pure]> {
     Q1.15 constant `gain` in `[-32768, 32767]`, with per-element semantics:
 
     ```text
-    y[i] = saturate_i16(round_half_even(x[i] * gain / 2^15))
+    y[i] = saturate_i16(round(x[i] * gain / 2^15))
     ```
 
     The product is exact (`|x * gain| <= 2^30`) and the single explicit
-    boundary is the nearest-even requantization back to Q1.15; saturation
-    is declared and reachable only for `x = gain = -32768`.
+    boundary is the requantization back to Q1.15; saturation is declared
+    and reachable only for `x = gain = -32768`.
+
+    Two tie rules are admissible at that boundary, and the choice is part
+    of the contract: `nearest_even` (zero-biased) and
+    `nearest_ties_positive` (add-half-then-shift, ties toward +infinity).
+    They agree everywhere except on exact half-way products, and only
+    NEGATIVE ties separate them: with `gain = 3`, the raw input `-16384`
+    gives the product `-49152 = -1.5 ulp`, which `nearest_even` requantizes
+    to `-2` and `nearest_ties_positive` to `-1`.
 
     A cascade of two gain operations is in general a DIFFERENT program
     from one gain carrying the quantized product of the constants: with
@@ -924,7 +932,9 @@ def Ondrix_GainOp : Ondrix_Op<"gain", [Pure]> {
     inputs, and the two cascade orders even differ from each other. The
     opt-in `merge-ondrix-gain-cascades` pass therefore rewrites a cascade
     only under an exhaustive compile-time certificate that evaluates both
-    programs on all 65536 inputs and proves them bit-identical.
+    programs on all 65536 inputs and proves them bit-identical. That
+    certificate is per tie rule: the mergeable constant pairs genuinely
+    differ between `nearest_even` and `nearest_ties_positive`.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    I64Attr:$gain,

@@ -652,6 +652,20 @@ public:
         kernel.result.gain = *constant;
       else
         kernel.result.window = *constant;
+      if (isGain && current.kind == TokenKind::Comma) {
+        // The gain contract admits two tie rules at its single
+        // requantization boundary; omission keeps the nearest_even default.
+        // gain has exactly one boundary, so the parameter is the plain
+        // `rounding=` rather than a boundary-qualified spelling.
+        if (!expect(TokenKind::Comma, "expected ',' before rounding policy") ||
+            !expectIdentifier("rounding", "expected rounding policy") ||
+            !expect(TokenKind::Equal, "expected '=' after rounding"))
+          return std::nullopt;
+        auto rounding = parseIdentifier("expected rounding mode");
+        if (!rounding)
+          return std::nullopt;
+        kernel.result.rounding = rounding->spelling.str();
+      }
       if (!expect(TokenKind::RightParen,
                   llvm::Twine("expected ')' after ") + builtin + " expression"))
         return std::nullopt;
@@ -1062,6 +1076,8 @@ static std::optional<ondsp::RoundingMode> parseRounding(llvm::StringRef value) {
     return ondsp::RoundingMode::TowardZero;
   if (value == "nearest_even")
     return ondsp::RoundingMode::NearestEven;
+  if (value == "nearest_ties_positive")
+    return ondsp::RoundingMode::NearestTiesPositive;
   return std::nullopt;
 }
 
@@ -1844,15 +1860,20 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       }
     }
-    // Only the rms surface can declare a rounding mode in this branch, and
-    // its contract admits exactly the two root modes of ondrix.rms.
+    // Two surfaces in this branch declare a rounding mode, and each admits
+    // exactly the modes its operation contract admits: gain chooses between
+    // the two nearest tie rules at its single boundary, rms chooses the root
+    // boundary direction. Omission keeps the contract default.
     ondsp::RoundingMode rounding = ondsp::RoundingMode::NearestEven;
     if (!ast.result.rounding.empty()) {
+      bool isGain = ast.result.kind == ReductionKind::Gain;
+      ondsp::RoundingMode alternative =
+          isGain ? ondsp::RoundingMode::NearestTiesPositive : ondsp::RoundingMode::TowardNegative;
       std::optional<ondsp::RoundingMode> parsed = parseRounding(ast.result.rounding);
-      if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven &&
-                      *parsed != ondsp::RoundingMode::TowardNegative)) {
+      if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven && *parsed != alternative)) {
         diagnostics.error(ast.result.position,
-                          "rms root_rounding must be nearest_even or toward_negative");
+                          isGain ? "gain rounding must be nearest_even or nearest_ties_positive"
+                                 : "rms root_rounding must be nearest_even or toward_negative");
         return std::nullopt;
       }
       rounding = *parsed;

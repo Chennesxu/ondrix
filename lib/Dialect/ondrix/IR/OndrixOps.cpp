@@ -1060,8 +1060,10 @@ LogicalResult RmsOp::verify() {
 LogicalResult GainOp::verify() {
   if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
     return failure();
-  if (getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
-    return emitOpError("gain requires nearest_even rounding");
+  ondrix::ondsp::RoundingMode rounding = getRounding();
+  if (rounding != ondrix::ondsp::RoundingMode::NearestEven &&
+      rounding != ondrix::ondsp::RoundingMode::NearestTiesPositive)
+    return emitOpError("gain requires nearest_even or nearest_ties_positive rounding");
   int64_t gain = getGain();
   if (gain < -32768 || gain > 32767)
     return emitOpError("gain constant must be a raw signed Q1.15 value in [-32768, 32767]");

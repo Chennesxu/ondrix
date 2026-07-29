@@ -25,3 +25,17 @@ func.func @gain_negative_full_scale(%input: tensor<1xi16>) -> tensor<1xi16> {
   } : (tensor<1xi16>) -> tensor<1xi16>
   return %result : tensor<1xi16>
 }
+
+// The second admissible tie rule round-trips as a declared attribute.
+// CHECK-LABEL: func.func @gain_ties_positive
+// CHECK: ondrix.gain
+// CHECK-SAME: gain = 3
+// CHECK-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
+func.func @gain_ties_positive(%input: tensor<64xi16>) -> tensor<64xi16> {
+  %result = ondrix.gain %input {
+    gain = 3 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<64xi16>) -> tensor<64xi16>
+  return %result : tensor<64xi16>
+}

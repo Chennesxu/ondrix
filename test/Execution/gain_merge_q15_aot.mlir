@@ -26,6 +26,15 @@
 //     order diverges from the merge on 11418, and the two cascade orders
 //     even diverge from each other on 13556 — quantized gain cascades do
 //     not commute, let alone merge.
+//   * The two admissible tie rules are separate executable contracts. The
+//     same `gain = 3` compiled under nearest_even and under
+//     nearest_ties_positive must DISAGREE on the negative tie
+//     `-16384 * 3 = -49152 = -1.5 ulp` (-2 versus -1) and agree everywhere
+//     else, over the whole domain.
+//   * The cascade (-16384 then -8192) is certified only under
+//     nearest_ties_positive, where it merges to 4096; the object gate
+//     replays that certificate the same way the nearest_even one is
+//     replayed.
 
 // MERGED-LABEL: func.func @gain_cascade_certified
 // MERGED: = ondrix.gain %
@@ -38,6 +47,20 @@
 // MERGED-SAME: gain = 22938
 // MERGED: = ondrix.gain %
 // MERGED-SAME: gain = 19661
+
+// MERGED-LABEL: func.func @gain_cascade_ties_positive
+// MERGED: = ondrix.gain %
+// MERGED-SAME: gain = 4096
+// MERGED-SAME: exhaustive_inputs = 65536
+// MERGED-NOT: = ondrix.gain %
+
+// MERGED-LABEL: func.func @gain_scale_nearest_even
+// MERGED: = ondrix.gain %
+// MERGED-SAME: rounding = #ondsp.rounding<nearest_even>
+
+// MERGED-LABEL: func.func @gain_scale_ties_positive
+// MERGED: = ondrix.gain %
+// MERGED-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
 
 func.func @gain_cascade_certified(%input: tensor<4096xi16>) -> tensor<4096xi16>
     attributes {llvm.emit_c_interface} {
@@ -67,4 +90,43 @@ func.func @gain_cascade_witness(%input: tensor<4096xi16>) -> tensor<4096xi16>
     rounding = #ondsp.rounding<nearest_even>
   } : (tensor<4096xi16>) -> tensor<4096xi16>
   return %second : tensor<4096xi16>
+}
+
+// Certified only under the ties-toward-positive rule: the nearest_even
+// certificate for these same constants fails on 8192 inputs.
+func.func @gain_cascade_ties_positive(%input: tensor<4096xi16>) -> tensor<4096xi16>
+    attributes {llvm.emit_c_interface} {
+  %negated = ondrix.gain %input {
+    gain = -16384 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<4096xi16>) -> tensor<4096xi16>
+  %scaled = ondrix.gain %negated {
+    gain = -8192 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<4096xi16>) -> tensor<4096xi16>
+  return %scaled : tensor<4096xi16>
+}
+
+// One constant, two declared tie rules: gain = 3 puts every raw input whose
+// product is an exact half ulp on the boundary that separates the modes.
+func.func @gain_scale_nearest_even(%input: tensor<4096xi16>) -> tensor<4096xi16>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.gain %input {
+    gain = 3 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<4096xi16>) -> tensor<4096xi16>
+  return %result : tensor<4096xi16>
+}
+
+func.func @gain_scale_ties_positive(%input: tensor<4096xi16>) -> tensor<4096xi16>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.gain %input {
+    gain = 3 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<4096xi16>) -> tensor<4096xi16>
+  return %result : tensor<4096xi16>
 }
