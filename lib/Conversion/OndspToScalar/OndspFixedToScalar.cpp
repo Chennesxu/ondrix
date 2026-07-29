@@ -677,8 +677,21 @@ public:
     Value rounded =
         roundSignedRightShift(op.getLoc(), adaptor.getAcc(), shift, op.getRounding(), rewriter);
     auto destinationType = cast<IntegerType>(op.getDst().getStorage());
-    Value result =
-        narrowSignedValue(op.getLoc(), rounded, destinationType, op.getOverflow(), rewriter);
+    unsigned roundedWidth = getIntegerElementType(rounded.getType()).getWidth();
+    Value result;
+    if (destinationType.getWidth() > roundedWidth) {
+      // The destination is WIDER than the accumulator storage, which the
+      // i64/frac30 identity destination reaches from an i40 or i48
+      // accumulator. `narrowSignedValue` cannot serve this direction: its
+      // wrap branch would emit an illegal widening `arith.trunci` and its
+      // saturate branch would sign extend the destination bounds into a
+      // narrower comparison width. Widening sign extension is exactly
+      // value preserving, so both declared overflow modes are provably
+      // no-ops here and neither needs to be materialized.
+      result = rewriter.create<arith::ExtSIOp>(op.getLoc(), destinationType, rounded);
+    } else {
+      result = narrowSignedValue(op.getLoc(), rounded, destinationType, op.getOverflow(), rewriter);
+    }
     rewriter.replaceOp(op, result);
     return success();
   }

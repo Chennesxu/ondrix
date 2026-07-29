@@ -101,4 +101,69 @@ func.func @export_integer_reading(
   return %result : i32
 }
 
+// The identity i64/frac30 destination is also reachable from a NARROWER
+// frac30 accumulator. The shift is zero and the frac is unchanged, so the
+// only work is a widening sign extension, which is exactly value
+// preserving: both declared overflow modes are no-ops and neither a
+// truncation nor a clamp may appear.
+// CHECK-LABEL: func.func @export_widen_i40_wrap(
+// CHECK-SAME: %[[W40:.*]]: i40) -> i64
+// CHECK-NEXT: %[[W40_RESULT:.*]] = arith.extsi %[[W40]] : i40 to i64
+// CHECK-NEXT: return %[[W40_RESULT]] : i64
+func.func @export_widen_i40_wrap(
+    %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>)
+    -> i64 {
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i64, frac = 30>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<wrap>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>) -> i64
+  return %result : i64
+}
+
+// CHECK-LABEL: func.func @export_widen_i40_saturate(
+// CHECK-SAME: %[[S40:.*]]: i40) -> i64
+// CHECK-NEXT: %[[S40_RESULT:.*]] = arith.extsi %[[S40]] : i40 to i64
+// CHECK-NEXT: return %[[S40_RESULT]] : i64
+func.func @export_widen_i40_saturate(
+    %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>)
+    -> i64 {
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i64, frac = 30>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i64
+  return %result : i64
+}
+
+// CHECK-LABEL: func.func @export_widen_i48_wrap(
+// CHECK-SAME: %[[W48:.*]]: i48) -> i64
+// CHECK-NEXT: %[[W48_RESULT:.*]] = arith.extsi %[[W48]] : i48 to i64
+// CHECK-NEXT: return %[[W48_RESULT]] : i64
+func.func @export_widen_i48_wrap(
+    %acc: !ondsp.acc<storage = i48, frac = 30, signed, update_overflow = wrap>)
+    -> i64 {
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i64, frac = 30>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<wrap>
+  } : (!ondsp.acc<storage = i48, frac = 30, signed, update_overflow = wrap>) -> i64
+  return %result : i64
+}
+
+// CHECK-LABEL: func.func @export_widen_i48_saturate(
+// CHECK-SAME: %[[S48:.*]]: i48) -> i64
+// CHECK-NEXT: %[[S48_RESULT:.*]] = arith.extsi %[[S48]] : i48 to i64
+// CHECK-NEXT: return %[[S48_RESULT]] : i64
+func.func @export_widen_i48_saturate(
+    %acc: !ondsp.acc<storage = i48, frac = 30, signed, update_overflow = saturate>)
+    -> i64 {
+  %result = ondsp.acc_export %acc {
+    dst = #ondsp.fixed<signed, storage = i64, frac = 30>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (!ondsp.acc<storage = i48, frac = 30, signed, update_overflow = saturate>) -> i64
+  return %result : i64
+}
+
 // CHECK-NOT: ondsp.
