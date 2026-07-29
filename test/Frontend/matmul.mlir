@@ -1,0 +1,16 @@
+// RUN: ondrix-compile %S/Inputs/q15_matmul.ox | FileCheck %s
+// RUN: not ondrix-compile %S/Inputs/invalid_matmul_rank.ox 2>&1 | FileCheck %s --check-prefix=RANK
+// RUN: not ondrix-compile %S/Inputs/invalid_matmul_inner.ox 2>&1 | FileCheck %s --check-prefix=INNER
+// RUN: not ondrix-compile %S/Inputs/invalid_matmul_extent.ox 2>&1 | FileCheck %s --check-prefix=EXTENT
+
+// CHECK-LABEL: func.func @q15_matmul(
+// CHECK-SAME: %[[LHS:.*]]: tensor<4x8xi16>, %[[RHS:.*]]: tensor<8x3xi16>) -> tensor<4x3xi16>
+// CHECK: %[[PRODUCT:.*]] = ondrix.matmul %[[LHS]], %[[RHS]]
+// CHECK-SAME: numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+// CHECK-SAME: rounding = #ondsp.rounding<nearest_even>
+// CHECK-SAME: (tensor<4x8xi16>, tensor<8x3xi16>) -> tensor<4x3xi16>
+// CHECK: return %[[PRODUCT]] : tensor<4x3xi16>
+
+// RANK: invalid_matmul_rank.ox:2:10: error: matmul requires rank-2 tensors
+// INNER: invalid_matmul_inner.ox:2:10: error: matmul inner extents must match: lhs columns and rhs rows
+// EXTENT: invalid_matmul_extent.ox:2:10: error: matmul currently requires all extents in [1, 64]

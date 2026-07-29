@@ -220,7 +220,9 @@ enum class ReductionKind {
   Dct,
   MovingAverage,
   Gain,
-  Rms
+  Rms,
+  Matmul,
+  Lms
 };
 
 static bool isCfftKind(ReductionKind kind) {
@@ -292,6 +294,7 @@ struct BuiltinCallAst {
   int64_t factor = 0;
   int64_t window = 0;
   int64_t gain = 0;
+  int64_t stepSize = 0;
   SourcePosition position;
 };
 
@@ -418,13 +421,14 @@ public:
         !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft") &&
         !isIdentifier("rfft") && !isIdentifier("irfft") && !isIdentifier("magnitude") &&
         !isIdentifier("dct") && !isIdentifier("moving_average") && !isIdentifier("gain") &&
-        !isIdentifier("rms")) {
+        !isIdentifier("rms") && !isIdentifier("matmul") && !isIdentifier("lms")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
                         "convolution(...), correlation(...), butterfly(...), cfft(...), or "
                         "icfft(...), rfft(...), irfft(...), magnitude(...), dct(...), "
-                        "moving_average(...), gain(...), or rms(...) return expression");
+                        "moving_average(...), gain(...), rms(...), matmul(...), or lms(...) "
+                        "return expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -463,8 +467,12 @@ public:
       kernel.result.kind = ReductionKind::MovingAverage;
     else if (isIdentifier("gain"))
       kernel.result.kind = ReductionKind::Gain;
-    else
+    else if (isIdentifier("rms"))
       kernel.result.kind = ReductionKind::Rms;
+    else if (isIdentifier("matmul"))
+      kernel.result.kind = ReductionKind::Matmul;
+    else
+      kernel.result.kind = ReductionKind::Lms;
     kernel.result.position = current.position;
     advance();
     if (!expect(TokenKind::LeftParen, "expected '(' after builtin"))
@@ -518,6 +526,29 @@ public:
       if (!parseFixedSosPolicy(kernel.result) ||
           !expect(TokenKind::RightParen, "expected ')' after sos_df2_fixed expression"))
         return std::nullopt;
+      if (current.kind != TokenKind::Eof) {
+        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
+        return std::nullopt;
+      }
+      return kernel;
+    }
+    if (kernel.result.kind == ReductionKind::Lms) {
+      if (!expect(TokenKind::Comma, "expected ',' after lms input operand"))
+        return std::nullopt;
+      auto desired = parseIdentifier("expected lms desired operand");
+      if (!desired || !expect(TokenKind::Comma, "expected ',' after lms desired operand"))
+        return std::nullopt;
+      auto weights = parseIdentifier("expected lms weights operand");
+      if (!weights || !expect(TokenKind::Comma, "expected ',' before lms step size") ||
+          !expectIdentifier("step_size", "expected lms step size") ||
+          !expect(TokenKind::Equal, "expected '=' after step_size"))
+        return std::nullopt;
+      auto stepSize = parseSignedInteger("expected lms step size");
+      if (!stepSize || !expect(TokenKind::RightParen, "expected ')' after lms expression"))
+        return std::nullopt;
+      kernel.result.operands.emplace_back(desired->spelling.str(), desired->position);
+      kernel.result.operands.emplace_back(weights->spelling.str(), weights->position);
+      kernel.result.stepSize = *stepSize;
       if (current.kind != TokenKind::Eof) {
         diagnostics.error(current.position, "only one kernel is supported per file in this slice");
         return std::nullopt;
@@ -597,6 +628,15 @@ public:
       return std::nullopt;
     kernel.result.operands.emplace_back(rhs->spelling.str(), rhs->position);
 
+    if (kernel.result.kind == ReductionKind::Matmul) {
+      if (!expect(TokenKind::RightParen, "expected ')' after matmul expression"))
+        return std::nullopt;
+      if (current.kind != TokenKind::Eof) {
+        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
+        return std::nullopt;
+      }
+      return kernel;
+    }
     if (kernel.result.kind == ReductionKind::FirFilter) {
       if (!expect(TokenKind::Comma, "expected ',' before FIR boundary policy"))
         return std::nullopt;
@@ -1009,8 +1049,9 @@ static std::optional<llvm::StringRef> getParameterOperand(const BuiltinCallAst &
 }
 
 static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diagnostics) {
-  bool hasThreeOperands =
-      ast.result.kind == ReductionKind::Butterfly || ast.result.kind == ReductionKind::FirStream;
+  bool hasThreeOperands = ast.result.kind == ReductionKind::Butterfly ||
+                          ast.result.kind == ReductionKind::FirStream ||
+                          ast.result.kind == ReductionKind::Lms;
   bool hasFourOperands = ast.result.kind == ReductionKind::SosDf2Fixed;
   size_t expectedOperandCount = isUnaryKind(ast.result.kind) ? 1
                                 : hasFourOperands            ? 4
@@ -1037,8 +1078,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                       : isUnaryKind(ast.result.kind)
                           ? "unary DSP kernels require exactly one parameter"
                       : hasFourOperands  ? "sos_df2_fixed kernels require exactly four parameters"
-                      : hasThreeOperands ? "butterfly and fir_stream kernels require exactly three "
-                                           "parameters"
+                      : hasThreeOperands ? "butterfly, fir_stream, and lms kernels require exactly "
+                                           "three parameters"
                                          : "binary DSP kernels require exactly two parameters");
     return std::nullopt;
   }
@@ -1227,6 +1268,100 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     }
     return CheckedKernel{std::move(ast), *updateOverflow, *outputRounding, *outputOverflow,
                          std::nullopt,   *stateRounding,  *stateOverflow};
+  }
+  if (ast.result.kind == ReductionKind::Matmul) {
+    if (ast.results.size() != 1 || !ast.primaryResult().tensor ||
+        ast.primaryResult().type != SourceType::Q15 || !lhsParameter || !rhsParameter ||
+        constexprCount != 0 || llvm::any_of(ast.parameters, [](const ParameterAst &parameter) {
+          return !parameter.isTensor();
+        })) {
+      diagnostics.error(ast.result.position,
+                        "matmul requires two Q15 tensor parameters and one Q15 tensor result");
+      return std::nullopt;
+    }
+    if (!hasRank(lhsParameter->shape, 2) || !hasRank(rhsParameter->shape, 2) ||
+        !hasRank(ast.primaryResult().shape, 2)) {
+      diagnostics.error(ast.result.position, "matmul requires rank-2 tensors");
+      return std::nullopt;
+    }
+    if (llvm::any_of(lhsParameter->shape,
+                     [](std::optional<int64_t> extent) { return !extent.has_value(); }) ||
+        llvm::any_of(rhsParameter->shape,
+                     [](std::optional<int64_t> extent) { return !extent.has_value(); }) ||
+        llvm::any_of(ast.primaryResult().shape,
+                     [](std::optional<int64_t> extent) { return !extent.has_value(); })) {
+      diagnostics.error(ast.result.position, "matmul currently requires static extents");
+      return std::nullopt;
+    }
+    int64_t rows = *lhsParameter->shape[0];
+    int64_t inner = *lhsParameter->shape[1];
+    int64_t columns = *rhsParameter->shape[1];
+    if (*rhsParameter->shape[0] != inner) {
+      diagnostics.error(ast.result.position,
+                        "matmul inner extents must match: lhs columns and rhs rows");
+      return std::nullopt;
+    }
+    auto inRange = [](int64_t extent) { return extent >= 1 && extent <= 64; };
+    if (!inRange(rows) || !inRange(inner) || !inRange(columns)) {
+      diagnostics.error(ast.result.position, "matmul currently requires all extents in [1, 64]");
+      return std::nullopt;
+    }
+    if (*ast.primaryResult().shape[0] != rows || *ast.primaryResult().shape[1] != columns) {
+      diagnostics.error(ast.result.position, "matmul result shape must be lhs rows by rhs columns");
+      return std::nullopt;
+    }
+    return CheckedKernel{std::move(ast), std::nullopt, ondsp::RoundingMode::NearestEven,
+                         std::nullopt, std::nullopt};
+  }
+  if (ast.result.kind == ReductionKind::Lms) {
+    if (ast.results.size() != 2 || !ast.primaryResult().tensor || !ast.results[1].tensor ||
+        ast.primaryResult().type != SourceType::Q15 || !lhsParameter || !rhsParameter ||
+        !thirdParameter || constexprCount != 0 ||
+        llvm::any_of(ast.parameters,
+                     [](const ParameterAst &parameter) { return !parameter.isTensor(); })) {
+      diagnostics.error(ast.result.position,
+                        "lms requires three Q15 tensor parameters and two Q15 tensor results");
+      return std::nullopt;
+    }
+    if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
+        !hasRank(thirdParameter->shape, 1) || !hasRank(ast.primaryResult().shape, 1) ||
+        !hasRank(ast.results[1].shape, 1)) {
+      diagnostics.error(ast.result.position, "lms currently requires rank-1 tensors");
+      return std::nullopt;
+    }
+    const std::optional<int64_t> &inputExtent = getRankOneExtent(lhsParameter->shape);
+    const std::optional<int64_t> &desiredExtent = getRankOneExtent(rhsParameter->shape);
+    const std::optional<int64_t> &weightExtent = getRankOneExtent(thirdParameter->shape);
+    const std::optional<int64_t> &errorExtent = getRankOneExtent(ast.primaryResult().shape);
+    const std::optional<int64_t> &adaptedExtent = getRankOneExtent(ast.results[1].shape);
+    if (!inputExtent || !desiredExtent || !weightExtent || !errorExtent || !adaptedExtent) {
+      diagnostics.error(ast.result.position, "lms currently requires static extents");
+      return std::nullopt;
+    }
+    if (*inputExtent < 1 || *inputExtent > 4096) {
+      diagnostics.error(ast.result.position, "lms currently requires a sample extent in [1, 4096]");
+      return std::nullopt;
+    }
+    if (*desiredExtent != *inputExtent || *errorExtent != *inputExtent) {
+      diagnostics.error(ast.result.position, "lms input, desired, and error extents must match");
+      return std::nullopt;
+    }
+    if (*weightExtent < 1 || *weightExtent > 64) {
+      diagnostics.error(ast.result.position, "lms currently requires a weight extent in [1, 64]");
+      return std::nullopt;
+    }
+    if (*adaptedExtent != *weightExtent) {
+      diagnostics.error(ast.result.position,
+                        "lms adapted weights must have the initial weight extent");
+      return std::nullopt;
+    }
+    if (ast.result.stepSize < 0 || ast.result.stepSize > 32767) {
+      diagnostics.error(ast.result.position,
+                        "lms step size must be a raw signed Q1.15 value in [0, 32767]");
+      return std::nullopt;
+    }
+    return CheckedKernel{std::move(ast), std::nullopt, ondsp::RoundingMode::NearestEven,
+                         std::nullopt, std::nullopt};
   }
   if (llvm::any_of(ast.parameters,
                    [](const ParameterAst &parameter) {
@@ -1986,6 +2121,32 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         ondsp::OverflowModeAttr::get(&context, *kernel.destinationOverflow));
     builder.create<func::ReturnOp>(expressionLocation,
                                    ValueRange{stream.getOutput(), stream.getNextState()});
+    module->push_back(function);
+    if (failed(verify(*module)))
+      return {};
+    return module;
+  }
+
+  if (kernel.ast.result.kind == ReductionKind::Matmul) {
+    auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
+    auto rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
+    auto product = builder.create<ir::MatmulOp>(
+        expressionLocation, cast<RankedTensorType>(resultType), lhs, rhs, numeric, rounding);
+    builder.create<func::ReturnOp>(expressionLocation, product.getResult());
+    module->push_back(function);
+    if (failed(verify(*module)))
+      return {};
+    return module;
+  }
+  if (kernel.ast.result.kind == ReductionKind::Lms) {
+    Value weights = arguments.lookup(*getParameterOperand(kernel.ast.result, 2));
+    auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
+    auto rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
+    auto lms = builder.create<ir::LmsOp>(
+        expressionLocation, resultTypes[0], resultTypes[1], lhs, rhs, weights,
+        builder.getI64IntegerAttr(kernel.ast.result.stepSize), numeric, rounding);
+    builder.create<func::ReturnOp>(expressionLocation,
+                                   ValueRange{lms.getError(), lms.getAdapted()});
     module->push_back(function);
     if (failed(verify(*module)))
       return {};
