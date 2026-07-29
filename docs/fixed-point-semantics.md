@@ -245,6 +245,12 @@ scalar tail.
   apply lane updates in increasing order.
 - Wrapping reductions may horizontally reduce widened products because Ondsp
   classifies the reassociation as exact modulo the accumulator width.
+- The layering of reduction legality is deliberate: a scalar-result
+  `ondsp.reduce_mac` is not output-tileable, because tap partitions carry
+  serial accumulator state unless reassociation is independently proven.
+  Output-axis tiling therefore remains an Ondrix algorithm-layer
+  responsibility, while tap-axis legality remains an Ondsp numeric-layer
+  responsibility.
 - Memrefs without a statically known unit minor stride remain on the scalar
   path.
 - Q31 `high_raw` computes the exact signed i64 product before selecting the

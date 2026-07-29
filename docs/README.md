@@ -1,14 +1,21 @@
 # ondrix Documentation
 
 This directory contains public documentation for implemented or
-stable-candidate Ondrix behavior.
+stable-candidate Ondrix behavior, organized along the architecture axes
+rather than per operation:
 
-- [Current implementation status](status.md)
-- [Fixed-point semantics](fixed-point-semantics.md)
-- [Frontend semantic boundary](frontend-semantics.md)
-- [Experimental `.ox` frontend](frontend-language.md)
-- [Streaming FIR contract](streaming-fir.md)
-- [Full-output FIR contract](full-output-fir.md)
+- [Current implementation status](status.md) — the capability matrix; one
+  row per algorithm family with its evidence state.
+- [Fixed-point semantics](fixed-point-semantics.md) — the target-independent
+  Ondsp numeric model: products, accumulators, rounding, overflow, and
+  reduction legality.
+- [Experimental `.ox` frontend](frontend-language.md) — the source language
+  reference and the frontend semantic boundary and design rules.
 
-Internal plans, private target material, review notes, and task history are not
-part of this directory.
+The authoritative contract for each individual operation is its description
+in the dialect definition (`include/ondrix/Dialect/*/IR/*.td`), which lives
+next to the verifier that enforces it and is reviewed with the code. This
+directory documents only cross-cutting semantics.
+
+Internal plans, private target material, review notes, and task history are
+not part of this directory.

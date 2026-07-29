@@ -78,6 +78,12 @@ def Ondrix_FirFilterOp
     lowering emits dominating assertions as diagnostic guards, but those
     checks are not observable behavior of an otherwise dead pure operation.
 
+    Tensor SSA semantics define the aliasing contract: bufferization must
+    preserve read-only input and coefficient values when a destination
+    aliases their storage, using an out-of-place result or a dominating
+    snapshot as required. The bufferized descriptor convention is an
+    execution-test mechanism, not a stable source or C ABI.
+
     Fixed-point execution explicitly names the accumulator domain and export
     policy. Floating-point execution uses the policy in `numeric` and must not
     carry fixed-point accumulator or export attributes.
@@ -316,7 +322,10 @@ def Ondrix_FirStreamOp
     Fixed-point execution explicitly names the accumulator domain and export
     policy. Floating-point execution uses the policy in `numeric` and must not
     carry fixed-point accumulator or export attributes. Stream chunking does
-    not authorize reassociation of tap updates.
+    not authorize reassociation of tap updates. The next state retains the
+    source sample storage type and never passes through the output
+    requantization policy: history is a copy of input samples, not a derived
+    quantity.
   }];
   let arguments = (ins
       AnyRankedTensor:$input,
