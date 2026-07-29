@@ -56,8 +56,20 @@ bool isSupportedFixedHorizontalMacDomain(ondrix::ondsp::AccType accumulator,
                                          ondrix::ondsp::ProductAttr product) {
   if (!isSupportedFixedVectorMacDomain(accumulator, numeric, product))
     return false;
-  if (ondrix::ondsp::isSignedQ15(numeric))
-    return ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator);
+  if (ondrix::ondsp::isSignedQ15(numeric)) {
+    if (ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator))
+      return true;
+    // Exact-modulo reassociation legality is width independent up to the i64
+    // horizontal carrier: the lane terms are widened to i64 and summed by one
+    // `vector.reduction<add>`, and modular i64 addition preserves every low
+    // bit of any accumulator at most 64 bits wide. The i40 restriction above
+    // exists for the saturating prefix-proof path, which gates independently
+    // on Saturate update overflow in `planConstantSaturatingReduction` and
+    // therefore cannot be widened here. Keep saturating Q15 accumulators
+    // exactly as before; admit only wider wrapping ones.
+    return accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Wrap &&
+           accumulator.getStorage().cast<IntegerType>().getWidth() > 40;
+  }
   return true;
 }
 

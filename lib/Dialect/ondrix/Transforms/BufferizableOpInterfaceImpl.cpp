@@ -378,6 +378,219 @@ struct FirDecimateOpInterface
   }
 };
 
+/// Allocate the result buffer of a value-producing algorithm operation. The
+/// framework owns the escape/deallocation decision; the caller only fills the
+/// returned buffer.
+static FailureOr<Value> createProducedResultBuffer(RewriterBase &rewriter, Value tensorResult,
+                                                   const BufferizationOptions &options) {
+  auto tensorType = cast<RankedTensorType>(tensorResult.getType());
+  Location loc = tensorResult.getLoc();
+  bool dealloc = shouldDeallocateOpResult(cast<OpResult>(tensorResult), options);
+  FailureOr<Value> allocated = allocateTensorForShapedValue(rewriter, loc, tensorResult,
+                                                            /*escape=*/!dealloc, options,
+                                                            /*copy=*/false);
+  if (failed(allocated))
+    return failure();
+  auto memrefType = MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+  return rewriter.create<bufferization::ToMemrefOp>(loc, memrefType, *allocated).getResult();
+}
+
+/// Signed frac-30 wrapping accumulator of the requested width. Wrap is the
+/// exact-modulo reassociation class, so a reduction seeded at zero with a
+/// provably non-wrapping range is reassociable without a prefix proof.
+static ondrix::ondsp::AccType getExactWrapAccumulator(MLIRContext *context, unsigned width) {
+  return ondrix::ondsp::AccType::get(context, IntegerType::get(context, width), /*frac=*/30,
+                                     ondrix::ondsp::Signedness::Signed,
+                                     ondrix::ondsp::OverflowMode::Wrap);
+}
+
+/// Rank-reduced unit-stride view of one row of a rank-2 memref.
+static Value createUnitStrideRowView(OpBuilder &builder, Location loc, Value matrix, Value row,
+                                     int64_t length) {
+  SmallVector<OpFoldResult> offsets{row, builder.getIndexAttr(0)};
+  SmallVector<OpFoldResult> sizes{builder.getIndexAttr(1), builder.getIndexAttr(length)};
+  SmallVector<OpFoldResult> strides{builder.getIndexAttr(1), builder.getIndexAttr(1)};
+  auto viewType = cast<MemRefType>(memref::SubViewOp::inferRankReducedResultType(
+      {length}, cast<MemRefType>(matrix.getType()), offsets, sizes, strides));
+  return builder.create<memref::SubViewOp>(loc, viewType, matrix, offsets, sizes, strides);
+}
+
+struct MatmulOpInterface
+    : public BufferizableOpInterface::ExternalModel<MatmulOpInterface, MatmulOp> {
+  bool bufferizesToAllocation(Operation *, OpResult) const { return true; }
+
+  bool bufferizesToMemoryRead(Operation *, OpOperand &, const AnalysisState &) const {
+    return true;
+  }
+
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &, const AnalysisState &) const {
+    return false;
+  }
+
+  AliasingOpResultList getAliasingOpResults(Operation *, OpOperand &, const AnalysisState &) const {
+    return {};
+  }
+
+  LogicalResult bufferize(Operation *operation, RewriterBase &rewriter,
+                          const BufferizationOptions &options) const {
+    auto op = cast<MatmulOp>(operation);
+    FailureOr<Value> lhs = getBuffer(rewriter, op.getLhs(), options);
+    FailureOr<Value> rhs = getBuffer(rewriter, op.getRhs(), options);
+    if (failed(lhs) || failed(rhs))
+      return failure();
+
+    rewriter.setInsertionPoint(op);
+    Location loc = op.getLoc();
+    MLIRContext *context = rewriter.getContext();
+    FailureOr<Value> output = createProducedResultBuffer(rewriter, op.getResult(), options);
+    if (failed(output))
+      return failure();
+
+    RankedTensorType lhsType = op.getLhs().getType();
+    RankedTensorType rhsType = op.getRhs().getType();
+    int64_t rowCount = lhsType.getDimSize(0);
+    int64_t innerCount = lhsType.getDimSize(1);
+    int64_t columnCount = rhsType.getDimSize(1);
+    auto elementType = cast<IntegerType>(lhsType.getElementType());
+    auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
+    // Every full product magnitude is at most 2^30 and K is at most 64, so
+    // |sum| <= 64 * 2^30 = 2^36 < 2^39: the i40 wrapping accumulator never
+    // wraps and equals the exact K-sum of the tensor-form lowering. Wrap is
+    // deliberate — it is the exact-modulo reassociation class, so the
+    // horizontal Vector consumer may reassociate the reduction with no
+    // constant-coefficient or prefix-range proof.
+    ondrix::ondsp::AccType accumulatorType = getExactWrapAccumulator(context, /*width=*/40);
+
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value rows = rewriter.create<arith::ConstantIndexOp>(loc, rowCount);
+    Value inner = rewriter.create<arith::ConstantIndexOp>(loc, innerCount);
+    Value columns = rewriter.create<arith::ConstantIndexOp>(loc, columnCount);
+
+    // The columns of B have stride N and would be refused by the unit-stride
+    // Vector legality gate. Pack B once into a transposed scratch buffer so
+    // both reduction operands are unit-stride rank-1 views. The pack is pure
+    // data movement and crosses no numeric boundary.
+    auto packedType = MemRefType::get({columnCount, innerCount}, elementType);
+    FailureOr<Value> packed = options.createAlloc(rewriter, loc, packedType, /*dynShape=*/{});
+    if (failed(packed))
+      return failure();
+    rewriter.create<scf::ForOp>(
+        loc, zero, columns, one, ValueRange{},
+        [&](OpBuilder &builder, Location columnLoc, Value column, ValueRange) {
+          builder.create<scf::ForOp>(
+              columnLoc, zero, inner, one, ValueRange{},
+              [&](OpBuilder &innerBuilder, Location innerLoc, Value index, ValueRange) {
+                Value element =
+                    innerBuilder.create<memref::LoadOp>(innerLoc, *rhs, ValueRange{index, column});
+                innerBuilder.create<memref::StoreOp>(innerLoc, element, *packed,
+                                                     ValueRange{column, index});
+                innerBuilder.create<scf::YieldOp>(innerLoc);
+              });
+          builder.create<scf::YieldOp>(columnLoc);
+        });
+
+    rewriter.create<scf::ForOp>(
+        loc, zero, rows, one, ValueRange{},
+        [&](OpBuilder &builder, Location rowLoc, Value row, ValueRange) {
+          Value lhsRow = createUnitStrideRowView(builder, rowLoc, *lhs, row, innerCount);
+          builder.create<scf::ForOp>(
+              rowLoc, zero, columns, one, ValueRange{},
+              [&](OpBuilder &columnBuilder, Location columnLoc, Value column, ValueRange) {
+                Value packedRow =
+                    createUnitStrideRowView(columnBuilder, columnLoc, *packed, column, innerCount);
+                Value initial =
+                    columnBuilder.create<ondrix::ondsp::AccZeroOp>(columnLoc, accumulatorType);
+                Value reduced = columnBuilder.create<ondrix::ondsp::ReduceMacOp>(
+                    columnLoc, accumulatorType, initial, lhsRow, packedRow, numeric, product);
+                // Dividing the raw accumulator by 2^(30 - 15) with nearest-even
+                // rounding and saturating to i16 is exactly the `round_shift`
+                // boundary of the tensor-form lowering.
+                Value element = columnBuilder.create<ondrix::ondsp::AccExportOp>(
+                    columnLoc, elementType, reduced, numeric, op.getRounding(),
+                    ondrix::ondsp::OverflowMode::Saturate);
+                columnBuilder.create<memref::StoreOp>(columnLoc, element, *output,
+                                                      ValueRange{row, column});
+                columnBuilder.create<scf::YieldOp>(columnLoc);
+              });
+          builder.create<scf::YieldOp>(rowLoc);
+        });
+
+    if (failed(options.createDealloc(rewriter, loc, *packed)))
+      return failure();
+    replaceOpWithBufferizedValues(rewriter, op, *output);
+    return success();
+  }
+};
+
+struct RmsOpInterface : public BufferizableOpInterface::ExternalModel<RmsOpInterface, RmsOp> {
+  bool bufferizesToAllocation(Operation *, OpResult) const { return true; }
+
+  bool bufferizesToMemoryRead(Operation *, OpOperand &, const AnalysisState &) const {
+    return true;
+  }
+
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &, const AnalysisState &) const {
+    return false;
+  }
+
+  AliasingOpResultList getAliasingOpResults(Operation *, OpOperand &, const AnalysisState &) const {
+    return {};
+  }
+
+  LogicalResult bufferize(Operation *operation, RewriterBase &rewriter,
+                          const BufferizationOptions &options) const {
+    auto op = cast<RmsOp>(operation);
+    FailureOr<Value> input = getBuffer(rewriter, op.getInput(), options);
+    if (failed(input))
+      return failure();
+
+    rewriter.setInsertionPoint(op);
+    Location loc = op.getLoc();
+    MLIRContext *context = rewriter.getContext();
+    FailureOr<Value> output = createProducedResultBuffer(rewriter, op.getResult(), options);
+    if (failed(output))
+      return failure();
+
+    int64_t extent = op.getInput().getType().getDimSize(0);
+    unsigned meanShift = llvm::Log2_64(extent);
+    IntegerType i32 = rewriter.getIntegerType(32);
+    IntegerType i64 = rewriter.getIntegerType(64);
+    auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
+    // Squaring the input is one reduction whose two operands are the same
+    // buffer. Every square is at most 2^30 and N is at most 4096, so the sum
+    // is at most 2^42 < 2^63: the i64 wrapping accumulator never wraps and
+    // equals the exact sum of squares. An i40 accumulator would NOT suffice
+    // (2^42 > 2^39), which is why this reduction needs the wider wrapping
+    // accumulator admitted by the horizontal-domain predicate.
+    ondrix::ondsp::AccType accumulatorType = getExactWrapAccumulator(context, /*width=*/64);
+    Value initial = rewriter.create<ondrix::ondsp::AccZeroOp>(loc, accumulatorType);
+    Value reduced = rewriter.create<ondrix::ondsp::ReduceMacOp>(loc, accumulatorType, initial,
+                                                                *input, *input, numeric, product);
+    // Exporting to frac `30 - log2(N)` makes `acc_export` divide the raw
+    // accumulator by 2^(30 - (30 - log2 N)) = 2^log2(N), which is exactly the
+    // nearest-even saturating mean boundary of the tensor-form lowering. The
+    // destination frac is a shift-selection device: the exported raw integer
+    // is the same mean of squares, and its declared i32 saturation is
+    // unreachable because the mean is at most 2^30.
+    auto meanFormat = ondrix::ondsp::FixedAttr::get(context, ondrix::ondsp::Signedness::Signed, i32,
+                                                    /*frac=*/30 - meanShift);
+    Value mean = rewriter.create<ondrix::ondsp::AccExportOp>(
+        loc, i32, reduced, meanFormat, ondrix::ondsp::RoundingMode::NearestEven,
+        ondrix::ondsp::OverflowMode::Saturate);
+    Value meanWide = rewriter.create<arith::ExtSIOp>(loc, i64, mean);
+    Value root = rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, rewriter.getI16Type(), meanWide,
+                                                             op.getRoundingAttr());
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    rewriter.create<memref::StoreOp>(loc, root, *output, ValueRange{zero});
+
+    replaceOpWithBufferizedValues(rewriter, op, *output);
+    return success();
+  }
+};
+
 struct Conv1DOpInterface
     : public DstBufferizableOpInterfaceExternalModel<Conv1DOpInterface, Conv1DOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand, const AnalysisState &) const {
@@ -437,6 +650,8 @@ void registerBufferizableOpInterfaceExternalModels(DialectRegistry &registry) {
     FirFilterOp::attachInterface<FirFilterOpInterface>(*context);
     FirDecimateOp::attachInterface<FirDecimateOpInterface>(*context);
     Conv1DOp::attachInterface<Conv1DOpInterface>(*context);
+    MatmulOp::attachInterface<MatmulOpInterface>(*context);
+    RmsOp::attachInterface<RmsOpInterface>(*context);
 
     // Bufferization materializes these dialects even when the input module
     // contains only tensor-form Ondrix operations.
