@@ -146,3 +146,19 @@ func.func @window_kaiser_even() -> tensor<8xi16> {
   } : tensor<8xi16>
   return %window : tensor<8xi16>
 }
+
+func.func @window_kaiser_huge_denominator() -> tensor<4xi16> {
+  // A representable rational far inside (0, 50] whose 50 * beta_den
+  // product overflows i64: the bound check must accept it (the review
+  // witness for the guarded comparison). At beta = 1e-18 the window is
+  // 1.0 everywhere in binary64, so every entry saturates by convention.
+  // CHECK-LABEL: func.func @window_kaiser_huge_denominator
+  // CHECK: arith.constant
+  // CHECK-SAME: saturated = 4
+  // CHECK-SAME: dense<32767> : tensor<4xi16>
+  %window = ondrix.window_kaiser {
+    beta_num = 1 : i64, beta_den = 1000000000000000000 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<4xi16>
+  return %window : tensor<4xi16>
+}

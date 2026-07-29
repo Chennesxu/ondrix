@@ -221,6 +221,8 @@ enum class ReductionKind {
   MovingAverage,
   Gain,
   Rms,
+  Sine,
+  Cosine,
   Matmul,
   Lms
 };
@@ -239,7 +241,8 @@ static bool isFftComposableKind(ReductionKind kind) {
 
 static bool isUnaryTensorKind(ReductionKind kind) {
   return kind == ReductionKind::Dct || kind == ReductionKind::MovingAverage ||
-         kind == ReductionKind::Gain || kind == ReductionKind::Rms;
+         kind == ReductionKind::Gain || kind == ReductionKind::Rms || kind == ReductionKind::Sine ||
+         kind == ReductionKind::Cosine;
 }
 
 static bool isUnaryKind(ReductionKind kind) {
@@ -421,14 +424,15 @@ public:
         !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft") &&
         !isIdentifier("rfft") && !isIdentifier("irfft") && !isIdentifier("magnitude") &&
         !isIdentifier("dct") && !isIdentifier("moving_average") && !isIdentifier("gain") &&
-        !isIdentifier("rms") && !isIdentifier("matmul") && !isIdentifier("lms")) {
+        !isIdentifier("rms") && !isIdentifier("sine") && !isIdentifier("cosine") &&
+        !isIdentifier("matmul") && !isIdentifier("lms")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
                         "convolution(...), correlation(...), butterfly(...), cfft(...), or "
                         "icfft(...), rfft(...), irfft(...), magnitude(...), dct(...), "
-                        "moving_average(...), gain(...), rms(...), matmul(...), or lms(...) "
-                        "return expression");
+                        "moving_average(...), gain(...), rms(...), sine(...), cosine(...), "
+                        "matmul(...), or lms(...) return expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -469,6 +473,10 @@ public:
       kernel.result.kind = ReductionKind::Gain;
     else if (isIdentifier("rms"))
       kernel.result.kind = ReductionKind::Rms;
+    else if (isIdentifier("sine"))
+      kernel.result.kind = ReductionKind::Sine;
+    else if (isIdentifier("cosine"))
+      kernel.result.kind = ReductionKind::Cosine;
     else if (isIdentifier("matmul"))
       kernel.result.kind = ReductionKind::Matmul;
     else
@@ -586,8 +594,12 @@ public:
       }
       return kernel;
     }
-    if (kernel.result.kind == ReductionKind::Dct || kernel.result.kind == ReductionKind::Rms) {
-      llvm::StringRef builtin = kernel.result.kind == ReductionKind::Dct ? "dct" : "rms";
+    if (kernel.result.kind == ReductionKind::Dct || kernel.result.kind == ReductionKind::Rms ||
+        kernel.result.kind == ReductionKind::Sine || kernel.result.kind == ReductionKind::Cosine) {
+      llvm::StringRef builtin = kernel.result.kind == ReductionKind::Dct    ? "dct"
+                                : kernel.result.kind == ReductionKind::Rms  ? "rms"
+                                : kernel.result.kind == ReductionKind::Sine ? "sine"
+                                                                            : "cosine";
       if (!expect(TokenKind::RightParen, llvm::Twine("expected ')' after ") + builtin + " operand"))
         return std::nullopt;
       if (current.kind != TokenKind::Eof) {
@@ -1705,7 +1717,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     llvm::StringRef builtin = ast.result.kind == ReductionKind::Dct             ? "dct"
                               : ast.result.kind == ReductionKind::MovingAverage ? "moving_average"
                               : ast.result.kind == ReductionKind::Gain          ? "gain"
-                                                                                : "rms";
+                              : ast.result.kind == ReductionKind::Rms           ? "rms"
+                              : ast.result.kind == ReductionKind::Sine          ? "sine"
+                                                                                : "cosine";
     if (constexprCount != 0 || !ast.primaryResult().tensor ||
         ast.primaryResult().type != SourceType::Q15 || !lhsParameter || !lhsParameter->isTensor()) {
       diagnostics.error(ast.result.position,
@@ -1770,7 +1784,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         diagnostics.error(ast.result.position, "gain result extent must equal the input extent");
         return std::nullopt;
       }
-    } else {
+    } else if (ast.result.kind == ReductionKind::Rms) {
       if (*inputExtent < 2 || *inputExtent > 4096 || !llvm::isPowerOf2_64(*inputExtent)) {
         diagnostics.error(ast.result.position,
                           "rms currently requires a power-of-two input extent in [2, 4096]");
@@ -1778,6 +1792,18 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       if (*resultExtent != 1) {
         diagnostics.error(ast.result.position, "rms returns a single-element tensor");
+        return std::nullopt;
+      }
+    } else {
+      if (*inputExtent > 4096) {
+        diagnostics.error(ast.result.position,
+                          llvm::Twine(builtin) +
+                              " currently requires an input extent in [1, 4096]");
+        return std::nullopt;
+      }
+      if (*resultExtent != *inputExtent) {
+        diagnostics.error(ast.result.position,
+                          llvm::Twine(builtin) + " result extent must equal the input extent");
         return std::nullopt;
       }
     }
@@ -2054,6 +2080,10 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       result = builder.create<ir::GainOp>(expressionLocation, outputType, lhs,
                                           builder.getI64IntegerAttr(kernel.ast.result.gain),
                                           numeric, rounding);
+    } else if (kernel.ast.result.kind == ReductionKind::Sine) {
+      result = builder.create<ir::SineOp>(expressionLocation, outputType, lhs, numeric, rounding);
+    } else if (kernel.ast.result.kind == ReductionKind::Cosine) {
+      result = builder.create<ir::CosineOp>(expressionLocation, outputType, lhs, numeric, rounding);
     } else {
       result = builder.create<ir::RmsOp>(expressionLocation, outputType, lhs, numeric, rounding);
     }
