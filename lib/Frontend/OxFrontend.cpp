@@ -1081,7 +1081,8 @@ static std::optional<ondsp::RoundingMode> parseRounding(llvm::StringRef value) {
   return std::nullopt;
 }
 
-// The three tie rules every export-policy contract in the language already
+// The three established rounding modes (two directed, one tie-breaking)
+// every export-policy contract in the language already
 // covers. A newly declared dialect mode is opted into per builtin, together
 // with the operation contract and its differential evidence; it never
 // reaches a binding just because the enum grew a case.

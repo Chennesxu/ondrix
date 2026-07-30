@@ -686,8 +686,10 @@ public:
       // wrap branch would emit an illegal widening `arith.trunci` and its
       // saturate branch would sign extend the destination bounds into a
       // narrower comparison width. Widening sign extension is exactly
-      // value preserving, so both declared overflow modes are provably
-      // no-ops here and neither needs to be materialized.
+      // value preserving, so both destination export overflow modes are
+      // provably no-ops here and neither needs to be materialized. The
+      // accumulator's own update_overflow stays observable semantics; the
+      // widening merely materializes the already-updated state faithfully.
       result = rewriter.create<arith::ExtSIOp>(op.getLoc(), destinationType, rounded);
     } else {
       result = narrowSignedValue(op.getLoc(), rounded, destinationType, op.getOverflow(), rewriter);

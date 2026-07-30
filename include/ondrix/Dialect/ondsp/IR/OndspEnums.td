@@ -23,7 +23,9 @@ def Ondsp_ProductSelection
 // two nearest modes disagree on ordinary fractional inputs as well; it is
 // only the two NEAREST modes that agree everywhere except on exact halves:
 //
-//   nearest_even           ties go to the even quotient (zero-biased);
+//   nearest_even           ties go to the even quotient (no fixed one-sided
+//                          tie direction; aggregate bias depends on the
+//                          input distribution and any saturation);
 //   nearest_ties_positive  ties go toward +infinity, the add-half-then-shift
 //                          convention of common DSP hardware rounding
 //                          variants. One instance of this rule — signed i32

@@ -8,7 +8,8 @@
 // reference embedding mpmath-derived coefficient tables. The i64 sums are
 // exact and the single boundary per output is the nearest-even export to
 // the frac = 14 - log2(N) reading, whose saturation is provably
-// unreachable (|X[k]| <= 16383).
+// unreachable (X[k] stays in the contract range [-16384, 16383]; the ODS
+// description beside the verifier is the authority for that bound).
 
 func.func @dct8_q15(%input: tensor<8xi16>) -> tensor<8xi16>
     attributes {llvm.emit_c_interface} {

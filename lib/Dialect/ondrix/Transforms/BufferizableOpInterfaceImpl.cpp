@@ -640,31 +640,41 @@ static Value getOrCreateDctRowTable(RewriterBase &rewriter, Location loc, Module
   IntegerType elementType = rewriter.getI16Type();
   auto tableType = MemRefType::get({extent}, elementType);
   std::string symbol = ("__ondrix_dct" + Twine(extent) + "_row" + Twine(row)).str();
+  // The expected initializer is constructed before any symbol lookup: reuse
+  // is legal only when the existing global carries exactly the coefficients
+  // this row requires. The symbol name proves nothing — a pre-existing
+  // constant global of the right name, kind, and type but different contents
+  // would otherwise be silently consumed as coefficient data, and the
+  // prefix-range proof downstream would then correctly authorize a reduction
+  // over the WRONG table.
+  SmallVector<llvm::APInt> coefficients;
+  coefficients.reserve(extent);
+  for (int64_t column = 0; column < extent; ++column) {
+    // The caller checked complete admissibility before emitting any table.
+    int64_t coefficient = *ondrix::getDctCoefficientQ15(extent, row, column);
+    coefficients.emplace_back(elementType.getWidth(), static_cast<uint64_t>(coefficient),
+                              /*isSigned=*/true);
+  }
+  auto expectedInitializer =
+      DenseIntElementsAttr::get(RankedTensorType::get({extent}, elementType), coefficients);
   if (Operation *existing = SymbolTable::lookupSymbolIn(module, symbol)) {
-    // Reuse only a table this interface itself emitted: a same-named symbol
-    // of another kind, a mutable global, or one of a different type would be
-    // silently consumed as coefficient data otherwise. Anything else in the
+    // Reuse only a table indistinguishable from one this interface emits:
+    // a private constant memref.global of the exact type whose initializer
+    // equals the expected coefficients bit for bit. Anything else in the
     // reserved __ondrix_ namespace fails closed.
     auto global = dyn_cast<memref::GlobalOp>(existing);
-    if (global && global.getConstant() && global.getType() == tableType && global.getInitialValue())
+    if (global && global.getConstant() && global.getType() == tableType &&
+        SymbolTable::getSymbolVisibility(existing) == SymbolTable::Visibility::Private &&
+        global.getInitialValueAttr() == expectedInitializer)
       return rewriter.create<memref::GetGlobalOp>(loc, tableType, symbol);
     return nullptr;
   }
   {
-    SmallVector<llvm::APInt> coefficients;
-    coefficients.reserve(extent);
-    for (int64_t column = 0; column < extent; ++column) {
-      // The caller checked complete admissibility before emitting any table.
-      int64_t coefficient = *ondrix::getDctCoefficientQ15(extent, row, column);
-      coefficients.emplace_back(elementType.getWidth(), static_cast<uint64_t>(coefficient),
-                                /*isSigned=*/true);
-    }
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToStart(module.getBody());
-    rewriter.create<memref::GlobalOp>(
-        loc, symbol, rewriter.getStringAttr("private"), tableType,
-        DenseIntElementsAttr::get(RankedTensorType::get({extent}, elementType), coefficients),
-        /*constant=*/true, IntegerAttr());
+    rewriter.create<memref::GlobalOp>(loc, symbol, rewriter.getStringAttr("private"), tableType,
+                                      expectedInitializer,
+                                      /*constant=*/true, IntegerAttr());
   }
   return rewriter.create<memref::GetGlobalOp>(loc, tableType, symbol);
 }
@@ -751,7 +761,8 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
     for (int64_t k = 0; k < extent; ++k) {
       Value row = getOrCreateDctRowTable(rewriter, loc, module, extent, k);
       if (!row)
-        return op.emitOpError("a foreign symbol occupies the reserved DCT coefficient table name");
+        return op.emitOpError("a foreign symbol occupies the reserved DCT coefficient table name ")
+               << "or carries contents that differ from the required coefficients";
       Value initial = rewriter.create<ondrix::ondsp::AccZeroOp>(loc, accumulatorType);
       Value reduced = rewriter.create<ondrix::ondsp::ReduceMacOp>(loc, accumulatorType, initial,
                                                                   *input, row, numeric, product);

@@ -715,7 +715,7 @@ def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
     the `k = 0` cosine of one; a 50-digit sweep of all 5456 coefficients
     for the supported extents shows a worst tie margin of 0.0044 LSB, and
     the guard remains the fail-closed backstop). Products and the sum are
-    exact in i64 — `|sum| <= N * 2^30 < 2^36` — so the reduction has no
+    exact in i64 — `|sum| <= N * 32767 * 32768 <= 2^36 - 2^21` — so the reduction has no
     reachable intermediate overflow and its association is value-neutral;
     the single explicit boundary is the final nearest-even
     `ondsp.round_shift` by `16 + m`. The output reading is the
