@@ -31,9 +31,11 @@ def Ondsp_ProductSelection
 //                          variants. One instance of this rule — signed i32
 //                          input, shift 16, saturating signed i16 result —
 //                          has been validated bit-exactly against the
-//                          official ITU-T G.191 STL round routine over the
-//                          complete 2^32 input domain in a pinned-revision
-//                          local evidence run; no broader basic-operator
+//                          official ITU-T G.191 (05/2024) STL round routine
+//                          (openitu/STL tag v2024, src/basop/basop32.c,
+//                          SHA-256 6d1babb406677ae6c485cf3f33aa11e85c2007
+//                          735a3b49fca3fed12342b2d50b) over the complete
+//                          2^32 input domain; no broader basic-operator
 //                          compatibility is asserted, and every other
 //                          (width, shift, saturation) instance remains a
 //                          separate validation obligation;

@@ -28,6 +28,8 @@
 // PROVEN: vector.reduction <add>, {{.*}} : vector<8xi64> into i64
 // PROVEN-LABEL: func.func @dct32_q15_vector
 // PROVEN: vector.reduction <add>, {{.*}} : vector<8xi64> into i64
+// PROVEN-LABEL: func.func @dct64_q15_vector
+// PROVEN: vector.reduction <add>, {{.*}} : vector<8xi64> into i64
 
 // No ondsp operation may survive the pipeline.
 // VECTOR-NOT: ondsp.
@@ -37,6 +39,8 @@
 // AVX2-LABEL: {{^}}dct8_q15_vector:
 // AVX2: vpmulld
 // AVX2-LABEL: {{^}}dct32_q15_vector:
+// AVX2: vpmulld
+// AVX2-LABEL: {{^}}dct64_q15_vector:
 // AVX2: vpmulld
 
 // N = 8 is exactly one width-8 chunk per row: the reduction reassociates
@@ -59,4 +63,17 @@ func.func @dct32_q15_vector(%input: tensor<32xi16>) -> tensor<32xi16>
     output_numeric = #ondsp.fixed<signed, storage = i16, frac = 9>
   } : (tensor<32xi16>) -> tensor<32xi16>
   return %result : tensor<32xi16>
+}
+
+// N = 64 is the largest admitted extent: the maximal eight-chunk schedule,
+// the largest coefficient table, and the tightest prefix bound the proof
+// ever certifies — the DC row realizes sum |c| * 32768 = 2^36 - 2^21, the
+// worst case admitted against the i40 rail of 2^39.
+func.func @dct64_q15_vector(%input: tensor<64xi16>) -> tensor<64xi16>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.dct %input {
+    input_numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_numeric = #ondsp.fixed<signed, storage = i16, frac = 8>
+  } : (tensor<64xi16>) -> tensor<64xi16>
+  return %result : tensor<64xi16>
 }
