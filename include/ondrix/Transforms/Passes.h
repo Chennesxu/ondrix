@@ -23,6 +23,10 @@ std::unique_ptr<mlir::Pass> createDecomposeOndrixFirStreamPass();
 std::unique_ptr<mlir::Pass> createEvaluateOndrixFirDesignPass();
 std::unique_ptr<mlir::Pass> createMergeOndrixGainCascadesPass();
 
+std::unique_ptr<mlir::Pass> createFuseOndrixGainIntoFirPass();
+std::unique_ptr<mlir::Pass>
+createFuseOndrixGainIntoFirPass(const FuseOndrixGainIntoFirOptions &options);
+
 #define GEN_PASS_REGISTRATION
 #include "ondrix/Transforms/Passes.h.inc"
 

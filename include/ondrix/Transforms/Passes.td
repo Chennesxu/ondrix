@@ -132,4 +132,65 @@ def MergeOndrixGainCascades
   ];
 }
 
+def FuseOndrixGainIntoFir
+    : Pass<"fuse-ondrix-gain-into-fir", "::mlir::ModuleOp"> {
+  let summary = "Fuse a constant gain into constant FIR taps under a per-tap certificate";
+  let description = [{
+    Opt-in rewrite of `ondrix.fir_filter(ondrix.gain(x, g), h, init)` into the
+    same filter reading `x` directly with rewritten constant taps `h'`,
+    deleting the gain's per-element Q1.15 requantization boundary. Scaling a
+    filter's input by `g` and scaling its taps by `g` are the same operation in
+    real arithmetic; under the contract they are not, because the gain rounds
+    and saturates every sample before the taps ever see it.
+
+    Each candidate is therefore authorized only by an exhaustive per-tap
+    certificate. For every tap `i` and every one of the 65536 possible i16
+    values `x`, the exact products entering the accumulator must be identical:
+
+    ```text
+    applyGainQ15(x, g, rule) * h[i] == x * h'[i]
+    ```
+
+    When every tap certifies, the two programs push the identical ordered
+    sequence of accumulator terms for any input, so the rewrite is bit-exact
+    independently of accumulator width, update overflow policy, and export
+    policy — none of those can distinguish programs whose term sequences agree
+    term by term. Because a product selection is a deterministic function of
+    that exact product, the certificate covers `full` and `high_raw` alike.
+
+    The certificate is evaluated under the DECLARED tie rule and the pass
+    admits only the two rules `ondrix.gain` itself admits. A gain with more
+    than one use, non-constant or non-i16 taps, a mismatched numeric policy,
+    or a single failing tap leaves the whole filter untouched: the unfused
+    program is the safe state and no diagnostic is emitted. A fused filter
+    records the gain constant, the tie rule, and the certificate domain in an
+    `ondrix.gain_fusion_provenance` attribute.
+
+    The certified set is nearly empty, and that is the experimental result.
+    A nonzero tap forces `applyGainQ15(x, g, rule) = x * h'[i] / h[i]` for all
+    `x`, an exact linear identity that Q1.15 requantization satisfies for no
+    representable nonzero gain — the unit gain `2^15` is outside `[-32768,
+    32767]`. Even `g = -32768`, plain negation, fails: with `h' = -h` it agrees
+    on 65535 of 65536 inputs and diverges only at `x = -32768`, where the gain
+    saturates to 32767 instead of 32768. Exhaustive sweeps over the whole gain
+    domain confirm the only certifying candidates are the degenerate ones,
+    `g = 0` and all-zero taps, and that legality here does not depend on the
+    tie rule.
+
+    `record-refusals` is a diagnostic mode, off by default. It attaches an
+    `ondrix.gain_fusion_refusal` attribute — the first failing tap and its
+    first witness input with the two divergent exact products — to filters the
+    certificate rejects, without rewriting them.
+  }];
+  let constructor = "ondrix::createFuseOndrixGainIntoFirPass()";
+  let dependentDialects = [
+    "ondrix::ir::OndrixDialect",
+    "mlir::arith::ArithDialect",
+  ];
+  let options = [
+    Option<"recordRefusals", "record-refusals", "bool", /*default=*/"false",
+           "Attach the first failing tap and its witness input to refused filters">,
+  ];
+}
+
 #endif // ONDRIX_TRANSFORMS_PASSES

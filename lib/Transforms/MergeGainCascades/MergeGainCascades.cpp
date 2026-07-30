@@ -2,9 +2,9 @@
 
 #include "ondrix/Dialect/ondrix/IR/OndrixDialect.h"
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
+#include "ondrix/Support/GainQ15Contract.h"
 
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/Support/ErrorHandling.h"
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
@@ -20,57 +20,15 @@ using namespace mlir;
 
 namespace {
 
-// The tie rules ondrix.gain admits, and therefore the only ones this
-// certificate models. Anything else is refused before any arithmetic runs.
-bool isAdmittedGainRounding(ondrix::ondsp::RoundingMode mode) {
-  return mode == ondrix::ondsp::RoundingMode::NearestEven ||
-         mode == ondrix::ondsp::RoundingMode::NearestTiesPositive;
-}
-
-// The exact ondrix.gain contract for one element: exact integer product,
-// requantization by 15 in explicit floor-division form under the declared
-// tie rule, i16 saturation. The operation admits two tie rules and they are
-// not interchangeable here — the certificate below is only valid for the
-// rule it was evaluated under.
-int64_t applyGainQ15(int64_t value, int64_t gain, ondrix::ondsp::RoundingMode mode) {
-  int64_t product = value * gain;
-  int64_t quotient = product / 32768;
-  int64_t remainder = product % 32768;
-  if (remainder < 0) {
-    --quotient;
-    remainder += 32768;
-  }
-  switch (mode) {
-  case ondrix::ondsp::RoundingMode::NearestTiesPositive:
-    // Ties toward +infinity: every remainder of at least half steps up.
-    if (remainder >= 16384)
-      ++quotient;
-    break;
-  case ondrix::ondsp::RoundingMode::NearestEven:
-    if (remainder > 16384 || (remainder == 16384 && (quotient & 1)))
-      ++quotient;
-    break;
-  case ondrix::ondsp::RoundingMode::TowardNegative:
-  case ondrix::ondsp::RoundingMode::TowardZero:
-    // Unreachable: `isAdmittedGainRounding` gates every caller, so an
-    // unmodeled mode must abort rather than be silently reinterpreted as
-    // nearest_even and certify a rewrite the program never asked for.
-    llvm_unreachable("gain admits only the two nearest tie rules");
-  }
-  if (quotient > 32767)
-    return 32767;
-  if (quotient < -32768)
-    return -32768;
-  return quotient;
-}
-
-// The natural merged constant: the Q1.15 quantization of the exact rational
-// product g1*g2/2^15 under the same tie rule the cascade declares. This is
-// pure integer arithmetic (no binary64, no tie guard needed): applyGainQ15
-// on the exact integer product of the two constants.
-int64_t mergedGainQ15(int64_t inner, int64_t outer, ondrix::ondsp::RoundingMode mode) {
-  return applyGainQ15(inner, outer, mode);
-}
+// The contract arithmetic (`isAdmittedGainRounding`, `applyGainQ15`) and the
+// natural merged constant `quantizeQ15Product(g1, g2, rule)` — the Q1.15
+// quantization of the exact rational product g1*g2/2^15 under the same tie
+// rule the cascade declares — come from the shared gain contract header, so
+// this certificate and the gain-into-FIR fusion certificate provably judge
+// the same arithmetic.
+using ondrix::applyGainQ15;
+using ondrix::isAdmittedGainRounding;
+using ondrix::quantizeQ15Product;
 
 // Exhaustive equivalence certificate: the cascade (inner gain first, then
 // outer) and the single merged gain must be bit-identical on every one of
@@ -118,7 +76,7 @@ public:
         ondrix::ondsp::RoundingMode mode = outer.getRounding();
         if (!isAdmittedGainRounding(mode))
           continue;
-        int64_t merged = mergedGainQ15(inner.getGain(), outer.getGain(), mode);
+        int64_t merged = quantizeQ15Product(inner.getGain(), outer.getGain(), mode);
         if (!certifyMerge(inner.getGain(), outer.getGain(), merged, mode))
           continue;
 
