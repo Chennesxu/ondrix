@@ -1,6 +1,7 @@
 add_ondrix_library(OndrixConversionUtils
   ConversionLegality.cpp
   FixedPointDomainUtils.cpp
+  MemRefLayoutUtils.cpp
   ReductionUtils.cpp
   ValueTypeConversions.cpp
 

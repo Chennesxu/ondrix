@@ -1,6 +1,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/FunctionInterfaces.h"
 
 #include <limits>
 
@@ -123,6 +124,29 @@ FailureOr<DistributivePairingSemantics> classifyDistributiveProductPairing(Opera
   if (exactBeforeAccumulatorOverflow && accumulator.getUpdateOverflow() == OverflowMode::Wrap)
     legality = TransformLegality::getFixedWidthModulo();
   return DistributivePairingSemantics{*productSemantics, legality, exactBeforeAccumulatorOverflow};
+}
+
+void appendAccumulatorCandidateTypes(Operation *op, SmallVectorImpl<Type> &types) {
+  llvm::append_range(types, op->getOperandTypes());
+  llvm::append_range(types, op->getResultTypes());
+  if (auto function = dyn_cast<FunctionOpInterface>(op)) {
+    llvm::append_range(types, function.getArgumentTypes());
+    llvm::append_range(types, function.getResultTypes());
+  }
+  for (Region &region : op->getRegions())
+    for (Block &block : region)
+      llvm::append_range(types, block.getArgumentTypes());
+}
+
+AccType findRejectedAccumulator(Type type, llvm::function_ref<bool(AccType)> accepted) {
+  AccType rejected;
+  type.walk([&](AccType accumulator) {
+    if (accepted(accumulator))
+      return WalkResult::advance();
+    rejected = accumulator;
+    return WalkResult::interrupt();
+  });
+  return rejected;
 }
 
 bool isSingleLaneAccumulator(AccType accumulator) { return accumulator.getLanes() == 1; }

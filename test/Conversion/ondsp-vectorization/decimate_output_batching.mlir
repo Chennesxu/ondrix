@@ -1,6 +1,10 @@
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --cse --canonicalize > %t.ordered.mlir
 // RUN: ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-decimate-outputs="vector-width=8" | FileCheck %s
 // RUN: not ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-decimate-outputs="vector-width=1" 2>&1 | FileCheck %s --check-prefix=WIDTH
+// The width becomes the accumulator's unsigned lane count, so it is bounded
+// from above as well: an unchecked width could truncate on the way into the
+// type, and a multiple of 2^32 would truncate to zero lanes.
+// RUN: not ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-decimate-outputs="vector-width=4294967296" 2>&1 | FileCheck %s --check-prefix=WIDE
 
 // Vertical output batching: the lanes of the accumulator carry independent
 // outputs, each folding the same taps in the same increasing order into its own
@@ -13,6 +17,7 @@
 // and the untouched ordered loop covers 16..18.
 
 // WIDTH: vector-width must be greater than one
+// WIDE: vector-width must not exceed 4096
 
 // CHECK-LABEL: func.func @batch_static_factor_two
 // The batched loop steps by the vector width over the full blocks.

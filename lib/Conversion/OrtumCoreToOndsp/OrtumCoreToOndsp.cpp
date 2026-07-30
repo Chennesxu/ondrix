@@ -134,24 +134,12 @@ static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) 
 /// meanings silently.
 static LogicalResult verifySingleLaneOndspAccumulators(Operation *root) {
   WalkResult result = root->walk([](Operation *op) {
-    SmallVector<Type> types(op->getOperandTypes());
-    llvm::append_range(types, op->getResultTypes());
-    if (auto function = dyn_cast<func::FuncOp>(op)) {
-      llvm::append_range(types, function.getFunctionType().getInputs());
-      llvm::append_range(types, function.getFunctionType().getResults());
-    }
-    for (Region &region : op->getRegions())
-      for (Block &block : region)
-        llvm::append_range(types, block.getArgumentTypes());
+    SmallVector<Type> types;
+    ondrix::ondsp::appendAccumulatorCandidateTypes(op, types);
 
     for (Type type : types) {
-      ondrix::ondsp::AccType multiLane;
-      type.walk([&](ondrix::ondsp::AccType accumulator) {
-        if (ondrix::ondsp::isSingleLaneAccumulator(accumulator))
-          return WalkResult::advance();
-        multiLane = accumulator;
-        return WalkResult::interrupt();
-      });
+      ondrix::ondsp::AccType multiLane =
+          ondrix::ondsp::findRejectedAccumulator(type, ondrix::ondsp::isSingleLaneAccumulator);
       if (!multiLane)
         continue;
       op->emitOpError() << "multi-lane accumulator type " << multiLane

@@ -6,6 +6,9 @@
 
 #include "mlir/IR/Operation.h"
 
+#include "llvm/ADT/STLFunctionalExtras.h"
+#include "llvm/ADT/SmallVector.h"
+
 #include <optional>
 
 namespace ondrix::ondsp {
@@ -96,6 +99,18 @@ TransformLegality classifyZeroProductElimination(mlir::Attribute numeric);
 mlir::FailureOr<DistributivePairingSemantics>
 classifyDistributiveProductPairing(mlir::Operation *op, FixedAttr numeric, ProductAttr product,
                                    AccType accumulator);
+
+/// Collects every type an operation exposes to a consumer that must classify
+/// accumulators: operand, result, function signature, and block argument types.
+/// Both target conversions gather exactly this set, so they share it.
+void appendAccumulatorCandidateTypes(mlir::Operation *op, llvm::SmallVectorImpl<mlir::Type> &types);
+
+/// Returns the first accumulator nested anywhere in `type` that `accepted`
+/// rejects, or a null accumulator when every nested one is accepted. Consumers
+/// pass their own capability predicate instead of restating the nested walk,
+/// which is what keeps one conversion's notion of "supported" from drifting
+/// into another's.
+AccType findRejectedAccumulator(mlir::Type type, llvm::function_ref<bool(AccType)> accepted);
 
 /// Returns whether the accumulator declares exactly one lane. Multi-lane
 /// accumulators exist only for order-preserving cross-output batching and are

@@ -1,5 +1,6 @@
 #include "ondrix/Conversion/OndspVectorization/OndspVectorization.h"
 #include "ondrix/Conversion/Utils/FixedPointDomainUtils.h"
+#include "ondrix/Conversion/Utils/MemRefLayoutUtils.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
@@ -40,6 +41,11 @@ constexpr int64_t kSupportedFactor = 2;
 /// arbitrarily large body. A longer filter keeps the ordered schedule.
 constexpr int64_t kMaxUnrolledTaps = 256;
 
+/// Largest accepted batch width. It bounds the lane count the accumulator type
+/// receives and every span index derived from it, well below any width a target
+/// register file makes sense for.
+constexpr int64_t kMaxVectorWidth = 4096;
+
 /// Everything the matcher recovered from one bufferized decimation loop. The
 /// loop is only rewritten when every field is present and consistent, so the
 /// matcher never leaves a partially understood loop behind.
@@ -63,20 +69,12 @@ struct DecimateLoopShape {
   ondrix::ondsp::OverflowMode overflow = ondrix::ondsp::OverflowMode::Saturate;
 };
 
-bool hasDefaultVectorMemorySpace(MemRefType type) {
-  Attribute memorySpace = type.getMemorySpace();
-  if (!memorySpace)
-    return true;
-  auto integerSpace = dyn_cast<IntegerAttr>(memorySpace);
-  return integerSpace && integerSpace.getValue().isZero();
-}
-
 /// Rank-1 memref whose single dimension is contiguous and whose memory space
 /// the Vector to LLVM lowering accepts.
 bool isBatchableRankOneMemRef(Value value) {
   auto type = dyn_cast<MemRefType>(value.getType());
   return type && type.getRank() == 1 && isLastMemrefDimUnitStride(type) &&
-         hasDefaultVectorMemorySpace(type);
+         ondrix::conversion::hasDefaultLLVMVectorMemorySpace(type);
 }
 
 /// Skips the layout-erasing casts bufferization inserts between a producer and
@@ -88,13 +86,6 @@ Value lookThroughMemRefCasts(Value value) {
   return value;
 }
 
-std::optional<int64_t> getConstantIndex(Value value) {
-  APInt constant;
-  if (!matchPattern(value, m_ConstantInt(&constant)))
-    return std::nullopt;
-  return constant.getSExtValue();
-}
-
 /// Returns the multiplier when `value` is `iv * constant` in either operand
 /// order, and nothing otherwise.
 std::optional<int64_t> matchInductionVariableScale(Value value, Value inductionVariable) {
@@ -102,9 +93,9 @@ std::optional<int64_t> matchInductionVariableScale(Value value, Value inductionV
   if (!multiply)
     return std::nullopt;
   if (multiply.getLhs() == inductionVariable)
-    return getConstantIndex(multiply.getRhs());
+    return getConstantIntValue(multiply.getRhs());
   if (multiply.getRhs() == inductionVariable)
-    return getConstantIndex(multiply.getLhs());
+    return getConstantIntValue(multiply.getLhs());
   return std::nullopt;
 }
 
@@ -124,12 +115,12 @@ std::optional<int64_t> getStaticRankOneLength(Value value) {
 /// accumulator profile the per-lane arithmetic does not implement all fail
 /// closed, leaving the ordered loop untouched.
 FailureOr<DecimateLoopShape> matchDecimateLoop(scf::ForOp loop, int64_t vectorWidth) {
-  if (!loop.getInitArgs().empty() || loop->getNumResults() != 0)
+  if (!loop.getInitArgs().empty())
     return failure();
 
-  std::optional<int64_t> lowerBound = getConstantIndex(loop.getLowerBound());
-  std::optional<int64_t> upperBound = getConstantIndex(loop.getUpperBound());
-  std::optional<int64_t> step = getConstantIndex(loop.getStep());
+  std::optional<int64_t> lowerBound = getConstantIntValue(loop.getLowerBound());
+  std::optional<int64_t> upperBound = getConstantIntValue(loop.getUpperBound());
+  std::optional<int64_t> step = getConstantIntValue(loop.getStep());
   if (!lowerBound || !upperBound || !step || *lowerBound != 0 || *step != 1 || *upperBound <= 0)
     return failure();
 
@@ -189,9 +180,8 @@ FailureOr<DecimateLoopShape> matchDecimateLoop(scf::ForOp loop, int64_t vectorWi
     return failure();
 
   // The window must be a plain unit-stride rank-1 slice at offset `m * factor`.
-  if (window.getSource().getType().getRank() != 1 || window.getType().getRank() != 1 ||
-      window.getMixedOffsets().size() != 1 || window.getMixedSizes().size() != 1 ||
-      window.getMixedStrides().size() != 1)
+  if (window.getType().getRank() != 1 || window.getMixedOffsets().size() != 1 ||
+      window.getMixedSizes().size() != 1 || window.getMixedStrides().size() != 1)
     return failure();
   auto windowOffset = window.getMixedOffsets().front().dyn_cast<Value>();
   if (!windowOffset || windowOffset != offset.getResult())
@@ -228,6 +218,19 @@ FailureOr<DecimateLoopShape> matchDecimateLoop(scf::ForOp loop, int64_t vectorWi
   // memref it addresses must be defined outside the ordered body.
   if (shape.coefficients.getParentBlock() == &body || shape.input.getParentBlock() == &body ||
       shape.output.getParentBlock() == &body)
+    return failure();
+
+  // The rewrite moves the W stores of a block past all K tap loads of that
+  // block, so it is only sound when the three sequences are distinct storage.
+  // The ordered schedule makes output m visible to the window of output m + 1;
+  // the batched one does not, and the two then compute different values. Refuse
+  // every sharing that is statically decidable rather than case-splitting on
+  // which pair is the actual store-versus-load hazard. What remains — distinct
+  // block arguments that alias at run time — is not decidable here and is
+  // stated as a precondition on the pass instead.
+  if (ondrix::conversion::mayShareStorage(shape.input, shape.output) ||
+      ondrix::conversion::mayShareStorage(shape.coefficients, shape.output) ||
+      ondrix::conversion::mayShareStorage(shape.input, shape.coefficients))
     return failure();
 
   // The accumulator profile must be one the per-lane arithmetic implements, and
@@ -371,8 +374,13 @@ public:
       signalPassFailure();
       return;
     }
-    if (vectorWidth > std::numeric_limits<int64_t>::max() / (kSupportedFactor * 2)) {
-      getOperation().emitError("vector-width is too large to address a batched window");
+    // The width becomes the accumulator's lane count, which is an `unsigned`.
+    // Without an upper bound a width above the unsigned range would truncate on
+    // the way into the type, and a multiple of 2^32 would truncate to zero
+    // lanes — a value the type verifier rejects but the unchecked builder the
+    // rewrite uses does not see.
+    if (vectorWidth > kMaxVectorWidth) {
+      getOperation().emitError("vector-width must not exceed ") << kMaxVectorWidth;
       signalPassFailure();
       return;
     }

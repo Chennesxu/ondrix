@@ -119,17 +119,6 @@ static bool containsOndspAccumulator(Type type) {
       type, [](Type nested) { return isa<ondrix::ondsp::AccType>(nested); });
 }
 
-static ondrix::ondsp::AccType findUnsupportedAccumulator(Type type) {
-  ondrix::ondsp::AccType unsupported;
-  type.walk([&](ondrix::ondsp::AccType accumulator) {
-    if (isSupportedOrtumCoreAccumulator(accumulator))
-      return WalkResult::advance();
-    unsupported = accumulator;
-    return WalkResult::interrupt();
-  });
-  return unsupported;
-}
-
 static ondrix::ondsp::AccType findAccumulatorInAttribute(Attribute attribute) {
   ondrix::ondsp::AccType accumulator;
   attribute.walk([&](ondrix::ondsp::AccType type) {
@@ -141,18 +130,12 @@ static ondrix::ondsp::AccType findAccumulatorInAttribute(Attribute attribute) {
 
 static LogicalResult verifySupportedAccumulatorTypes(Operation *root) {
   WalkResult result = root->walk([&](Operation *op) {
-    SmallVector<Type> types(op->getOperandTypes());
-    llvm::append_range(types, op->getResultTypes());
-    if (auto function = dyn_cast<func::FuncOp>(op)) {
-      llvm::append_range(types, function.getFunctionType().getInputs());
-      llvm::append_range(types, function.getFunctionType().getResults());
-    }
-    for (Region &region : op->getRegions())
-      for (Block &block : region)
-        llvm::append_range(types, block.getArgumentTypes());
+    SmallVector<Type> types;
+    ondrix::ondsp::appendAccumulatorCandidateTypes(op, types);
 
     for (Type type : types) {
-      ondrix::ondsp::AccType unsupported = findUnsupportedAccumulator(type);
+      ondrix::ondsp::AccType unsupported =
+          ondrix::ondsp::findRejectedAccumulator(type, isSupportedOrtumCoreAccumulator);
       if (!unsupported)
         continue;
       op->emitOpError() << "unsupported accumulator type " << unsupported

@@ -341,6 +341,25 @@ def VectorizeOndspFixedDecimateOutputs
     `factor * vector-width` elements and one even-lane shuffle, which is what
     a factor of two makes exact. The block containing the final output stays
     on the ordered loop so that contiguous load never reads past the input.
+
+    Aliasing is a real precondition, not an aside. The rewrite defers a
+    block's stores past all of that block's tap loads, so an output that
+    shares storage with the input or the coefficients would be read at a
+    different time than the ordered schedule reads it, and the two schedules
+    would compute different values. The pass refuses every sharing it can
+    decide: it resolves each operand through casts, subviews, and the other
+    view-like operations to the storage it views, and declines whenever two
+    of them reach the same base or read the same global.
+
+    What that cannot decide is distinct block arguments that alias at run
+    time. This shape reaches the pass from `one-shot-bufferize` with
+    `bufferize-function-boundaries`, whose function-boundary ABI passes the
+    input, the coefficients, and the destination-style output as separate
+    memref arguments and does not promise they are disjoint. Callers of such
+    a function own that disjointness, exactly as they already own it for the
+    ordered lowering's own destination-style aliasing rules; this pass adds
+    the further requirement that the output be disjoint from the input, which
+    the ordered schedule tolerates and the batched one does not.
   }];
   let constructor = "ondrix::createVectorizeOndspFixedDecimateOutputsPass()";
   let dependentDialects = [
