@@ -4,6 +4,7 @@
 
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
+#include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreDialect.h"
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreOps.h"
@@ -126,6 +127,42 @@ static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) 
                                                                  isOrtumCoreAttribute);
 }
 
+/// Ondsp operations stay legal in this pass, so a multi-lane accumulator
+/// already present in the module would pass through untouched next to
+/// emulated single-lane target accumulators. The emulation profile has no
+/// multi-lane form, so reject the whole module instead of mixing the two lane
+/// meanings silently.
+static LogicalResult verifySingleLaneOndspAccumulators(Operation *root) {
+  WalkResult result = root->walk([](Operation *op) {
+    SmallVector<Type> types(op->getOperandTypes());
+    llvm::append_range(types, op->getResultTypes());
+    if (auto function = dyn_cast<func::FuncOp>(op)) {
+      llvm::append_range(types, function.getFunctionType().getInputs());
+      llvm::append_range(types, function.getFunctionType().getResults());
+    }
+    for (Region &region : op->getRegions())
+      for (Block &block : region)
+        llvm::append_range(types, block.getArgumentTypes());
+
+    for (Type type : types) {
+      ondrix::ondsp::AccType multiLane;
+      type.walk([&](ondrix::ondsp::AccType accumulator) {
+        if (ondrix::ondsp::isSingleLaneAccumulator(accumulator))
+          return WalkResult::advance();
+        multiLane = accumulator;
+        return WalkResult::interrupt();
+      });
+      if (!multiLane)
+        continue;
+      op->emitOpError() << "multi-lane accumulator type " << multiLane
+                        << " has no OrtumCore emulation profile";
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return failure(result.wasInterrupted());
+}
+
 class AccInitOpLowering final : public OpConversionPattern<ondrix::ortumcore::AccInitOp> {
 public:
   using OpConversionPattern<ondrix::ortumcore::AccInitOp>::OpConversionPattern;
@@ -174,7 +211,8 @@ public:
       ConvertOrtumCoreToOndspEmulationPass>::ConvertOrtumCoreToOndspEmulationBase;
 
   void runOnOperation() override {
-    if (failed(verifySourceArtifactUsage(getOperation()))) {
+    if (failed(verifySourceArtifactUsage(getOperation())) ||
+        failed(verifySingleLaneOndspAccumulators(getOperation()))) {
       signalPassFailure();
       return;
     }

@@ -25,6 +25,9 @@ std::unique_ptr<mlir::Pass> createVerifyOndspConstantReassociationProofTracePass
 std::unique_ptr<mlir::Pass> createVectorizeOndspFixedMemRefReducePass();
 std::unique_ptr<mlir::Pass>
 createVectorizeOndspFixedMemRefReducePass(const VectorizeOndspFixedMemRefReduceOptions &options);
+std::unique_ptr<mlir::Pass> createVectorizeOndspFixedDecimateOutputsPass();
+std::unique_ptr<mlir::Pass> createVectorizeOndspFixedDecimateOutputsPass(
+    const VectorizeOndspFixedDecimateOutputsOptions &options);
 
 #define GEN_PASS_REGISTRATION
 #include "ondrix/Conversion/Passes.h.inc"

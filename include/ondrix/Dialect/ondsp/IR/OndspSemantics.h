@@ -97,6 +97,13 @@ mlir::FailureOr<DistributivePairingSemantics>
 classifyDistributiveProductPairing(mlir::Operation *op, FixedAttr numeric, ProductAttr product,
                                    AccType accumulator);
 
+/// Returns whether the accumulator declares exactly one lane. Multi-lane
+/// accumulators exist only for order-preserving cross-output batching and are
+/// accepted by `acc_zero`, `mac`, and `acc_export` alone. Every other
+/// accumulator consumer calls this and fails closed, so adding the lane
+/// parameter cannot silently widen an existing presence-only check.
+bool isSingleLaneAccumulator(AccType accumulator);
+
 /// Returns whether a policy denotes signed Q15 in signless i16 storage.
 bool isSignedQ15(FixedAttr numeric);
 

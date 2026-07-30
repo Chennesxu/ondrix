@@ -51,6 +51,11 @@ getProductDomain(Operation *op, ondrix::ondsp::FixedAttr numeric,
 // The parameterless target type admits only this accumulator representation.
 // Product semantics remain operation-specific legalization rules.
 static bool isSupportedOrtumCoreAccumulator(ondrix::ondsp::AccType accumulator) {
+  // The target accumulator domain has no lane count, so a lane count greater
+  // than one would be silently dropped on the way to the parameterless target
+  // type. Refuse it before the domain comparison rather than after.
+  if (!ondrix::ondsp::isSingleLaneAccumulator(accumulator))
+    return false;
   return ondrix::ortumcore::OrtumCoreTargetProfile().supportsAccumulator(
       getAccumulatorDomain(accumulator));
 }

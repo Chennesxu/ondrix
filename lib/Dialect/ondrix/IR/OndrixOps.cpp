@@ -66,6 +66,12 @@ static LogicalResult verifyFixedReductionResult(Operation *op, Type resultType,
   auto accumulator = dyn_cast<ondrix::ondsp::AccType>(resultType);
   if (!accumulator)
     return op->emitOpError("fixed reduction result must use !ondsp.acc");
+  // Algorithm intent never declares a lane count: batching across outputs is a
+  // lowering decision an explicit pass makes, so a multi-lane accumulator in
+  // the intent attribute would be an unproven claim about the schedule.
+  if (!ondrix::ondsp::isSingleLaneAccumulator(accumulator))
+    return op->emitOpError("algorithm accumulator must be single-lane; lane batching is a lowering "
+                           "decision, not part of the algorithm contract");
   if (accumulator.getSignedness() != numeric.getSignedness())
     return op->emitOpError("accumulator signedness must match fixed numeric policy");
   FailureOr<ondrix::ondsp::ProductSemantics> semantics =
@@ -618,6 +624,9 @@ static LogicalResult verifySosFilterDf2FixedDomain(SosFilterDf2FixedOp op) {
     return op.emitOpError("supports only exact full products");
 
   ondrix::ondsp::AccType accumulator = op.getAccumulator();
+  if (!ondrix::ondsp::isSingleLaneAccumulator(accumulator))
+    return op.emitOpError("algorithm accumulator must be single-lane; lane batching is a lowering "
+                          "decision, not part of the algorithm contract");
   bool isQ15 = ondrix::ondsp::isSignedQ15(numeric) &&
                ondrix::ondsp::isSignedI40Frac30Accumulator(accumulator);
   bool isQ31 = ondrix::ondsp::isSignedQ31(numeric) &&

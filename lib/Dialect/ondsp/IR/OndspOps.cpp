@@ -112,12 +112,67 @@ static StringRef getProductName(ProductAttr product) {
   return "unsupported";
 }
 
+/// Rejects a multi-lane accumulator on a consumer that has no per-lane
+/// meaning. The lane parameter defaults to one, so without this check every
+/// existing "is it an accumulator?" test would silently accept W independent
+/// accumulators as if they were a single one.
+static LogicalResult verifySingleLaneAccumulator(Operation *op, AccType accumulator,
+                                                 StringRef consumer) {
+  if (isSingleLaneAccumulator(accumulator))
+    return success();
+  return op->emitOpError() << consumer
+                           << " requires a single-lane accumulator; lanes > 1 is accepted only by "
+                              "acc_zero, mac, and acc_export";
+}
+
+/// Returns the lane count of a value in the accumulator's lane domain: the
+/// element count for a fixed-length rank-1 vector, and nothing for any other
+/// shape. A scalar has no lane count of its own; it is the single-lane form.
+static std::optional<int64_t> getVectorLaneCount(Type type) {
+  auto vector = dyn_cast<VectorType>(type);
+  if (!vector || vector.isScalable() || vector.getRank() != 1)
+    return std::nullopt;
+  return vector.getNumElements();
+}
+
+/// Verifies that a value operand or result carries exactly one element per
+/// accumulator lane. A single-lane accumulator requires a scalar rather than a
+/// one-element vector: the two would denote the same values but only the scalar
+/// form is the one every existing consumer lowers, so admitting the vector form
+/// would create a shape no lowering handles.
+static LogicalResult verifyLaneDomain(Operation *op, Type type, AccType accumulator,
+                                      StringRef valueName) {
+  if (isSingleLaneAccumulator(accumulator)) {
+    if (!isa<IntegerType>(type))
+      return op->emitOpError() << valueName
+                               << " must be a scalar value for a single-lane accumulator";
+    return success();
+  }
+  std::optional<int64_t> lanes = getVectorLaneCount(type);
+  if (!lanes)
+    return op->emitOpError() << valueName
+                             << " must be a fixed-length rank-1 vector value for a multi-lane "
+                                "accumulator";
+  if (*lanes != static_cast<int64_t>(accumulator.getLanes()))
+    return op->emitOpError() << valueName << " lane count " << *lanes
+                             << " does not match accumulator lanes " << accumulator.getLanes();
+  return success();
+}
+
 static LogicalResult verifyMacLike(Operation *op, Value acc, Value lhs, Value rhs,
                                    FixedAttr numeric, ProductAttr product) {
   if (failed(verifyFixedStorageOperands(op, numeric, lhs, rhs)))
     return failure();
 
   auto accumulator = acc.getType().cast<AccType>();
+  // The coefficient stays scalar in every lane profile: the splat is declared
+  // semantics, not a lowering detail, so a vector coefficient is a different
+  // operation rather than a wider form of this one.
+  if (!isa<IntegerType>(rhs.getType()))
+    return op->emitOpError("coefficient must be a scalar value");
+  if (failed(verifyLaneDomain(op, lhs.getType(), accumulator, "value")))
+    return failure();
+
   if (accumulator.getSignedness() != numeric.getSignedness())
     return op->emitOpError("accumulator signedness must match the fixed numeric policy");
 
@@ -264,6 +319,8 @@ LogicalResult SatSubShiftOp::verify() {
 LogicalResult AccImportOp::verify() {
   FixedAttr source = getSrc();
   AccType accumulator = getAcc().getType();
+  if (failed(verifySingleLaneAccumulator(*this, accumulator, "acc_import")))
+    return failure();
   if (getInput().getType() != source.getStorage())
     return emitOpError("input type must match source storage type");
   if (accumulator.getSignedness() != source.getSignedness())
@@ -286,12 +343,16 @@ LogicalResult MacOp::verify() {
 }
 
 LogicalResult MacSubOp::verify() {
+  if (failed(verifySingleLaneAccumulator(*this, getAcc().getType(), "mac_sub")))
+    return failure();
   return verifyMacLike(*this, getAcc(), getLhs(), getRhs(), getNumeric(), getProduct());
 }
 
 LogicalResult AccAddTermOp::verify() {
   AccType accumulator = getAcc().getType();
   FixedAttr termNumeric = getTermNumeric();
+  if (failed(verifySingleLaneAccumulator(*this, accumulator, "acc_add_term")))
+    return failure();
   if (getTerm().getType() != termNumeric.getStorage())
     return emitOpError("term type must match term numeric storage type");
   if (accumulator.getSignedness() != termNumeric.getSignedness())
@@ -308,9 +369,9 @@ LogicalResult AccExportOp::verify() {
     return emitOpError("accumulator and destination signedness must match");
   if (accumulator.getFrac() < destination.getFrac())
     return emitOpError("destination frac must not exceed accumulator frac");
-  if (getResult().getType() != destination.getStorage())
+  if (ondrix::getElementTypeOrSelf(getResult().getType()) != destination.getStorage())
     return emitOpError("result type must match destination storage type");
-  return success();
+  return verifyLaneDomain(*this, getResult().getType(), accumulator, "result");
 }
 
 LogicalResult ReduceMacOp::verify() {
@@ -323,7 +384,23 @@ LogicalResult ReduceMacOp::verify() {
     auto accumulator = dyn_cast<AccType>(getInitial().getType());
     if (!accumulator)
       return emitOpError("fixed reduce_mac initial and result must use !ondsp.acc");
-    return verifyMacLike(*this, getInitial(), getLhs(), getRhs(), fixed, *getProduct());
+    if (failed(verifySingleLaneAccumulator(*this, accumulator, "reduce_mac")))
+      return failure();
+    // `verifyMacLike` reads the operands as one value plus one scalar
+    // coefficient; a reduction pairs two sequences instead, so only the policy
+    // half of that check applies here.
+    if (failed(verifyFixedStorageOperands(*this, fixed, getLhs(), getRhs())))
+      return failure();
+    if (accumulator.getSignedness() != fixed.getSignedness())
+      return emitOpError("accumulator signedness must match the fixed numeric policy");
+    FailureOr<ProductSemantics> semantics = inferProductSemantics(*this, fixed, *getProduct());
+    if (failed(semantics))
+      return failure();
+    if (accumulator.getFrac() != semantics->frac)
+      return emitOpError() << "accumulator frac " << accumulator.getFrac()
+                           << " does not match expected frac " << semantics->frac << " for "
+                           << getProductName(*getProduct()) << " product";
+    return success();
   }
   if (failed(verifyValueNumericType(*this, getLhs().getType(), getNumeric(), "lhs")) ||
       failed(verifyValueNumericType(*this, getRhs().getType(), getNumeric(), "rhs")))

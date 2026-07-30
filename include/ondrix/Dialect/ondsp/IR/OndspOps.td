@@ -123,8 +123,18 @@ def Ondsp_SatAddShiftOp
 def Ondsp_SatSubShiftOp
     : Ondsp_BinaryShiftOp<"sat_sub_shift", "Saturating subtract plus scaling">;
 
+// A value that carries either one lane or one lane per accumulator lane.
+// Coefficients deliberately stay scalar: the per-lane splat is part of the
+// declared semantics, so the signature says so instead of hiding it in a
+// rewrite.
+def Ondsp_LaneInteger : AnyTypeOf<[AnyInteger, VectorOf<[AnyInteger]>]>;
+
 def Ondsp_AccZeroOp : Ondsp_Op<"acc_zero", [Pure]> {
   let summary = "Create an all-zero accumulator state";
+  let description = [{
+    Produces an accumulator whose every lane is numeric zero. This is one of
+    the three operations that accept a multi-lane accumulator.
+  }];
   let results = (outs Ondsp_Acc:$acc);
   let assemblyFormat = "attr-dict `:` type($acc)";
 }
@@ -145,7 +155,7 @@ def Ondsp_AccImportOp : Ondsp_Op<"acc_import", [Pure]> {
 class Ondsp_MacLikeOp<string mnemonic, string opSummary>
     : Ondsp_Op<mnemonic, [Pure, AllTypesMatch<["acc", "result"]>]> {
   let summary = opSummary;
-  let arguments = (ins Ondsp_Acc:$acc, AnyInteger:$lhs, AnyInteger:$rhs,
+  let arguments = (ins Ondsp_Acc:$acc, Ondsp_LaneInteger:$lhs, AnyInteger:$rhs,
                    Ondsp_FixedAttr:$numeric, Ondsp_ProductAttr:$product);
   let results = (outs Ondsp_Acc:$result);
   let hasVerifier = 1;
@@ -158,6 +168,11 @@ def Ondsp_MacOp : Ondsp_MacLikeOp<"mac", "Multiply-accumulate"> {
     the mathematical accumulator value, and applies `acc.update_overflow` when
     the result is written back to the accumulator storage width. Rounding and
     destination overflow are not part of this operation.
+
+    With a `lanes = W` accumulator the value operand is a `vector<W x storage>`
+    and the coefficient stays a scalar broadcast across the lanes. Every lane
+    performs the identical declared update on its own accumulator; lanes are
+    never combined. This is the only multi-lane accumulator update.
   }];
 }
 
@@ -167,7 +182,7 @@ def Ondsp_MacSubOp : Ondsp_MacLikeOp<"mac_sub", "Multiply-subtract accumulate"> 
     from the mathematical accumulator value, and applies
     `acc.update_overflow` when the result is written back to the accumulator
     storage width. Rounding and destination overflow are not part of this
-    operation.
+    operation. Multi-lane accumulators are rejected.
   }];
 }
 
@@ -199,11 +214,15 @@ def Ondsp_AccExportOp : Ondsp_Op<"acc_export", [Pure]> {
     rounding mode, destination-range overflow handling is applied next, and
     the resulting integer is then materialized in the destination storage
     type.
+
+    With a `lanes = W` accumulator the result is a `vector<W x storage>` and
+    every lane is exported independently under the same destination policy.
+    This is one of the three operations that accept a multi-lane accumulator.
   }];
   let arguments = (ins Ondsp_Acc:$acc, Ondsp_FixedAttr:$dst,
                    Ondsp_RoundingModeAttr:$rounding,
                    Ondsp_OverflowModeAttr:$overflow);
-  let results = (outs AnyInteger:$result);
+  let results = (outs Ondsp_LaneInteger:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }

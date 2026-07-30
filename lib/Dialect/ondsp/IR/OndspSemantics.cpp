@@ -125,6 +125,8 @@ FailureOr<DistributivePairingSemantics> classifyDistributiveProductPairing(Opera
   return DistributivePairingSemantics{*productSemantics, legality, exactBeforeAccumulatorOverflow};
 }
 
+bool isSingleLaneAccumulator(AccType accumulator) { return accumulator.getLanes() == 1; }
+
 bool isSignedQ15(FixedAttr numeric) {
   auto storage = dyn_cast<IntegerType>(numeric.getStorage());
   return storage && storage.isSignless() && storage.getWidth() == 16 && numeric.getFrac() == 15 &&

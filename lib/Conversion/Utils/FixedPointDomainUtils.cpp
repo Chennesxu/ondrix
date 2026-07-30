@@ -32,6 +32,10 @@ static bool isSignedQ31RawHighDomain(ondrix::ondsp::AccType accumulator,
 bool isSupportedFixedScalarMacDomain(ondrix::ondsp::AccType accumulator,
                                      ondrix::ondsp::FixedAttr numeric,
                                      ondrix::ondsp::ProductAttr product) {
+  // This predicate describes the PER-LANE arithmetic domain and is therefore
+  // deliberately lane count independent: a multi-lane accumulator is W copies
+  // of exactly this domain. Which operations may carry more than one lane is
+  // an operation question the ondsp verifiers answer, not a domain question.
   return isSignedQ15FullDomain(accumulator, numeric, product) ||
          isSignedQ31FullDomain(accumulator, numeric, product) ||
          isSignedQ31RawHighDomain(accumulator, numeric, product);
@@ -43,6 +47,14 @@ bool isSupportedFixedVectorMacDomain(ondrix::ondsp::AccType accumulator,
   // Vector lowering currently uses signed extension and signed high-half
   // selection. Keep signedness in the capability gate, not in rewrite details.
   if (numeric.getSignedness() != ondrix::ondsp::Signedness::Signed)
+    return false;
+  // The fixed-length Vector consumers spend the vector lanes on the REDUCTION
+  // axis: they pair lane i of the value vector with lane i of the coefficient
+  // vector and fold them into one accumulator. A multi-lane accumulator spends
+  // its lanes on independent outputs instead, so the two lane meanings would
+  // collide. Refuse them here rather than in each pass, and keep the refusal
+  // separate from scalar legality so neither can widen the other.
+  if (!ondrix::ondsp::isSingleLaneAccumulator(accumulator))
     return false;
   if (accumulator.getStorage().cast<IntegerType>().getWidth() > 64)
     return false;

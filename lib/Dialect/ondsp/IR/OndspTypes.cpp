@@ -21,9 +21,13 @@ void OndspDialect::registerTypes() {
 }
 
 LogicalResult AccType::verify(function_ref<InFlightDiagnostic()> emitError, Type storage,
-                              unsigned frac, Signedness signedness, OverflowMode updateOverflow) {
+                              unsigned frac, Signedness signedness, OverflowMode updateOverflow,
+                              unsigned lanes) {
   (void)signedness;
   (void)updateOverflow;
+  if (lanes == 0)
+    return emitError() << "accumulator must declare at least one lane";
+
   auto intType = storage.dyn_cast<IntegerType>();
   if (!intType)
     return emitError() << "accumulator storage must be an integer type";

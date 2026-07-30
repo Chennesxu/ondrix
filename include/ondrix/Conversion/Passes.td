@@ -163,6 +163,13 @@ def ConvertOndspFixedToScalar
     declared rounding and saturation, keeping the result bit-identical to
     the contract. The mode assumes an IEEE double square root exists on
     the target; targets without one keep the default integer lowering.
+
+    A multi-lane accumulator lowers to one storage element per lane and runs
+    the identical per-lane arithmetic: the same product widths, the same
+    update clamp bounds, and the same export rounding, with vector compare
+    and select in place of their scalar forms. Only `acc_zero`, `mac`, and
+    `acc_export` accept more than one lane; `acc_import`, `acc_add_term`,
+    `mac_sub`, and `reduce_mac` fail closed on them.
   }];
   let constructor = "ondrix::createConvertOndspFixedToScalarPass()";
   let options = [
@@ -180,6 +187,7 @@ def ConvertOndspFixedToScalar
     "mlir::math::MathDialect",
     "mlir::memref::MemRefDialect",
     "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
   ];
 }
 
@@ -299,6 +307,52 @@ def VectorizeOndspFixedMemRefReduce
   let options = [
     Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
            "Number of fixed-point lanes per vector chunk">,
+  ];
+}
+
+def VectorizeOndspFixedDecimateOutputs
+    : Pass<"vectorize-ondsp-fixed-decimate-outputs", "::mlir::ModuleOp"> {
+  let summary = "Batch independent decimation outputs across accumulator lanes";
+  let description = [{
+    Rewrite the leading full blocks of a bufferized `ondrix.fir_decimate`
+    output loop to compute `vector-width` outputs at a time in a
+    multi-lane accumulator, and leave the remaining outputs on the
+    untouched ordered loop.
+
+    This is a vertical transformation: the vector lanes carry independent
+    outputs, not partial sums of one output. Each lane visits the same taps
+    in the same increasing order and applies the same declared accumulator
+    update, so no reassociation occurs and the rewrite needs no range or
+    overflow proof — including for saturating accumulators. That is the
+    contrast with the horizontal reduction passes, whose lanes do change the
+    fold order and therefore do require proofs. The decimation contract
+    permits exactly this: consumers may batch products only while preserving
+    the declared ordered updates.
+
+    The pass is opt-in and never part of a default pipeline. It fires only
+    for the loop shape decimation bufferization emits with a static factor of
+    two, a static coefficient count, a static output length, contiguous
+    rank-1 operand layouts in the default memory space, and a single-lane
+    accumulator profile whose per-lane arithmetic the scalar lowering
+    implements. Every other loop is left byte-identical, so an unmatched
+    program keeps the ordered schedule rather than a partially batched one.
+
+    Per tap, one full block issues a single contiguous load of
+    `factor * vector-width` elements and one even-lane shuffle, which is what
+    a factor of two makes exact. The block containing the final output stays
+    on the ordered loop so that contiguous load never reads past the input.
+  }];
+  let constructor = "ondrix::createVectorizeOndspFixedDecimateOutputsPass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
+           "Number of independent outputs batched per accumulator">,
   ];
 }
 

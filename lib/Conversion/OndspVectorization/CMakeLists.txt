@@ -1,4 +1,5 @@
 add_ondrix_library(OndspVectorization
+  OndspDecimateOutputBatching.cpp
   OndspVectorization.cpp
 
   DEPENDS

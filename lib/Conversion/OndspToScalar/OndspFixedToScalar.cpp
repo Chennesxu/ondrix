@@ -9,6 +9,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
+#include "ondrix/Support/DSPTypeUtils.h"
 #include "ondrix/Support/FixedPointSemantics.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -18,6 +19,7 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Matchers.h"
@@ -51,6 +53,10 @@ static bool isSupportedAccumulator(ondrix::ondsp::AccType accumulator) {
 }
 
 static bool isSupportedImport(ondrix::ondsp::AccType accumulator, ondrix::ondsp::FixedAttr source) {
+  // Importing one scalar value into W independent lanes is not a defined
+  // operation, so the lane count is part of this capability gate.
+  if (!ondrix::ondsp::isSingleLaneAccumulator(accumulator))
+    return false;
   if (ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator))
     return ondrix::ondsp::isSignedQ31(source);
   if (!isSupportedAccumulator(accumulator) || accumulator.getFrac() != 30)
@@ -95,6 +101,15 @@ static bool isSupportedAccumulatorTerm(ondrix::ondsp::AccType accumulator,
          numeric.getFrac() == accumulator.getFrac();
 }
 
+/// Storage carrier of one accumulator value: the raw storage type for a single
+/// lane, and one storage element per lane otherwise. Lanes never interact, so
+/// the multi-lane carrier is the single-lane carrier applied elementwise.
+static Type getAccumulatorCarrier(ondrix::ondsp::AccType accumulator) {
+  if (ondrix::ondsp::isSingleLaneAccumulator(accumulator))
+    return accumulator.getStorage();
+  return VectorType::get({static_cast<int64_t>(accumulator.getLanes())}, accumulator.getStorage());
+}
+
 class OndspFixedToScalarTypeConverter final : public TypeConverter {
 public:
   OndspFixedToScalarTypeConverter() {
@@ -103,7 +118,7 @@ public:
                      SmallVectorImpl<Type> &results) -> std::optional<LogicalResult> {
       if (!isSupportedAccumulator(type))
         return failure();
-      results.push_back(type.getStorage());
+      results.push_back(getAccumulatorCarrier(type));
       return success();
     });
   }
@@ -188,6 +203,38 @@ static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) 
                                                                  isOndspAttribute);
 }
 
+// The arithmetic below is written once and applied either to a scalar carrier
+// or elementwise to a `vector<lanes x carrier>`. Every helper therefore takes
+// the carrier type from its input instead of assuming a scalar, so a multi-lane
+// accumulator executes the identical per-lane sequence.
+static IntegerType getIntegerElementType(Type type) {
+  if (auto vector = dyn_cast<VectorType>(type))
+    return cast<IntegerType>(vector.getElementType());
+  return cast<IntegerType>(type);
+}
+
+static Type getIntegerTypeLike(Type reference, unsigned width, OpBuilder &builder) {
+  IntegerType elementType = builder.getIntegerType(width);
+  if (auto vector = dyn_cast<VectorType>(reference))
+    return VectorType::get(vector.getShape(), elementType);
+  return elementType;
+}
+
+static Value createIntegerConstant(Location loc, Type type, const llvm::APInt &value,
+                                   OpBuilder &builder) {
+  IntegerType elementType = getIntegerElementType(type);
+  IntegerAttr valueAttr = builder.getIntegerAttr(elementType, value);
+  if (auto vector = dyn_cast<VectorType>(type))
+    return builder.create<arith::ConstantOp>(loc, vector,
+                                             SplatElementsAttr::get(vector, valueAttr));
+  return builder.create<arith::ConstantOp>(loc, type, valueAttr);
+}
+
+static Value createIntegerConstant(Location loc, Type type, int64_t value, OpBuilder &builder) {
+  return createIntegerConstant(
+      loc, type, llvm::APInt(getIntegerElementType(type).getWidth(), value, true), builder);
+}
+
 class AccZeroOpLowering final : public OpConversionPattern<ondrix::ondsp::AccZeroOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::AccZeroOp>::OpConversionPattern;
@@ -195,11 +242,9 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::AccZeroOp op, OpAdaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Type resultType = getTypeConverter()->convertType(op.getAcc().getType());
-    auto integerType = dyn_cast_or_null<IntegerType>(resultType);
-    if (!integerType)
+    if (!resultType || !isa<IntegerType>(ondrix::getElementTypeOrSelf(resultType)))
       return op.emitOpError("fixed scalar lowering requires a supported accumulator type");
-    rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, integerType,
-                                                   rewriter.getIntegerAttr(integerType, 0));
+    rewriter.replaceOp(op, createIntegerConstant(op.getLoc(), resultType, 0, rewriter));
     return success();
   }
 };
@@ -230,11 +275,12 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
                                     ondrix::ondsp::OverflowMode overflowMode,
                                     ondrix::fixedpoint::AccumulatorUpdateOperation operation,
                                     OpBuilder &builder) {
-  auto accumulatorType = cast<IntegerType>(accumulator.getType());
-  auto productType = cast<IntegerType>(product.getType());
+  Type accumulatorType = accumulator.getType();
+  IntegerType accumulatorElement = getIntegerElementType(accumulatorType);
+  IntegerType productElement = getIntegerElementType(product.getType());
   unsigned intermediateWidth = ondrix::fixedpoint::getAccumulatorUpdateIntermediateWidth(
-      accumulatorType.getWidth(), productType.getWidth());
-  IntegerType intermediateType = builder.getIntegerType(intermediateWidth);
+      accumulatorElement.getWidth(), productElement.getWidth());
+  Type intermediateType = getIntegerTypeLike(accumulatorType, intermediateWidth, builder);
   Value extendedAccumulator = builder.create<arith::ExtSIOp>(loc, intermediateType, accumulator);
   Value extendedProduct = builder.create<arith::ExtSIOp>(loc, intermediateType, product);
   Value updated;
@@ -250,15 +296,15 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
   if (overflowMode == ondrix::ondsp::OverflowMode::Wrap)
     return builder.create<arith::TruncIOp>(loc, accumulatorType, updated);
 
-  // Clamp in the exact update width before narrowing to the accumulator.
+  // Clamp in the exact update width before narrowing to the accumulator. The
+  // comparison and select vectorize elementwise, so every lane saturates
+  // independently against the same accumulator bounds.
   llvm::APInt minimum =
-      llvm::APInt::getSignedMinValue(accumulatorType.getWidth()).sext(intermediateWidth);
+      llvm::APInt::getSignedMinValue(accumulatorElement.getWidth()).sext(intermediateWidth);
   llvm::APInt maximum =
-      llvm::APInt::getSignedMaxValue(accumulatorType.getWidth()).sext(intermediateWidth);
-  Value minimumValue = builder.create<arith::ConstantOp>(
-      loc, intermediateType, builder.getIntegerAttr(intermediateType, minimum));
-  Value maximumValue = builder.create<arith::ConstantOp>(
-      loc, intermediateType, builder.getIntegerAttr(intermediateType, maximum));
+      llvm::APInt::getSignedMaxValue(accumulatorElement.getWidth()).sext(intermediateWidth);
+  Value minimumValue = createIntegerConstant(loc, intermediateType, minimum, builder);
+  Value maximumValue = createIntegerConstant(loc, intermediateType, maximum, builder);
   Value belowMinimum =
       builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, updated, minimumValue);
   Value aboveMaximum =
@@ -266,35 +312,6 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
   Value lowerClamped = builder.create<arith::SelectOp>(loc, belowMinimum, minimumValue, updated);
   Value clamped = builder.create<arith::SelectOp>(loc, aboveMaximum, maximumValue, lowerClamped);
   return builder.create<arith::TruncIOp>(loc, accumulatorType, clamped);
-}
-
-static IntegerType getIntegerElementType(Type type) {
-  if (auto vector = dyn_cast<VectorType>(type))
-    return cast<IntegerType>(vector.getElementType());
-  return cast<IntegerType>(type);
-}
-
-static Type getIntegerTypeLike(Type reference, unsigned width, OpBuilder &builder) {
-  IntegerType elementType = builder.getIntegerType(width);
-  if (auto vector = dyn_cast<VectorType>(reference))
-    return VectorType::get(vector.getShape(), elementType);
-  return elementType;
-}
-
-static Value createIntegerConstant(Location loc, Type type, const llvm::APInt &value,
-                                   ConversionPatternRewriter &rewriter) {
-  IntegerType elementType = getIntegerElementType(type);
-  IntegerAttr valueAttr = rewriter.getIntegerAttr(elementType, value);
-  if (auto vector = dyn_cast<VectorType>(type))
-    return rewriter.create<arith::ConstantOp>(loc, vector,
-                                              SplatElementsAttr::get(vector, valueAttr));
-  return rewriter.create<arith::ConstantOp>(loc, type, valueAttr);
-}
-
-static Value createIntegerConstant(Location loc, Type type, int64_t value,
-                                   ConversionPatternRewriter &rewriter) {
-  return createIntegerConstant(
-      loc, type, llvm::APInt(getIntegerElementType(type).getWidth(), value, true), rewriter);
 }
 
 static Value roundSignedRightShift(Location loc, Value input, unsigned shift,
@@ -451,18 +468,17 @@ static Value saturatingNegatePackedQ15(Location loc, Value input,
 static Value lowerSignedProduct(Location loc, Value lhs, Value rhs,
                                 ondrix::ondsp::FixedAttr numeric,
                                 ondrix::ondsp::ProductSemantics semantics, OpBuilder &builder) {
-  IntegerType fullProductType =
-      builder.getIntegerType(cast<IntegerType>(numeric.getStorage()).getWidth() * 2);
+  unsigned storageWidth = cast<IntegerType>(numeric.getStorage()).getWidth();
+  Type fullProductType = getIntegerTypeLike(lhs.getType(), storageWidth * 2, builder);
   Value lhsExtended = builder.create<arith::ExtSIOp>(loc, fullProductType, lhs);
   Value rhsExtended = builder.create<arith::ExtSIOp>(loc, fullProductType, rhs);
   Value fullProduct = builder.create<arith::MulIOp>(loc, lhsExtended, rhsExtended);
   if (semantics.selection == ondrix::ondsp::ProductSelection::Full)
     return fullProduct;
 
-  Value shift = builder.create<arith::ConstantIntOp>(
-      loc, cast<IntegerType>(numeric.getStorage()).getWidth(), fullProductType.getWidth());
+  Value shift = createIntegerConstant(loc, fullProductType, storageWidth, builder);
   Value shifted = builder.create<arith::ShRSIOp>(loc, fullProduct, shift);
-  IntegerType rawHighType = builder.getIntegerType(semantics.rawWidth);
+  Type rawHighType = getIntegerTypeLike(lhs.getType(), semantics.rawWidth, builder);
   return builder.create<arith::TruncIOp>(loc, rawHighType, shifted);
 }
 
@@ -474,6 +490,12 @@ public:
   LogicalResult matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
+    // `mac` is the only multi-lane accumulator update. Every other MAC-like
+    // operation fails closed here as well as in its verifier, so a pass that
+    // builds one without going through the parser cannot slip past.
+    if (!std::is_same_v<OpTy, ondrix::ondsp::MacOp> &&
+        !ondrix::ondsp::isSingleLaneAccumulator(accumulator))
+      return op.emitOpError("fixed scalar lowering supports multi-lane accumulators only for mac");
     FailureOr<ondrix::conversion::SupportedFixedMacDomain> domain =
         ondrix::conversion::getSupportedFixedScalarMacDomain(op, accumulator, op.getNumeric(),
                                                              op.getProduct());
@@ -482,9 +504,24 @@ public:
           "fixed scalar lowering supports Q15/full with a signed frac30 accumulator of at least "
           "32 bits, Q31/full with i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
 
-    Value product = lowerSignedProduct(op.getLoc(), adaptor.getLhs(), adaptor.getRhs(),
-                                       op.getNumeric(), domain->product, rewriter);
-    Value updated = lowerAccumulatorUpdate(op.getLoc(), adaptor.getAcc(), product,
+    Location loc = op.getLoc();
+    Value value = adaptor.getLhs();
+    Value coefficient = adaptor.getRhs();
+    if (!ondrix::ondsp::isSingleLaneAccumulator(accumulator)) {
+      auto valueType = dyn_cast<VectorType>(value.getType());
+      if (!valueType || valueType.isScalable() || valueType.getRank() != 1 ||
+          valueType.getNumElements() != static_cast<int64_t>(accumulator.getLanes()))
+        return op.emitOpError("fixed scalar lowering requires one value lane per accumulator lane");
+      // The declared broadcast of the scalar coefficient across the lanes. It
+      // is materialized here rather than assumed by the caller because it is
+      // part of the operation's meaning.
+      coefficient = rewriter.create<vector::BroadcastOp>(
+          loc, VectorType::get(valueType.getShape(), coefficient.getType()), coefficient);
+    }
+
+    Value product =
+        lowerSignedProduct(loc, value, coefficient, op.getNumeric(), domain->product, rewriter);
+    Value updated = lowerAccumulatorUpdate(loc, adaptor.getAcc(), product,
                                            accumulator.getUpdateOverflow(), operation, rewriter);
     rewriter.replaceOp(op, updated);
     return success();
@@ -590,6 +627,9 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::AccAddTermOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
+    if (!ondrix::ondsp::isSingleLaneAccumulator(accumulator))
+      return op.emitOpError("fixed scalar lowering requires a single-lane accumulator for "
+                            "acc_add_term");
     if (!isSupportedAccumulatorTerm(accumulator, op.getTermNumeric()))
       return op.emitOpError(
           "fixed scalar lowering requires a supported signed accumulator and a signed term "
@@ -615,6 +655,9 @@ public:
       return op.emitOpError(
           "fixed scalar reduction supports Q15/full with a signed frac30 accumulator of at least "
           "32 bits, Q31/full with i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
+    if (!ondrix::ondsp::isSingleLaneAccumulator(accumulator))
+      return op.emitOpError("fixed scalar reduction requires a single-lane accumulator; a "
+                            "reduction spends its lanes on the reduction axis");
 
     FailureOr<ondrix::conversion::SupportedFixedMacDomain> domain =
         ondrix::conversion::getSupportedFixedScalarMacDomain(op, accumulator, numeric,
@@ -676,10 +719,14 @@ public:
     unsigned shift = accumulator.getFrac() - op.getDst().getFrac();
     Value rounded =
         roundSignedRightShift(op.getLoc(), adaptor.getAcc(), shift, op.getRounding(), rewriter);
-    auto destinationType = cast<IntegerType>(op.getDst().getStorage());
+    // A multi-lane accumulator exports one destination element per lane; the
+    // rounding, narrowing, and clamping sequence below is exactly the
+    // single-lane one applied elementwise.
+    unsigned destinationWidth = cast<IntegerType>(op.getDst().getStorage()).getWidth();
+    Type destinationType = getIntegerTypeLike(rounded.getType(), destinationWidth, rewriter);
     unsigned roundedWidth = getIntegerElementType(rounded.getType()).getWidth();
     Value result;
-    if (destinationType.getWidth() > roundedWidth) {
+    if (destinationWidth > roundedWidth) {
       // The destination is WIDER than the accumulator storage, which the
       // i64/frac30 identity destination reaches from an i40 or i48
       // accumulator. `narrowSignedValue` cannot serve this direction: its
