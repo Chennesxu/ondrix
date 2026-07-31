@@ -75,10 +75,29 @@ struct DistributivePairingSemantics {
 mlir::LogicalResult verifyProductPolicy(mlir::Operation *op, mlir::Attribute numeric,
                                         std::optional<ProductAttr> product);
 
-/// Verifies the single executable packed-Q15 radix-2 butterfly profile.
-mlir::LogicalResult verifyPackedQ15ButterflyPolicy(mlir::Operation *op, mlir::Attribute numeric,
-                                                   ProductAttr product, ScaleAttr productScale,
-                                                   ScaleAttr outputScale);
+/// Storage geometry of one executable packed-complex butterfly profile. The
+/// two profiles differ in exactly one number, so every width-dependent rule
+/// below is derived from `storageWidth` rather than restated per profile.
+struct PackedComplexProfile {
+  /// Signed fixed-point storage width of one component; frac is width - 1.
+  unsigned storageWidth;
+  /// Packed container width, always two components side by side.
+  unsigned containerWidth;
+};
+
+/// Returns the executable packed-complex profile a layout denotes, or
+/// std::nullopt for a layout that has no executable butterfly contract. Split,
+/// interleaved, and the real-high packed spelling deliberately have none.
+std::optional<PackedComplexProfile> getPackedComplexProfile(ComplexLayout layout);
+
+/// Verifies the executable packed radix-2 butterfly profile the layout
+/// selects: signed Q(storageWidth-1) numeric in matching storage, an exact
+/// full product, one product requantization by storageWidth - 1, and one
+/// output scale by 1, both nearest-even and saturating to the component
+/// storage. Fails closed on any layout without an executable profile.
+mlir::LogicalResult verifyPackedButterflyPolicy(mlir::Operation *op, CxLayoutAttr layout,
+                                                mlir::Attribute numeric, ProductAttr product,
+                                                ScaleAttr productScale, ScaleAttr outputScale);
 
 /// Returns the raw product width, fractional position, and exact bit selection
 /// without applying target-specific arithmetic behavior.

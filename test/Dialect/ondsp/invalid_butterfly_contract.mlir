@@ -1,7 +1,7 @@
 // RUN: ondrix-opt %s -split-input-file -verify-diagnostics
 
 func.func @rejects_non_q15_numeric(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
-  // expected-error@+1 {{packed butterfly requires signed Q15 numeric semantics}}
+  // expected-error@+1 {{packed butterfly requires signed Q15 numeric semantics for this layout}}
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
     layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 14>,
@@ -29,7 +29,7 @@ func.func @rejects_raw_high_product(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
 // -----
 
 func.func @rejects_other_layout(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
-  // expected-error@+1 {{executable butterfly requires packed_i16_imag_hi_real_lo layout}}
+  // expected-error@+1 {{executable butterfly requires packed_i16_imag_hi_real_lo or packed_i32_imag_hi_real_lo layout}}
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
     layout = #ondsp.cx_layout<packed_i16_real_hi_imag_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
@@ -139,4 +139,46 @@ func.func @rejects_output_overflow(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
     output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = wrap, saturate_to = i16>
   } : (i32, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
+}
+
+// -----
+
+func.func @q31_rejects_i32_container(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{executable butterfly requires scalar or fixed Vector signless i64 packed values}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
+}
+
+// -----
+
+func.func @q15_layout_rejects_i64_container(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
+  // expected-error@+1 {{executable butterfly requires scalar or fixed Vector signless i32 packed values}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (i64, i64, i64) -> (i64, i64)
+  return %0, %1 : i64, i64
+}
+
+// -----
+
+func.func @q31_rejects_q15_numeric(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
+  // expected-error@+1 {{packed butterfly requires signed Q31 numeric semantics for this layout}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+  } : (i64, i64, i64) -> (i64, i64)
+  return %0, %1 : i64, i64
 }

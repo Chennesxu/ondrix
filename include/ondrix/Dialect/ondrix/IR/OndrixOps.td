@@ -509,13 +509,20 @@ def Ondrix_ButterflyOp : Ondrix_Op<"butterfly", [Pure]> {
 }
 
 def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
-  let summary = "Static packed-Q15 radix-2 CFFT";
+  let summary = "Static packed fixed-point radix-2 CFFT";
   let description = [{
     Computes one static power-of-two radix-2 decimation-in-time CFFT over
-    packed signed-Q15 complex values, for extents `N` in `[4, 1024]`. The
-    input and result use natural index order and matching `tensor<Nxi32>`
-    storage. Each packed element uses the layout and finite-precision
-    butterfly contract of `ondrix.butterfly`.
+    packed signed fixed-point complex values in natural index order. The
+    `layout` attribute selects the profile, which fixes the container and the
+    supported extents:
+
+    * `packed_i16_imag_hi_real_lo`: signed Q15, matching `tensor<Nxi32>`
+      input and result, `N` in `[4, 1024]`;
+    * `packed_i32_imag_hi_real_lo`: signed Q31, matching `tensor<Nxi64>`
+      input and result, `N` in `[4, 64]`.
+
+    Each packed element uses the layout and finite-precision butterfly
+    contract of `ondsp.cx_butterfly` under the same profile.
 
     The transform recursively decomposes even and odd input indices, then
     combines the two half transforms in increasing frequency order:
@@ -524,16 +531,25 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
 
     Forward direction uses `W_N^k = exp(-2*pi*j*k/N)`; inverse direction
     uses `conj(W_N^k)`. Each twiddle component is quantized once from the
-    real-valued definition with round-half-even signed Q1.15 and declared
-    saturation (`+1.0` and `+j` use positive raw value 32767, `-1.0` and
-    `-j` use raw value -32768), and generation is admissible only when the
-    binary64 estimate is at least `2^-20` Q15 LSB away from every rounding
-    tie, so the emitted constants provably equal the real-valued definition
-    under the declared binary64/libm evaluation error budget (more than
-    three orders of magnitude below the guard). Four points use `[1, -j]`
-    forward; eight
-    points use `[1, 23170-j23170, -j, -23170-j23170]` forward, with the
-    conjugate tables in inverse direction.
+    real-valued definition with round-half-even signed Q1.f and declared
+    saturation (`+1.0` and `+j` use the positive maximum, `-1.0` and `-j`
+    use the exact negative minimum).
+
+    The two profiles obtain those integers differently, and the difference is
+    part of the contract. Q15 quantizes binary64 estimates in the compiler
+    and is admissible only when the estimate is at least `2^-20` Q15 LSB from
+    every rounding tie, so the emitted constants provably equal the
+    real-valued definition under the declared binary64/libm error budget
+    (more than three orders of magnitude below the guard). At Q31 that guard
+    is `2^-51` absolute, only about four times a binary64 evaluation error,
+    so it can no longer certify an in-compiler estimate; the Q31 tables are
+    instead evaluated offline at 50 decimal digits and frozen as literal
+    constants that the conversion reads directly.
+
+    Four points use `[1, -j]` forward; eight points use
+    `[1, 23170-j23170, -j, -23170-j23170]` forward at Q15 and
+    `[1, 1518500250-j1518500250, -j, -1518500250-j1518500250]` forward at
+    Q31, with the conjugate tables in inverse direction.
 
     Each butterfly applies the declared product and output requantization
     independently. A size-N transform therefore has `log2(N)` observable
@@ -542,12 +558,13 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
     every stage, inverse direction includes the conventional `1/N`
     normalization.
 
-    The executable profile is deliberately limited to static power-of-two
-    extents in `[4, 1024]`, explicit forward or inverse direction, the
-    imag-high/real-low packed layout, signed Q15, exact full products, and
+    The executable profiles are deliberately limited to static power-of-two
+    extents within each profile's declared range, explicit forward or inverse
+    direction, an imag-high/real-low packed layout, exact full products, and
     the same two scale policies as the executable butterfly. Dynamic
     planning, other sizes, and other numeric profiles require separate
-    extensions.
+    extensions. The opt-in loop-form and Vector-batched CFFT lowerings remain
+    Q15-only and reject the Q31 profile.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondrix_CfftDirectionAttr:$direction,

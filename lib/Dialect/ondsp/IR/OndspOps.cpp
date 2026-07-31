@@ -415,6 +415,12 @@ static LogicalResult verifyComplexValueDomain(Operation *op, TypeRange types, Cx
                                               Attribute numeric) {
   if (failed(verifySameElementwiseShape(op, types)))
     return failure();
+  // The packed Q31 layout exists only for the butterfly profile. Falling
+  // through to the unpacked branch here would verify an i32 value against an
+  // i32 numeric policy and silently ignore the declared packing.
+  if (layout.getLayout() == ComplexLayout::PackedI32ImagHiRealLo)
+    return op->emitOpError(
+        "packed_i32_imag_hi_real_lo is supported only by the packed butterfly profile");
   if (!isPackedI16Layout(layout)) {
     for (Type type : types)
       if (failed(verifyValueNumericType(op, type, numeric, "complex value")))
@@ -442,24 +448,28 @@ LogicalResult CxMulOp::verify() {
 LogicalResult CxButterflyOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();
-  if (failed(verifyPackedQ15ButterflyPolicy(*this, getNumeric(), getProduct(), getProductScale(),
-                                            getOutputScale())))
-    return failure();
-  if (getLayout().getLayout() != ComplexLayout::PackedI16ImagHiRealLo)
-    return emitOpError("executable butterfly requires packed_i16_imag_hi_real_lo layout");
+  // The layout selects the executable profile; container width and every
+  // width-dependent numeric rule follow from it rather than being restated.
+  std::optional<PackedComplexProfile> profile = getPackedComplexProfile(getLayout().getLayout());
+  if (!profile)
+    return emitOpError("executable butterfly requires packed_i16_imag_hi_real_lo or "
+                       "packed_i32_imag_hi_real_lo layout");
   SmallVector<Type> types(getOperandTypes().begin(), getOperandTypes().end());
   types.append(getResultTypes().begin(), getResultTypes().end());
   if (failed(verifySameElementwiseShape(*this, types)))
     return failure();
-  if (!llvm::all_of(types, [](Type type) {
-        if (type.isSignlessInteger(32))
+  unsigned containerWidth = profile->containerWidth;
+  if (!llvm::all_of(types, [containerWidth](Type type) {
+        if (type.isSignlessInteger(containerWidth))
           return true;
         auto vector = dyn_cast<VectorType>(type);
-        return vector && !vector.isScalable() && vector.getElementType().isSignlessInteger(32);
+        return vector && !vector.isScalable() &&
+               vector.getElementType().isSignlessInteger(containerWidth);
       }))
-    return emitOpError(
-        "executable butterfly requires scalar or fixed Vector signless i32 packed values");
-  return success();
+    return emitOpError() << "executable butterfly requires scalar or fixed Vector signless i"
+                         << containerWidth << " packed values";
+  return verifyPackedButterflyPolicy(*this, getLayout(), getNumeric(), getProduct(),
+                                     getProductScale(), getOutputScale());
 }
 
 LogicalResult FftStageOp::verify() { return verifyValueOnlyTypes(*this); }

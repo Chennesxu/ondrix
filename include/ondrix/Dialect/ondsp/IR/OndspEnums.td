@@ -93,9 +93,16 @@ def Ondsp_CxPackedImagHiRealLo
 def Ondsp_CxPackedRealHiImagLo
     : I32EnumAttrCase<"PackedI16RealHiImagLo", 3,
                       "packed_i16_real_hi_imag_lo">;
+// The Q31 counterpart of packed_i16_imag_hi_real_lo: two signed i32
+// components in one i64 container, imaginary in bits 63..32 and real in bits
+// 31..0. Only the imag-high spelling exists because only it has an executable
+// consumer; a real-high Q31 variant would be unproven surface.
+def Ondsp_CxPackedI32ImagHiRealLo
+    : I32EnumAttrCase<"PackedI32ImagHiRealLo", 4,
+                      "packed_i32_imag_hi_real_lo">;
 def Ondsp_ComplexLayout : I32EnumAttr<"ComplexLayout", "complex storage layout",
     [Ondsp_CxSplit, Ondsp_CxInterleaved, Ondsp_CxPackedImagHiRealLo,
-     Ondsp_CxPackedRealHiImagLo]> {
+     Ondsp_CxPackedRealHiImagLo, Ondsp_CxPackedI32ImagHiRealLo]> {
   let cppNamespace = "::ondrix::ondsp";
 }
 

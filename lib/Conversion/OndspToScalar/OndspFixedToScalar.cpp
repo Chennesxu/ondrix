@@ -415,23 +415,27 @@ static Value requantizeSignedValue(Location loc, Value input, ondrix::ondsp::Sca
                            scale.getOverflow(), rewriter);
 }
 
-static std::pair<Value, Value> unpackPackedQ15(Location loc, Value packed,
-                                               ConversionPatternRewriter &rewriter) {
-  Type i16 = getIntegerTypeLike(packed.getType(), 16, rewriter);
-  Type i32 = getIntegerTypeLike(packed.getType(), 32, rewriter);
-  Value real = rewriter.create<arith::TruncIOp>(loc, i16, packed);
-  Value shift = createIntegerConstant(loc, i32, 16, rewriter);
+// Split one packed container into its signed components. The container is
+// exactly two components wide, so the real part is the low truncation and the
+// imaginary part is the logical high half.
+static std::pair<Value, Value> unpackPackedComplex(Location loc, Value packed,
+                                                   unsigned storageWidth,
+                                                   ConversionPatternRewriter &rewriter) {
+  Type component = getIntegerTypeLike(packed.getType(), storageWidth, rewriter);
+  Type container = packed.getType();
+  Value real = rewriter.create<arith::TruncIOp>(loc, component, packed);
+  Value shift = createIntegerConstant(loc, container, storageWidth, rewriter);
   Value high = rewriter.create<arith::ShRUIOp>(loc, packed, shift);
-  Value imaginary = rewriter.create<arith::TruncIOp>(loc, i16, high);
+  Value imaginary = rewriter.create<arith::TruncIOp>(loc, component, high);
   return {real, imaginary};
 }
 
-static Value packQ15Complex(Location loc, Value real, Value imaginary,
-                            ConversionPatternRewriter &rewriter) {
-  Type i32 = getIntegerTypeLike(real.getType(), 32, rewriter);
-  Value realBits = rewriter.create<arith::ExtUIOp>(loc, i32, real);
-  Value imaginaryBits = rewriter.create<arith::ExtUIOp>(loc, i32, imaginary);
-  Value shift = createIntegerConstant(loc, i32, 16, rewriter);
+static Value packComplex(Location loc, Value real, Value imaginary, unsigned storageWidth,
+                         ConversionPatternRewriter &rewriter) {
+  Type container = getIntegerTypeLike(real.getType(), 2 * storageWidth, rewriter);
+  Value realBits = rewriter.create<arith::ExtUIOp>(loc, container, real);
+  Value imaginaryBits = rewriter.create<arith::ExtUIOp>(loc, container, imaginary);
+  Value shift = createIntegerConstant(loc, container, storageWidth, rewriter);
   Value shiftedImaginary = rewriter.create<arith::ShLIOp>(loc, imaginaryBits, shift);
   return rewriter.create<arith::OrIOp>(loc, shiftedImaginary, realBits);
 }
@@ -544,14 +548,24 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::CxButterflyOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
-    auto [aReal, aImaginary] = unpackPackedQ15(loc, adaptor.getA(), rewriter);
-    auto [bReal, bImaginary] = unpackPackedQ15(loc, adaptor.getB(), rewriter);
-    auto [wReal, wImaginary] = unpackPackedQ15(loc, adaptor.getTwiddle(), rewriter);
+    std::optional<ondrix::ondsp::PackedComplexProfile> profile =
+        ondrix::ondsp::getPackedComplexProfile(op.getLayout().getLayout());
+    if (!profile)
+      return op.emitOpError("fixed scalar lowering requires an executable packed complex layout");
+    unsigned storageWidth = profile->storageWidth;
+    auto [aReal, aImaginary] = unpackPackedComplex(loc, adaptor.getA(), storageWidth, rewriter);
+    auto [bReal, bImaginary] = unpackPackedComplex(loc, adaptor.getB(), storageWidth, rewriter);
+    auto [wReal, wImaginary] =
+        unpackPackedComplex(loc, adaptor.getTwiddle(), storageWidth, rewriter);
 
     Value twiddledReal;
     Value twiddledImaginary;
     bool specialized = false;
-    if (specializeCanonicalTwiddles) {
+    // Canonical-twiddle specialization is proven only for packed Q15: its
+    // identities are stated over i16 components and its exhaustive ground
+    // truth covers that domain alone. The Q31 profile keeps the general
+    // product path rather than reusing an unproven identity.
+    if (specializeCanonicalTwiddles && storageWidth == 16) {
       std::optional<ondrix::analysis::CanonicalPackedQ15TwiddlePlan> plan =
           ondrix::analysis::planCanonicalPackedQ15Twiddle(op);
       if (plan) {
@@ -574,7 +588,13 @@ public:
       }
     }
     if (!specialized) {
-      Type productType = getIntegerTypeLike(bReal.getType(), 33, rewriter);
+      // Exact carrier for br*wr - bi*wi. Q15 needs 33 bits. Q31 needs 65, and
+      // the closest natural width the whole backend chain already handles is
+      // i128 (arbitrary-width in MLIR, native in LLVM), so the Q31 profile
+      // declares i128 rather than a minimal odd width. Both are wide enough
+      // that no product partial can wrap before `product_scale` runs.
+      Type productType =
+          getIntegerTypeLike(bReal.getType(), storageWidth == 16 ? 33 : 128, rewriter);
       auto extendProductOperand = [&](Value value) {
         return rewriter.create<arith::ExtSIOp>(loc, productType, value);
       };
@@ -593,7 +613,8 @@ public:
           requantizeSignedValue(loc, productImaginary, op.getProductScale(), rewriter);
     }
 
-    Type sumType = getIntegerTypeLike(aReal.getType(), 17, rewriter);
+    // Exact carrier for a +- t, one bit wider than the component storage.
+    Type sumType = getIntegerTypeLike(aReal.getType(), storageWidth + 1, rewriter);
     auto extendSumOperand = [&](Value value) {
       return rewriter.create<arith::ExtSIOp>(loc, sumType, value);
     };
@@ -611,8 +632,9 @@ public:
     out1Real = requantizeSignedValue(loc, out1Real, op.getOutputScale(), rewriter);
     out1Imaginary = requantizeSignedValue(loc, out1Imaginary, op.getOutputScale(), rewriter);
 
-    rewriter.replaceOp(op, ValueRange{packQ15Complex(loc, out0Real, out0Imaginary, rewriter),
-                                      packQ15Complex(loc, out1Real, out1Imaginary, rewriter)});
+    rewriter.replaceOp(
+        op, ValueRange{packComplex(loc, out0Real, out0Imaginary, storageWidth, rewriter),
+                       packComplex(loc, out1Real, out1Imaginary, storageWidth, rewriter)});
     return success();
   }
 

@@ -25,7 +25,7 @@ LogicalResult verifyProductPolicy(Operation *op, Attribute numeric,
 }
 
 static LogicalResult verifyButterflyScale(Operation *op, ScaleAttr scale, unsigned rightShift,
-                                          StringRef name) {
+                                          unsigned storageWidth, StringRef name) {
   if (scale.getPreShiftLeft() != 0 || scale.getPostShiftRight() != rightShift)
     return op->emitOpError() << name
                              << " requires pre_shift_left=0 and post_shift_right=" << rightShift;
@@ -34,21 +34,48 @@ static LogicalResult verifyButterflyScale(Operation *op, ScaleAttr scale, unsign
   if (scale.getOverflow() != OverflowMode::Saturate)
     return op->emitOpError() << name << " requires saturating overflow";
   auto destination = dyn_cast<IntegerType>(scale.getSaturateTo());
-  if (!destination || !destination.isSignless() || destination.getWidth() != 16)
-    return op->emitOpError() << name << " requires signless i16 destination storage";
+  if (!destination || !destination.isSignless() || destination.getWidth() != storageWidth)
+    return op->emitOpError() << name << " requires signless i" << storageWidth
+                             << " destination storage";
   return success();
 }
 
-LogicalResult verifyPackedQ15ButterflyPolicy(Operation *op, Attribute numeric, ProductAttr product,
-                                             ScaleAttr productScale, ScaleAttr outputScale) {
+std::optional<PackedComplexProfile> getPackedComplexProfile(ComplexLayout layout) {
+  switch (layout) {
+  case ComplexLayout::PackedI16ImagHiRealLo:
+    return PackedComplexProfile{16, 32};
+  case ComplexLayout::PackedI32ImagHiRealLo:
+    return PackedComplexProfile{32, 64};
+  case ComplexLayout::Split:
+  case ComplexLayout::Interleaved:
+  case ComplexLayout::PackedI16RealHiImagLo:
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+LogicalResult verifyPackedButterflyPolicy(Operation *op, CxLayoutAttr layout, Attribute numeric,
+                                          ProductAttr product, ScaleAttr productScale,
+                                          ScaleAttr outputScale) {
+  std::optional<PackedComplexProfile> profile = getPackedComplexProfile(layout.getLayout());
+  if (!profile)
+    return op->emitOpError("executable butterfly requires packed_i16_imag_hi_real_lo or "
+                           "packed_i32_imag_hi_real_lo layout");
+  unsigned storageWidth = profile->storageWidth;
   auto fixed = dyn_cast<FixedAttr>(numeric);
-  if (!fixed || !isSignedQ15(fixed))
-    return op->emitOpError("packed butterfly requires signed Q15 numeric semantics");
+  auto storage = fixed ? dyn_cast<IntegerType>(fixed.getStorage()) : IntegerType();
+  if (!fixed || !storage || !storage.isSignless() || storage.getWidth() != storageWidth ||
+      fixed.getFrac() != storageWidth - 1 || fixed.getSignedness() != Signedness::Signed)
+    return op->emitOpError() << "packed butterfly requires signed Q" << (storageWidth - 1)
+                             << " numeric semantics for this layout";
   if (!isFullProduct(product))
     return op->emitOpError("packed butterfly requires product = #ondsp.product<full>");
-  if (failed(verifyButterflyScale(op, productScale, 15, "product_scale")))
+  // One product requantization per product term and one output scale per
+  // stage: both boundaries are declared, never folded into each other.
+  if (failed(
+          verifyButterflyScale(op, productScale, storageWidth - 1, storageWidth, "product_scale")))
     return failure();
-  return verifyButterflyScale(op, outputScale, 1, "output_scale");
+  return verifyButterflyScale(op, outputScale, 1, storageWidth, "output_scale");
 }
 
 FailureOr<ProductSemantics> inferProductSemantics(Operation *op, FixedAttr numeric,

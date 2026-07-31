@@ -4,9 +4,11 @@
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
+#include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Support/DctCoefficients.h"
 #include "ondrix/Support/FirStreamRuntimeShape.h"
 #include "ondrix/Support/GuardedQ15Quantization.h"
+#include "ondrix/Support/Q31TwiddleTables.h"
 
 #include "llvm/ADT/APInt.h"
 
@@ -936,7 +938,7 @@ static std::optional<int64_t> quantizeTwiddleComponentQ15(double value) {
   return quantized->value;
 }
 
-static std::optional<uint32_t> getPackedQ15TwiddleBits(ondrix::ir::CfftDirection direction,
+static std::optional<uint64_t> getPackedQ15TwiddleBits(ondrix::ir::CfftDirection direction,
                                                        int64_t size, int64_t index) {
   constexpr double kTwoPi = 6.28318530717958647692528676655900577;
   double angle = kTwoPi * static_cast<double>(index) / static_cast<double>(size);
@@ -946,36 +948,56 @@ static std::optional<uint32_t> getPackedQ15TwiddleBits(ondrix::ir::CfftDirection
       quantizeTwiddleComponentQ15(direction == ondrix::ir::CfftDirection::Forward ? -sine : sine);
   if (!real || !imaginary)
     return std::nullopt;
-  return (static_cast<uint32_t>(*imaginary & 0xFFFF) << 16) | static_cast<uint32_t>(*real & 0xFFFF);
+  return (static_cast<uint64_t>(*imaginary & 0xFFFF) << 16) | static_cast<uint64_t>(*real & 0xFFFF);
 }
 
-// Fail-closed admissibility of every stage twiddle needed by the recursive
+// One stage twiddle of whichever profile the layout selects. Q15 quantizes a
+// binary64 estimate under the tie guard; Q31 reads the offline-frozen table,
+// because at Q31 the guard is no longer wide enough to certify an
+// in-compiler estimate (see include/ondrix/Support/Q31TwiddleTables.h).
+static std::optional<uint64_t> getPackedTwiddleBits(unsigned storageWidth,
+                                                    ondrix::ir::CfftDirection direction,
+                                                    int64_t size, int64_t index) {
+  if (storageWidth == 16)
+    return getPackedQ15TwiddleBits(direction, size, index);
+  return ondrix::getPackedQ31TwiddleBits(direction == ondrix::ir::CfftDirection::Forward
+                                             ? ondrix::Q31TwiddleDirection::Forward
+                                             : ondrix::Q31TwiddleDirection::Inverse,
+                                         size, index);
+}
+
+// Fail-closed availability of every stage twiddle needed by the recursive
 // combine of one static extent. The recursion itself may then rely on
 // twiddle generation succeeding.
-static bool hasAdmissiblePackedQ15TwiddleTables(ondrix::ir::CfftDirection direction,
-                                                int64_t extent) {
+static bool hasAdmissiblePackedTwiddleTables(unsigned storageWidth,
+                                             ondrix::ir::CfftDirection direction, int64_t extent) {
   for (int64_t size = 2; size <= extent; size *= 2)
     for (int64_t index = 0; index < size / 2; ++index)
-      if (!getPackedQ15TwiddleBits(direction, size, index))
+      if (!getPackedTwiddleBits(storageWidth, direction, size, index))
         return false;
   return true;
 }
 
+// The real-spectrum lowerings below are packed-Q15 only: their verifiers
+// accept no other layout, so they name the profile instead of deriving it.
+static constexpr ondrix::ondsp::PackedComplexProfile kPackedQ15Profile{16, 32};
+
 static SmallVector<Value>
-lowerPackedQ15Cfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirection direction,
-                   ondrix::ondsp::CxLayoutAttr layout, Attribute numeric,
-                   ondrix::ondsp::ProductAttr product, ondrix::ondsp::ScaleAttr productScale,
-                   ondrix::ondsp::ScaleAttr outputScale, bool vectorizeStaticCfft,
-                   ConversionPatternRewriter &rewriter) {
-  auto createPackedTwiddle = [&](uint32_t bits) {
-    IntegerType i32 = rewriter.getI32Type();
-    return rewriter.create<arith::ConstantOp>(loc, i32,
-                                              rewriter.getIntegerAttr(i32, llvm::APInt(32, bits)));
+lowerPackedCfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirection direction,
+                ondrix::ondsp::PackedComplexProfile profile, ondrix::ondsp::CxLayoutAttr layout,
+                Attribute numeric, ondrix::ondsp::ProductAttr product,
+                ondrix::ondsp::ScaleAttr productScale, ondrix::ondsp::ScaleAttr outputScale,
+                bool vectorizeStaticCfft, ConversionPatternRewriter &rewriter) {
+  IntegerType container = rewriter.getIntegerType(profile.containerWidth);
+  auto createPackedTwiddle = [&](uint64_t bits) {
+    return rewriter.create<arith::ConstantOp>(
+        loc, container,
+        rewriter.getIntegerAttr(container, llvm::APInt(profile.containerWidth, bits)));
   };
   auto createButterfly = [&](Value a, Value b, Value twiddle) {
-    return rewriter.create<ondrix::ondsp::CxButterflyOp>(
-        loc, rewriter.getI32Type(), rewriter.getI32Type(), a, b, twiddle, layout, numeric, product,
-        productScale, outputScale);
+    return rewriter.create<ondrix::ondsp::CxButterflyOp>(loc, container, container, a, b, twiddle,
+                                                         layout, numeric, product, productScale,
+                                                         outputScale);
   };
   auto buildVector = [&](ArrayRef<Value> values) {
     assert(!values.empty() && "CFFT stage vector must contain at least one lane");
@@ -1007,8 +1029,8 @@ lowerPackedQ15Cfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirecti
       SmallVector<Value> twiddles;
       twiddles.reserve(even.size());
       for (int64_t index = 0, end = even.size(); index < end; ++index) {
-        std::optional<uint32_t> twiddleBits =
-            getPackedQ15TwiddleBits(direction, values.size(), index);
+        std::optional<uint64_t> twiddleBits =
+            getPackedTwiddleBits(profile.storageWidth, direction, values.size(), index);
         assert(twiddleBits && "verified CFFT extent must have a static twiddle table");
         twiddles.push_back(createPackedTwiddle(*twiddleBits));
       }
@@ -1026,8 +1048,8 @@ lowerPackedQ15Cfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirecti
       return outputs;
     }
     for (int64_t index = 0, end = values.size() / 2; index < end; ++index) {
-      std::optional<uint32_t> twiddleBits =
-          getPackedQ15TwiddleBits(direction, values.size(), index);
+      std::optional<uint64_t> twiddleBits =
+          getPackedTwiddleBits(profile.storageWidth, direction, values.size(), index);
       assert(twiddleBits && "verified CFFT extent must have a static twiddle table");
       auto butterfly = createButterfly(even[index], odd[index], createPackedTwiddle(*twiddleBits));
       outputs[index] = butterfly.getOut0();
@@ -1048,6 +1070,8 @@ lowerPackedQ15Cfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirecti
 // identical sequence of quantization boundaries in an equivalent order and
 // the two lowerings are bit-identical per element; only the code shape
 // changes (loops and constant tables instead of unrolled SSA butterflies).
+// This opt-in mode is packed-Q15 only; the caller rejects the packed-Q31
+// profile before reaching it.
 static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
                                      ondrix::ir::CfftDirection direction,
                                      ondrix::ondsp::CxLayoutAttr layout, Attribute numeric,
@@ -1063,9 +1087,9 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
   SmallVector<int32_t> twiddleBits(extent, 0);
   for (int64_t half = 1; half < extent; half *= 2)
     for (int64_t index = 0; index < half; ++index) {
-      std::optional<uint32_t> bits = getPackedQ15TwiddleBits(direction, 2 * half, index);
+      std::optional<uint64_t> bits = getPackedQ15TwiddleBits(direction, 2 * half, index);
       assert(bits && "twiddle admissibility was checked before lowering");
-      twiddleBits[half + index] = static_cast<int32_t>(*bits);
+      twiddleBits[half + index] = static_cast<int32_t>(static_cast<uint32_t>(*bits));
     }
   SmallVector<int64_t> bitReversed(extent);
   for (int64_t index = 0; index < extent; ++index) {
@@ -1167,9 +1191,22 @@ public:
     if (!layout)
       return rewriter.notifyMatchFailure(op, "requires an ondsp.cx_layout layout attribute");
 
+    std::optional<ondrix::ondsp::PackedComplexProfile> profile =
+        ondrix::ondsp::getPackedComplexProfile(layout.getLayout());
+    if (!profile)
+      return rewriter.notifyMatchFailure(op, "layout has no executable packed complex profile");
+    bool isQ15 = profile->storageWidth == 16;
+    // Both opt-in code-shape modes still carry hardcoded Q15 tables and i32
+    // containers, so they fail closed on the packed-Q31 profile rather than
+    // emitting a plausible but unvalidated schedule.
+    if (!isQ15 && fftLoops)
+      return op.emitOpError("loop-form CFFT lowering supports only the packed Q15 profile");
+    if (!isQ15 && vectorizeStaticCfft)
+      return op.emitOpError("Vector-batched CFFT lowering supports only the packed Q15 profile");
+
     int64_t extent = op.getInput().getType().getDimSize(0);
-    if (!hasAdmissiblePackedQ15TwiddleTables(op.getDirection(), extent))
-      return rewriter.notifyMatchFailure(op, "twiddle quantization is not tie-guard admissible");
+    if (!hasAdmissiblePackedTwiddleTables(profile->storageWidth, op.getDirection(), extent))
+      return rewriter.notifyMatchFailure(op, "the stage twiddle table is unavailable");
     if (fftLoops) {
       Value result = lowerPackedQ15CfftLoops(loc, adaptor.getInput(), extent, op.getDirection(),
                                              layout, op.getNumeric(), op.getProduct(),
@@ -1186,8 +1223,8 @@ public:
       indices.push_back(position);
       inputs.push_back(rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position));
     }
-    SmallVector<Value> outputs = lowerPackedQ15Cfft(
-        loc, inputs, op.getDirection(), layout, op.getNumeric(), op.getProduct(),
+    SmallVector<Value> outputs = lowerPackedCfft(
+        loc, inputs, op.getDirection(), *profile, layout, op.getNumeric(), op.getProduct(),
         op.getProductScale(), op.getOutputScale(), vectorizeStaticCfft, rewriter);
 
     Value result = rewriter.create<tensor::EmptyOp>(loc, op.getResult().getType().getShape(),
@@ -1213,7 +1250,8 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     int64_t extent = op.getInput().getType().getDimSize(0);
-    if (!hasAdmissiblePackedQ15TwiddleTables(ondrix::ir::CfftDirection::Forward, extent))
+    if (!hasAdmissiblePackedTwiddleTables(kPackedQ15Profile.storageWidth,
+                                          ondrix::ir::CfftDirection::Forward, extent))
       return rewriter.notifyMatchFailure(op, "twiddle quantization is not tie-guard admissible");
     if (fftLoops) {
       IntegerType i32 = rewriter.getI32Type();
@@ -1257,9 +1295,10 @@ public:
       inputs.push_back(rewriter.create<arith::ExtUIOp>(loc, rewriter.getI32Type(), real));
     }
 
-    SmallVector<Value> outputs = lowerPackedQ15Cfft(
-        loc, inputs, ondrix::ir::CfftDirection::Forward, op.getLayout(), op.getNumeric(),
-        op.getProduct(), op.getProductScale(), op.getOutputScale(), vectorizeStaticCfft, rewriter);
+    SmallVector<Value> outputs =
+        lowerPackedCfft(loc, inputs, ondrix::ir::CfftDirection::Forward, kPackedQ15Profile,
+                        op.getLayout(), op.getNumeric(), op.getProduct(), op.getProductScale(),
+                        op.getOutputScale(), vectorizeStaticCfft, rewriter);
     outputs.front() = canonicalizePackedQ15Real(loc, outputs.front(), rewriter);
     outputs[extent / 2] = canonicalizePackedQ15Real(loc, outputs[extent / 2], rewriter);
 
@@ -1289,7 +1328,8 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     int64_t extent = op.getResult().getType().getDimSize(0);
-    if (!hasAdmissiblePackedQ15TwiddleTables(ondrix::ir::CfftDirection::Inverse, extent))
+    if (!hasAdmissiblePackedTwiddleTables(kPackedQ15Profile.storageWidth,
+                                          ondrix::ir::CfftDirection::Inverse, extent))
       return rewriter.notifyMatchFailure(op, "twiddle quantization is not tie-guard admissible");
     int64_t half = extent / 2;
     if (fftLoops) {
@@ -1348,9 +1388,10 @@ public:
       spectrum[extent - index] = conjugatePackedQ15Saturating(loc, compact[index], rewriter);
     }
 
-    SmallVector<Value> outputs = lowerPackedQ15Cfft(
-        loc, spectrum, ondrix::ir::CfftDirection::Inverse, op.getLayout(), op.getNumeric(),
-        op.getProduct(), op.getProductScale(), op.getOutputScale(), vectorizeStaticCfft, rewriter);
+    SmallVector<Value> outputs =
+        lowerPackedCfft(loc, spectrum, ondrix::ir::CfftDirection::Inverse, kPackedQ15Profile,
+                        op.getLayout(), op.getNumeric(), op.getProduct(), op.getProductScale(),
+                        op.getOutputScale(), vectorizeStaticCfft, rewriter);
     RankedTensorType resultType = op.getResult().getType();
     Value result =
         rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());

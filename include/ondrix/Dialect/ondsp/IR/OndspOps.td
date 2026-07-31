@@ -265,24 +265,31 @@ def Ondsp_CxMulOp : Ondsp_Op<"cx_mul", [Pure]> {
 }
 
 def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
-  let summary = "Packed-Q15 elementwise radix-2 butterfly semantic operation";
+  let summary = "Packed fixed-point elementwise radix-2 butterfly semantic operation";
   let description = [{
-    Implements the target-independent packed-Q15 equation documented by
-    `ondrix.butterfly`. Bits 31:16 are imaginary and bits 15:0 are real.
+    Implements the target-independent packed complex equation documented by
+    `ondrix.butterfly`. The `layout` attribute selects one of two executable
+    profiles, and every width below follows from it:
 
-    The complex product `b*w` is evaluated as exact signed i33/Q30
-    cross-products, then `product_scale` independently requantizes its real
-    and imaginary components to signed Q15. Exact signed i17 additions and
+    * `packed_i16_imag_hi_real_lo`: signed Q15 components in an i32
+      container, imaginary in bits 31:16 and real in bits 15:0;
+    * `packed_i32_imag_hi_real_lo`: signed Q31 components in an i64
+      container, imaginary in bits 63:32 and real in bits 31:0.
+
+    The complex product `b*w` is evaluated as exact signed cross-products
+    wide enough to hold `br*wr - bi*wi` without wrapping, then
+    `product_scale` independently requantizes its real and imaginary
+    components back to the component storage. Exact widened additions and
     subtractions form `a + b*w` and `a - b*w`; `output_scale` independently
     requantizes those components before packing.
 
     Both scaling boundaries explicitly apply left shift, signed right-shift
-    rounding, then destination wrap or saturation. The current executable
-    profile is deliberately closed to scalar or matching fixed Vector packed
-    i32 signed-Q15 values, full products, nearest-even saturating product shift
-    15, and nearest-even saturating output shift 1. Vector lanes are
-    independent butterflies; the operation does not reorder FFT stages or
-    move either requantization boundary.
+    rounding, then destination wrap or saturation. Each profile is
+    deliberately closed to scalar or matching fixed Vector packed container
+    values, full products, a nearest-even saturating product shift of
+    `storage width - 1`, and a nearest-even saturating output shift of 1.
+    Vector lanes are independent butterflies; the operation does not reorder
+    FFT stages or move either requantization boundary.
   }];
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
                    Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric,

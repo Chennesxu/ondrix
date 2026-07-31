@@ -4,6 +4,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 #include "ondrix/Support/DSPTypeUtils.h"
+#include "ondrix/Support/Q31TwiddleTables.h"
 
 #include "llvm/Support/MathExtras.h"
 
@@ -101,17 +102,27 @@ static LogicalResult verifyUnencodedTensorTypes(Operation *op,
 }
 
 static LogicalResult verifyCfftValueDomain(CfftOp op) {
-  if (op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
-    return op.emitOpError("executable CFFT requires packed_i16_imag_hi_real_lo layout");
+  // The layout selects the executable profile: packed Q15 in an i32 container
+  // or packed Q31 in an i64 container. The Q15 extent bound is the
+  // in-compiler twiddle contract; the Q31 bound is the frozen offline table,
+  // so an extent beyond it fails closed rather than extrapolating.
+  std::optional<ondrix::ondsp::PackedComplexProfile> profile =
+      ondrix::ondsp::getPackedComplexProfile(op.getLayout().getLayout());
+  if (!profile)
+    return op.emitOpError("executable CFFT requires packed_i16_imag_hi_real_lo or "
+                          "packed_i32_imag_hi_real_lo layout");
   RankedTensorType inputType = op.getInput().getType();
   RankedTensorType resultType = op.getResult().getType();
   if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
     return failure();
+  int64_t maximumExtent = profile->storageWidth == 16 ? 1024 : ondrix::kMaxQ31TwiddleExtent;
+  unsigned containerWidth = profile->containerWidth;
   int64_t extent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
-  if (inputType != resultType || inputType.getRank() != 1 || extent < 4 || extent > 1024 ||
-      !llvm::isPowerOf2_64(extent) || !inputType.getElementType().isSignlessInteger(32))
-    return op.emitOpError("executable CFFT requires matching tensor<Nxi32> input and result "
-                          "with power-of-two N in [4, 1024]");
+  if (inputType != resultType || inputType.getRank() != 1 || extent < 4 || extent > maximumExtent ||
+      !llvm::isPowerOf2_64(extent) || !inputType.getElementType().isSignlessInteger(containerWidth))
+    return op.emitOpError() << "executable CFFT requires matching tensor<Nxi" << containerWidth
+                            << "> input and result with power-of-two N in [4, " << maximumExtent
+                            << "]";
   return success();
 }
 
@@ -919,34 +930,39 @@ LogicalResult DotOp::verify() {
   return verifyDotDomain(*this);
 }
 
+// The value domain runs before the numeric policy in every FFT-family
+// verifier below. The policy is layout-driven now, so a Q15-only operation
+// must reject an unsupported layout with its own diagnostic before the shared
+// policy starts reporting the width rules of a profile that operation does
+// not implement.
 LogicalResult ButterflyOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();
-  if (failed(ondrix::ondsp::verifyPackedQ15ButterflyPolicy(*this, getNumeric(), getProduct(),
-                                                           getProductScale(), getOutputScale())))
+  if (failed(verifyButterflyValueDomain(*this)))
     return failure();
-  return verifyButterflyValueDomain(*this);
+  return ondrix::ondsp::verifyPackedButterflyPolicy(*this, getLayout(), getNumeric(), getProduct(),
+                                                    getProductScale(), getOutputScale());
 }
 
 LogicalResult CfftOp::verify() {
-  if (failed(ondrix::ondsp::verifyPackedQ15ButterflyPolicy(*this, getNumeric(), getProduct(),
-                                                           getProductScale(), getOutputScale())))
+  if (failed(verifyCfftValueDomain(*this)))
     return failure();
-  return verifyCfftValueDomain(*this);
+  return ondrix::ondsp::verifyPackedButterflyPolicy(*this, getLayout(), getNumeric(), getProduct(),
+                                                    getProductScale(), getOutputScale());
 }
 
 LogicalResult RfftOp::verify() {
-  if (failed(ondrix::ondsp::verifyPackedQ15ButterflyPolicy(*this, getNumeric(), getProduct(),
-                                                           getProductScale(), getOutputScale())))
+  if (failed(verifyRfftValueDomain(*this)))
     return failure();
-  return verifyRfftValueDomain(*this);
+  return ondrix::ondsp::verifyPackedButterflyPolicy(*this, getLayout(), getNumeric(), getProduct(),
+                                                    getProductScale(), getOutputScale());
 }
 
 LogicalResult IrfftOp::verify() {
-  if (failed(ondrix::ondsp::verifyPackedQ15ButterflyPolicy(*this, getNumeric(), getProduct(),
-                                                           getProductScale(), getOutputScale())))
+  if (failed(verifyIrfftValueDomain(*this)))
     return failure();
-  return verifyIrfftValueDomain(*this);
+  return ondrix::ondsp::verifyPackedButterflyPolicy(*this, getLayout(), getNumeric(), getProduct(),
+                                                    getProductScale(), getOutputScale());
 }
 
 LogicalResult RfftRadix4SplitOp::verify() {
