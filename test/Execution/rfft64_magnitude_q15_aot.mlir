@@ -8,9 +8,20 @@
 // RUN: llc -relocation-model=pic -filetype=obj %t.estimate.ll -o %t.estimate.o
 // RUN: cc %S/Inputs/rfft64_magnitude_q15_aot.c %t.estimate.o -o %t.estimate -lm
 // RUN: %t.estimate
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --canonicalize --cse --forward-ondrix-insert-extract --canonicalize --cse --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.forwarded.mlir
+// RUN: ondrix-translate %t.forwarded.mlir --mlir-to-llvmir > %t.forwarded.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.forwarded.ll -o %t.forwarded.o
+// RUN: cc %S/Inputs/rfft64_magnitude_q15_aot.c %t.forwarded.o -o %t.forwarded -lm
+// RUN: %t.forwarded
 
 // The second pipeline exercises the opt-in sqrt-estimate lowering against
 // the SAME independent reference: both roots must be bit-identical.
+//
+// The third pipeline forwards the staged spectrum reads onto the RFFT
+// scalars, deleting the intermediate packed tensor before bufferization.
+// Forwarding replaces a read with the very SSA value that was written, so it
+// moves no numeric boundary and the object must satisfy the same
+// differential checks bit for bit.
 //
 // Fixed-point magnitude spectrum: 64 real Q15 samples through the staged
 // RFFT contract, then exact sums of squares and the explicit integer square

@@ -193,4 +193,37 @@ def FuseOndrixGainIntoFir
   ];
 }
 
+def ForwardOndrixInsertExtract
+    : Pass<"forward-ondrix-insert-extract", "::mlir::ModuleOp"> {
+  let summary = "Forward constant-index tensor reads through insert chains";
+  let description = [{
+    Opt-in producer-consumer fusion for staged tensor consumers. A staged
+    algorithm lowering assembles an intermediate tensor with a chain of
+    constant-index `tensor.insert` operations into `tensor.empty`, and the
+    next stage reads it back with constant-index `tensor.extract`. Upstream
+    folding only inspects the nearest insert, so a chain whose last write
+    targets a different index leaves the whole intermediate materialized.
+
+    This pass walks the insert chain from the extract toward the base and
+    replaces the extract with the scalar of the first insert whose constant
+    indices all equal the extract's. That scalar and the read are the same
+    SSA value, so this is value-identity forwarding: it moves no numeric
+    boundary, reorders no accumulator update, and carries no legality
+    obligation beyond index equality. Once every read of the intermediate is
+    forwarded, the inserts and the `tensor.empty` become dead and ordinary
+    dead-code elimination removes the intermediate tensor.
+
+    The walk refuses and leaves the extract untouched when any compared index
+    is not a compile-time constant, when the ranks differ, or when it reaches
+    a producer that is not a `tensor.insert` without having found a matching
+    index. In particular a read that resolves to `tensor.empty` is never
+    forwarded: an unmatched read of uninitialized storage is an upstream
+    defect, not a value this pass may invent.
+  }];
+  let constructor = "ondrix::createForwardOndrixInsertExtractPass()";
+  let dependentDialects = [
+    "mlir::tensor::TensorDialect",
+  ];
+}
+
 #endif // ONDRIX_TRANSFORMS_PASSES
