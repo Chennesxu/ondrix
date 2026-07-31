@@ -39,10 +39,12 @@ std::optional<llvm::SmallVector<int64_t>> constantIndices(ValueRange indices) {
 Value forwardedScalar(Value source, ArrayRef<int64_t> readIndices) {
   while (auto insert = source.getDefiningOp<tensor::InsertOp>()) {
     std::optional<llvm::SmallVector<int64_t>> writeIndices = constantIndices(insert.getIndices());
-    // Either the write index is unknown or the ranks disagree; in both cases
-    // this write may be the one the read observes and cannot be walked past.
-    if (!writeIndices || writeIndices->size() != readIndices.size())
+    // A write with an unknown index may be the one the read observes and
+    // cannot be walked past. The verifier ties every chained insert to the
+    // extract tensor's rank, so the index counts always agree.
+    if (!writeIndices)
       return Value();
+    assert(writeIndices->size() == readIndices.size() && "insert chain changed rank");
     if (llvm::ArrayRef<int64_t>(*writeIndices) == readIndices)
       return insert.getScalar();
     source = insert.getDest();
@@ -60,8 +62,10 @@ public:
       ForwardOndrixInsertExtractPass>::ForwardOndrixInsertExtractBase;
 
   void runOnOperation() override {
-    // Each walk already traverses the whole chain, so one sweep reaches the
-    // fixpoint. Collect first because forwarding erases the visited read.
+    // One sweep in walk order. A read whose index is produced by a
+    // not-yet-forwarded extract in a later block can be missed; the miss
+    // leaves the read in its declared safe unforwarded state, never on a
+    // wrong value. Collect first because forwarding erases the visited read.
     llvm::SmallVector<tensor::ExtractOp> reads;
     getOperation().walk([&](tensor::ExtractOp op) { reads.push_back(op); });
     for (tensor::ExtractOp read : reads) {

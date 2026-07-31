@@ -200,9 +200,10 @@ def ForwardOndrixInsertExtract
     Opt-in producer-consumer fusion for staged tensor consumers. A staged
     algorithm lowering assembles an intermediate tensor with a chain of
     constant-index `tensor.insert` operations into `tensor.empty`, and the
-    next stage reads it back with constant-index `tensor.extract`. Upstream
-    folding only inspects the nearest insert, so a chain whose last write
-    targets a different index leaves the whole intermediate materialized.
+    next stage reads it back with constant-index `tensor.extract`. This
+    LLVM release has no extract-of-insert folding at all — upstream folds
+    inspect only splats, from_elements, and constants — so every such
+    intermediate stays fully materialized through lowering.
 
     This pass walks the insert chain from the extract toward the base and
     replaces the extract with the scalar of the first insert whose constant

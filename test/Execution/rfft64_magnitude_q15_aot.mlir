@@ -8,6 +8,11 @@
 // RUN: llc -relocation-model=pic -filetype=obj %t.estimate.ll -o %t.estimate.o
 // RUN: cc %S/Inputs/rfft64_magnitude_q15_aot.c %t.estimate.o -o %t.estimate -lm
 // RUN: %t.estimate
+// The forwarded execution gate below is self-attesting: this RUN pins that
+// the pass actually fired at this extent before the object is built — a
+// silently inert pass would leave the packed 33xi32 intermediate alive here.
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --canonicalize --cse --forward-ondrix-insert-extract --canonicalize --cse | FileCheck %s --check-prefix=FORWARDED --implicit-check-not="tensor<33xi32>"
+// FORWARDED-LABEL: func.func @rfft64_magnitude_q15
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --canonicalize --cse --forward-ondrix-insert-extract --canonicalize --cse --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.forwarded.mlir
 // RUN: ondrix-translate %t.forwarded.mlir --mlir-to-llvmir > %t.forwarded.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.forwarded.ll -o %t.forwarded.o
