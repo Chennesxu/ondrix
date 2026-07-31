@@ -1,10 +1,11 @@
 // RUN: ondrix-opt %s --convert-ondsp-fixed-to-scalar | FileCheck %s --implicit-check-not=ondsp.
 // RUN: ondrix-opt %s --convert-ondsp-fixed-to-scalar="specialize-canonical-twiddles" | FileCheck %s --check-prefix=GENERAL --implicit-check-not=ondsp.
 
-// The Q31 cross products br*wr - bi*wi reach +-2^63 and would wrap an i64
-// carrier, so the exact product carrier is i128 and the sum carrier is i33.
-// The i128 operations must be visible here: a silent narrowing to i64 would
-// still produce plausible output for small inputs.
+// ondsp.cx_butterfly admits an arbitrary twiddle, so the imaginary cross sum
+// br*wi + bi*wr reaches 2^63 (at b = w = (-2^31, -2^31)), one past INT64_MAX.
+// The exact product carrier is therefore i128 and the sum carrier i33. The
+// i128 operations must be visible here; the executable witness that the width
+// is load bearing is test/Execution/cx_butterfly_q31_aot.mlir.
 func.func @cx_butterfly_q31(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
   %o0, %o1 = ondsp.cx_butterfly %a, %b, %tw {
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,

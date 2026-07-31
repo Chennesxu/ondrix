@@ -1,10 +1,15 @@
 /* Independent reference for the packed-Q31 radix-2 CFFT contract.
  *
- * Every intermediate here is __int128 by construction: the Q31 cross products
- * br*wr - bi*wi reach +-2^63 and would wrap an int64_t accumulator, so an
- * int64_t reference would silently agree with a buggy compiler only outside
- * the interesting range. The recursion, the packing, and the requantization
- * are written from the contract rather than shared with the compiler. */
+ * Every intermediate here is __int128 because the contract says the products
+ * are exact, not because this corpus can wrap an int64_t. Inside the CFFT the
+ * twiddles are frozen unit-circle constants, so both cross sums are bounded
+ * by 2^31 * max(|wr| + |wi|) = 0.7071 * INT64_MAX and no input reaches an i64
+ * overflow. The carrier width is witnessed at the operation level instead,
+ * where ondsp.cx_butterfly admits an arbitrary twiddle: see
+ * test/Execution/Inputs/cx_butterfly_q31_aot.c. What this reference does
+ * establish is the recursion, the packing, the staged scaling, and the
+ * saturating requantization, all written from the contract rather than
+ * shared with the compiler. */
 
 #include <inttypes.h>
 #include <limits.h>
@@ -269,8 +274,11 @@ static int checkRoundTrip(void) {
     cfftRecursive(spectrum, 1, 0, kExtent, kInverseTwiddles16, expected);
     failed |= compare("round trip", kExtent, &output, expected);
 
-    /* 2*log2(8) = 6 rounding boundaries lie between the input and the
-     * scaled-by-1/8 result, so allow one LSB of drift per boundary. */
+    /* Each element passes the full staged boundary budget of both
+     * transforms: 2*log2(8) = 6 output scales, plus up to that many product
+     * requantizations along the b-side of each butterfly. The +-6 LSB window
+     * below is the empirical bound this gate enforces, not a derived error
+     * bound. */
     for (unsigned i = 0; i < kExtent; ++i) {
       struct Complex source = unpack(input[i]);
       struct Complex result = unpack(expected[i]);

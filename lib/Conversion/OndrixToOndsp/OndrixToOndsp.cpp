@@ -979,8 +979,14 @@ static bool hasAdmissiblePackedTwiddleTables(unsigned storageWidth,
 }
 
 // The real-spectrum lowerings below are packed-Q15 only: their verifiers
-// accept no other layout, so they name the profile instead of deriving it.
-static constexpr ondrix::ondsp::PackedComplexProfile kPackedQ15Profile{16, 32};
+// accept no other layout, so they name the layout and let the shared mapping
+// supply its widths rather than restating them.
+static ondrix::ondsp::PackedComplexProfile getPackedQ15Profile() {
+  std::optional<ondrix::ondsp::PackedComplexProfile> profile =
+      ondrix::ondsp::getPackedComplexProfile(ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo);
+  assert(profile && "the packed Q15 layout must have an executable profile");
+  return *profile;
+}
 
 static SmallVector<Value>
 lowerPackedCfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirection direction,
@@ -1250,9 +1256,9 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     int64_t extent = op.getInput().getType().getDimSize(0);
-    if (!hasAdmissiblePackedTwiddleTables(kPackedQ15Profile.storageWidth,
+    if (!hasAdmissiblePackedTwiddleTables(getPackedQ15Profile().storageWidth,
                                           ondrix::ir::CfftDirection::Forward, extent))
-      return rewriter.notifyMatchFailure(op, "twiddle quantization is not tie-guard admissible");
+      return rewriter.notifyMatchFailure(op, "the stage twiddle table is unavailable");
     if (fftLoops) {
       IntegerType i32 = rewriter.getI32Type();
       Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
@@ -1296,7 +1302,7 @@ public:
     }
 
     SmallVector<Value> outputs =
-        lowerPackedCfft(loc, inputs, ondrix::ir::CfftDirection::Forward, kPackedQ15Profile,
+        lowerPackedCfft(loc, inputs, ondrix::ir::CfftDirection::Forward, getPackedQ15Profile(),
                         op.getLayout(), op.getNumeric(), op.getProduct(), op.getProductScale(),
                         op.getOutputScale(), vectorizeStaticCfft, rewriter);
     outputs.front() = canonicalizePackedQ15Real(loc, outputs.front(), rewriter);
@@ -1328,9 +1334,9 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     int64_t extent = op.getResult().getType().getDimSize(0);
-    if (!hasAdmissiblePackedTwiddleTables(kPackedQ15Profile.storageWidth,
+    if (!hasAdmissiblePackedTwiddleTables(getPackedQ15Profile().storageWidth,
                                           ondrix::ir::CfftDirection::Inverse, extent))
-      return rewriter.notifyMatchFailure(op, "twiddle quantization is not tie-guard admissible");
+      return rewriter.notifyMatchFailure(op, "the stage twiddle table is unavailable");
     int64_t half = extent / 2;
     if (fftLoops) {
       IntegerType i32 = rewriter.getI32Type();
@@ -1389,7 +1395,7 @@ public:
     }
 
     SmallVector<Value> outputs =
-        lowerPackedCfft(loc, spectrum, ondrix::ir::CfftDirection::Inverse, kPackedQ15Profile,
+        lowerPackedCfft(loc, spectrum, ondrix::ir::CfftDirection::Inverse, getPackedQ15Profile(),
                         op.getLayout(), op.getNumeric(), op.getProduct(), op.getProductScale(),
                         op.getOutputScale(), vectorizeStaticCfft, rewriter);
     RankedTensorType resultType = op.getResult().getType();

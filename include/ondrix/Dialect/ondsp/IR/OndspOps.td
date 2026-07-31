@@ -277,9 +277,12 @@ def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
       container, imaginary in bits 63:32 and real in bits 31:0.
 
     The complex product `b*w` is evaluated as exact signed cross-products
-    wide enough to hold `br*wr - bi*wi` without wrapping, then
-    `product_scale` independently requantizes its real and imaginary
-    components back to the component storage. Exact widened additions and
+    wide enough to hold both `br*wr - bi*wi` and `br*wi + bi*wr` without
+    wrapping for any operand values the profile admits. The imaginary term is
+    the binding one: it reaches `2^63` at `b = w = (-2^31, -2^31)` in the Q31
+    profile, one past `INT64_MAX`. `product_scale` then independently
+    requantizes the real and imaginary components back to the component
+    storage. Exact widened additions and
     subtractions form `a + b*w` and `a - b*w`; `output_scale` independently
     requantizes those components before packing.
 

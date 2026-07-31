@@ -10,9 +10,14 @@
 // against an independent __int128 reference over full-scale rails and
 // xorshift trials.
 
-// The exact cross-product carrier must survive to LLVM IR. If it silently
-// narrowed to i64 the rails below would wrap, so the gate pins it here as
-// well as in the differential run.
+// Structural pin only: the shared butterfly lowering must still hand this
+// profile the i128 carrier. It is NOT a necessity witness. Inside the CFFT
+// the twiddles are frozen unit-circle constants, so |br*wr - bi*wi| and
+// |br*wi + bi*wr| are bounded by 2^31 * max(|wr| + |wi|) = 0.7071 *
+// INT64_MAX: no CFFT input can make an i64 carrier wrap, and this corpus
+// passes unchanged with one. The carrier width is witnessed at the operation
+// level instead, by test/Execution/cx_butterfly_q31_aot.mlir, where an
+// arbitrary SSA twiddle reaches 2^63.
 // CARRIER: i128
 // CARRIER-NOT: ondrix.
 // CARRIER-NOT: ondsp.
