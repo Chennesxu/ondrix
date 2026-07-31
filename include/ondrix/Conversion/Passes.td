@@ -342,24 +342,36 @@ def VectorizeOndspFixedDecimateOutputs
     a factor of two makes exact. The block containing the final output stays
     on the ordered loop so that contiguous load never reads past the input.
 
-    Aliasing is a real precondition, not an aside. The rewrite defers a
-    block's stores past all of that block's tap loads, so an output that
-    shares storage with the input or the coefficients would be read at a
-    different time than the ordered schedule reads it, and the two schedules
-    would compute different values. The pass refuses every sharing it can
-    decide: it resolves each operand through casts, subviews, and the other
-    view-like operations to the storage it views, and declines whenever two
-    of them reach the same base or read the same global.
+    Aliasing is a separately discharged legality obligation, not an aside.
+    The rewrite defers a block's stores past all of that block's tap loads,
+    so an output that shares storage with the input or the coefficients would
+    be read at a different time than the ordered schedule reads it, and the
+    two schedules would compute different values. Nothing about the numeric
+    contract covers this: it is a memory-schedule question, discharged partly
+    by a static refusal here and partly by a precondition on the caller.
 
-    What that cannot decide is distinct block arguments that alias at run
-    time. This shape reaches the pass from `one-shot-bufferize` with
+    The static half fails closed. Each operand is resolved through casts,
+    subviews, and the other view-like operations to the storage it views, and
+    the loop is refused unless BOTH resolved bases have provenance this can
+    place — a block argument, an `alloc`, an `alloca`, or a `get_global`.
+    Anything else (a memref chosen by `arith.select`, yielded from an
+    `scf.if`, or returned by a call) is refused outright, because such a
+    producer may hand back storage another operand already names. Among
+    placeable bases, the same value shares, two reads of one global share
+    when the symbol matches, and a fresh allocation shares with nothing else.
+
+    The remaining half is a PRECONDITION, not a compiler proof: distinct
+    block arguments, and a block argument against a global, are not decidable
+    here. This shape reaches the pass from `one-shot-bufferize` with
     `bufferize-function-boundaries`, whose function-boundary ABI passes the
     input, the coefficients, and the destination-style output as separate
-    memref arguments and does not promise they are disjoint. Callers of such
-    a function own that disjointness, exactly as they already own it for the
-    ordered lowering's own destination-style aliasing rules; this pass adds
-    the further requirement that the output be disjoint from the input, which
-    the ordered schedule tolerates and the batched one does not.
+    memref arguments and promises nothing about their disjointness. Enabling
+    this pass therefore asserts, on the caller's behalf, that the output's
+    storage is disjoint from every other operand's storage for every
+    argument-or-global mix the compiler could not place. The ordered schedule
+    tolerates that overlap and the batched one does not, so the assertion is
+    an additional obligation this pass introduces — inherited from the
+    bufferization boundary, never established by it.
   }];
   let constructor = "ondrix::createVectorizeOndspFixedDecimateOutputsPass()";
   let dependentDialects = [

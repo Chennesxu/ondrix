@@ -31,7 +31,13 @@
  * saturated 32767. `expectVisibleClamp` requires exactly that disagreement at
  * an i34 output that is itself non-saturating, so dropping the clamp, or
  * applying one lane's clamp to another lane, is caught in the exported bits
- * rather than swallowed by the destination range. */
+ * rather than swallowed by the destination range.
+ *
+ * This is the first committed strongly visible construction, not a proven
+ * minimum: it separates the two trajectories by 2^30, and shorter shapes can
+ * still be made visible through the one-raw-unit clamp loss landing on a
+ * nearest-even half-tie. A tighter shape would be a narrower witness of the
+ * same property, so it is not committed here. */
 
 enum {
   kOutputLength = 19,

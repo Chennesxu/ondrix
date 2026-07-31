@@ -152,3 +152,128 @@ func.func @refuse_same_global_operands(%output: memref<19xi16>) {
   }
   return
 }
+
+// Storage the analysis cannot place is refused rather than assumed distinct.
+// An opaque producer may hand back a buffer another operand already names, and
+// answering "distinct" there would authorize the rewrite on a false premise.
+// The three shapes below are exactly that: the store target is chosen at run
+// time, so no local rule can decide whether it is the input.
+//
+// Their non-vacuity is the positive test's: replacing each opaque producer with
+// a plain block argument leaves an otherwise identical loop that does batch.
+
+// A run-time choice between the input and an independent allocation.
+// CHECK-LABEL: func.func @refuse_selected_output
+// CHECK: ondsp.reduce_mac
+
+func.func @refuse_selected_output(%input: memref<48xi16>, %coeffs: memref<8xi16>,
+                                  %condition: i1) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c19 = arith.constant 19 : index
+  %fresh = memref.alloc() : memref<19xi16>
+  %aliased = memref.subview %input[10] [19] [1]
+      : memref<48xi16> to memref<19xi16, strided<[1], offset: 10>>
+  %view = memref.cast %aliased
+      : memref<19xi16, strided<[1], offset: 10>> to memref<19xi16, strided<[1], offset: ?>>
+  %freshView = memref.cast %fresh : memref<19xi16> to memref<19xi16, strided<[1], offset: ?>>
+  %output = arith.select %condition, %view, %freshView : memref<19xi16, strided<[1], offset: ?>>
+  scf.for %index = %c0 to %c19 step %c1 {
+    %offset = arith.muli %index, %c2 : index
+    %window = memref.subview %input[%offset] [8] [1]
+        : memref<48xi16> to memref<8xi16, strided<[1], offset: ?>>
+    %zero = ondsp.acc_zero
+        : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %reduced = ondsp.reduce_mac %zero, %window, %coeffs {
+      numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+      product = #ondsp.product<full>
+    } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+         memref<8xi16, strided<[1], offset: ?>>, memref<8xi16>)
+        -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %sample = ondsp.acc_export %reduced {
+      dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+      rounding = #ondsp.rounding<nearest_even>,
+      overflow = #ondsp.overflow<saturate>
+    } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+    memref.store %sample, %output[%index] : memref<19xi16, strided<[1], offset: ?>>
+  }
+  return
+}
+
+// The same choice made by control flow instead of a select.
+// CHECK-LABEL: func.func @refuse_yielded_output
+// CHECK: ondsp.reduce_mac
+
+func.func @refuse_yielded_output(%input: memref<48xi16>, %coeffs: memref<8xi16>,
+                                 %condition: i1) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c19 = arith.constant 19 : index
+  %output = scf.if %condition -> (memref<19xi16, strided<[1], offset: ?>>) {
+    %aliased = memref.subview %input[10] [19] [1]
+        : memref<48xi16> to memref<19xi16, strided<[1], offset: 10>>
+    %view = memref.cast %aliased
+        : memref<19xi16, strided<[1], offset: 10>> to memref<19xi16, strided<[1], offset: ?>>
+    scf.yield %view : memref<19xi16, strided<[1], offset: ?>>
+  } else {
+    %fresh = memref.alloc() : memref<19xi16>
+    %freshView = memref.cast %fresh : memref<19xi16> to memref<19xi16, strided<[1], offset: ?>>
+    scf.yield %freshView : memref<19xi16, strided<[1], offset: ?>>
+  }
+  scf.for %index = %c0 to %c19 step %c1 {
+    %offset = arith.muli %index, %c2 : index
+    %window = memref.subview %input[%offset] [8] [1]
+        : memref<48xi16> to memref<8xi16, strided<[1], offset: ?>>
+    %zero = ondsp.acc_zero
+        : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %reduced = ondsp.reduce_mac %zero, %window, %coeffs {
+      numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+      product = #ondsp.product<full>
+    } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+         memref<8xi16, strided<[1], offset: ?>>, memref<8xi16>)
+        -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %sample = ondsp.acc_export %reduced {
+      dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+      rounding = #ondsp.rounding<nearest_even>,
+      overflow = #ondsp.overflow<saturate>
+    } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+    memref.store %sample, %output[%index] : memref<19xi16, strided<[1], offset: ?>>
+  }
+  return
+}
+
+// A callee's return value: its provenance is not visible here at all.
+func.func private @pick_destination(memref<44xi16>) -> memref<19xi16>
+
+// CHECK-LABEL: func.func @refuse_called_output
+// CHECK: ondsp.reduce_mac
+
+func.func @refuse_called_output(%input: memref<44xi16>, %coeffs: memref<8xi16>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c19 = arith.constant 19 : index
+  %output = func.call @pick_destination(%input) : (memref<44xi16>) -> memref<19xi16>
+  scf.for %index = %c0 to %c19 step %c1 {
+    %offset = arith.muli %index, %c2 : index
+    %window = memref.subview %input[%offset] [8] [1]
+        : memref<44xi16> to memref<8xi16, strided<[1], offset: ?>>
+    %zero = ondsp.acc_zero
+        : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %reduced = ondsp.reduce_mac %zero, %window, %coeffs {
+      numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+      product = #ondsp.product<full>
+    } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+         memref<8xi16, strided<[1], offset: ?>>, memref<8xi16>)
+        -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %sample = ondsp.acc_export %reduced {
+      dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+      rounding = #ondsp.rounding<nearest_even>,
+      overflow = #ondsp.overflow<saturate>
+    } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+    memref.store %sample, %output[%index] : memref<19xi16>
+  }
+  return
+}

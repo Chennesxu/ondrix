@@ -39,10 +39,13 @@
 //     profile never clamps, lands on 1074003968, and exports the saturated
 //     32767. The harness requires that disagreement at an i34 output that is
 //     itself non-saturating, so an implementation that dropped the clamp, or
-//     applied one lane's clamp to another lane, cannot pass. Seventeen is the
-//     smallest tap count that can express this: the largest available negative
-//     product is -32768 * 32767, so a single opposite tap moves the clamped
-//     accumulator only to 7516225535, whose export still saturates.
+//     applied one lane's clamp to another lane, cannot pass. Seventeen taps is
+//     the first committed strongly visible construction, not a proven minimum:
+//     the clamped and unclamped trajectories are driven apart by 2^30 here, and
+//     shorter shapes can still be made visible through the one-raw-unit clamp
+//     loss landing on a nearest-even half-tie. Nine taps cannot: the largest
+//     available negative product is -32768 * 32767, so a single opposite tap
+//     moves the clamped accumulator only to 7516225535, whose export saturates.
 //
 // The output length 19 is odd, so with width 8 the batched loop covers outputs
 // 0..15 and the untouched ordered loop covers 16..18. Both paths run in every
