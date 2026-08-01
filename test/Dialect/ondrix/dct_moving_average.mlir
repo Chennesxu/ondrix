@@ -30,3 +30,14 @@ func.func @moving_average(%input: tensor<40xi16>) -> tensor<33xi16> {
   } : (tensor<40xi16>) -> tensor<33xi16>
   return %result : tensor<33xi16>
 }
+
+// A non-power-of-two window is the round_div consumer profile.
+func.func @moving_average_odd_window(%input: tensor<12xi16>) -> tensor<10xi16> {
+  // CHECK: ondrix.moving_average
+  // CHECK-SAME: window = 3
+  %result = ondrix.moving_average %input {
+    window = 3 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : (tensor<12xi16>) -> tensor<10xi16>
+  return %result : tensor<10xi16>
+}

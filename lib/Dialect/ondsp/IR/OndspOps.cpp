@@ -268,6 +268,40 @@ LogicalResult RoundShiftOp::verify() {
   return verifyResultElementType(*this, getResult().getType(), getScale().getSaturateTo());
 }
 
+LogicalResult RoundDivOp::verify() {
+  if (failed(verifyValueOnlyTypes(*this)))
+    return failure();
+  if (failed(verifySameElementwiseShape(*this, {getInput().getType(), getResult().getType()})))
+    return failure();
+  if (failed(verifySignlessIntegerElementType(*this, getInput().getType(), "input")) ||
+      failed(verifySignlessIntegerElementType(*this, getResult().getType(), "result")))
+    return failure();
+  // The generated I64Attr getters hand back unsigned values; the contract's
+  // sign checks need the signed reading.
+  int64_t divisor = int64_t(getDivisor());
+  if (divisor < 1)
+    return emitOpError("round_div requires a positive static divisor; a runtime divisor is a "
+                       "different operation with an explicit zero policy");
+  int64_t preShift = int64_t(getPreShiftLeft());
+  if (preShift < 0 || preShift > 63)
+    return emitOpError("pre_shift_left must lie in [0, 63]");
+  auto inputElement = cast<IntegerType>(ondrix::getElementTypeOrSelf(getInput().getType()));
+  auto resultElement = cast<IntegerType>(ondrix::getElementTypeOrSelf(getResult().getType()));
+  uint64_t carrierWidth = uint64_t{inputElement.getWidth()} + uint64_t(preShift);
+  if (carrierWidth > 128)
+    return emitOpError("the exact scaled carrier (input width + pre_shift_left) must not "
+                       "exceed 128 bits");
+  // The divisor participates in carrier arithmetic (the lowering compares the
+  // remainder against divisor - remainder), so it must be a representable
+  // positive carrier value.
+  if (carrierWidth < 64 && uint64_t(divisor) >= (uint64_t{1} << (carrierWidth - 1)))
+    return emitOpError("the divisor must be representable in the exact scaled carrier");
+  if (resultElement.getWidth() > carrierWidth)
+    return emitOpError("round_div does not widen: the result storage must not exceed the "
+                       "exact scaled carrier");
+  return success();
+}
+
 LogicalResult SatCastOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();

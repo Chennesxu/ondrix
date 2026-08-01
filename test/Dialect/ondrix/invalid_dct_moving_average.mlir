@@ -33,13 +33,24 @@ func.func @dct_too_large(%input: tensor<128xi16>) -> tensor<128xi16> {
 
 // -----
 
-func.func @average_odd_window(%input: tensor<12xi16>) -> tensor<10xi16> {
-  // expected-error@+1 {{executable moving average requires a power-of-two window in [2, 64]}}
+func.func @average_degenerate_window(%input: tensor<12xi16>) -> tensor<12xi16> {
+  // expected-error@+1 {{executable moving average requires a window in [2, 64]}}
   %result = ondrix.moving_average %input {
-    window = 3 : i64,
+    window = 1 : i64,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
-  } : (tensor<12xi16>) -> tensor<10xi16>
-  return %result : tensor<10xi16>
+  } : (tensor<12xi16>) -> tensor<12xi16>
+  return %result : tensor<12xi16>
+}
+
+// -----
+
+func.func @average_window_too_large(%input: tensor<70xi16>) -> tensor<6xi16> {
+  // expected-error@+1 {{executable moving average requires a window in [2, 64]}}
+  %result = ondrix.moving_average %input {
+    window = 65 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : (tensor<70xi16>) -> tensor<6xi16>
+  return %result : tensor<6xi16>
 }
 
 // -----

@@ -759,22 +759,23 @@ def Ondrix_MovingAverageOp : Ondrix_Op<"moving_average", [Pure]> {
   let summary = "Valid-boundary moving average with one exact rounding";
   let description = [{
     `ondrix.moving_average` computes the valid-boundary sliding mean of a
-    static rank-1 signed-Q1.15 tensor with a static power-of-two window
-    `K = 2^m` in `[2, 64]`:
+    static rank-1 signed-Q1.15 tensor with a static window `K` in `[2, 64]`:
 
     ```text
-    y[n] = round_shift(sum_{i=0}^{K-1} x[n + i], m),  n = 0..N-K
+    y[n] = round_nearest_even(sum_{i=0}^{K-1} x[n + i] / K),  n = 0..N-K
     ```
 
     The window sum is exact in i64 and the single explicit boundary is the
-    final nearest-even `ondsp.round_shift` by `m`; a mean of Q1.15 values
-    stays inside Q1.15, so the declared saturation is unreachable. This
-    contract is deliberately NOT the equal-tap FIR
-    `sum x[n+i] * q15(1/K)`: quantizing `1/K` first is a different
-    program with a different result (a gain-merge-class divergence), which
-    is why the operation exists instead of a rewrite onto `ondrix.fir`.
-    Non-power-of-two windows require a rounded-division primitive and fail
-    closed until one has a consumer.
+    final nearest-even division by `K`: `ondsp.round_shift` by `log2(K)`
+    when `K` is a power of two (keeping that profile's lowering
+    byte-identical to its pre-generalization form) and `ondsp.round_div`
+    by `K` otherwise — the two spellings agree bit-exactly where both
+    exist. A mean of Q1.15 values stays inside Q1.15, so the declared
+    saturation is unreachable either way. This contract is deliberately
+    NOT the equal-tap FIR `sum x[n+i] * q15(1/K)`: quantizing `1/K` first
+    is a different program with a different result (a gain-merge-class
+    divergence), which is why the operation exists instead of a rewrite
+    onto `ondrix.fir`.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    I64Attr:$window,

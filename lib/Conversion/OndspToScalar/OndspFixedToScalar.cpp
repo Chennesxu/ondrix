@@ -819,6 +819,102 @@ public:
   }
 };
 
+class RoundDivOpLowering final : public OpConversionPattern<ondrix::ondsp::RoundDivOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::RoundDivOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::RoundDivOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    IntegerType inputElement = getSignlessIntegerElementOrNull(adaptor.getInput().getType());
+    if (!inputElement)
+      return op.emitOpError("fixed scalar lowering supports scalar or fixed-width vector "
+                            "signless integer round_div values");
+    Location loc = op.getLoc();
+    unsigned carrierWidth = inputElement.getWidth() + unsigned(op.getPreShiftLeft());
+    Type carrierType = getIntegerTypeLike(adaptor.getInput().getType(), carrierWidth, rewriter);
+    Value scaled = adaptor.getInput();
+    if (scaled.getType() != carrierType)
+      scaled = rewriter.create<arith::ExtSIOp>(loc, carrierType, scaled);
+    if (op.getPreShiftLeft() != 0) {
+      // Exact by construction: the carrier grew by exactly the shift amount.
+      Value amount = createIntegerConstant(loc, carrierType, op.getPreShiftLeft(), rewriter);
+      scaled = rewriter.create<arith::ShLIOp>(loc, scaled, amount);
+    }
+
+    Value divisor = createIntegerConstant(loc, carrierType, op.getDivisor(), rewriter);
+    Value zero = createIntegerConstant(loc, carrierType, 0, rewriter);
+    Value one = createIntegerConstant(loc, carrierType, 1, rewriter);
+    // arith division truncates toward zero; the contract's Euclidean pair is
+    // recovered from it on demand. For a positive divisor the truncated
+    // remainder is negative exactly when the floor correction applies, so
+    // that one sign test replaces the scaled < 0 && r != 0 form. Each mode
+    // builds only the values it reads: toward_zero IS the truncated
+    // quotient, toward_negative needs the corrected quotient alone, and only
+    // the nearest modes need the non-negative remainder.
+    Value truncated = rewriter.create<arith::DivSIOp>(loc, scaled, divisor);
+    Value truncatedRemainder;
+    Value needsCorrection;
+    auto flooredQuotient = [&]() {
+      truncatedRemainder = rewriter.create<arith::RemSIOp>(loc, scaled, divisor);
+      needsCorrection =
+          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, truncatedRemainder, zero);
+      Value stepped = rewriter.create<arith::SubIOp>(loc, truncated, one);
+      return rewriter.create<arith::SelectOp>(loc, needsCorrection, stepped, truncated).getResult();
+    };
+    auto euclideanRemainder = [&]() {
+      Value lifted = rewriter.create<arith::AddIOp>(loc, truncatedRemainder, divisor);
+      return rewriter.create<arith::SelectOp>(loc, needsCorrection, lifted, truncatedRemainder)
+          .getResult();
+    };
+
+    Value rounded;
+    switch (op.getRounding()) {
+    case ondrix::ondsp::RoundingMode::TowardNegative:
+      rounded = flooredQuotient();
+      break;
+    case ondrix::ondsp::RoundingMode::TowardZero:
+      // q + [scaled < 0 and r != 0] is the truncated quotient by construction.
+      rounded = truncated;
+      break;
+    case ondrix::ondsp::RoundingMode::NearestTiesPositive: {
+      // r >= divisor - r, stated without ever forming 2r.
+      Value quotient = flooredQuotient();
+      Value remainder = euclideanRemainder();
+      Value complement = rewriter.create<arith::SubIOp>(loc, divisor, remainder);
+      Value atLeastHalf =
+          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, remainder, complement);
+      Value increment = rewriter.create<arith::SelectOp>(loc, atLeastHalf, one, zero);
+      rounded = rewriter.create<arith::AddIOp>(loc, quotient, increment);
+      break;
+    }
+    case ondrix::ondsp::RoundingMode::NearestEven: {
+      Value quotient = flooredQuotient();
+      Value remainder = euclideanRemainder();
+      Value complement = rewriter.create<arith::SubIOp>(loc, divisor, remainder);
+      Value aboveHalf =
+          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, remainder, complement);
+      Value exactlyHalf =
+          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, remainder, complement);
+      Value quotientLowBit = rewriter.create<arith::AndIOp>(loc, quotient, one);
+      Value quotientIsOdd =
+          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, quotientLowBit, zero);
+      Value halfAndOdd = rewriter.create<arith::AndIOp>(loc, exactlyHalf, quotientIsOdd);
+      Value condition = rewriter.create<arith::OrIOp>(loc, aboveHalf, halfAndOdd);
+      Value increment = rewriter.create<arith::SelectOp>(loc, condition, one, zero);
+      rounded = rewriter.create<arith::AddIOp>(loc, quotient, increment);
+      break;
+    }
+    }
+
+    unsigned destinationWidth = getIntegerElementType(op.getResult().getType()).getWidth();
+    rewriter.replaceOp(
+        op,
+        narrowSignedValue(loc, rounded, getIntegerTypeLike(carrierType, destinationWidth, rewriter),
+                          op.getOverflow(), rewriter));
+    return success();
+  }
+};
+
 class SatCastOpLowering final : public OpConversionPattern<ondrix::ondsp::SatCastOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::SatCastOp>::OpConversionPattern;
@@ -975,8 +1071,8 @@ public:
     OndspFixedToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
-                 MacOpLowering, MacSubOpLowering, ReduceMacOpLowering, RoundShiftOpLowering,
-                 SatCastOpLowering>(typeConverter, &getContext());
+                 MacOpLowering, MacSubOpLowering, ReduceMacOpLowering, RoundDivOpLowering,
+                 RoundShiftOpLowering, SatCastOpLowering>(typeConverter, &getContext());
     patterns.add<SqrtFixedOpLowering>(typeConverter, &getContext(), sqrtEstimate);
     patterns.add<CxButterflyOpLowering>(typeConverter, &getContext(), specializeCanonicalTwiddles);
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);

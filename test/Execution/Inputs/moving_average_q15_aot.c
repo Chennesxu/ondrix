@@ -11,13 +11,19 @@ typedef struct {
 } MemRefI16;
 
 extern void _mlir_ciface_moving_average2_q15(MemRefI16 *, MemRefI16 *);
+extern void _mlir_ciface_moving_average3_q15(MemRefI16 *, MemRefI16 *);
+extern void _mlir_ciface_moving_average6_q15(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_moving_average8_q15(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_moving_average64_q15(MemRefI16 *, MemRefI16 *);
 
 enum { kMaxLength = 64, kTrialCount = 12 };
 
-/* Exact contract: window sum in i64, one round-half-even shift by
- * log2(K). The mean of Q1.15 values stays in Q1.15, so no saturation. */
+/* Exact contract: window sum in i64, one round-half-even division by K.
+ * The mean of Q1.15 values stays in Q1.15, so no saturation. The half test
+ * compares the remainder against window - remainder rather than against
+ * floor(window / 2): for an odd window the exact half K/2 is not an
+ * integer, so no remainder is a tie there, and the floored comparison
+ * would wrongly treat remainder == (K-1)/2 as one. */
 static int16_t referenceMean(const int16_t *input, int64_t index, int64_t window) {
   int64_t sum = 0;
   for (int64_t i = 0; i < window; ++i)
@@ -28,18 +34,19 @@ static int16_t referenceMean(const int16_t *input, int64_t index, int64_t window
     --quotient;
     remainder += window;
   }
-  int64_t half = window / 2;
-  if (remainder > half || (remainder == half && (quotient & 1)))
+  int64_t complement = window - remainder;
+  if (remainder > complement || (remainder == complement && (quotient & 1)))
     ++quotient;
   return (int16_t)quotient;
 }
 
 /* The equal-tap Q15 FIR reformulation quantizes 1/K first. For K = 2^m
  * the tap q15(1/K) = 2^(15-m) makes the scaling exact and the programs
- * coincide, but for the non-power-of-two windows this contract fails
- * closed on, the reformulation is a different program: with K = 3,
- * q15(1/3) = 10923 and x = {16385, 16385, 16385}, the tap form rounds to
- * 16386 while the exact mean is 16385. */
+ * coincide, but for a general window the reformulation is a different
+ * program: with K = 3, q15(1/3) = 10923 and x = {16385, 16385, 16385},
+ * the tap form rounds to 16386 while the exact mean is 16385. The
+ * directed trial below runs that exact input through the K = 3 kernel, so
+ * the gate itself witnesses which of the two programs this contract is. */
 
 static uint32_t nextState(uint32_t state) {
   state ^= state << 13;
@@ -96,11 +103,22 @@ int main(void) {
         input[i] = INT16_MAX;
     if (trial == 3)
       /* K = 2 half-remainder ties with both quotient parities: {2k, 2k+1}
-       * windows land exactly on the rounding half and must round to even. */
+       * windows land exactly on the rounding half and must round to even.
+       * The same ramp reaches the K = 6 tie (remainder 3) as well. */
       for (int64_t i = 0; i < kMaxLength; ++i)
         input[i] = (int16_t)(i - 32);
+    if (trial == 4)
+      /* The FIR-divergence witness pinned in the comment above. */
+      for (int64_t i = 0; i < kMaxLength; ++i)
+        input[i] = 16385;
     snprintf(label, sizeof label, "window2 trial %d", trial);
     failed |= check(_mlir_ciface_moving_average2_q15, input, 40, 2, label);
+    /* The odd window has no reachable tie; the even non-power-of-two one
+     * does. Together they cover both halves of the round_div boundary. */
+    snprintf(label, sizeof label, "window3 trial %d", trial);
+    failed |= check(_mlir_ciface_moving_average3_q15, input, 40, 3, label);
+    snprintf(label, sizeof label, "window6 trial %d", trial);
+    failed |= check(_mlir_ciface_moving_average6_q15, input, 40, 6, label);
     snprintf(label, sizeof label, "window8 trial %d", trial);
     failed |= check(_mlir_ciface_moving_average8_q15, input, 40, 8, label);
     /* Maximum window with input length == window: exactly one output. */

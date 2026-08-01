@@ -2111,8 +2111,14 @@ public:
     int64_t extent = op.getInput().getType().getDimSize(0);
     int64_t window = op.getWindow();
     IntegerType i64 = rewriter.getIntegerType(64);
+    // A power-of-two window keeps its original round_shift boundary so that
+    // profile's lowering stays byte-identical; every other window is the
+    // round_div consumer. Both spell the same nearest-even division by K.
+    bool windowIsPowerOfTwo = llvm::isPowerOf2_64(window);
     ondrix::ondsp::ScaleAttr scale =
-        getNearestEvenSaturatingShift(rewriter.getContext(), llvm::Log2_64(window));
+        windowIsPowerOfTwo
+            ? getNearestEvenSaturatingShift(rewriter.getContext(), llvm::Log2_64(window))
+            : nullptr;
 
     SmallVector<Value> inputs;
     inputs.reserve(extent);
@@ -2126,8 +2132,18 @@ public:
     Value result =
         rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
     auto emitMean = [&](Value sum, int64_t n) {
-      Value mean =
-          rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, rewriter.getI16Type(), sum, scale);
+      Value mean;
+      if (windowIsPowerOfTwo) {
+        mean = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, rewriter.getI16Type(), sum, scale);
+      } else {
+        mean = rewriter.create<ondrix::ondsp::RoundDivOp>(
+            loc, rewriter.getI16Type(), sum, rewriter.getI64IntegerAttr(window),
+            /*pre_shift_left=*/rewriter.getI64IntegerAttr(0),
+            ondrix::ondsp::RoundingModeAttr::get(rewriter.getContext(),
+                                                 ondrix::ondsp::RoundingMode::NearestEven),
+            ondrix::ondsp::OverflowModeAttr::get(rewriter.getContext(),
+                                                 ondrix::ondsp::OverflowMode::Saturate));
+      }
       Value position = rewriter.create<arith::ConstantIndexOp>(loc, n);
       result = rewriter.create<tensor::InsertOp>(loc, mean, result, position);
     };

@@ -36,6 +36,26 @@ func.func @moving_average2_q15(%input: tensor<40xi16>) -> tensor<39xi16>
   return %result : tensor<39xi16>
 }
 
+// The general-window profiles land on the round_div boundary: the odd
+// window has no reachable rounding tie, the even non-power-of-two one does.
+func.func @moving_average3_q15(%input: tensor<40xi16>) -> tensor<38xi16>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.moving_average %input {
+    window = 3 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : (tensor<40xi16>) -> tensor<38xi16>
+  return %result : tensor<38xi16>
+}
+
+func.func @moving_average6_q15(%input: tensor<40xi16>) -> tensor<35xi16>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.moving_average %input {
+    window = 6 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : (tensor<40xi16>) -> tensor<35xi16>
+  return %result : tensor<35xi16>
+}
+
 func.func @moving_average64_q15(%input: tensor<64xi16>) -> tensor<1xi16>
     attributes {llvm.emit_c_interface} {
   %result = ondrix.moving_average %input {

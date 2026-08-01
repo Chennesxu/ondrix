@@ -52,6 +52,49 @@ def Ondsp_RoundShiftOp : Ondsp_Op<"round_shift", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondsp_RoundDivOp : Ondsp_Op<"round_div", [Pure]> {
+  let summary = "Explicit rounded division by a static positive divisor";
+  let description = [{
+    Divides one signed integer value by a static positive divisor under a
+    complete declared policy. With signed input `x` interpreted as a
+    mathematical integer, the exact sequence is:
+
+    ```
+    scaled  = x * 2^pre_shift_left            (exact, in a carrier of
+                                               input width + pre_shift_left bits)
+    q, r    = Euclidean division of scaled by divisor:
+              scaled = q * divisor + r with 0 <= r < divisor
+    rounded = per the rounding mode over (q, r):
+      toward_negative:       q
+      toward_zero:           q + 1 when scaled < 0 and r != 0
+      nearest_ties_positive: q + 1 when r >= divisor - r
+      nearest_even:          q + 1 when r > divisor - r, or
+                             r == divisor - r and q is odd
+    result  = narrow(rounded) to the result storage:
+      wrap:     two's-complement truncation
+      saturate: clamp to the signed range of the result type, then truncate
+    ```
+
+    The half comparisons are stated against `divisor - r` rather than `2r`
+    so no doubled intermediate exists anywhere in the contract or its
+    lowerings. The tie `r == divisor - r` is reachable only for an even
+    divisor; for an odd divisor the two nearest modes agree everywhere by
+    construction. The parity test uses the Euclidean (floor) quotient.
+
+    The divisor is a static attribute and must be positive: a zero or
+    negative divisor has no declared semantics and is rejected, and a
+    RUNTIME divisor is a different operation that must carry an explicit
+    zero policy, failing closed here by not existing. A power-of-two
+    divisor is admitted and agrees bit-exactly with `ondsp.round_shift` of
+    the same policy, which the execution gates cross-check.
+  }];
+  let arguments = (ins AnyType:$input, I64Attr:$divisor, I64Attr:$pre_shift_left,
+                   Ondsp_RoundingModeAttr:$rounding, Ondsp_OverflowModeAttr:$overflow);
+  let results = (outs AnyType:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondsp_SatCastOp : Ondsp_Op<"sat_cast", [Pure]> {
   let summary = "Saturating cast under an explicit numeric policy";
   let description = [{

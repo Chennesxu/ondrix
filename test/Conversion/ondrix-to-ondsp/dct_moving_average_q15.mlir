@@ -48,3 +48,21 @@ func.func @moving_average_q15(%input: tensor<12xi16>) -> tensor<5xi16> {
   } : (tensor<12xi16>) -> tensor<5xi16>
   return %result : tensor<5xi16>
 }
+
+// A general window keeps the exact i64 sums but its single boundary is the
+// nearest-even round_div by K; the power-of-two profile above must keep its
+// round_shift spelling untouched.
+
+// CHECK-LABEL: func.func @moving_average_odd_q15
+// CHECK-COUNT-10: ondsp.round_div {{.*}}divisor = 3 : i64, overflow = #ondsp.overflow<saturate>, pre_shift_left = 0 : i64, rounding = #ondsp.rounding<nearest_even>{{.*}} (i64) -> i16
+// CHECK-NOT: ondsp.round_div
+// CHECK-NOT: ondsp.round_shift
+// CHECK-NOT: ondrix.moving_average
+
+func.func @moving_average_odd_q15(%input: tensor<12xi16>) -> tensor<10xi16> {
+  %result = ondrix.moving_average %input {
+    window = 3 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : (tensor<12xi16>) -> tensor<10xi16>
+  return %result : tensor<10xi16>
+}

@@ -1002,8 +1002,8 @@ LogicalResult MovingAverageOp::verify() {
   if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
     return failure();
   int64_t window = getWindow();
-  if (window < 2 || window > 64 || !llvm::isPowerOf2_64(window))
-    return emitOpError("executable moving average requires a power-of-two window in [2, 64]");
+  if (window < 2 || window > 64)
+    return emitOpError("executable moving average requires a window in [2, 64]");
   int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;

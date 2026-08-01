@@ -1830,9 +1830,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
     } else if (ast.result.kind == ReductionKind::MovingAverage) {
       int64_t window = ast.result.window;
-      if (window < 2 || window > 64 || !llvm::isPowerOf2_64(window)) {
+      if (window < 2 || window > 64) {
         diagnostics.error(ast.result.position,
-                          "moving_average currently requires a power-of-two window in [2, 64]");
+                          "moving_average currently requires a window in [2, 64]");
         return std::nullopt;
       }
       if (window > *inputExtent) {
