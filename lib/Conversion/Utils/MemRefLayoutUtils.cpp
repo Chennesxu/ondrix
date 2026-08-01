@@ -1,6 +1,7 @@
 #include "ondrix/Conversion/Utils/MemRefLayoutUtils.h"
 
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/FunctionInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
 using namespace mlir;
@@ -25,9 +26,19 @@ Value resolveMemRefBase(Value value) {
 /// all. Anything else — an `arith.select` between two memrefs, an `scf.if`
 /// result, a call result — is an opaque producer that may hand back storage
 /// already named by another operand, and is therefore not a fresh base.
+///
+/// Among block arguments, only a function ENTRY argument qualifies: its
+/// storage is chosen by the caller, so disjointness against another entry
+/// argument is a fact the caller owns. Every other block argument — a branch
+/// successor argument, a loop's iter_args — merely renames whatever its
+/// in-function predecessors pass, so the very same buffer and a view of it can
+/// arrive as two distinct arguments with no caller anywhere to discharge the
+/// overlap. Those are opaque.
 static bool hasKnownProvenance(Value base) {
-  if (isa<BlockArgument>(base))
-    return true;
+  if (auto argument = dyn_cast<BlockArgument>(base)) {
+    Block *owner = argument.getOwner();
+    return owner->isEntryBlock() && isa<FunctionOpInterface>(owner->getParentOp());
+  }
   Operation *producer = base.getDefiningOp();
   return producer && isa<memref::AllocOp, memref::AllocaOp, memref::GetGlobalOp>(producer);
 }
@@ -48,9 +59,10 @@ bool mayShareStorage(Value lhs, Value rhs) {
   if (lhsGlobal && rhsGlobal)
     return lhsGlobal.getName() == rhsGlobal.getName();
   // What remains is a pair of distinct known bases. An allocation is fresh
-  // storage, so it shares with nothing else. Two distinct block arguments, or a
-  // block argument against a global, are not decidable here: they are precisely
-  // the runtime residual a caller owns, not a fact this returns.
+  // storage, so it shares with nothing else. Two distinct function entry
+  // arguments, or an entry argument against a global, are not decidable here:
+  // they are precisely the runtime residual a caller owns, not a fact this
+  // returns.
   return false;
 }
 

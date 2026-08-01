@@ -353,16 +353,19 @@ def VectorizeOndspFixedDecimateOutputs
     The static half fails closed. Each operand is resolved through casts,
     subviews, and the other view-like operations to the storage it views, and
     the loop is refused unless BOTH resolved bases have provenance this can
-    place — a block argument, an `alloc`, an `alloca`, or a `get_global`.
-    Anything else (a memref chosen by `arith.select`, yielded from an
-    `scf.if`, or returned by a call) is refused outright, because such a
-    producer may hand back storage another operand already names. Among
-    placeable bases, the same value shares, two reads of one global share
-    when the symbol matches, and a fresh allocation shares with nothing else.
+    place — a function entry argument, an `alloc`, an `alloca`, or a
+    `get_global`. Anything else (a memref chosen by `arith.select`, yielded
+    from an `scf.if`, returned by a call, or carried as a non-entry block
+    argument — a branch successor argument or a loop's iter_args, whose
+    in-function predecessors can pass the same buffer twice) is refused
+    outright, because such a producer may hand back storage another operand
+    already names. Among placeable bases, the same value shares, two reads of
+    one global share when the symbol matches, and a fresh allocation shares
+    with nothing else.
 
     The remaining half is a PRECONDITION, not a compiler proof: distinct
-    block arguments, and a block argument against a global, are not decidable
-    here. This shape reaches the pass from `one-shot-bufferize` with
+    function entry arguments, and an entry argument against a global, are not
+    decidable here. This shape reaches the pass from `one-shot-bufferize` with
     `bufferize-function-boundaries`, whose function-boundary ABI passes the
     input, the coefficients, and the destination-style output as separate
     memref arguments and promises nothing about their disjointness. Enabling

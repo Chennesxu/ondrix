@@ -277,3 +277,84 @@ func.func @refuse_called_output(%input: memref<44xi16>, %coeffs: memref<8xi16>) 
   }
   return
 }
+
+// A non-entry block argument is NOT the caller-owned residual. The branch
+// below passes the buffer and a view of it as two successor arguments, so the
+// aliasing is fixed inside the function; there is no caller whose argument
+// choice could discharge it. Both bases resolve to distinct block arguments —
+// exactly the pair the entry-argument precondition covers at the function
+// boundary — which is why non-entry arguments must be refused as opaque, not
+// deferred to that precondition.
+// CHECK-LABEL: func.func @refuse_branched_operands
+// CHECK: ondsp.reduce_mac
+
+func.func @refuse_branched_operands(%buffer: memref<48xi16>, %coeffs: memref<8xi16>) {
+  %aliased = memref.subview %buffer[10] [19] [1]
+      : memref<48xi16> to memref<19xi16, strided<[1], offset: 10>>
+  cf.br ^bb1(%buffer, %aliased : memref<48xi16>, memref<19xi16, strided<[1], offset: 10>>)
+^bb1(%input: memref<48xi16>, %output: memref<19xi16, strided<[1], offset: 10>>):
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c19 = arith.constant 19 : index
+  scf.for %index = %c0 to %c19 step %c1 {
+    %offset = arith.muli %index, %c2 : index
+    %window = memref.subview %input[%offset] [8] [1]
+        : memref<48xi16> to memref<8xi16, strided<[1], offset: ?>>
+    %zero = ondsp.acc_zero
+        : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %reduced = ondsp.reduce_mac %zero, %window, %coeffs {
+      numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+      product = #ondsp.product<full>
+    } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+         memref<8xi16, strided<[1], offset: ?>>, memref<8xi16>)
+        -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %sample = ondsp.acc_export %reduced {
+      dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+      rounding = #ondsp.rounding<nearest_even>,
+      overflow = #ondsp.overflow<saturate>
+    } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+    memref.store %sample, %output[%index] : memref<19xi16, strided<[1], offset: 10>>
+  }
+  return
+}
+
+// The same in-function renaming through a loop's iter_args: the outer loop's
+// region arguments are entry arguments of that REGION, but their parent is the
+// loop, not a function, so no caller owns their disjointness either.
+// CHECK-LABEL: func.func @refuse_iter_args_operands
+// CHECK: ondsp.reduce_mac
+
+func.func @refuse_iter_args_operands(%buffer: memref<48xi16>, %coeffs: memref<8xi16>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c19 = arith.constant 19 : index
+  %aliased = memref.subview %buffer[10] [19] [1]
+      : memref<48xi16> to memref<19xi16, strided<[1], offset: 10>>
+  %carried:2 = scf.for %step = %c0 to %c2 step %c1
+      iter_args(%input = %buffer, %output = %aliased)
+      -> (memref<48xi16>, memref<19xi16, strided<[1], offset: 10>>) {
+    scf.for %index = %c0 to %c19 step %c1 {
+      %offset = arith.muli %index, %c2 : index
+      %window = memref.subview %input[%offset] [8] [1]
+          : memref<48xi16> to memref<8xi16, strided<[1], offset: ?>>
+      %zero = ondsp.acc_zero
+          : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+      %reduced = ondsp.reduce_mac %zero, %window, %coeffs {
+        numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+        product = #ondsp.product<full>
+      } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+           memref<8xi16, strided<[1], offset: ?>>, memref<8xi16>)
+          -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+      %sample = ondsp.acc_export %reduced {
+        dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+        rounding = #ondsp.rounding<nearest_even>,
+        overflow = #ondsp.overflow<saturate>
+      } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+      memref.store %sample, %output[%index] : memref<19xi16, strided<[1], offset: 10>>
+    }
+    scf.yield %input, %output : memref<48xi16>, memref<19xi16, strided<[1], offset: 10>>
+  }
+  return
+}
