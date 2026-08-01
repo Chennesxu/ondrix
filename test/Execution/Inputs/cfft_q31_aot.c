@@ -4,8 +4,8 @@
  * are exact, not because this corpus can wrap an int64_t. Inside the CFFT the
  * twiddles are frozen unit-circle constants, so both cross sums are bounded
  * by 2^31 * max(|wr| + |wi|) = 0.7071 * INT64_MAX and no input reaches an i64
- * overflow. The carrier width is witnessed at the operation level instead,
- * where ondsp.cx_butterfly admits an arbitrary twiddle: see
+ * overflow. The wrapping-i64 carrier is refuted at the operation level
+ * instead, where ondsp.cx_butterfly admits an arbitrary twiddle: see
  * test/Execution/Inputs/cx_butterfly_q31_aot.c. What this reference does
  * establish is the recursion, the packing, the staged scaling, and the
  * saturating requantization, all written from the contract rather than
@@ -32,33 +32,68 @@ extern void _mlir_ciface_cfft8_forward_q31(MemRefI64 *, MemRefI64 *);
 extern void _mlir_ciface_cfft8_inverse_q31(MemRefI64 *, MemRefI64 *);
 extern void _mlir_ciface_cfft16_forward_q31(MemRefI64 *, MemRefI64 *);
 extern void _mlir_ciface_cfft16_inverse_q31(MemRefI64 *, MemRefI64 *);
+extern void _mlir_ciface_cfft64_forward_q31(MemRefI64 *, MemRefI64 *);
+extern void _mlir_ciface_cfft64_inverse_q31(MemRefI64 *, MemRefI64 *);
 extern void _mlir_ciface_cfft8_round_trip_q31(MemRefI64 *, MemRefI64 *);
 
-enum { kMaxExtent = 16, kTrialCount = 16 };
+enum { kMaxExtent = 64, kTrialCount = 16 };
 
 struct Complex {
   int32_t real;
   int32_t imaginary;
 };
 
-/* Twiddles w_16^k = cos(2*pi*k/16) -+ j*sin(2*pi*k/16), quantized to Q31 with
+/* Twiddles w_64^k = cos(2*pi*k/64) -+ j*sin(2*pi*k/64), quantized to Q31 with
  * round-half-even and declared saturation at +1.0, derived independently with
  * 50-digit mpmath from the contract equation. A stage of size n uses
- * table[k * (16 / n)]. The inverse table is listed rather than negated: at
- * k = 4 the forward imaginary part is exactly -2147483648 while its inverse
+ * table[k * (64 / n)]. The inverse table is listed rather than negated: at
+ * k = 16 the forward imaginary part is exactly -2147483648 while its inverse
  * counterpart saturates to 2147483647, so the two are not related by a sign
  * flip. */
-static const struct Complex kForwardTwiddles16[8] = {{2147483647, 0},
-                                                     {1984016189, -821806413},
-                                                     {1518500250, -1518500250},
-                                                     {821806413, -1984016189},
-                                                     {0, -2147483648},
-                                                     {-821806413, -1984016189},
-                                                     {-1518500250, -1518500250},
-                                                     {-1984016189, -821806413}};
-static const struct Complex kInverseTwiddles16[8] = {
-    {2147483647, 0}, {1984016189, 821806413},  {1518500250, 1518500250},  {821806413, 1984016189},
-    {0, 2147483647}, {-821806413, 1984016189}, {-1518500250, 1518500250}, {-1984016189, 821806413}};
+static const struct Complex kForwardTwiddles64[32] = {{2147483647, 0},
+                                                      {2137142927, -210490206},
+                                                      {2106220352, -418953276},
+                                                      {2055013723, -623381598},
+                                                      {1984016189, -821806413},
+                                                      {1893911494, -1012316784},
+                                                      {1785567396, -1193077991},
+                                                      {1660027308, -1362349204},
+                                                      {1518500250, -1518500250},
+                                                      {1362349204, -1660027308},
+                                                      {1193077991, -1785567396},
+                                                      {1012316784, -1893911494},
+                                                      {821806413, -1984016189},
+                                                      {623381598, -2055013723},
+                                                      {418953276, -2106220352},
+                                                      {210490206, -2137142927},
+                                                      {0, -2147483648},
+                                                      {-210490206, -2137142927},
+                                                      {-418953276, -2106220352},
+                                                      {-623381598, -2055013723},
+                                                      {-821806413, -1984016189},
+                                                      {-1012316784, -1893911494},
+                                                      {-1193077991, -1785567396},
+                                                      {-1362349204, -1660027308},
+                                                      {-1518500250, -1518500250},
+                                                      {-1660027308, -1362349204},
+                                                      {-1785567396, -1193077991},
+                                                      {-1893911494, -1012316784},
+                                                      {-1984016189, -821806413},
+                                                      {-2055013723, -623381598},
+                                                      {-2106220352, -418953276},
+                                                      {-2137142927, -210490206}};
+static const struct Complex kInverseTwiddles64[32] = {
+    {2147483647, 0},           {2137142927, 210490206},   {2106220352, 418953276},
+    {2055013723, 623381598},   {1984016189, 821806413},   {1893911494, 1012316784},
+    {1785567396, 1193077991},  {1660027308, 1362349204},  {1518500250, 1518500250},
+    {1362349204, 1660027308},  {1193077991, 1785567396},  {1012316784, 1893911494},
+    {821806413, 1984016189},   {623381598, 2055013723},   {418953276, 2106220352},
+    {210490206, 2137142927},   {0, 2147483647},           {-210490206, 2137142927},
+    {-418953276, 2106220352},  {-623381598, 2055013723},  {-821806413, 1984016189},
+    {-1012316784, 1893911494}, {-1193077991, 1785567396}, {-1362349204, 1660027308},
+    {-1518500250, 1518500250}, {-1660027308, 1362349204}, {-1785567396, 1193077991},
+    {-1893911494, 1012316784}, {-1984016189, 821806413},  {-2055013723, 623381598},
+    {-2106220352, 418953276},  {-2137142927, 210490206}};
 
 /* Nearest-even signed right shift with saturation into i32, evaluated on the
  * exact __int128 value. Floor division plus a remainder test is total: the
@@ -163,7 +198,7 @@ static int check(void (*kernel)(MemRefI64 *, MemRefI64 *), unsigned extent, bool
   kernel(&output, &inputRef);
 
   int64_t expected[kMaxExtent];
-  cfftRecursive(input, 1, 0, extent, inverse ? kInverseTwiddles16 : kForwardTwiddles16, expected);
+  cfftRecursive(input, 1, 0, extent, inverse ? kInverseTwiddles64 : kForwardTwiddles64, expected);
   int failed = compare(label, extent, &output, expected);
   free(output.allocated);
   return failed;
@@ -270,15 +305,18 @@ static int checkRoundTrip(void) {
 
     int64_t spectrum[kExtent];
     int64_t expected[kExtent];
-    cfftRecursive(input, 1, 0, kExtent, kForwardTwiddles16, spectrum);
-    cfftRecursive(spectrum, 1, 0, kExtent, kInverseTwiddles16, expected);
+    cfftRecursive(input, 1, 0, kExtent, kForwardTwiddles64, spectrum);
+    cfftRecursive(spectrum, 1, 0, kExtent, kInverseTwiddles64, expected);
     failed |= compare("round trip", kExtent, &output, expected);
 
-    /* Each element passes the full staged boundary budget of both
-     * transforms: 2*log2(8) = 6 output scales, plus up to that many product
-     * requantizations along the b-side of each butterfly. The +-6 LSB window
-     * below is the empirical bound this gate enforces, not a derived error
-     * bound. */
+    /* Any single source-to-output dependency path passes at most
+     * 2*log2(8) = 6 output scales plus as many product requantizations along
+     * the b-side of each butterfly — the maximum rounding-boundary DEPTH.
+     * That is a path property, not the count of rounding events influencing
+     * one output: a single result's dependency cone spans N-1 butterflies per
+     * transform, so no worst-case error follows from the depth alone. The
+     * +-6 LSB window below is the empirical bound this gate enforces, not a
+     * derived one. */
     for (unsigned i = 0; i < kExtent; ++i) {
       struct Complex source = unpack(input[i]);
       struct Complex result = unpack(expected[i]);
@@ -304,6 +342,8 @@ int main(void) {
   failed |= checkExtent(_mlir_ciface_cfft8_forward_q31, _mlir_ciface_cfft8_inverse_q31, 8, "N=8");
   failed |=
       checkExtent(_mlir_ciface_cfft16_forward_q31, _mlir_ciface_cfft16_inverse_q31, 16, "N=16");
+  failed |=
+      checkExtent(_mlir_ciface_cfft64_forward_q31, _mlir_ciface_cfft64_inverse_q31, 64, "N=64");
   failed |= checkRoundTrip();
   return failed;
 }

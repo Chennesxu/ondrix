@@ -6,18 +6,20 @@
 // RUN: %t
 
 // Object-level differential gate for the packed-Q31 CFFT profile: extents 4,
-// 8, and 16 in both directions plus the forward/inverse composition, checked
-// against an independent __int128 reference over full-scale rails and
-// xorshift trials.
+// 8, 16, and the maximum supported 64 in both directions plus the
+// forward/inverse composition, checked against an independent __int128
+// reference over full-scale rails and xorshift trials.
 
 // Structural pin only: the shared butterfly lowering must still hand this
 // profile the i128 carrier. It is NOT a necessity witness. Inside the CFFT
 // the twiddles are frozen unit-circle constants, so |br*wr - bi*wi| and
 // |br*wi + bi*wr| are bounded by 2^31 * max(|wr| + |wi|) = 0.7071 *
 // INT64_MAX: no CFFT input can make an i64 carrier wrap, and this corpus
-// passes unchanged with one. The carrier width is witnessed at the operation
-// level instead, by test/Execution/cx_butterfly_q31_aot.mlir, where an
-// arbitrary SSA twiddle reaches 2^63.
+// passes unchanged with one. The wrapping-i64 carrier is refuted at the
+// operation level instead, by test/Execution/cx_butterfly_q31_aot.mlir,
+// where an arbitrary SSA twiddle reaches 2^63 — and that gate also states
+// why the refutation covers wrapping i64 alone, not every i64-based
+// implementation.
 // CARRIER: i128
 // CARRIER-NOT: ondrix.
 // CARRIER-NOT: ondsp.
@@ -98,6 +100,32 @@ func.func @cfft16_inverse_q31(%input: tensor<16xi64>) -> tensor<16xi64>
     output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
   } : (tensor<16xi64>) -> tensor<16xi64>
   return %result : tensor<16xi64>
+}
+
+func.func @cfft64_forward_q31(%input: tensor<64xi64>) -> tensor<64xi64>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+  } : (tensor<64xi64>) -> tensor<64xi64>
+  return %result : tensor<64xi64>
+}
+
+func.func @cfft64_inverse_q31(%input: tensor<64xi64>) -> tensor<64xi64>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<inverse>,
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+  } : (tensor<64xi64>) -> tensor<64xi64>
+  return %result : tensor<64xi64>
 }
 
 // Every intermediate quantization boundary of both transforms is preserved:

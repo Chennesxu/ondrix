@@ -64,6 +64,35 @@ Q15_AUTHORITY = {
     ("inverse", 8, 3): 1518511486,
 }
 
+# Complete value coverage at the maximum extent: every DISTINCT packed word
+# the compiler emits for the packed-Q15 CFFT at extent 64, per direction,
+# extracted from `ondrix-opt --convert-ondrix-to-ondsp` over the extent-64
+# packed_i16_imag_hi_real_lo forward and inverse transforms. There are 32 per
+# direction because every smaller stage's W(size, index) coincides with
+# W(64, index * 64 / size), so each set contains every packed word any
+# supported Q15 extent ships. The keyed entries above pin the
+# (direction, size, index) attribution on a stage-2/4/8 sample; these sorted
+# sets pin bit-exact value coverage of the whole shipped surface.
+Q15_AUTHORITY_EXTENT64 = {
+    "forward": [
+        -2147483648, -2137125748, -2137066636, -2106189575, -2106136825,
+        -2055002840, -2054956328, -1984024324, -1983983868, -1893909417,
+        -1893874775, -1785575651, -1785546525, -1660006092, -1659982132,
+        -1518445950, -1518426754, -1362337038, -1362322162, -1193055634,
+        -1193044590, -1012305693, -1012297955, -821791166, -821786178,
+        -623347075, -623344253, -418939510, -418938250, -210469022,
+        -210468706, 32767,
+    ],
+    "inverse": [
+        32767, 210534242, 210534558, 419003786, 419005046, 623409789,
+        623412611, 821851714, 821856702, 1012363491, 1012371229, 1193110126,
+        1193121170, 1362387698, 1362402574, 1518492290, 1518511486,
+        1660047668, 1660071628, 1785612061, 1785641187, 1893940311,
+        1893974953, 1984049404, 1984089860, 2055021864, 2055068376,
+        2106202361, 2106255111, 2137132172, 2137191284, 2147418112,
+    ],
+}
+
 
 def quantize(value, fractional_bits):
     """Round-half-even signed Q1.f quantization with declared saturation.
@@ -136,12 +165,16 @@ def worst_margin_per_extent(fractional_bits):
     return margins
 
 
+def packedQ15Word(direction, size, index):
+    real, imaginary, _, _ = components(direction, size, index, 15)
+    packed = ((imaginary & 0xFFFF) << 16) | (real & 0xFFFF)
+    return packed - (1 << 32 if packed >= 1 << 31 else 0)
+
+
 def selfCheck():
     """Reproduce the shipped Q15 words before trusting the Q31 output."""
     for (direction, size, index), expected in sorted(Q15_AUTHORITY.items()):
-        real, imaginary, _, _ = components(direction, size, index, 15)
-        packed = ((imaginary & 0xFFFF) << 16) | (real & 0xFFFF)
-        packed -= 1 << 32 if packed >= 1 << 31 else 0
+        packed = packedQ15Word(direction, size, index)
         if packed != expected:
             print(
                 f"Q15 self-check FAILED for {direction} W({size},{index}): "
@@ -149,7 +182,24 @@ def selfCheck():
                 file=sys.stderr,
             )
             return False
-    print(f"Q15 self-check: {len(Q15_AUTHORITY)} shipped packed words reproduced")
+    for direction, expected in sorted(Q15_AUTHORITY_EXTENT64.items()):
+        words = set()
+        size = 2
+        while size <= MAX_EXTENT:
+            for index in range(size // 2):
+                words.add(packedQ15Word(direction, size, index))
+            size *= 2
+        if sorted(words) != expected:
+            print(
+                f"Q15 self-check FAILED: the {direction} extent-{MAX_EXTENT} "
+                f"distinct word set differs from what the compiler emits",
+                file=sys.stderr,
+            )
+            return False
+    print(
+        f"Q15 self-check: {len(Q15_AUTHORITY)} keyed packed words and both "
+        f"complete extent-{MAX_EXTENT} word sets reproduced"
+    )
     return True
 
 

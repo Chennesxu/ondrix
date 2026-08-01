@@ -591,13 +591,18 @@ public:
       // Exact carrier for both cross sums. The binding one is the imaginary
       // term br*wi + bi*wr, which reaches 2^63 at b = w = (-2^31, -2^31);
       // the real term br*wr - bi*wi only spans +-(2^63 - 2^31). Q15 therefore
-      // needs 33 bits and Q31 needs 65. The closest natural width the whole
-      // backend chain already handles is i128 (arbitrary-width in MLIR,
-      // native in LLVM), so the Q31 profile declares i128 rather than a
-      // minimal odd width. A CFFT never reaches that corner, because its
-      // twiddles lie on the unit circle; an arbitrary SSA twiddle does, which
-      // is why the width belongs to the operation contract and is witnessed
-      // by the operation-level rail gate.
+      // needs 33 bits and Q31 needs 65 for exactness. The closest natural
+      // width the whole backend chain already handles is i128
+      // (arbitrary-width in MLIR, native in LLVM), so the Q31 profile
+      // declares i128 rather than a minimal odd width. A CFFT never reaches
+      // that corner, because its twiddles lie on the unit circle; an
+      // arbitrary SSA twiddle does, which is why the requirement belongs to
+      // the operation contract. The operation-level rail gate refutes a
+      // WRAPPING i64 carrier at that corner; it does not make i128 the only
+      // legal choice — 2^63 is the single value past i64 and the shift-31
+      // nearest-even boundary saturates its i32 result either way, so an
+      // overflow-aware saturating-i64 sum is observably equivalent under
+      // this profile and would be admissible with its own equivalence proof.
       Type productType =
           getIntegerTypeLike(bReal.getType(), storageWidth == 16 ? 33 : 128, rewriter);
       auto extendProductOperand = [&](Value value) {
