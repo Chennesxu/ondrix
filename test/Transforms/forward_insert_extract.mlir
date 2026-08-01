@@ -61,6 +61,24 @@ func.func @dynamic_write_blocks_walk(%base: tensor<4xi32>, %first: i32, %second:
   return %read : i32
 }
 
+// A slice write between the read and a matching scalar write is not a
+// tensor.insert, so the walk stops at it. That stop is the safety property,
+// not a missed opportunity: this slice covers the read index, and looking
+// past it to the matching write below would forward a shadowed value.
+// CHECK-LABEL: func.func @insert_slice_blocks_walk
+// CHECK:         tensor.insert
+// CHECK:         tensor.insert_slice
+// CHECK:         tensor.extract
+func.func @insert_slice_blocks_walk(%base: tensor<4xi32>, %value: i32,
+                                    %slice: tensor<2xi32>) -> i32 {
+  %c0 = arith.constant 0 : index
+  %write = tensor.insert %value into %base[%c0] : tensor<4xi32>
+  %overlaid = tensor.insert_slice %slice into %write[0] [2] [1]
+      : tensor<2xi32> into tensor<4xi32>
+  %read = tensor.extract %overlaid[%c0] : tensor<4xi32>
+  return %read : i32
+}
+
 // The walk reaches a function argument without a matching write; the read
 // observes incoming data and is left alone.
 // CHECK-LABEL: func.func @unmatched_read_reaches_argument
