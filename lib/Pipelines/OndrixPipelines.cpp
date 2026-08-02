@@ -47,6 +47,7 @@ std::string defaultPipelineText(const ondrix::OndrixDefaultPipelineOptions &opti
   if (options.vectorBits >= 64) {
     int64_t lanes = options.vectorBits / 32;
     os << llvm::formatv("vectorize-ondsp-fp-filter-outputs{{vector-width={0}},", lanes);
+    os << llvm::formatv("vectorize-ondsp-fp-fast-memref-reduce{{vector-width={0}},", lanes);
     os << llvm::formatv("vectorize-ondsp-fixed-decimate-outputs{{vector-width={0}},", lanes);
     os << llvm::formatv(
         "vectorize-ondsp-constant-saturating-memref-reduce{{vector-width={0} max-elements=64},",

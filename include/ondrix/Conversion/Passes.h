@@ -31,6 +31,9 @@ std::unique_ptr<mlir::Pass> createVectorizeOndspFixedDecimateOutputsPass(
 std::unique_ptr<mlir::Pass> createVectorizeOndspFpFilterOutputsPass();
 std::unique_ptr<mlir::Pass>
 createVectorizeOndspFpFilterOutputsPass(const VectorizeOndspFpFilterOutputsOptions &options);
+std::unique_ptr<mlir::Pass> createVectorizeOndspFpFastMemRefReducePass();
+std::unique_ptr<mlir::Pass>
+createVectorizeOndspFpFastMemRefReducePass(const VectorizeOndspFpFastMemRefReduceOptions &options);
 
 #define GEN_PASS_REGISTRATION
 #include "ondrix/Conversion/Passes.h.inc"

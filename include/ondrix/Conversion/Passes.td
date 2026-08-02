@@ -397,6 +397,47 @@ def VectorizeOndspFixedDecimateOutputs
   ];
 }
 
+def VectorizeOndspFpFastMemRefReduce
+    : Pass<"vectorize-ondsp-fp-fast-memref-reduce", "mlir::ModuleOp"> {
+  let summary = "Vectorize f32 reductions whose call sites declared the fast "
+                "relaxation";
+  let description = [{
+    Splits a rank-1 f32 `ondsp.reduce_mac` under `contract = fast` into
+    W-lane fused partial sums, one cross-lane `vector.reduction <add>`, and a
+    scalar tail, every floating-point operation carrying exactly the declared
+    `fastmath<reassoc, contract>` profile. This is the one transform that
+    exploits the relaxation the fast contract declares: regrouping one
+    output's accumulation chain across lanes is precisely the reassociation a
+    call site authorizes by writing `contract = fast`, and precisely the
+    value change the off and fma contracts forbid, so those two are refused
+    here — the exact inverse of the order-preserving batching pass's refusal
+    of fast. The rewrite reorders reads only and produces one scalar, so
+    unlike the batching passes it carries no aliasing obligation.
+
+    Because the result is declaratively relaxed, its evidence is an error
+    envelope against a higher-precision reference, a determinism check, and a
+    structural pin of the emitted vector form — never a bit-exact gate. The
+    canonical pipeline runs this pass inside its schedule stage; the
+    standalone flag remains an ablation and oracle interface. Only the
+    default LLVM memory space and statically unit-strided minor dimensions
+    are supported; other reductions remain unchanged for scalar lowering.
+  }];
+  let constructor = "ondrix::createVectorizeOndspFpFastMemRefReducePass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
+    "mlir::math::MathDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
+           "Number of f32 lanes per partial-sum vector">,
+  ];
+}
+
 def VectorizeOndspFpFilterOutputs
     : Pass<"vectorize-ondsp-fp-filter-outputs", "mlir::ModuleOp"> {
   let summary = "Batch independent f32 filter outputs into vector lanes under "

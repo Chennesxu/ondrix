@@ -26,6 +26,21 @@ func.func @f32_filter(%input: tensor<40xf32>, %coeffs: tensor<8xf32>,
   return %result : tensor<33xf32>
 }
 
+// A site that declared the fast relaxation gets the horizontal reduction the
+// exact contracts refuse: fused partial-sum lanes and one cross-lane fadd.
+// CHECK: llvm.func @f32_filter_fast
+// CHECK: "llvm.intr.vector.reduce.fadd"
+// SCALAR: llvm.func @f32_filter_fast
+// SCALAR-NOT: vector.reduce.fadd
+func.func @f32_filter_fast(%input: tensor<40xf32>, %coeffs: tensor<8xf32>,
+                           %init: tensor<33xf32>) -> tensor<33xf32> {
+  %result = ondrix.fir_filter %input, %coeffs, %init {
+    boundary = #ondrix.fir_boundary<valid>,
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (tensor<40xf32>, tensor<8xf32>, tensor<33xf32>) -> tensor<33xf32>
+  return %result : tensor<33xf32>
+}
+
 // A dynamic shape is refused by every schedule candidate and still compiles
 // through the same pipeline on the ordered path.
 // CHECK: llvm.func @f32_filter_dynamic
