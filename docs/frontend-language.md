@@ -224,17 +224,43 @@ and nearest-even saturating one-bit scaling at every butterfly stage. The
 per-stage scaling makes the inverse profile include the `1/N` normalization.
 This spelling does not imply a general source complex type; other sizes,
 dynamic planning, and configurable complex policies remain unsupported.
-`rfft` accepts static real extents 8 or 16 and returns the compact natural
-Hermitian bins 0 through N/2. `irfft` accepts the corresponding 5 or 9 packed
-bins and returns N real Q15 values. DC and Nyquist imaginary components are
-canonicalized to zero by the existing Ondrix contract.
+`rfft` accepts static power-of-two real extents from 8 through 64 and returns
+the compact natural Hermitian bins 0 through N/2. `irfft` accepts the
+corresponding 5 or 9 packed bins and returns N real Q15 values. DC and
+Nyquist imaginary components are canonicalized to zero by the existing Ondrix
+contract.
 
 As a bounded expression-composition slice, the unary FFT-family builtins may
 be nested when every intermediate type and extent satisfies the next
 builtin's contract. Each nested call emits a separate Ondrix operation, so the
 intermediate stage-scaling and requantization boundaries remain observable;
-in particular, `irfft(rfft(input))` is not folded to an identity. Other
-builtins still require direct parameter operands.
+in particular, `irfft(rfft(input))` is not folded to an identity.
+
+A kernel body may also name intermediate stages with local bindings before
+its single return statement. Each local binds exactly one builtin call and is
+consumed exactly once by a later statement; the binding is spelling for the
+same nested expression tree, so it adds readability, not expressiveness, and
+unused or doubly-consumed locals are compile errors. Within this slice a
+`fir_filter` stage may feed the FFT chain — static Q15 tensors, the `valid`
+boundary, and the explicit executable accumulator profile — and its
+coefficients may come from a runtime tensor parameter or from a compile-time
+`lowpass` design expression, which names the Hamming-windowed-sinc design
+contract (`taps` odd, rational `cutoff` strictly inside (0, 1/2)). The design
+is evaluated at compile time under the fail-closed quantization tie guard;
+`lowpass` is legal only in the coefficient slot. The composed four-stage
+program is:
+
+```python
+def q15_filtered_spectrum(signal: tensor[q15,72]) -> tensor[q15,33]:
+  taps = lowpass(taps=9, cutoff=[1,4])
+  filtered = fir_filter(signal, taps, boundary=valid,
+                        accumulator=exact[40,saturate],
+                        rounding=nearest_even, overflow=saturate)
+  spectrum = rfft(filtered)
+  return magnitude(spectrum)
+```
+
+Other builtins still require direct parameter operands.
 After source generation, the opt-in
 `--convert-ondrix-to-ondsp="vectorize-static-cfft"` mode maps independent
 combine-stage butterflies to fixed-length Vector arithmetic while preserving

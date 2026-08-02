@@ -20,6 +20,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -224,7 +225,8 @@ enum class ReductionKind {
   Sine,
   Cosine,
   Matmul,
-  Lms
+  Lms,
+  Lowpass
 };
 
 static bool isCfftKind(ReductionKind kind) {
@@ -298,6 +300,9 @@ struct BuiltinCallAst {
   int64_t window = 0;
   int64_t gain = 0;
   int64_t stepSize = 0;
+  int64_t taps = 0;
+  int64_t cutoffNum = 0;
+  int64_t cutoffDen = 0;
   SourcePosition position;
 };
 
@@ -413,10 +418,58 @@ public:
         return std::nullopt;
       kernel.results.push_back(ResultTypeAst{*resultType, false, {}});
     }
-    if (!expect(TokenKind::Colon, "expected ':' before function body") ||
-        !expectIdentifier("return", "expected a single return statement"))
+    if (!expect(TokenKind::Colon, "expected ':' before function body"))
       return std::nullopt;
 
+    // Local bindings before the single return statement. Each local names one
+    // builtin call and is consumed exactly once by a later statement;
+    // consumption moves the bound call into its use site, so the checked
+    // kernel is the same nested expression tree direct nesting would produce.
+    // The sugar adds spelling, not expressiveness.
+    SourceType policyType = kernel.primaryResult().type;
+    while (current.kind == TokenKind::Identifier && current.spelling != "return" &&
+           next.kind == TokenKind::Equal) {
+      Token name = current;
+      bool collides = bindingsByName.contains(name.spelling) ||
+                      llvm::any_of(kernel.parameters, [&](const ParameterAst &parameter) {
+                        return parameter.name == name.spelling;
+                      });
+      if (collides) {
+        diagnostics.error(name.position, llvm::Twine("local '") + name.spelling +
+                                             "' collides with an existing name");
+        return std::nullopt;
+      }
+      advance();
+      advance();
+      std::optional<BuiltinCallAst> bound = parseBuiltinCall(policyType);
+      if (!bound)
+        return std::nullopt;
+      bindingsByName[name.spelling] = bindings.size();
+      bindings.push_back(
+          Binding{name.spelling.str(), ExpressionAst(std::move(*bound)), name.position, false});
+    }
+    if (!expectIdentifier("return", "expected a single return statement"))
+      return std::nullopt;
+    std::optional<BuiltinCallAst> result = parseBuiltinCall(policyType);
+    if (!result)
+      return std::nullopt;
+    kernel.result = std::move(*result);
+    if (current.kind != TokenKind::Eof) {
+      diagnostics.error(current.position, "only one kernel is supported per file in this slice");
+      return std::nullopt;
+    }
+    for (const Binding &binding : bindings) {
+      if (!binding.consumed) {
+        diagnostics.error(binding.position, llvm::Twine("local '") + binding.name +
+                                                "' is never consumed by a later statement");
+        return std::nullopt;
+      }
+    }
+    return kernel;
+  }
+
+  std::optional<BuiltinCallAst> parseBuiltinCall(SourceType policyType) {
+    BuiltinCallAst call;
     if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter") &&
         !isIdentifier("fir_decimate") && !isIdentifier("fir_interpolate") &&
         !isIdentifier("fir_stream") && !isIdentifier("sos_df2_fixed") &&
@@ -425,84 +478,108 @@ public:
         !isIdentifier("rfft") && !isIdentifier("irfft") && !isIdentifier("magnitude") &&
         !isIdentifier("dct") && !isIdentifier("moving_average") && !isIdentifier("gain") &&
         !isIdentifier("rms") && !isIdentifier("sine") && !isIdentifier("cosine") &&
-        !isIdentifier("matmul") && !isIdentifier("lms")) {
+        !isIdentifier("matmul") && !isIdentifier("lms") && !isIdentifier("lowpass")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
                         "convolution(...), correlation(...), butterfly(...), cfft(...), or "
                         "icfft(...), rfft(...), irfft(...), magnitude(...), dct(...), "
                         "moving_average(...), gain(...), rms(...), sine(...), cosine(...), "
-                        "matmul(...), or lms(...) return expression");
+                        "matmul(...), lms(...), or lowpass(...) builtin expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
-      kernel.result.kind = ReductionKind::Dot;
+      call.kind = ReductionKind::Dot;
     else if (isIdentifier("fir"))
-      kernel.result.kind = ReductionKind::Fir;
+      call.kind = ReductionKind::Fir;
     else if (isIdentifier("fir_filter"))
-      kernel.result.kind = ReductionKind::FirFilter;
+      call.kind = ReductionKind::FirFilter;
     else if (isIdentifier("fir_decimate"))
-      kernel.result.kind = ReductionKind::FirDecimate;
+      call.kind = ReductionKind::FirDecimate;
     else if (isIdentifier("fir_interpolate"))
-      kernel.result.kind = ReductionKind::FirInterpolate;
+      call.kind = ReductionKind::FirInterpolate;
     else if (isIdentifier("fir_stream"))
-      kernel.result.kind = ReductionKind::FirStream;
+      call.kind = ReductionKind::FirStream;
     else if (isIdentifier("sos_df2_fixed"))
-      kernel.result.kind = ReductionKind::SosDf2Fixed;
+      call.kind = ReductionKind::SosDf2Fixed;
     else if (isIdentifier("convolution"))
-      kernel.result.kind = ReductionKind::Convolution;
+      call.kind = ReductionKind::Convolution;
     else if (isIdentifier("correlation"))
-      kernel.result.kind = ReductionKind::Correlation;
+      call.kind = ReductionKind::Correlation;
     else if (isIdentifier("butterfly"))
-      kernel.result.kind = ReductionKind::Butterfly;
+      call.kind = ReductionKind::Butterfly;
     else if (isIdentifier("cfft"))
-      kernel.result.kind = ReductionKind::Cfft;
+      call.kind = ReductionKind::Cfft;
     else if (isIdentifier("icfft"))
-      kernel.result.kind = ReductionKind::Icfft;
+      call.kind = ReductionKind::Icfft;
     else if (isIdentifier("rfft"))
-      kernel.result.kind = ReductionKind::Rfft;
+      call.kind = ReductionKind::Rfft;
     else if (isIdentifier("irfft"))
-      kernel.result.kind = ReductionKind::Irfft;
+      call.kind = ReductionKind::Irfft;
     else if (isIdentifier("magnitude"))
-      kernel.result.kind = ReductionKind::Magnitude;
+      call.kind = ReductionKind::Magnitude;
     else if (isIdentifier("dct"))
-      kernel.result.kind = ReductionKind::Dct;
+      call.kind = ReductionKind::Dct;
     else if (isIdentifier("moving_average"))
-      kernel.result.kind = ReductionKind::MovingAverage;
+      call.kind = ReductionKind::MovingAverage;
     else if (isIdentifier("gain"))
-      kernel.result.kind = ReductionKind::Gain;
+      call.kind = ReductionKind::Gain;
     else if (isIdentifier("rms"))
-      kernel.result.kind = ReductionKind::Rms;
+      call.kind = ReductionKind::Rms;
     else if (isIdentifier("sine"))
-      kernel.result.kind = ReductionKind::Sine;
+      call.kind = ReductionKind::Sine;
     else if (isIdentifier("cosine"))
-      kernel.result.kind = ReductionKind::Cosine;
+      call.kind = ReductionKind::Cosine;
     else if (isIdentifier("matmul"))
-      kernel.result.kind = ReductionKind::Matmul;
+      call.kind = ReductionKind::Matmul;
+    else if (isIdentifier("lms"))
+      call.kind = ReductionKind::Lms;
     else
-      kernel.result.kind = ReductionKind::Lms;
-    kernel.result.position = current.position;
+      call.kind = ReductionKind::Lowpass;
+    call.position = current.position;
     advance();
     if (!expect(TokenKind::LeftParen, "expected '(' after builtin"))
       return std::nullopt;
-    if (isFftKind(kernel.result.kind)) {
+    if (call.kind == ReductionKind::Lowpass) {
+      // The design is fully named by its attributes; the tap count also
+      // names the coefficient extent, which no result type spells here.
+      if (!expectIdentifier("taps", "expected lowpass tap count") ||
+          !expect(TokenKind::Equal, "expected '=' after taps"))
+        return std::nullopt;
+      auto taps = parseSignedInteger("expected lowpass tap count");
+      if (!taps || !expect(TokenKind::Comma, "expected ',' before lowpass cutoff") ||
+          !expectIdentifier("cutoff", "expected lowpass cutoff") ||
+          !expect(TokenKind::Equal, "expected '=' after cutoff") ||
+          !expect(TokenKind::LeftBracket, "expected '[' before the rational cutoff"))
+        return std::nullopt;
+      auto cutoffNum = parseSignedInteger("expected cutoff numerator");
+      if (!cutoffNum ||
+          !expect(TokenKind::Comma, "expected ',' between cutoff numerator and denominator"))
+        return std::nullopt;
+      auto cutoffDen = parseSignedInteger("expected cutoff denominator");
+      if (!cutoffDen ||
+          !expect(TokenKind::RightBracket, "expected ']' after the rational cutoff") ||
+          !expect(TokenKind::RightParen, "expected ')' after lowpass expression"))
+        return std::nullopt;
+      call.taps = *taps;
+      call.cutoffNum = *cutoffNum;
+      call.cutoffDen = *cutoffDen;
+      return call;
+    }
+    if (isFftKind(call.kind)) {
       std::optional<ExpressionAst> operand = parseFftExpression();
       if (!operand)
         return std::nullopt;
-      kernel.result.operands.push_back(std::move(*operand));
+      call.operands.push_back(std::move(*operand));
       if (!expect(TokenKind::RightParen, "expected ')' after FFT operand"))
         return std::nullopt;
-      if (current.kind != TokenKind::Eof) {
-        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
-        return std::nullopt;
-      }
-      return kernel;
+      return call;
     }
-    if (kernel.result.kind == ReductionKind::Magnitude) {
+    if (call.kind == ReductionKind::Magnitude) {
       std::optional<ExpressionAst> operand = parseFftExpression();
       if (!operand)
         return std::nullopt;
-      kernel.result.operands.push_back(std::move(*operand));
+      call.operands.push_back(std::move(*operand));
       if (current.kind == TokenKind::Comma) {
         // The magnitude contract admits a declared root rounding mode;
         // omission keeps the nearest_even default. The parameter names the
@@ -514,21 +591,17 @@ public:
         auto rounding = parseIdentifier("expected rounding mode");
         if (!rounding)
           return std::nullopt;
-        kernel.result.rounding = rounding->spelling.str();
+        call.rounding = rounding->spelling.str();
       }
       if (!expect(TokenKind::RightParen, "expected ')' after magnitude operand"))
         return std::nullopt;
-      if (current.kind != TokenKind::Eof) {
-        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
-        return std::nullopt;
-      }
-      return kernel;
+      return call;
     }
     auto lhs = parseIdentifier("expected builtin operand");
     if (!lhs)
       return std::nullopt;
-    kernel.result.operands.emplace_back(lhs->spelling.str(), lhs->position);
-    if (kernel.result.kind == ReductionKind::SosDf2Fixed) {
+    call.operands.push_back(resolveOperand(*lhs));
+    if (call.kind == ReductionKind::SosDf2Fixed) {
       if (!expect(TokenKind::Comma, "expected ',' after sos_df2_fixed input operand"))
         return std::nullopt;
       auto coefficients = parseIdentifier("expected sos_df2_fixed coefficients operand");
@@ -541,19 +614,15 @@ public:
       auto state = parseIdentifier("expected sos_df2_fixed state operand");
       if (!state || !expect(TokenKind::Comma, "expected ',' before sos_df2_fixed numeric policy"))
         return std::nullopt;
-      kernel.result.operands.emplace_back(coefficients->spelling.str(), coefficients->position);
-      kernel.result.operands.emplace_back(scales->spelling.str(), scales->position);
-      kernel.result.operands.emplace_back(state->spelling.str(), state->position);
-      if (!parseFixedSosPolicy(kernel.result) ||
+      call.operands.push_back(resolveOperand(*coefficients));
+      call.operands.push_back(resolveOperand(*scales));
+      call.operands.push_back(resolveOperand(*state));
+      if (!parseFixedSosPolicy(call) ||
           !expect(TokenKind::RightParen, "expected ')' after sos_df2_fixed expression"))
         return std::nullopt;
-      if (current.kind != TokenKind::Eof) {
-        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
-        return std::nullopt;
-      }
-      return kernel;
+      return call;
     }
-    if (kernel.result.kind == ReductionKind::Lms) {
+    if (call.kind == ReductionKind::Lms) {
       if (!expect(TokenKind::Comma, "expected ',' after lms input operand"))
         return std::nullopt;
       auto desired = parseIdentifier("expected lms desired operand");
@@ -567,19 +636,13 @@ public:
       auto stepSize = parseSignedInteger("expected lms step size");
       if (!stepSize || !expect(TokenKind::RightParen, "expected ')' after lms expression"))
         return std::nullopt;
-      kernel.result.operands.emplace_back(desired->spelling.str(), desired->position);
-      kernel.result.operands.emplace_back(weights->spelling.str(), weights->position);
-      kernel.result.stepSize = *stepSize;
-      if (current.kind != TokenKind::Eof) {
-        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
-        return std::nullopt;
-      }
-      return kernel;
+      call.operands.push_back(resolveOperand(*desired));
+      call.operands.push_back(resolveOperand(*weights));
+      call.stepSize = *stepSize;
+      return call;
     }
-    if (kernel.result.kind == ReductionKind::Butterfly ||
-        kernel.result.kind == ReductionKind::FirStream) {
-      llvm::StringRef builtin =
-          kernel.result.kind == ReductionKind::Butterfly ? "butterfly" : "fir_stream";
+    if (call.kind == ReductionKind::Butterfly || call.kind == ReductionKind::FirStream) {
+      llvm::StringRef builtin = call.kind == ReductionKind::Butterfly ? "butterfly" : "fir_stream";
       if (!expect(TokenKind::Comma,
                   llvm::Twine("expected ',' after ") + builtin + " first operand"))
         return std::nullopt;
@@ -587,33 +650,29 @@ public:
       if (!rhs || !expect(TokenKind::Comma,
                           llvm::Twine("expected ',' after ") + builtin + " second operand"))
         return std::nullopt;
-      auto third = parseIdentifier(kernel.result.kind == ReductionKind::Butterfly
+      auto third = parseIdentifier(call.kind == ReductionKind::Butterfly
                                        ? "expected butterfly twiddle operand"
                                        : "expected fir_stream state operand");
       if (!third || !expect(TokenKind::RightParen,
                             llvm::Twine("expected ')' after ") + builtin + " operands"))
         return std::nullopt;
-      kernel.result.operands.emplace_back(rhs->spelling.str(), rhs->position);
-      kernel.result.operands.emplace_back(third->spelling.str(), third->position);
-      if (kernel.result.kind == ReductionKind::FirStream) {
-        kernel.result.accumulatorAuto = true;
-        kernel.result.rounding = "nearest_even";
-        kernel.result.destinationOverflow = "saturate";
-        kernel.result.updateOverflow = "wrap";
+      call.operands.push_back(resolveOperand(*rhs));
+      call.operands.push_back(resolveOperand(*third));
+      if (call.kind == ReductionKind::FirStream) {
+        call.accumulatorAuto = true;
+        call.rounding = "nearest_even";
+        call.destinationOverflow = "saturate";
+        call.updateOverflow = "wrap";
       }
-      if (current.kind != TokenKind::Eof) {
-        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
-        return std::nullopt;
-      }
-      return kernel;
+      return call;
     }
-    if (kernel.result.kind == ReductionKind::Dct || kernel.result.kind == ReductionKind::Rms ||
-        kernel.result.kind == ReductionKind::Sine || kernel.result.kind == ReductionKind::Cosine) {
-      llvm::StringRef builtin = kernel.result.kind == ReductionKind::Dct    ? "dct"
-                                : kernel.result.kind == ReductionKind::Rms  ? "rms"
-                                : kernel.result.kind == ReductionKind::Sine ? "sine"
-                                                                            : "cosine";
-      if (kernel.result.kind == ReductionKind::Rms && current.kind == TokenKind::Comma) {
+    if (call.kind == ReductionKind::Dct || call.kind == ReductionKind::Rms ||
+        call.kind == ReductionKind::Sine || call.kind == ReductionKind::Cosine) {
+      llvm::StringRef builtin = call.kind == ReductionKind::Dct    ? "dct"
+                                : call.kind == ReductionKind::Rms  ? "rms"
+                                : call.kind == ReductionKind::Sine ? "sine"
+                                                                   : "cosine";
+      if (call.kind == ReductionKind::Rms && current.kind == TokenKind::Comma) {
         // The rms contract admits a declared root rounding mode while the
         // mean boundary stays nearest even; omission keeps the nearest_even
         // default. The parameter names the specific boundary (`root_`)
@@ -626,19 +685,14 @@ public:
         auto rounding = parseIdentifier("expected rounding mode");
         if (!rounding)
           return std::nullopt;
-        kernel.result.rounding = rounding->spelling.str();
+        call.rounding = rounding->spelling.str();
       }
       if (!expect(TokenKind::RightParen, llvm::Twine("expected ')' after ") + builtin + " operand"))
         return std::nullopt;
-      if (current.kind != TokenKind::Eof) {
-        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
-        return std::nullopt;
-      }
-      return kernel;
+      return call;
     }
-    if (kernel.result.kind == ReductionKind::MovingAverage ||
-        kernel.result.kind == ReductionKind::Gain) {
-      bool isGain = kernel.result.kind == ReductionKind::Gain;
+    if (call.kind == ReductionKind::MovingAverage || call.kind == ReductionKind::Gain) {
+      bool isGain = call.kind == ReductionKind::Gain;
       llvm::StringRef builtin = isGain ? "gain" : "moving_average";
       llvm::StringRef keyword = isGain ? "gain" : "window";
       if (!expect(TokenKind::Comma, llvm::Twine("expected ',' before ") + builtin + " constant") ||
@@ -649,9 +703,9 @@ public:
       if (!constant)
         return std::nullopt;
       if (isGain)
-        kernel.result.gain = *constant;
+        call.gain = *constant;
       else
-        kernel.result.window = *constant;
+        call.window = *constant;
       if (isGain && current.kind == TokenKind::Comma) {
         // The gain contract admits two tie rules at its single
         // requantization boundary; omission keeps the nearest_even default.
@@ -664,34 +718,26 @@ public:
         auto rounding = parseIdentifier("expected rounding mode");
         if (!rounding)
           return std::nullopt;
-        kernel.result.rounding = rounding->spelling.str();
+        call.rounding = rounding->spelling.str();
       }
       if (!expect(TokenKind::RightParen,
                   llvm::Twine("expected ')' after ") + builtin + " expression"))
         return std::nullopt;
-      if (current.kind != TokenKind::Eof) {
-        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
-        return std::nullopt;
-      }
-      return kernel;
+      return call;
     }
     if (!expect(TokenKind::Comma, "expected ',' after reduction left operand"))
       return std::nullopt;
     auto rhs = parseIdentifier("expected reduction right operand");
     if (!rhs)
       return std::nullopt;
-    kernel.result.operands.emplace_back(rhs->spelling.str(), rhs->position);
+    call.operands.push_back(resolveOperand(*rhs));
 
-    if (kernel.result.kind == ReductionKind::Matmul) {
+    if (call.kind == ReductionKind::Matmul) {
       if (!expect(TokenKind::RightParen, "expected ')' after matmul expression"))
         return std::nullopt;
-      if (current.kind != TokenKind::Eof) {
-        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
-        return std::nullopt;
-      }
-      return kernel;
+      return call;
     }
-    if (kernel.result.kind == ReductionKind::FirFilter) {
+    if (call.kind == ReductionKind::FirFilter) {
       if (!expect(TokenKind::Comma, "expected ',' before FIR boundary policy"))
         return std::nullopt;
       if (!expectIdentifier("boundary", "expected FIR boundary policy") ||
@@ -700,10 +746,10 @@ public:
       auto boundary = parseIdentifier("expected FIR boundary mode");
       if (!boundary || !expect(TokenKind::Comma, "expected ',' after FIR boundary mode"))
         return std::nullopt;
-      kernel.result.boundary = boundary->spelling.str();
-    } else if (kernel.result.kind == ReductionKind::FirDecimate ||
-               kernel.result.kind == ReductionKind::FirInterpolate) {
-      bool isInterpolation = kernel.result.kind == ReductionKind::FirInterpolate;
+      call.boundary = boundary->spelling.str();
+    } else if (call.kind == ReductionKind::FirDecimate ||
+               call.kind == ReductionKind::FirInterpolate) {
+      bool isInterpolation = call.kind == ReductionKind::FirInterpolate;
       llvm::StringRef operation = isInterpolation ? "fir_interpolate" : "fir_decimate";
       if (!expect(TokenKind::Comma, "expected ',' before FIR resampling factor") ||
           !expectIdentifier("factor", "expected FIR resampling factor") ||
@@ -712,31 +758,26 @@ public:
       auto factor = parseSignedInteger("expected FIR resampling factor");
       if (!factor)
         return std::nullopt;
-      kernel.result.factor = *factor;
-      kernel.result.accumulatorAuto = true;
-      kernel.result.rounding = "nearest_even";
-      kernel.result.destinationOverflow = "saturate";
-      kernel.result.updateOverflow = "wrap";
+      call.factor = *factor;
+      call.accumulatorAuto = true;
+      call.rounding = "nearest_even";
+      call.destinationOverflow = "saturate";
+      call.updateOverflow = "wrap";
       if (!expect(TokenKind::RightParen,
                   llvm::Twine("expected ')' after ") + operation + " expression"))
         return std::nullopt;
-      if (current.kind != TokenKind::Eof) {
-        diagnostics.error(current.position, "only one kernel is supported per file in this slice");
-        return std::nullopt;
-      }
-      return kernel;
-    } else if (current.kind == TokenKind::RightParen &&
-               kernel.primaryResult().type != SourceType::F32) {
-      kernel.result.accumulatorAuto = true;
-      kernel.result.rounding = "nearest_even";
-      kernel.result.destinationOverflow = "saturate";
-      kernel.result.updateOverflow = "wrap";
+      return call;
+    } else if (current.kind == TokenKind::RightParen && policyType != SourceType::F32) {
+      call.accumulatorAuto = true;
+      call.rounding = "nearest_even";
+      call.destinationOverflow = "saturate";
+      call.updateOverflow = "wrap";
     } else if (!expect(TokenKind::Comma, "expected ',' before numeric policy")) {
       return std::nullopt;
     }
 
-    if (kernel.primaryResult().type != SourceType::F32) {
-      if (!kernel.result.accumulatorAuto && !parseFixedPolicy(kernel.result))
+    if (policyType != SourceType::F32) {
+      if (!call.accumulatorAuto && !parseFixedPolicy(call))
         return std::nullopt;
     } else {
       if (!expectIdentifier("contract", "expected floating-point contract policy") ||
@@ -745,17 +786,13 @@ public:
       auto contract = parseIdentifier("expected floating-point contract mode");
       if (!contract)
         return std::nullopt;
-      kernel.result.fpContract = contract->spelling.str();
+      call.fpContract = contract->spelling.str();
     }
 
     if (!expect(TokenKind::RightParen, "expected ')' after reduction expression"))
       return std::nullopt;
 
-    if (current.kind != TokenKind::Eof) {
-      diagnostics.error(current.position, "only one kernel is supported per file in this slice");
-      return std::nullopt;
-    }
-    return kernel;
+    return call;
   }
 
 private:
@@ -766,7 +803,7 @@ private:
       auto parameter = parseIdentifier("expected FFT operand expression");
       if (!parameter)
         return std::nullopt;
-      return ExpressionAst(parameter->spelling.str(), parameter->position);
+      return resolveOperand(*parameter);
     }
 
     BuiltinCallAst call;
@@ -1045,10 +1082,35 @@ private:
     return true;
   }
 
+  struct Binding {
+    std::string name;
+    ExpressionAst expression;
+    SourcePosition position;
+    bool consumed = false;
+  };
+
+  // Resolve an operand identifier: a local binding is consumed by moving its
+  // bound call into the use site (exactly once); anything else stays a
+  // parameter reference for sema to judge.
+  ExpressionAst resolveOperand(const Token &token) {
+    auto binding = bindingsByName.find(token.spelling);
+    if (binding == bindingsByName.end())
+      return ExpressionAst(token.spelling.str(), token.position);
+    Binding &bound = bindings[binding->second];
+    if (bound.consumed)
+      diagnostics.error(token.position,
+                        llvm::Twine("local '") + token.spelling +
+                            "' is already consumed; each local binds exactly one use");
+    bound.consumed = true;
+    return std::move(bound.expression);
+  }
+
   Lexer &lexer;
   Diagnostics &diagnostics;
   Token current;
   Token next;
+  std::vector<Binding> bindings;
+  llvm::StringMap<size_t> bindingsByName;
 };
 
 struct CheckedKernel {
@@ -1115,6 +1177,11 @@ static std::optional<llvm::StringRef> getParameterOperand(const BuiltinCallAst &
 }
 
 static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diagnostics) {
+  if (ast.result.kind == ReductionKind::Lowpass) {
+    diagnostics.error(ast.result.position,
+                      "lowpass is a design expression; it is consumed by fir_filter coefficients");
+    return std::nullopt;
+  }
   bool hasThreeOperands = ast.result.kind == ReductionKind::Butterfly ||
                           ast.result.kind == ReductionKind::FirStream ||
                           ast.result.kind == ReductionKind::Lms;
@@ -1138,10 +1205,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                                   : hasFourOperands            ? 4
                                   : hasThreeOperands           ? 3
                                                                : 2;
-  if (ast.parameters.size() != expectedParameterCount) {
+  // FFT-composable kernels take however many parameters their expression
+  // tree consumes; the exactly-once accounting below replaces the count.
+  if (!isFftComposableKind(ast.result.kind) && ast.parameters.size() != expectedParameterCount) {
     diagnostics.error(ast.position,
-                      isFftKind(ast.result.kind) ? "FFT kernels require exactly one parameter"
-                      : isUnaryKind(ast.result.kind)
+                      isUnaryKind(ast.result.kind)
                           ? "unary DSP kernels require exactly one parameter"
                       : hasFourOperands  ? "sos_df2_fixed kernels require exactly four parameters"
                       : hasThreeOperands ? "butterfly, fir_stream, and lms kernels require exactly "
@@ -1463,6 +1531,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       SourceType elementType;
       int64_t extent;
     };
+    llvm::StringMap<unsigned> parameterUses;
     std::function<std::optional<FftExpressionType>(const ExpressionAst &)> checkFftExpression;
     std::function<std::optional<FftExpressionType>(const BuiltinCallAst &)> checkFftCall;
     checkFftExpression = [&](const ExpressionAst &expression) -> std::optional<FftExpressionType> {
@@ -1473,6 +1542,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                             llvm::Twine("unknown FFT operand '") + expression.parameter + "'");
           return std::nullopt;
         }
+        ++parameterUses[expression.parameter];
         const ParameterAst *value = parameter->second;
         if (!value->isTensor() || !hasRank(value->shape, 1)) {
           diagnostics.error(expression.position,
@@ -1490,10 +1560,128 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
 
       return checkFftCall(*expression.call);
     };
+    // A fir_filter stage may feed the FFT chain: static Q15 tensors, the
+    // valid boundary, and the executable Q15 export profile, explicitly
+    // declared. Its coefficients are a tensor parameter or a lowpass design.
+    auto checkNestedFirFilter =
+        [&](const BuiltinCallAst &call) -> std::optional<FftExpressionType> {
+      if (call.operands.size() != 2) {
+        diagnostics.error(call.position, "builtin operand count does not match its contract");
+        return std::nullopt;
+      }
+      const ExpressionAst &inputOperand = call.operands[0];
+      if (!inputOperand.isParameterReference()) {
+        diagnostics.error(inputOperand.position,
+                          "a composed fir_filter currently takes its input from a parameter");
+        return std::nullopt;
+      }
+      auto inputEntry = parametersByName.find(inputOperand.parameter);
+      if (inputEntry == parametersByName.end()) {
+        diagnostics.error(inputOperand.position,
+                          llvm::Twine("unknown builtin operand '") + inputOperand.parameter + "'");
+        return std::nullopt;
+      }
+      ++parameterUses[inputOperand.parameter];
+      const ParameterAst *input = inputEntry->second;
+      if (!input->isTensor() || input->type != SourceType::Q15 || !hasRank(input->shape, 1) ||
+          !getRankOneExtent(input->shape)) {
+        diagnostics.error(inputOperand.position,
+                          "a composed fir_filter currently requires a static rank-1 Q15 tensor "
+                          "input");
+        return std::nullopt;
+      }
+      int64_t inputExtent = *getRankOneExtent(input->shape);
+      int64_t tapCount = 0;
+      const ExpressionAst &coefficientOperand = call.operands[1];
+      if (coefficientOperand.isParameterReference()) {
+        auto entry = parametersByName.find(coefficientOperand.parameter);
+        if (entry == parametersByName.end()) {
+          diagnostics.error(coefficientOperand.position,
+                            llvm::Twine("unknown reduction operand '") +
+                                coefficientOperand.parameter + "'");
+          return std::nullopt;
+        }
+        ++parameterUses[coefficientOperand.parameter];
+        const ParameterAst *coefficients = entry->second;
+        if (!coefficients->isTensor() || coefficients->type != SourceType::Q15 ||
+            !hasRank(coefficients->shape, 1) || !getRankOneExtent(coefficients->shape)) {
+          diagnostics.error(coefficientOperand.position,
+                            "composed fir_filter coefficients currently require a static rank-1 "
+                            "Q15 tensor parameter or a lowpass design");
+          return std::nullopt;
+        }
+        tapCount = *getRankOneExtent(coefficients->shape);
+      } else if (coefficientOperand.call->kind == ReductionKind::Lowpass) {
+        const BuiltinCallAst &design = *coefficientOperand.call;
+        if (design.taps < 3 || design.taps > 4095 || design.taps % 2 == 0) {
+          diagnostics.error(design.position,
+                            "lowpass currently requires an odd tap count in [3, 4095]");
+          return std::nullopt;
+        }
+        // 0 < num/den < 1/2 strictly, compared without overflow.
+        if (design.cutoffNum < 1 || design.cutoffDen < 1 ||
+            design.cutoffNum > (design.cutoffDen - 1) / 2) {
+          diagnostics.error(design.position,
+                            "lowpass cutoff must satisfy 0 < num/den < 1/2 strictly");
+          return std::nullopt;
+        }
+        tapCount = design.taps;
+      } else {
+        diagnostics.error(coefficientOperand.position,
+                          "composed fir_filter coefficients currently require a static rank-1 "
+                          "Q15 tensor parameter or a lowpass design");
+        return std::nullopt;
+      }
+      if (call.boundary != "valid") {
+        diagnostics.error(call.position, "a composed fir_filter currently supports boundary=valid");
+        return std::nullopt;
+      }
+      if (inputExtent < tapCount) {
+        diagnostics.error(call.position,
+                          "valid-boundary fir_filter requires input extent >= tap count");
+        return std::nullopt;
+      }
+      if (call.accumulatorAuto) {
+        diagnostics.error(call.position,
+                          "a composed fir_filter requires an explicit accumulator=exact[40, ...] "
+                          "policy");
+        return std::nullopt;
+      }
+      if (call.accumulatorWidth != 40) {
+        diagnostics.error(call.position,
+                          "the executable Q15 profile requires exact accumulator width 40");
+        return std::nullopt;
+      }
+      if (!parseOverflow(call.updateOverflow)) {
+        diagnostics.error(call.position, llvm::Twine("unsupported update overflow mode '") +
+                                             call.updateOverflow + "'");
+        return std::nullopt;
+      }
+      std::optional<ondsp::RoundingMode> rounding = parseRounding(call.rounding);
+      if (!rounding) {
+        diagnostics.error(call.position,
+                          llvm::Twine("unsupported rounding mode '") + call.rounding + "'");
+        return std::nullopt;
+      }
+      if (!isEstablishedRounding(*rounding)) {
+        diagnostics.error(call.position,
+                          "export rounding must be nearest_even, toward_negative, or toward_zero");
+        return std::nullopt;
+      }
+      if (!parseOverflow(call.destinationOverflow)) {
+        diagnostics.error(call.position, llvm::Twine("unsupported destination overflow mode '") +
+                                             call.destinationOverflow + "'");
+        return std::nullopt;
+      }
+      return FftExpressionType{SourceType::Q15, inputExtent - tapCount + 1};
+    };
     checkFftCall = [&](const BuiltinCallAst &call) -> std::optional<FftExpressionType> {
+      if (call.kind == ReductionKind::FirFilter)
+        return checkNestedFirFilter(call);
       if (!isFftComposableKind(call.kind) || call.operands.size() != 1) {
         diagnostics.error(call.position,
-                          "nested calls are currently supported only by unary FFT-family builtins");
+                          "nested calls are currently supported only by unary FFT-family builtins "
+                          "and a fir_filter input stage");
         return std::nullopt;
       }
       std::optional<FftExpressionType> input = checkFftExpression(call.operands.front());
@@ -1537,8 +1725,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           diagnostics.error(call.position, "rfft requires Q15 real operand elements");
           return std::nullopt;
         }
-        if (input->extent != 8 && input->extent != 16) {
-          diagnostics.error(call.position, "rfft currently supports only eight or sixteen points");
+        if (input->extent < 8 || input->extent > 64 || !llvm::isPowerOf2_64(input->extent)) {
+          diagnostics.error(call.position,
+                            "rfft currently supports power-of-two extents in [8, 64]");
           return std::nullopt;
         }
         return FftExpressionType{SourceType::ComplexQ15, input->extent / 2 + 1};
@@ -1558,6 +1747,16 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     std::optional<FftExpressionType> inferred = checkFftCall(ast.result);
     if (!inferred)
       return std::nullopt;
+    for (const ParameterAst &parameter : ast.parameters) {
+      unsigned count = parameterUses.lookup(parameter.name);
+      if (count != 1) {
+        diagnostics.error(parameter.position,
+                          llvm::Twine("parameter '") + parameter.name +
+                              (count == 0 ? "' is never consumed by the kernel expression"
+                                          : "' is consumed more than once in this slice"));
+        return std::nullopt;
+      }
+    }
     if (!ast.primaryResult().tensor || !hasRank(ast.primaryResult().shape, 1)) {
       diagnostics.error(ast.result.position,
                         "FFT-family builtins currently require a rank-1 tensor result");
@@ -2120,6 +2319,37 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                                              ondsp::OverflowMode::Saturate, i16);
     std::function<Value(const BuiltinCallAst &)> emitFftCall =
         [&](const BuiltinCallAst &call) -> Value {
+      if (call.kind == ReductionKind::FirFilter) {
+        // The composed filter stage: sema pinned Q15 elements, the valid
+        // boundary, static extents, and the explicit width-40 profile.
+        Location callLocation = getLocation(context, sourceName, call.position);
+        Value signal = arguments.lookup(call.operands[0].parameter);
+        const ExpressionAst &coefficientOperand = call.operands[1];
+        Value coefficients;
+        if (coefficientOperand.isParameterReference()) {
+          coefficients = arguments.lookup(coefficientOperand.parameter);
+        } else {
+          const BuiltinCallAst &design = *coefficientOperand.call;
+          auto designType = RankedTensorType::get({design.taps}, i16);
+          coefficients = builder.create<ir::FirDesignWindowedSincOp>(
+              getLocation(context, sourceName, design.position), designType,
+              ir::FirDesignResponseAttr::get(&context, ir::FirDesignResponse::Lowpass),
+              builder.getI64IntegerAttr(design.cutoffNum),
+              builder.getI64IntegerAttr(design.cutoffDen), numeric);
+        }
+        int64_t inputExtent = cast<RankedTensorType>(signal.getType()).getDimSize(0);
+        int64_t tapCount = cast<RankedTensorType>(coefficients.getType()).getDimSize(0);
+        auto outputType = RankedTensorType::get({inputExtent - tapCount + 1}, i16);
+        Value init = builder.create<tensor::EmptyOp>(callLocation, outputType.getShape(), i16);
+        auto accumulatorType =
+            ondsp::AccType::get(&context, builder.getIntegerType(call.accumulatorWidth), 30,
+                                ondsp::Signedness::Signed, *parseOverflow(call.updateOverflow));
+        return builder.create<ir::FirFilterOp>(
+            callLocation, outputType, signal, coefficients, init, Value(),
+            ir::FirBoundaryMode::Valid, numeric, product, TypeAttr::get(accumulatorType), numeric,
+            ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding)),
+            ondsp::OverflowModeAttr::get(&context, *parseOverflow(call.destinationOverflow)));
+      }
       const ExpressionAst &operand = call.operands.front();
       Value input = operand.isParameterReference() ? arguments.lookup(operand.parameter)
                                                    : emitFftCall(*operand.call);

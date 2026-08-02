@@ -50,3 +50,43 @@ func.func @q15_moving_average(%input: tensor<40xi16>) -> tensor<38xi16> {
   } : (tensor<40xi16>) -> tensor<38xi16>
   return %result : tensor<38xi16>
 }
+
+// The composed four-stage program exercises every automatic stage at once:
+// the design intent is evaluated to its guarded constant table, those
+// constants feed the certified saturating horizontal reduction (8 lanes at
+// the default width), the staged spectrum reads are forwarded onto the RFFT
+// scalars, and width zero keeps the whole chain ordered.
+// CHECK: llvm.func @q15_composed_spectrum
+// CHECK: vector<8xi16>
+// CHECK: vector<8xi64>
+// SCALAR: llvm.func @q15_composed_spectrum
+func.func @q15_composed_spectrum(%signal: tensor<72xi16>) -> tensor<33xi16> {
+  %taps = ondrix.fir_design_windowed_sinc {
+    response = #ondrix.fir_design_response<lowpass>,
+    cutoff_num = 1 : i64, cutoff_den = 4 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : tensor<9xi16>
+  %init = tensor.empty() : tensor<64xi16>
+  %filtered = ondrix.fir_filter %signal, %taps, %init {
+    boundary = #ondrix.fir_boundary<valid>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<72xi16>, tensor<9xi16>, tensor<64xi16>) -> tensor<64xi16>
+  %spectrum = ondrix.rfft %filtered {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (tensor<64xi16>) -> tensor<33xi32>
+  %result = ondrix.cx_magnitude %spectrum {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<33xi32>) -> tensor<33xi16>
+  return %result : tensor<33xi16>
+}
