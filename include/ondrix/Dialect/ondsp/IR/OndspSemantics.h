@@ -14,11 +14,12 @@
 
 namespace ondrix::ondsp {
 
-/// The exact fast-math permission set the `fast` contract declares —
-/// reassoc plus contract, nothing else. LLVM's blanket `fast` keyword would
-/// add nnan/ninf/nsz/arcp/afn, each a separate promise no call site made
-/// (semantics: FpContractMode in OndspEnums.td). Every lowering of the fast
-/// contract must emit exactly this set.
+/// The LLVM encoding of the two rewrites the `fast` contract permits:
+/// reassociation of a reduction's additive tree maps to reassoc, selection
+/// of a fused event maps to contract. Nothing else — LLVM's blanket `fast`
+/// keyword would add nnan/ninf/nsz/arcp/afn, each a separate promise no call
+/// site made (semantics: FpContractMode in OndspEnums.td). No lowering of
+/// the fast contract may exceed this set.
 inline mlir::arith::FastMathFlags getFastContractFlags() {
   return mlir::arith::FastMathFlags::reassoc | mlir::arith::FastMathFlags::contract;
 }

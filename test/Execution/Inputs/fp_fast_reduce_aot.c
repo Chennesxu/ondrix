@@ -4,9 +4,12 @@
 #include <string.h>
 
 /* Object gate for the fast-contract f32 reduction. The contract declares a
- * relaxation, so nothing here compares the kernel against a pinned bit
- * pattern; every trial carries the envelope and the determinism check, and the
- * directed corpora additionally carry an executed divergence. */
+ * relaxation, so no trial pins a relaxed result to a bit pattern; the envelope
+ * trials carry the error bound and the determinism check, and the directed
+ * corpora additionally carry an executed divergence. Two families run without
+ * the envelope: the integer-lattice corpus, whose sub-domain admits only exact
+ * schedules, and the special-value corpus, where a finite bound is
+ * meaningless. */
 
 typedef struct {
   float *allocated;
@@ -44,6 +47,21 @@ static float callKernel(const float *lhs, const float *rhs, int64_t count) {
   return _mlir_ciface_f32_dot_fast(&lhsRef, &rhsRef);
 }
 
+/* The repeated pair every family interprets: the value is usable only once the
+ * two calls agree bit for bit. */
+static int callTwice(const char *name, const float *lhs, const float *rhs, int64_t count,
+                     float *result) {
+  const float first = callKernel(lhs, rhs, count);
+  const float second = callKernel(lhs, rhs, count);
+  *result = first;
+  if (memcmp(&first, &second, sizeof(first)) != 0) {
+    fprintf(stderr, "%s (N=%lld): repeated calls returned %a and %a\n", name, (long long)count,
+            (double)first, (double)second);
+    return 1;
+  }
+  return 0;
+}
+
 /* The ordered scalar fma chain the fast contract is permitted to leave: one
  * fused event per element in increasing order, then the initial value. */
 static float referenceOrderedFma(const float *lhs, const float *rhs, int64_t count) {
@@ -75,15 +93,8 @@ static double referenceDouble(const float *lhs, const float *rhs, int64_t count,
  * because the pinned LLVM 17.0.6 baseline fixes the emitted vector schedule. */
 static int checkTrial(const char *name, const float *lhs, const float *rhs, int64_t count,
                       int requireDivergence) {
-  const float first = callKernel(lhs, rhs, count);
-  const float second = callKernel(lhs, rhs, count);
-  int failed = 0;
-
-  if (memcmp(&first, &second, sizeof(first)) != 0) {
-    fprintf(stderr, "%s (N=%lld): repeated calls returned %a and %a\n", name, (long long)count,
-            (double)first, (double)second);
-    failed = 1;
-  }
+  float first = 0.0f;
+  int failed = callTwice(name, lhs, rhs, count, &first);
 
   double absoluteSum = 0.0;
   const double expected = referenceDouble(lhs, rhs, count, &absoluteSum);
@@ -166,6 +177,197 @@ static int checkBoundaryLengths(void) {
   return failed;
 }
 
+/* Integer lattice. Both operands hold small integers, so every product is an
+ * integer and the widest corpus keeps |product| <= 4096 over at most 129
+ * elements: |partial sum| <= 129 * 4096 = 528384 < 2^23, an order of magnitude
+ * inside the 2^24 exact-integer range of f32. No schedule derivable from the
+ * reduction rounds anywhere in this sub-domain, so every lane assignment,
+ * every fused or unfused product, and the cross-lane fold agree on the same
+ * integer. Asserting that integer bit for bit therefore pins term conservation
+ * and index coverage, not the relaxation: an envelope wide enough for a legal
+ * regrouping also admits a dropped or duplicated product, and this assertion
+ * does not. */
+static int checkLatticeTrial(const char *name, const float *lhs, const float *rhs, int64_t count) {
+  float result = 0.0f;
+  int failed = callTwice(name, lhs, rhs, count, &result);
+
+  int64_t exact = 0;
+  for (int64_t index = 0; index < count; ++index)
+    exact += (int64_t)lhs[index] * (int64_t)rhs[index];
+  if (floatBits(result) != floatBits((float)exact)) {
+    fprintf(stderr, "%s (N=%lld): got %a, exact integer sum %lld is %a\n", name, (long long)count,
+            (double)result, (long long)exact, (double)(float)exact);
+    failed = 1;
+  }
+  return failed;
+}
+
+/* Every product strictly positive, so dropping or repeating any single one
+ * moves the sum. */
+static void fillLatticePositive(float *lhs, float *rhs, int64_t count) {
+  for (int64_t index = 0; index < count; ++index) {
+    lhs[index] = (float)(1 + (int)(index % 9));
+    rhs[index] = (float)(2 + (int)(index % 7));
+  }
+}
+
+static void fillLatticeMixed(float *lhs, float *rhs, int64_t count) {
+  for (int64_t index = 0; index < count; ++index) {
+    lhs[index] = (float)((index % 5 == 0 ? -1 : 1) * (3 + (int)(index % 11)));
+    rhs[index] = (float)((index % 3 == 0 ? -1 : 1) * (2 + (int)(index % 9)));
+  }
+}
+
+/* The margin case: |product| between 3968 and 4096, so a lane running the full
+ * 129 elements still accumulates far below the exact range. */
+static void fillLatticeWide(float *lhs, float *rhs, int64_t count) {
+  for (int64_t index = 0; index < count; ++index) {
+    lhs[index] = (float)(64 - (int)(index % 3));
+    rhs[index] = (float)(index % 4 == 0 ? -64 : 64);
+  }
+}
+
+static int checkIntegerLatticeCorpus(void) {
+  /* Pure tail, one full pass, a pass plus one, a pass plus a seven-element
+   * tail, two full passes, three, eight, and sixteen with a one-element
+   * tail. */
+  static const int64_t lengths[] = {7, 8, 9, 15, 16, 24, 64, 129};
+  float lhs[kMaxLength];
+  float rhs[kMaxLength];
+  int failed = 0;
+
+  for (size_t entry = 0; entry < sizeof(lengths) / sizeof(lengths[0]); ++entry) {
+    const int64_t count = lengths[entry];
+    fillLatticePositive(lhs, rhs, count);
+    failed |= checkLatticeTrial("lattice positive", lhs, rhs, count);
+    fillLatticeMixed(lhs, rhs, count);
+    failed |= checkLatticeTrial("lattice mixed sign", lhs, rhs, count);
+    fillLatticeWide(lhs, rhs, count);
+    failed |= checkLatticeTrial("lattice wide", lhs, rhs, count);
+  }
+  return failed;
+}
+
+enum SpecialClass { kClassZero, kClassPositiveInfinity, kClassNegativeInfinity, kClassNotANumber };
+
+static const char *specialClassName(enum SpecialClass expected) {
+  switch (expected) {
+  case kClassZero:
+    return "zero";
+  case kClassPositiveInfinity:
+    return "+inf";
+  case kClassNegativeInfinity:
+    return "-inf";
+  case kClassNotANumber:
+    return "nan";
+  }
+  return "unknown";
+}
+
+/* The envelope is a distance to a finite f64 reference and says nothing once a
+ * product is non-finite, so these trials assert only the IEEE class the
+ * schedule must carry through the lanes, the fold, and the tail. */
+static int checkSpecialTrial(const char *name, const float *lhs, const float *rhs, int64_t count,
+                             enum SpecialClass expected) {
+  float result = 0.0f;
+  int failed = callTwice(name, lhs, rhs, count, &result);
+  int matched = 0;
+
+  switch (expected) {
+  case kClassZero:
+    matched = result == 0.0f;
+    break;
+  case kClassPositiveInfinity:
+    matched = isinf(result) && !signbit(result);
+    break;
+  case kClassNegativeInfinity:
+    matched = isinf(result) && signbit(result);
+    break;
+  case kClassNotANumber:
+    matched = isnan(result) != 0;
+    break;
+  }
+  if (!matched) {
+    fprintf(stderr, "%s (N=%lld): got %a, expected class %s\n", name, (long long)count,
+            (double)result, specialClassName(expected));
+    failed = 1;
+  }
+  return failed;
+}
+
+enum { kSpecialLength = 20, kSpecialBodyIndex = 3, kSpecialTailIndex = 17 };
+
+static void fillUnitProducts(float *lhs, float *rhs, int64_t count) {
+  for (int64_t index = 0; index < count; ++index) {
+    lhs[index] = 1.0f;
+    rhs[index] = 1.0f;
+  }
+}
+
+/* Length 20 runs two full vector passes and a four-element tail, so index 3
+ * carries the special value through a lane and the cross-lane fold while
+ * index 17 carries it through the scalar tail. */
+static int checkSpecialValueCorpus(void) {
+  float lhs[kSpecialLength];
+  float rhs[kSpecialLength];
+  int failed = 0;
+
+  for (int64_t index = 0; index < kSpecialLength; ++index) {
+    lhs[index] = 0.0f;
+    rhs[index] = 1.0f;
+  }
+  /* Observed 0x0p+0 for both zero trials: the dense<0.0> seed, the +0.0
+   * reduction start, and the +0.0 initial keep a positive zero available at
+   * every add, and IEEE addition returns +0 unless both operands are -0.
+   * Either sign satisfies the assertion. */
+  failed |= checkSpecialTrial("zero products", lhs, rhs, kSpecialLength, kClassZero);
+
+  for (int64_t index = 0; index < kSpecialLength; ++index)
+    rhs[index] = index % 2 == 0 ? 1.0f : -1.0f;
+  failed |= checkSpecialTrial("signed zero products", lhs, rhs, kSpecialLength, kClassZero);
+
+  fillUnitProducts(lhs, rhs, kSpecialLength);
+  lhs[kSpecialBodyIndex] = INFINITY;
+  failed |= checkSpecialTrial("positive infinity in body", lhs, rhs, kSpecialLength,
+                              kClassPositiveInfinity);
+
+  fillUnitProducts(lhs, rhs, kSpecialLength);
+  lhs[kSpecialTailIndex] = INFINITY;
+  failed |= checkSpecialTrial("positive infinity in tail", lhs, rhs, kSpecialLength,
+                              kClassPositiveInfinity);
+
+  fillUnitProducts(lhs, rhs, kSpecialLength);
+  lhs[kSpecialBodyIndex] = -INFINITY;
+  failed |= checkSpecialTrial("negative infinity in body", lhs, rhs, kSpecialLength,
+                              kClassNegativeInfinity);
+
+  fillUnitProducts(lhs, rhs, kSpecialLength);
+  lhs[kSpecialTailIndex] = -INFINITY;
+  failed |= checkSpecialTrial("negative infinity in tail", lhs, rhs, kSpecialLength,
+                              kClassNegativeInfinity);
+
+  fillUnitProducts(lhs, rhs, kSpecialLength);
+  lhs[kSpecialBodyIndex] = INFINITY;
+  lhs[kSpecialBodyIndex + 1] = -INFINITY;
+  failed |=
+      checkSpecialTrial("opposite infinities in body", lhs, rhs, kSpecialLength, kClassNotANumber);
+
+  fillUnitProducts(lhs, rhs, kSpecialLength);
+  lhs[kSpecialBodyIndex] = INFINITY;
+  lhs[kSpecialTailIndex] = -INFINITY;
+  failed |= checkSpecialTrial("opposite infinities across the tail", lhs, rhs, kSpecialLength,
+                              kClassNotANumber);
+
+  fillUnitProducts(lhs, rhs, kSpecialLength);
+  lhs[kSpecialBodyIndex] = NAN;
+  failed |= checkSpecialTrial("quiet nan in body", lhs, rhs, kSpecialLength, kClassNotANumber);
+
+  fillUnitProducts(lhs, rhs, kSpecialLength);
+  lhs[kSpecialTailIndex] = NAN;
+  failed |= checkSpecialTrial("quiet nan in tail", lhs, rhs, kSpecialLength, kClassNotANumber);
+  return failed;
+}
+
 static uint32_t nextRandom(uint32_t *state) {
   uint32_t value = *state;
   value ^= value << 13;
@@ -205,6 +407,8 @@ int main(void) {
   failed |= checkUnfusedProductCorpus();
   failed |= checkCrossLaneCorpus();
   failed |= checkBoundaryLengths();
+  failed |= checkIntegerLatticeCorpus();
+  failed |= checkSpecialValueCorpus();
   failed |= checkRandomCorpus();
   return failed;
 }

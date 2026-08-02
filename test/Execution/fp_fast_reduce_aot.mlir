@@ -5,11 +5,13 @@
 // RUN: cc -ffp-contract=off %S/Inputs/fp_fast_reduce_aot.c %t.o -lm -o %t
 // RUN: %t
 
-// Object gate for the declared fast relaxation on a rank-1 f32 reduction. The
-// result is never bit-pinned, so the executed evidence is an error envelope
-// against an f64 reference, bit-identical repeated calls, and a directed
-// cancellation corpus on which the result must differ from an ordered scalar
-// fma chain. The pass description carries the authorization argument.
+// Object gate for the declared fast relaxation on a rank-1 f32 reduction. No
+// relaxed result is bit-pinned: the executed evidence is term conservation on
+// an integer sub-domain that is exact for every derivable schedule, class
+// preservation for non-finite values, an error budget against an f64
+// reference, bit-identical repeated calls, and directed corpora on which the
+// result must differ from an ordered scalar fma chain. The pass description
+// carries the authorization argument.
 
 // The structural pin runs before the object is built, so a silently
 // unvectorized kernel cannot satisfy the envelope by staying scalar.

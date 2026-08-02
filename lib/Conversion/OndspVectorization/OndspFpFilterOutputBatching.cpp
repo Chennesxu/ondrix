@@ -119,7 +119,7 @@ FailureOr<FpFilterLoopShape> matchFpFilterLoop(scf::ForOp loop, int64_t vectorWi
   // the relation instead of preserving the graph) and has its own mode, so
   // it is refused here rather than silently treated as exact.
   auto numeric = dyn_cast<ondrix::ondsp::FpAttr>(reduce.getNumeric());
-  if (!numeric || !numeric.getFormat().isF32() || reduce.getProduct())
+  if (!numeric || !numeric.getFormat().isF32())
     return failure();
   if (numeric.getContract() != ondrix::ondsp::FpContractMode::Off &&
       numeric.getContract() != ondrix::ondsp::FpContractMode::Fma)

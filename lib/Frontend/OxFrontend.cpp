@@ -1639,12 +1639,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                           "valid-boundary fir_filter requires input extent >= tap count");
         return std::nullopt;
       }
-      if (call.accumulatorAuto) {
-        diagnostics.error(call.position,
-                          "a composed fir_filter requires an explicit accumulator=exact[40, ...] "
-                          "policy");
-        return std::nullopt;
-      }
+      // The fir_filter grammar always consumes an explicit accumulator policy,
+      // so an inferred width cannot reach here.
+      assert(!call.accumulatorAuto && "fir_filter never infers its accumulator");
       if (call.accumulatorWidth != 40) {
         diagnostics.error(call.position,
                           "the executable Q15 profile requires exact accumulator width 40");
@@ -2518,10 +2515,9 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   if (kernel.ast.result.kind == ReductionKind::FirFilter || isFirDecimate || isFirInterpolate ||
       isConv1D) {
     auto outputType = cast<RankedTensorType>(resultType);
-    if ((isFirDecimate || isFirInterpolate) && outputType.isDynamicDim(0)) {
-      emitError(expressionLocation, "internal error: resampling source result must be static");
-      return {};
-    }
+    // Resampling result extents are required to be static during checking.
+    assert(!((isFirDecimate || isFirInterpolate) && outputType.isDynamicDim(0)) &&
+           "resampling source result must be static");
     SmallVector<Value> dynamicSizes;
     if (outputType.isDynamicDim(0)) {
       Value zero = builder.create<arith::ConstantIndexOp>(expressionLocation, 0);

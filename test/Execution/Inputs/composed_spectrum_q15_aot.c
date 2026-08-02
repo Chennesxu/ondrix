@@ -11,7 +11,21 @@ typedef struct {
   int64_t strides[1];
 } MemRefI16;
 
+typedef struct {
+  int32_t *allocated;
+  int32_t *aligned;
+  int64_t offset;
+  int64_t sizes[1];
+  int64_t strides[1];
+} MemRefI32;
+
 extern void _mlir_ciface_q15_filtered_spectrum(MemRefI16 *, MemRefI16 *);
+/* The same pipeline prefix stopping at the spectrum. Magnitude is not
+ * injective - a real/imaginary swap or a sign error can leave every bin's
+ * modulus unchanged - so the packed bins are observed directly. This is a
+ * stage-isolated compilation of the shared prefix, not an observation of the
+ * intermediate the forwarded object deletes. */
+extern void _mlir_ciface_q15_filtered_spectrum_stage(MemRefI32 *, MemRefI16 *);
 
 enum { kSignalLength = 72, kTapCount = 9, kExtent = 64, kBinCount = 33, kRandomTrialCount = 64 };
 
@@ -154,7 +168,7 @@ static int16_t referenceMagnitude(int32_t packedBin) {
 
 /* The whole four-stage chain, stage by stage and independent of the
  * compiler: design table, valid FIR, staged RFFT, magnitude. */
-static void referenceSpectrum(const int16_t *signal, int16_t *expected) {
+static void referenceBins(const int16_t *signal, int32_t *bins) {
   int32_t packedFiltered[kExtent];
   for (unsigned i = 0; i < kExtent; ++i)
     packedFiltered[i] = (int32_t)((uint32_t)(uint16_t)referenceFilterOutput(signal, (int64_t)i));
@@ -165,7 +179,14 @@ static void referenceSpectrum(const int16_t *signal, int16_t *expected) {
   spectrum[kExtent / 2] = (int32_t)((uint32_t)spectrum[kExtent / 2] & 0xFFFFu);
 
   for (unsigned i = 0; i < kBinCount; ++i)
-    expected[i] = referenceMagnitude(spectrum[i]);
+    bins[i] = spectrum[i];
+}
+
+static void referenceSpectrum(const int16_t *signal, int16_t *expected) {
+  int32_t bins[kBinCount];
+  referenceBins(signal, bins);
+  for (unsigned i = 0; i < kBinCount; ++i)
+    expected[i] = referenceMagnitude(bins[i]);
 }
 
 static uint32_t nextState(uint32_t state) {
@@ -180,6 +201,30 @@ static int16_t toSigned16(uint32_t bits) {
   return (int16_t)(low < 32768u ? (int32_t)low : (int32_t)low - 65536);
 }
 
+static int checkBins(const int16_t *signal, const char *label) {
+  MemRefI16 inputRef = {(int16_t *)signal, (int16_t *)signal, 0, {kSignalLength}, {1}};
+  MemRefI32 output;
+  _mlir_ciface_q15_filtered_spectrum_stage(&output, &inputRef);
+
+  int32_t expected[kBinCount];
+  referenceBins(signal, expected);
+
+  int failed = output.sizes[0] != kBinCount;
+  if (failed)
+    fprintf(stderr, "%s: spectrum length %lld\n", label, (long long)output.sizes[0]);
+  int64_t count = output.sizes[0] < kBinCount ? output.sizes[0] : kBinCount;
+  for (int64_t i = 0; i < count; ++i) {
+    int32_t actual = output.aligned[output.offset + i * output.strides[0]];
+    if (actual != expected[i]) {
+      fprintf(stderr, "%s packed bin %lld: got %d, expected %d\n", label, (long long)i, actual,
+              expected[i]);
+      failed = 1;
+    }
+  }
+  free(output.allocated);
+  return failed;
+}
+
 static int check(const int16_t *signal, const char *label) {
   MemRefI16 inputRef = {(int16_t *)signal, (int16_t *)signal, 0, {kSignalLength}, {1}};
   MemRefI16 output;
@@ -188,9 +233,11 @@ static int check(const int16_t *signal, const char *label) {
   int16_t expected[kBinCount];
   referenceSpectrum(signal, expected);
 
-  int failed = output.sizes[0] != kBinCount;
-  if (failed)
+  int failed = checkBins(signal, label);
+  if (output.sizes[0] != kBinCount) {
     fprintf(stderr, "%s: output length %lld\n", label, (long long)output.sizes[0]);
+    failed = 1;
+  }
   int64_t count = output.sizes[0] < kBinCount ? output.sizes[0] : kBinCount;
   for (int64_t i = 0; i < count; ++i) {
     int16_t actual = output.aligned[output.offset + i * output.strides[0]];

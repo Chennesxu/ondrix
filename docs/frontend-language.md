@@ -345,15 +345,29 @@ of `rms` and `magnitude`).
 f32 dot and FIR support `contract=off`, `contract=fma`, and `contract=fast`.
 `off` preserves separate multiply and add operations in the stated order, and
 `fma` pins each update as one explicit fused multiply-add event (a single
-rounding); both are exact contracts, and any authorized schedule must
-reproduce their results bit for bit. `fast` is a named relaxation profile
-that permits exactly two things: reassociation of the accumulation graph and
-multiply-add contraction. It does not assert that inputs are free of NaN or
-infinity, does not abandon signed-zero observability, and does not permit
-reciprocal division or approximate math functions — each of those would be a
+rounding). Both are exact contracts: every authorized schedule reproduces
+their results bitwise for non-NaN outputs, and maps NaN outputs to NaN
+outputs — the payload and sign of a NaN, and whether a signalling NaN is
+quieted, are outside the contract, while signed zeros and infinities remain
+bitwise. An output can be NaN even when no input is, so the qualification is
+stated over outputs rather than inputs.
+
+`contract=fast` names a set of permitted numeric rewrites rather than an
+error bound: reassociation of the reduction's additive tree, and selection
+of a fused multiply-add event at a permitted multiply-accumulate site.
+Declaring it does not discharge the numeric obligation; it selects a
+different one. A schedule is admissible under `fast` when its numeric event
+graph is derivable from the source event graph using only those two rewrites
+— terms are conserved, indices are covered exactly once, and no other
+identity is used — and when the permissions the backend receives do not
+exceed the declared set. `fast` does not assert that inputs are free of NaN
+or infinity, does not abandon signed-zero observability, and does not permit
+reciprocal division or approximate math functions; each of those would be a
 separate declaration this language does not currently offer. A `fast` result
-is therefore compared under an explicit error characterization, never bit
-for bit.
+is therefore never compared bit for bit against a fixed expectation; the
+implementation is characterized by an error budget measured against a
+higher-precision reference, which is a quality measurement rather than a
+guarantee the language makes.
 
 No target capability or physical register information enters source IR.
 `llvm.emit_c_interface` marks the generated function for the existing AOT

@@ -1,13 +1,19 @@
 // RUN: ondrix-compile --emit=contracts %S/../Frontend/Inputs/q15_filtered_spectrum.ox | ondrix-opt --ondrix-default-pipeline > %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
-// RUN: cc %S/Inputs/composed_spectrum_q15_aot.c %t.o -o %t -lm
+// RUN: ondrix-compile --emit=contracts %S/../Frontend/Inputs/q15_filtered_spectrum_stage.ox | ondrix-opt --ondrix-default-pipeline > %t.stage.mlir
+// RUN: ondrix-translate %t.stage.mlir --mlir-to-llvmir > %t.stage.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.stage.ll -o %t.stage.o
+// RUN: cc %S/Inputs/composed_spectrum_q15_aot.c %t.o %t.stage.o -o %t -lm
 // RUN: %t
 
 // RUN: ondrix-compile --emit=contracts %S/../Frontend/Inputs/q15_filtered_spectrum.ox | ondrix-opt --ondrix-default-pipeline="vector-bits=0" > %t.ordered.mlir
 // RUN: ondrix-translate %t.ordered.mlir --mlir-to-llvmir > %t.ordered.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ordered.ll -o %t.ordered.o
-// RUN: cc %S/Inputs/composed_spectrum_q15_aot.c %t.ordered.o -o %t.ordered -lm
+// RUN: ondrix-compile --emit=contracts %S/../Frontend/Inputs/q15_filtered_spectrum_stage.ox | ondrix-opt --ondrix-default-pipeline="vector-bits=0" > %t.ordered.stage.mlir
+// RUN: ondrix-translate %t.ordered.stage.mlir --mlir-to-llvmir > %t.ordered.stage.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.ordered.stage.ll -o %t.ordered.stage.o
+// RUN: cc %S/Inputs/composed_spectrum_q15_aot.c %t.ordered.o %t.ordered.stage.o -o %t.ordered -lm
 // RUN: %t.ordered
 
 // The forwarding attestation is self-attesting in the same sense as the

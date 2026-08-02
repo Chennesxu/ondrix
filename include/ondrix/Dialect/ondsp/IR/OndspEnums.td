@@ -80,27 +80,34 @@ def Ondsp_OverflowMode : I32EnumAttr<"OverflowMode", "overflow mode",
 //
 //   off   every multiply and every add is a separate IEEE-754 operation in
 //         the contract's stated order (emitted with NO fast-math flags, so
-//         not even mul-add contraction is permitted). Exact contract: any
-//         authorized schedule must reproduce the result bit for bit.
+//         not even mul-add contraction is permitted). Exact contract.
 //   fma   each multiply-accumulate step is one explicit fused multiply-add
 //         EVENT — an infinitely precise product-and-sum with a single
 //         rounding (`math.fma` -> `llvm.fma`), never a mere contraction
-//         permission on separate operations. Exact contract as well: the
-//         event tree is different from off's, but it is pinned, and
-//         evidence is again bit-for-bit.
-//   fast  a named RELAXATION profile that widens the correctness relation
-//         instead of pinning an event tree. It declares exactly two
-//         permissions — reassociation of the accumulation graph and
-//         mul-add contraction (fastmath<reassoc,contract>) — so schedules
-//         may regroup the chain and results are compared under an explicit
-//         error characterization, never bit-pinned. It deliberately does
-//         NOT assert the absence of NaN/Inf inputs, does not abandon
-//         signed-zero observability, and does not license reciprocal
-//         division or approximate math functions; each of those would be a
-//         separate declaration. The declaration replaces the
-//         bit-equivalence obligation only: memory disjointness, bounds,
-//         and every other structural legality obligation remain to be
-//         discharged by analysis.
+//         permission on separate operations. Exact contract as well: a
+//         different event tree from off's, equally pinned.
+//   fast  a declared SET OF PERMITTED REWRITES over the event graph, not a
+//         pinned tree and not an error bound. It permits exactly two:
+//         reassociation of a reduction's additive tree, and selection of a
+//         fused multiply-add event at a permitted multiply-accumulate site.
+//         Declaring it selects a different numeric obligation rather than
+//         discharging one — a schedule is admissible when its event graph
+//         is DERIVABLE from the source graph using only those rewrites
+//         (terms conserved, indices covered exactly once, no other
+//         identity used) and the permissions reaching the backend do not
+//         exceed the declared set's encoding. It does NOT assert the
+//         absence of NaN/Inf inputs, does not abandon signed-zero
+//         observability, and does not license reciprocal division or
+//         approximate math functions; each would be a separate
+//         declaration. Structural legality — memory disjointness, bounds,
+//         control — is unchanged and still discharged by analysis.
+//
+// What an exact contract guarantees is stated over OUTPUTS: two authorized
+// schedules agree bitwise whenever the output is not NaN, and both produce
+// NaN when either does. A NaN's payload and sign, and whether a signalling
+// NaN is quieted, are outside the contract; signed zeros and infinities are
+// inside it. An output can be NaN when no input is (Inf + -Inf), which is
+// why the qualification is over outputs.
 //
 // Environment contract shared by all three modes: round-to-nearest-even,
 // FP exception state unobservable, subnormals preserved (no FTZ/DAZ), and

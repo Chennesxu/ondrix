@@ -31,14 +31,14 @@ constexpr int64_t kMaxVectorWidth = 4096;
 bool isSupportedFastMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
   auto numeric = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
   if (!numeric || !numeric.getFormat().isF32() ||
-      numeric.getContract() != ondrix::ondsp::FpContractMode::Fast || op.getProduct() ||
-      !op.getInitial().getType().isF32())
+      numeric.getContract() != ondrix::ondsp::FpContractMode::Fast)
     return false;
+  // A verified f32 reduction already has rank-1 shaped operands whose element
+  // type and initial value match the format, and carries no product; only the
+  // layout facts the Vector lowering needs are this pass's own obligation.
   auto lhsType = dyn_cast<MemRefType>(op.getLhs().getType());
   auto rhsType = dyn_cast<MemRefType>(op.getRhs().getType());
-  return lhsType && rhsType && lhsType.getRank() == 1 && rhsType.getRank() == 1 &&
-         lhsType.getElementType().isF32() && rhsType.getElementType().isF32() &&
-         ondrix::conversion::hasDefaultLLVMVectorMemorySpace(lhsType) &&
+  return lhsType && rhsType && ondrix::conversion::hasDefaultLLVMVectorMemorySpace(lhsType) &&
          ondrix::conversion::hasDefaultLLVMVectorMemorySpace(rhsType) &&
          isLastMemrefDimUnitStride(lhsType) && isLastMemrefDimUnitStride(rhsType);
 }

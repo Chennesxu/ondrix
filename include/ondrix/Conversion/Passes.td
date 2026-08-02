@@ -43,7 +43,7 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
   let options = [
     Option<"vectorizeStaticCfft", "vectorize-static-cfft",
            "bool", /*default=*/"false",
-           "Use fixed-length Vector arithmetic for independent static CFFT stage butterflies">,
+           "Ablation interface: force fixed-length Vector arithmetic for independent static CFFT stage butterflies (the canonical path never sets it)">,
     Option<"preserveBufferizableReductions", "preserve-bufferizable-reductions",
            "bool", /*default=*/"false",
            "Keep the algorithm operations whose reductions bufferize directly "
@@ -52,11 +52,10 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
            "loops instead of pre-lowered scalar bodies">,
     Option<"slidingWindowReuse", "sliding-window-reuse",
            "bool", /*default=*/"false",
-           "Reuse exact moving-average window sums incrementally across outputs">,
+           "Ablation interface: reuse exact moving-average window sums incrementally across outputs (the canonical path recomputes each window)">,
     Option<"fftLoops", "fft-loops",
            "bool", /*default=*/"false",
-           "Lower static FFTs with bit-reversal/stage loops over in-memory twiddle tables "
-           "(bit-identical to the unrolled lowering)">,
+           "Ablation interface: force the bit-reversal/stage-loop FFT lowering over in-memory twiddle tables, bit-identical to the unrolled default the canonical path uses">,
   ];
 }
 
@@ -181,9 +180,9 @@ def ConvertOndspFixedToScalar
   let options = [
     Option<"specializeCanonicalTwiddles", "specialize-canonical-twiddles",
            "bool", /*default=*/"false",
-           "Use exact packed-Q15 identities for supported canonical twiddles">,
+           "Ablation interface: use exact packed-Q15 identities for supported canonical twiddles (the canonical path keeps the generic product)">,
     Option<"sqrtEstimate", "sqrt-estimate", "bool", /*default=*/"false",
-           "Lower sqrt_fixed via an IEEE estimate plus exact integer correction">,
+           "Ablation interface: lower sqrt_fixed via an IEEE estimate plus exact integer correction (the canonical path uses the bit-by-bit root)">,
   ];
   let dependentDialects = [
     "ondrix::ondsp::OndspDialect",
@@ -403,24 +402,41 @@ def VectorizeOndspFpFastMemRefReduce
                 "relaxation";
   let description = [{
     Splits a rank-1 f32 `ondsp.reduce_mac` under `contract = fast` into
-    W-lane fused partial sums, one cross-lane `vector.reduction <add>`, and a
-    scalar tail, every floating-point operation carrying exactly the declared
-    `fastmath<reassoc, contract>` profile. This is the one transform that
-    exploits the relaxation the fast contract declares: regrouping one
-    output's accumulation chain across lanes is precisely the reassociation a
-    call site authorizes by writing `contract = fast`, and precisely the
-    value change the off and fma contracts forbid, so those two are refused
-    here — the exact inverse of the order-preserving batching pass's refusal
-    of fast. The rewrite reorders reads only and produces one scalar, so
+    W-lane partial sums built from explicitly selected fused events, one
+    cross-lane `vector.reduction <add>`, and a scalar tail. This is the one
+    transform that consumes a permission the fast contract declares:
+    regrouping the reduction's additive tree across lanes is exactly the
+    reassociation a call site authorizes by writing `contract = fast`, and
+    exactly the value change the off and fma contracts forbid, so those two
+    are refused here — the inverse of the order-preserving batching pass's
+    refusal of fast.
+
+    The produced event graph is derivable from the source graph using only
+    the declared rewrites, by construction: the vector body covers
+    `[0, floor(N/W)*W)` and the tail covers `[floor(N/W)*W, N)`, disjointly
+    and completely, so every source product `x[i]*y[i]` appears exactly once
+    with its original operands; the only changes are the grouping of the
+    additive tree and the choice of a fused event per term. The lane
+    accumulators are consumed exactly once by the final fold, whose start
+    value is an explicit `+0.0`. That fold is the ordered
+    `llvm.vector.reduce.fadd` — a narrower, fully determined choice inside
+    the permitted set rather than a further use of the reassociation
+    permission, because MLIR 17's `vector.reduction` carries no fast-math
+    attribute. The rewrite reorders reads only and produces one scalar, so
     unlike the batching passes it carries no aliasing obligation.
 
-    Because the result is declaratively relaxed, its evidence is an error
-    envelope against a higher-precision reference, a determinism check, and a
-    structural pin of the emitted vector form — never a bit-exact gate. The
-    canonical pipeline runs this pass inside its schedule stage; the
-    standalone flag remains an ablation and oracle interface. Only the
-    default LLVM memory space and statically unit-strided minor dimensions
-    are supported; other reductions remain unchanged for scalar lowering.
+    A relaxed result is never bit-pinned. Its evidence is term conservation
+    checked on an integer sub-domain where every derivable regrouping is
+    exact, mechanism mutations that drop, duplicate, or misindex a term, an
+    audit that the permissions in the translated LLVM IR do not exceed the
+    declared set and do not leak into neighbouring exact sites, executed
+    divergences from the ordered fused chain, determinism, and an error
+    budget against a higher-precision reference that measures this
+    implementation rather than bounding the contract. The canonical pipeline
+    runs this pass inside its schedule stage; the standalone flag remains an
+    ablation and oracle interface. Only the default LLVM memory space and
+    statically unit-strided minor dimensions are supported; other reductions
+    remain unchanged for scalar lowering.
   }];
   let constructor = "ondrix::createVectorizeOndspFpFastMemRefReducePass()";
   let dependentDialects = [
