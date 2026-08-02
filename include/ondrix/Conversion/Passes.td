@@ -335,7 +335,8 @@ def VectorizeOndspFixedDecimateOutputs
     permits exactly this: consumers may batch products only while preserving
     the declared ordered updates.
 
-    The pass is opt-in and never part of a default pipeline. It fires only
+    The canonical pipeline runs this pass inside its schedule stage; the
+    standalone flag remains an ablation and oracle interface. It fires only
     for the loop shape decimation bufferization emits with a static factor of
     two, a static coefficient count, a static output length, contiguous
     rank-1 operand layouts in the default memory space, and a single-lane
@@ -425,7 +426,8 @@ def VectorizeOndspFpFilterOutputs
     correctness relation instead of pinning the event graph, and its
     horizontal reduction is a different mode with different evidence.
 
-    The pass is opt-in and never part of a default pipeline. It fires only
+    The canonical pipeline runs this pass inside its schedule stage; the
+    standalone flag remains an ablation and oracle interface. It fires only
     for the loop shape the valid-boundary f32 filter bufferization emits,
     with static extents, contiguous rank-1 operands in the default memory
     space, and a +0.0 reduction seed. Unlike the decimate batching there is

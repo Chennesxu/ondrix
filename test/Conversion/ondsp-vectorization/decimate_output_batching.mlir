@@ -6,12 +6,9 @@
 // type, and a multiple of 2^32 would truncate to zero lanes.
 // RUN: not ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-decimate-outputs="vector-width=4294967296" 2>&1 | FileCheck %s --check-prefix=WIDE
 
-// Vertical output batching: the lanes of the accumulator carry independent
-// outputs, each folding the same taps in the same increasing order into its own
-// accumulator. Nothing is reassociated and no lane is ever combined with
-// another, so the rewrite needs no range or overflow proof — the contrast with
-// the horizontal reduction passes, whose lanes do reorder the fold, is the
-// point of keeping the two axes separate.
+// Vertical output batching is order-preserving — each lane folds its own
+// output, so no range or overflow proof is needed (the pass description
+// carries the full argument).
 //
 // With nineteen outputs and width eight the batched loop covers outputs 0..15
 // and the untouched ordered loop covers 16..18.

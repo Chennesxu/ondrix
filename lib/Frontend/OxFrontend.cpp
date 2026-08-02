@@ -421,11 +421,10 @@ public:
     if (!expect(TokenKind::Colon, "expected ':' before function body"))
       return std::nullopt;
 
-    // Local bindings before the single return statement. Each local names one
-    // builtin call and is consumed exactly once by a later statement;
-    // consumption moves the bound call into its use site, so the checked
-    // kernel is the same nested expression tree direct nesting would produce.
-    // The sugar adds spelling, not expressiveness.
+    // Local bindings before the single return statement: each names one
+    // builtin call and is consumed exactly once by a later statement, which
+    // moves the bound call into its use site — the checked kernel is the
+    // nested expression tree direct nesting would produce.
     SourceType policyType = kernel.primaryResult().type;
     while (current.kind == TokenKind::Identifier && current.spelling != "return" &&
            next.kind == TokenKind::Equal) {
@@ -1089,9 +1088,8 @@ private:
     bool consumed = false;
   };
 
-  // Resolve an operand identifier: a local binding is consumed by moving its
-  // bound call into the use site (exactly once); anything else stays a
-  // parameter reference for sema to judge.
+  // A local binding is consumed by moving its bound call into the use site;
+  // anything else stays a parameter reference for sema to judge.
   ExpressionAst resolveOperand(const Token &token) {
     auto binding = bindingsByName.find(token.spelling);
     if (binding == bindingsByName.end())
@@ -2081,10 +2079,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       }
     }
-    // Two surfaces in this branch declare a rounding mode, and each admits
-    // exactly the modes its operation contract admits: gain chooses between
-    // the two nearest tie rules at its single boundary, rms chooses the root
-    // boundary direction. Omission keeps the contract default.
+    // Each surface admits exactly its contract's modes (parsed above);
+    // omission keeps the contract default.
     ondsp::RoundingMode rounding = ondsp::RoundingMode::NearestEven;
     if (!ast.result.rounding.empty()) {
       bool isGain = ast.result.kind == ReductionKind::Gain;

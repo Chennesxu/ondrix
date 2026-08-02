@@ -6,11 +6,9 @@
 /* Object gate for vertical (cross-output) batching of the valid-boundary f32
  * filter.
  *
- * Batching outputs across vector lanes is order preserving: lane j is output
- * m + j and folds the same taps in the same increasing order into its own
- * accumulator, starting from +0.0. No lane is ever combined with another, so
- * legality does not depend on a reassociation proof — unlike the horizontal
- * f32 reduction schedules, whose lanes do change the fold order.
+ * The batched lanes carry independent outputs (order preserving; the pass
+ * description carries the argument), so this harness checks the falsifiable
+ * consequence: batched == ordered == an independent reference, per element.
  *
  * Both admitted contracts are EXACT: off names one rounded product followed by
  * one accumulation per tap, fma names one fused event per tap. Neither permits

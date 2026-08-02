@@ -392,10 +392,9 @@ coefficients. The broader items below remain design constraints.
 The frontend must not mirror every source construct into a custom operation.
 A custom project IR construct is justified only when it preserves algorithm,
 numeric, or target-capability information that upstream MLIR cannot recover
-after lowering. Within that split, Ondrix owns algorithm intent and Ondsp owns
-numeric contracts.
+after lowering.
 
-Generic source constructs lower directly to upstream dialects:
+Source constructs map to owning dialects as follows:
 
 | Source concept | MLIR ownership |
 | --- | --- |
@@ -514,18 +513,11 @@ The intended pipeline is:
   -> scalar, Vector, or OrtumCore consumer
 ```
 
-An algorithm transform first identifies a mathematical identity. Ondsp then
+An algorithm transform first identifies a mathematical identity; Ondsp then
 classifies that identity under the concrete product, accumulator, rounding,
-and overflow contract. Transformations must distinguish:
-
-- bit-exact equivalence;
-- exact fixed-width modular equivalence;
-- equivalence requiring a no-overflow proof;
-- bounded-error transforms only after an explicit error-bound contract exists;
-- unsupported or illegal transformations.
-
-Proof facts are compiler-produced analysis results, not unchecked rewrite
-attributes. Optimized variants should normally be represented with the same
+and overflow contract, using the equivalence taxonomy and proof-fact rules
+of the Transform Equivalence section in `fixed-point-semantics.md`.
+Optimized variants should normally be represented with the same
 algorithm operations, normalized Ondsp operations, and upstream dialects,
 rather than one custom operation per theorem or fusion pattern.
 

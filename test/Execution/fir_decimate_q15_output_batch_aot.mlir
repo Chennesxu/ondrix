@@ -9,14 +9,9 @@
 // RUN: llc -O2 -mtriple=x86_64-unknown-linux-gnu -mattr=+avx2 -filetype=asm %t.ll -o %t.s
 // RUN: FileCheck %s --check-prefix=AVX2 < %t.s
 
-// Vertical output batching for Q15 decimation, as object evidence.
-//
-// The lanes of the batched accumulator carry INDEPENDENT outputs. Lane j is
-// output m + j, visits the same taps in the same increasing order, and applies
-// the same declared update to its own accumulator. Nothing is reassociated, so
-// this rewrite needs no range or overflow proof at all — the contrast with the
-// horizontal reduction passes, whose lanes do reorder the fold and therefore
-// do require one, is the point of committing both.
+// Vertical output batching for Q15 decimation, as object evidence. The lanes
+// carry independent outputs — order preserving, no range or overflow proof
+// needed; the pass description carries the full argument.
 //
 // Six kernels share one object. The four static kernels are batched; the two
 // dynamic ones keep the ordered schedule because the pass refuses a loop whose

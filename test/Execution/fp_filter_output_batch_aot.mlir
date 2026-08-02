@@ -15,13 +15,8 @@
 // floating point, where the preserved thing is not an accumulator rail but a
 // per-lane event graph.
 //
-// The lanes of the batched accumulator carry INDEPENDENT outputs. Lane j is
-// output m + j, visits the same taps in the same increasing order, and applies
-// the same declared update — one rounded product then one accumulation under
-// contract=off, one fused event under contract=fma, both from +0.0 — to its
-// own accumulator. Nothing is reassociated and no lane is ever combined with
-// another, so this rewrite needs no reassociation proof, unlike the horizontal
-// f32 reductions whose lanes do reorder the fold.
+// The lanes carry independent outputs — per-lane event-graph identity, no
+// reassociation proof needed; the pass description carries the full argument.
 //
 // off and fma are both EXACT contracts: they name the event graph rather than
 // permitting a relation, so the gate is bit-for-bit rather than a tolerance.

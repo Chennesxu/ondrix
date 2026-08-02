@@ -6,13 +6,10 @@
 
 /* Object gate for vertical (cross-output) batching of Q15 decimation.
  *
- * Batching outputs across accumulator lanes is order preserving: lane j is
- * output m + j and folds the same taps in the same increasing order into its
- * own accumulator. No lane is ever combined with another, so legality does not
- * depend on a range or overflow proof — unlike the horizontal reduction
- * schedules, whose lanes do change the fold order. This harness pins that
- * claim where it is falsifiable: batched == ordered == an independent
- * reference, per element, for both executable accumulator profiles.
+ * The batched lanes carry independent outputs (order preserving; the pass
+ * description carries the argument). This harness pins that claim where it is
+ * falsifiable: batched == ordered == an independent reference, per element,
+ * for both executable accumulator profiles.
  *
  * Two tap counts, because an accumulator rail is only evidence when the clamp
  * survives to the exported bits.

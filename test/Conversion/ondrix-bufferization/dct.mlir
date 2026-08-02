@@ -5,13 +5,11 @@
 
 // The bufferized form is a second consumer of the same DCT contract: one
 // zero-seeded reduction and one nearest-even saturating boundary per output
-// row. It is the deliberate counterpart of the matmul/rms convergence. Those
-// two reduce over runtime values and therefore declare WRAPPING accumulators,
-// the exact-modulo reassociation class that needs no proof at all. A DCT row
-// is a compile-time CONSTANT, so this consumer declares a SATURATING
-// accumulator instead and the horizontal Vector consumer has to earn its
-// reassociation through the constant-coefficient prefix-range proof. Both
-// legality routes are now exercised by a real algorithm.
+// row. Unlike matmul/rms (runtime values, wrapping accumulators, proof-free
+// exact-modulo reassociation), the constant DCT row declares a SATURATING
+// accumulator, so the horizontal Vector consumer must earn its reassociation
+// through the constant-coefficient prefix-range proof — the derivation lives
+// in dct_q15_vector_aot.mlir.
 
 // The tie-guarded coefficient tables are materialized as immutable rank-1
 // globals, one per output row, because that is the only constant form

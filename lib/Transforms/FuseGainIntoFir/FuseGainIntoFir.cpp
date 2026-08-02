@@ -45,16 +45,10 @@ struct TapWitness {
 
 // Exhaustive per-tap equivalence certificate. The unfused program feeds the
 // accumulator `applyGainQ15(x, g, rule) * h`; the fused program feeds
-// `x * h'`. Both are exact integers, and the certificate demands they agree
-// on every one of the 65536 possible i16 inputs. There is no sampled or
-// approximate mode: either the whole domain agrees or the tap does not
-// certify, and one uncertified tap refuses the whole filter.
-//
-// Term-level equality is what makes the rewrite independent of everything
-// downstream. If the two programs push the identical ordered sequence of
-// accumulator terms, no accumulator width, update overflow policy, or export
-// policy can tell them apart, and neither can a product selection, which is a
-// deterministic function of that same exact product.
+// `x * h'`. Both are exact integers and must agree on every one of the 65536
+// possible i16 inputs — one uncertified tap refuses the whole filter.
+// Term-level equality makes the rewrite independent of everything downstream
+// (the pass description carries that argument).
 std::optional<TapWitness> certifyTap(int64_t gain, int64_t tap, int64_t fusedTap,
                                      ondrix::ondsp::RoundingMode mode) {
   for (int64_t value = -32768; value <= 32767; ++value) {

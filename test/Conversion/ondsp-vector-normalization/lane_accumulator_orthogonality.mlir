@@ -1,15 +1,12 @@
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --cse --canonicalize --vectorize-ondsp-fixed-decimate-outputs="vector-width=8" > %t.batched.mlir
 // RUN: ondrix-opt %t.batched.mlir --vectorize-ondsp-fixed-memref-reduce="vector-width=4" --parallelize-ondsp-fixed-wrap-vector-reduce --normalize-ondsp-fixed-vector-reduce | FileCheck %s
 
-// The two vectorization axes are orthogonal and must stay that way.
-//
-// Vertical batching spends vector lanes on independent OUTPUTS: no lane is
-// combined with another, so it is order preserving and needs no proof. The
-// horizontal reduction passes spend lanes on the REDUCTION axis: they change
-// the fold order and therefore need a range or reassociation proof. If a single
-// accumulator value carried both meanings the two readings would collide, so a
-// multi-lane accumulator is refused by `reduce_mac` itself and by the shared
-// fixed Vector MAC domain gate the horizontal passes consult.
+// The two vectorization axes are orthogonal and must stay that way: vertical
+// batching spends lanes on independent OUTPUTS, horizontal reduction spends
+// them on the REDUCTION axis. If a single accumulator value carried both
+// meanings the two readings would collide, so a multi-lane accumulator is
+// refused by `reduce_mac` itself and by the shared fixed Vector MAC domain
+// gate the horizontal passes consult.
 //
 // What that buys, pinned here: running the horizontal passes after batching
 // leaves the batched body exactly as it was and chunks only the ordered

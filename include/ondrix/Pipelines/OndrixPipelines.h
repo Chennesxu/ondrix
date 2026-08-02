@@ -23,12 +23,9 @@ struct OndrixDefaultPipelineOptions
                              llvm::cl::init(256)};
 };
 
-/// Appends the canonical Ondrix flow to `pm`: contract conversion, boundary
-/// bufferization, the automatic schedule stage (candidate transforms filtered
-/// by their own legality analyses, applied in the documented priority order),
-/// and the lowering tail down to the LLVM dialect. Normal compilation never
-/// selects schedules by hand; the individual pass flags remain available for
-/// ablation, testing, and oracle runs.
+/// Appends the canonical Ondrix flow to `pm`: design evaluation, contract
+/// conversion, forwarding, boundary bufferization, the automatic schedule
+/// stage, and the lowering tail down to the LLVM dialect.
 void buildOndrixDefaultPipeline(mlir::OpPassManager &pm,
                                 const OndrixDefaultPipelineOptions &options);
 

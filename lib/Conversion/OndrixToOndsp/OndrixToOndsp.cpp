@@ -2150,10 +2150,9 @@ public:
     };
     int64_t outputs = extent - window + 1;
     if (slidingWindowReuse) {
-      // Incremental running sum. Authorized by the contract: the window
-      // sums are exact i64 values with no per-update saturation, so this
-      // reassociation is value-neutral. A saturating-accumulator mean
-      // could not legally reuse partial sums this way.
+      // Incremental running sum — value-neutral only because the window
+      // sums are exact with no per-update saturation (the option
+      // description carries the argument).
       Value sum = inputs[0];
       for (int64_t i = 1; i < window; ++i)
         sum = rewriter.create<arith::AddIOp>(loc, sum, inputs[i]);

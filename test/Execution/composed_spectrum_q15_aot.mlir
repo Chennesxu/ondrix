@@ -31,15 +31,9 @@
 // The composed four-stage spectral program from .ox source to executed bits:
 // compile-time windowed-sinc lowpass design, valid-boundary FIR over the
 // exact i40 saturating accumulator, the staged 64-point RFFT, and the
-// magnitude spectrum. One tool invocation produces the module; the harness
-// carries its own end-to-end reference — its own frozen golden tap table,
-// its own quantized twiddles, its own correction-looped integer square root
-// — so no stage is checked against itself.
-//
-// The gate doctrine: one independent reference, two schedule variants. The
-// default width picks the certified vector schedules; width zero is the
-// all-ordered program. Both objects run against the same reference and must
-// agree with it bit for bit, on every one of the 33 bins. For exact
-// fixed-point contracts the schedule cannot be allowed to move a numeric
-// boundary, so schedule invariance is a checked fact here, not an assumption
-// inherited from the transforms that produced the schedule.
+// magnitude spectrum. The harness carries its own end-to-end reference —
+// frozen golden tap table, quantized twiddles, correction-looped integer
+// square root — so no stage is checked against itself. Both schedule
+// variants (default width, ordered width zero) must match it bit for bit on
+// every bin: schedule invariance of the exact contracts is checked, not
+// assumed.

@@ -17,18 +17,13 @@ std::string defaultPipelineText(const ondrix::OndrixDefaultPipelineOptions &opti
   std::string text;
   llvm::raw_string_ostream os(text);
 
-  // Contract conversion. Compile-time design intents are evaluated first —
-  // the fail-closed quantization tie guard aborts the compile rather than
-  // ship a misquantized table. Algorithm operations whose reductions have a
-  // direct bufferization stay in contract form here so the schedule stage
-  // below sees their `reduce_mac` loops; everything else lowers to its ondsp
-  // event form.
+  // Design evaluation must precede conversion (no other pass lowers the
+  // design ops); reductions with a direct bufferization stay in contract
+  // form so the schedule stage sees their `reduce_mac` loops.
   os << "evaluate-ondrix-fir-design,";
   os << "convert-ondrix-to-ondsp{preserve-bufferizable-reductions=true},";
-  // Proof-gated forwarding joins the automatic flow: constant-index reads
-  // staged through insert chains (an FFT feeding magnitude) collapse onto
-  // the producing SSA values, deleting the packed intermediate before
-  // bufferization ever materializes it. Fail-closed and inert elsewhere.
+  // Forwarding must precede bufferization so a forwarded intermediate is
+  // never materialized as a buffer.
   os << "canonicalize,cse,forward-ondrix-insert-extract,canonicalize,cse,";
   os << "empty-tensor-to-alloc-tensor,";
   // Entry points may return fresh result buffers; ownership transfers to the

@@ -30,10 +30,8 @@ using ondrix::applyGainQ15;
 using ondrix::isAdmittedGainRounding;
 using ondrix::quantizeQ15Product;
 
-// Exhaustive equivalence certificate: the cascade (inner gain first, then
-// outer) and the single merged gain must be bit-identical on every one of
-// the 65536 possible i16 inputs. There is no sampled or approximate mode —
-// either the whole domain agrees or the rewrite does not happen.
+// Exhaustive equivalence certificate: cascade and merged gain must agree on
+// every one of the 65536 possible i16 inputs, or the rewrite does not happen.
 //
 // The certificate is PER TIE RULE, and the certified-mergeable constant set
 // genuinely differs between the two: (-16384, 16384) merges to -8192 under
