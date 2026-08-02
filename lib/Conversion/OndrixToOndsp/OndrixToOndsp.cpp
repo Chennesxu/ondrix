@@ -1811,15 +1811,22 @@ public:
     RankedTensorType lhsType = op.getLhs().getType();
     RankedTensorType rhsType = op.getRhs().getType();
     IntegerType i64 = rewriter.getIntegerType(64);
+    auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
     // Exact i64 K-sum per element (|sum| <= 64 * 2^30), one nearest-even
-    // saturating boundary. Loop-form over all three dimensions.
-    ondrix::ondsp::ScaleAttr scale = getNearestEvenSaturatingShift(rewriter.getContext(), 15);
+    // saturating boundary. Loop-form over all three dimensions. The f32
+    // profile runs the same nest over its declared per-term events and has
+    // no boundary after the sum.
+    ondrix::ondsp::ScaleAttr scale =
+        fp ? ondrix::ondsp::ScaleAttr() : getNearestEvenSaturatingShift(rewriter.getContext(), 15);
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     Value rows = rewriter.create<arith::ConstantIndexOp>(loc, lhsType.getDimSize(0));
     Value inner = rewriter.create<arith::ConstantIndexOp>(loc, lhsType.getDimSize(1));
     Value columns = rewriter.create<arith::ConstantIndexOp>(loc, rhsType.getDimSize(1));
-    Value zero64 = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
+    Value seed =
+        fp ? rewriter.create<arith::ConstantOp>(loc, rewriter.getFloatAttr(fp.getFormat(), 0.0))
+                 .getResult()
+           : rewriter.create<arith::ConstantIntOp>(loc, 0, 64).getResult();
 
     RankedTensorType resultType = op.getResult().getType();
     Value empty =
@@ -1831,20 +1838,28 @@ public:
               loc, zero, columns, one, ValueRange{rowArgs.front()},
               [&](OpBuilder &builder, Location loc, Value column, ValueRange columnArgs) {
                 auto accLoop = builder.create<scf::ForOp>(
-                    loc, zero, inner, one, ValueRange{zero64},
+                    loc, zero, inner, one, ValueRange{seed},
                     [&](OpBuilder &builder, Location loc, Value index, ValueRange accArgs) {
                       Value left = builder.create<tensor::ExtractOp>(loc, adaptor.getLhs(),
                                                                      ValueRange{row, index});
                       Value right = builder.create<tensor::ExtractOp>(loc, adaptor.getRhs(),
                                                                       ValueRange{index, column});
+                      if (fp) {
+                        Value updated = createFpAccumulatorUpdate(loc, left, right, accArgs.front(),
+                                                                  fp, builder);
+                        builder.create<scf::YieldOp>(loc, updated);
+                        return;
+                      }
                       Value leftWide = builder.create<arith::ExtSIOp>(loc, i64, left);
                       Value rightWide = builder.create<arith::ExtSIOp>(loc, i64, right);
                       Value product = builder.create<arith::MulIOp>(loc, leftWide, rightWide);
                       Value sum = builder.create<arith::AddIOp>(loc, accArgs.front(), product);
                       builder.create<scf::YieldOp>(loc, sum);
                     });
-                Value element = builder.create<ondrix::ondsp::RoundShiftOp>(
-                    loc, builder.getI16Type(), accLoop.getResult(0), scale);
+                Value element = accLoop.getResult(0);
+                if (!fp)
+                  element = builder.create<ondrix::ondsp::RoundShiftOp>(loc, builder.getI16Type(),
+                                                                        element, scale);
                 Value inserted = builder.create<tensor::InsertOp>(loc, element, columnArgs.front(),
                                                                   ValueRange{row, column});
                 builder.create<scf::YieldOp>(loc, inserted);
@@ -1867,6 +1882,29 @@ public:
     IntegerType i32 = rewriter.getIntegerType(32);
     IntegerType i64 = rewriter.getIntegerType(64);
     MLIRContext *context = rewriter.getContext();
+    RankedTensorType resultTensor = op.getResult().getType();
+    if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric())) {
+      Type element = fp.getFormat();
+      Value index = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      Value step = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+      Value bound = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+      Value seed = rewriter.create<arith::ConstantOp>(loc, rewriter.getFloatAttr(element, 0.0));
+      auto sumLoop = rewriter.create<scf::ForOp>(
+          loc, index, bound, step, ValueRange{seed},
+          [&](OpBuilder &builder, Location bodyLoc, Value position, ValueRange iterArgs) {
+            Value value = builder.create<tensor::ExtractOp>(bodyLoc, adaptor.getInput(), position);
+            Value updated =
+                createFpAccumulatorUpdate(bodyLoc, value, value, iterArgs.front(), fp, builder);
+            builder.create<scf::YieldOp>(bodyLoc, updated);
+          });
+      Value count = rewriter.create<arith::ConstantOp>(
+          loc, rewriter.getFloatAttr(element, static_cast<double>(extent)));
+      Value mean = rewriter.create<arith::DivFOp>(loc, sumLoop.getResult(0), count);
+      Value root = rewriter.create<math::SqrtOp>(loc, mean);
+      Value empty = rewriter.create<tensor::EmptyOp>(loc, resultTensor.getShape(), element);
+      rewriter.replaceOpWithNewOp<tensor::InsertOp>(op, root, empty, index);
+      return success();
+    }
     // The exact i64 sum of squares is bounded by 2^42; the nearest-even
     // mean by 2^m is the first boundary (frac 30, at most 2^30, so the
     // declared i32 saturation is unreachable) and the integer root the

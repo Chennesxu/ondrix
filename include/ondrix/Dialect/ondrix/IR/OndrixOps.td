@@ -869,7 +869,7 @@ def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
 }
 
 def Ondrix_MatmulOp : Ondrix_Op<"matmul", [Pure]> {
-  let summary = "Fixed-point matrix product with one boundary per element";
+  let summary = "Matrix product with one declared boundary per element";
   let description = [{
     `ondrix.matmul` multiplies static signed-Q1.15 matrices
     `tensor<MxKxi16> x tensor<KxNxi16> -> tensor<MxNxi16>` with all three
@@ -887,18 +887,26 @@ def Ondrix_MatmulOp : Ondrix_Op<"matmul", [Pure]> {
     `-32768` against a matching column). Reassociating the exact K-sum is
     value-neutral by construction; moving or splitting the requantization
     boundary is not.
+
+    The f32 profile maps `tensor<MxKxf32> x tensor<KxNxf32>` to
+    `tensor<MxNxf32>` over the same extent envelope and carries no rounding
+    attribute, because it has no requantization boundary to place: each
+    element is exactly the reduction its `#ondsp.fp` contract declares over
+    increasing `k`, from `+0.0`. Under `off` that is one multiply and one
+    add per term, under `fma` one fused event per term, and under `fast` any
+    schedule derivable from the declared rewrites.
   }];
   let arguments = (ins AnyRankedTensor:$lhs,
                    AnyRankedTensor:$rhs,
                    Ondsp_NumericAttr:$numeric,
-                   Ondsp_RoundingModeAttr:$rounding);
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
 def Ondrix_RmsOp : Ondrix_Op<"rms", [Pure]> {
-  let summary = "Fixed-point root-mean-square with two explicit boundaries";
+  let summary = "Root-mean-square with explicitly declared boundaries";
   let description = [{
     `ondrix.rms` reduces a static rank-1 signed-Q1.15 tensor with a
     power-of-two extent `N = 2^m` in `[2, 4096]` to its root-mean-square:
@@ -921,10 +929,26 @@ def Ondrix_RmsOp : Ondrix_Op<"rms", [Pure]> {
     near-full-scale inputs — for example sixty-three minimum samples and
     one maximum, whose floor root 32767 takes the nearest adjustment to
     32768 before the clamp.
+
+    The f32 profile takes `tensor<Nxf32>` to `tensor<1xf32>` for any `N` in
+    `[2, 4096]` — the power-of-two restriction exists so the fixed-point
+    mean is a shift, and an f32 mean is a division by a representable
+    constant — and carries no rounding attribute:
+
+    ```text
+    sumsq = the reduction the #ondsp.fp contract declares over x[i]*x[i]
+    mean  = sumsq / (f32)N          one IEEE division
+    rms   = sqrt(mean)              one IEEE square root, correctly rounded
+    ```
+
+    Only the reduction is contract indexed. The division and the root are
+    single operations with no grouping to choose and no product to fuse, so
+    they are the same event under `off`, `fma`, and `fast` and carry no
+    fast-math flag.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_NumericAttr:$numeric,
-                   Ondsp_RoundingModeAttr:$rounding);
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

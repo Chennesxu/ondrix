@@ -14,3 +14,11 @@
 // RANK: invalid_matmul_rank.ox:2:10: error: matmul requires rank-2 tensors
 // INNER: invalid_matmul_inner.ox:2:10: error: matmul inner extents must match: lhs columns and rhs rows
 // EXTENT: invalid_matmul_extent.ox:2:10: error: matmul currently requires all extents in [1, 64]
+
+// RUN: ondrix-compile %S/Inputs/f32_matmul.ox | FileCheck %s --check-prefix=F32
+// RUN: not ondrix-compile %S/Inputs/invalid_f32_matmul_contract.ox 2>&1 | FileCheck %s --check-prefix=CONTRACT
+
+// F32-LABEL: func.func @f32_matmul
+// F32: ondrix.matmul
+// F32-SAME: numeric = #ondsp.fp<format = f32, contract = fma>
+// CONTRACT: error: unsupported floating-point contract 'exact'

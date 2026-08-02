@@ -342,7 +342,11 @@ catalog builtins expose their own admissible choices at the call site
 (for example `gain(..., rounding=...)` and the `root_rounding=` parameter
 of `rms` and `magnitude`).
 
-f32 dot and FIR support `contract=off`, `contract=fma`, and `contract=fast`.
+f32 dot, FIR, `matmul`, and `rms` support `contract=off`, `contract=fma`, and
+`contract=fast`. The floating-point spellings name a contract where their
+fixed-point counterparts name a rounding mode, because a floating-point result
+has no requantization boundary to round; `rms(x, contract=...)` also accepts
+any extent in range rather than only powers of two.
 `off` preserves separate multiply and add operations in the stated order, and
 `fma` pins each update as one explicit fused multiply-add event (a single
 rounding). Both are exact contracts: every authorized schedule reproduces

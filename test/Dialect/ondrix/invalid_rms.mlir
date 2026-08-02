@@ -44,3 +44,24 @@ func.func @rms_undersized(%input: tensor<1xi16>) -> tensor<1xi16> {
   } : (tensor<1xi16>) -> tensor<1xi16>
   return %result : tensor<1xi16>
 }
+
+// -----
+
+func.func @fp_rms_rounding(%input: tensor<8xf32>) -> tensor<1xf32> {
+  // expected-error @below {{floating-point rms rounds at no declared boundary of its own}}
+  %result = ondrix.rms %input {
+    numeric = #ondsp.fp<format = f32, contract = off>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xf32>) -> tensor<1xf32>
+  return %result : tensor<1xf32>
+}
+
+// -----
+
+func.func @fixed_rms_without_rounding(%input: tensor<8xi16>) -> tensor<1xi16> {
+  // expected-error @below {{rms supports toward_negative or nearest_even rounding}}
+  %result = ondrix.rms %input {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : (tensor<8xi16>) -> tensor<1xi16>
+  return %result : tensor<1xi16>
+}

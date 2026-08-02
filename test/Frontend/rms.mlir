@@ -24,3 +24,12 @@
 // A newly declared dialect rounding mode does not widen a binding: rms
 // admits only the modes its own contract admits.
 // TIES: invalid_rms_ties_positive.ox:2:10: error: rms root_rounding must be nearest_even or toward_negative
+
+// RUN: ondrix-compile %S/Inputs/f32_rms.ox | FileCheck %s --check-prefix=F32
+
+// The f32 binding names a contract instead of a root rounding mode, and its
+// extent need not be a power of two.
+// F32-LABEL: func.func @f32_rms
+// F32-SAME: tensor<10xf32>) -> tensor<1xf32>
+// F32: ondrix.rms
+// F32-SAME: numeric = #ondsp.fp<format = f32, contract = off>

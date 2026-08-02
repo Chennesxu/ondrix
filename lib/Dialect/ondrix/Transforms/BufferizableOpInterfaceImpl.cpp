@@ -460,9 +460,12 @@ struct MatmulOpInterface
     int64_t rowCount = lhsType.getDimSize(0);
     int64_t innerCount = lhsType.getDimSize(1);
     int64_t columnCount = rhsType.getDimSize(1);
-    auto elementType = cast<IntegerType>(lhsType.getElementType());
-    auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
-    auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
+    Type elementType = lhsType.getElementType();
+    auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+    Attribute numeric = op.getNumeric();
+    ondrix::ondsp::ProductAttr product;
+    if (!fp)
+      product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
     // Two independent arguments meet here. Reassociation legality needs only
     // the wrap overflow mode: exact-modulo accumulation is associative at any
     // width, so the horizontal Vector consumer may reassociate with no
@@ -472,7 +475,9 @@ struct MatmulOpInterface
     // |sum| <= 64 * 2^30 = 2^36 < 2^39 and the i40 wrapping accumulator never
     // actually wraps — its value equals the exact K-sum of the tensor-form
     // lowering.
-    ondrix::ondsp::AccType accumulatorType = getExactWrapAccumulator(context, /*width=*/40);
+    ondrix::ondsp::AccType accumulatorType;
+    if (!fp)
+      accumulatorType = getExactWrapAccumulator(context, /*width=*/40);
 
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
@@ -517,16 +522,26 @@ struct MatmulOpInterface
               [&](OpBuilder &columnBuilder, Location columnLoc, Value column, ValueRange) {
                 Value packedRow =
                     createUnitStrideRowView(columnBuilder, columnLoc, *packed, column, innerCount);
-                Value initial =
-                    columnBuilder.create<ondrix::ondsp::AccZeroOp>(columnLoc, accumulatorType);
-                Value reduced = columnBuilder.create<ondrix::ondsp::ReduceMacOp>(
-                    columnLoc, accumulatorType, initial, lhsRow, packedRow, numeric, product);
-                // Dividing the raw accumulator by 2^(30 - 15) with nearest-even
-                // rounding and saturating to i16 is exactly the `round_shift`
-                // boundary of the tensor-form lowering.
-                Value element = columnBuilder.create<ondrix::ondsp::AccExportOp>(
-                    columnLoc, elementType, reduced, numeric, op.getRounding(),
-                    ondrix::ondsp::OverflowMode::Saturate);
+                Value element;
+                if (fp) {
+                  // The reduction result is the element: an f32 element has no
+                  // requantization boundary after it.
+                  Value initial = columnBuilder.create<arith::ConstantOp>(
+                      columnLoc, columnBuilder.getFloatAttr(elementType, 0.0));
+                  element = columnBuilder.create<ondrix::ondsp::ReduceMacOp>(
+                      columnLoc, elementType, initial, lhsRow, packedRow, numeric, product);
+                } else {
+                  Value initial =
+                      columnBuilder.create<ondrix::ondsp::AccZeroOp>(columnLoc, accumulatorType);
+                  Value reduced = columnBuilder.create<ondrix::ondsp::ReduceMacOp>(
+                      columnLoc, accumulatorType, initial, lhsRow, packedRow, numeric, product);
+                  // Dividing the raw accumulator by 2^(30 - 15) with nearest-even
+                  // rounding and saturating to i16 is exactly the `round_shift`
+                  // boundary of the tensor-form lowering.
+                  element = columnBuilder.create<ondrix::ondsp::AccExportOp>(
+                      columnLoc, elementType, reduced, cast<ondrix::ondsp::FixedAttr>(numeric),
+                      *op.getRounding(), ondrix::ondsp::OverflowMode::Saturate);
+                }
                 columnBuilder.create<memref::StoreOp>(columnLoc, element, *output,
                                                       ValueRange{row, column});
                 columnBuilder.create<scf::YieldOp>(columnLoc);
@@ -571,9 +586,23 @@ struct RmsOpInterface : public BufferizableOpInterface::ExternalModel<RmsOpInter
       return failure();
 
     int64_t extent = op.getInput().getType().getDimSize(0);
-    unsigned meanShift = llvm::Log2_64(extent);
     IntegerType i32 = rewriter.getIntegerType(32);
     IntegerType i64 = rewriter.getIntegerType(64);
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric())) {
+      Type element = fp.getFormat();
+      Value seed = rewriter.create<arith::ConstantOp>(loc, rewriter.getFloatAttr(element, 0.0));
+      Value sumsq = rewriter.create<ondrix::ondsp::ReduceMacOp>(loc, element, seed, *input, *input,
+                                                                fp, ondrix::ondsp::ProductAttr());
+      Value count = rewriter.create<arith::ConstantOp>(
+          loc, rewriter.getFloatAttr(element, static_cast<double>(extent)));
+      Value mean = rewriter.create<arith::DivFOp>(loc, sumsq, count);
+      Value root = rewriter.create<math::SqrtOp>(loc, mean);
+      rewriter.create<memref::StoreOp>(loc, root, *output, ValueRange{zero});
+      replaceOpWithBufferizedValues(rewriter, op, *output);
+      return success();
+    }
+    unsigned meanShift = llvm::Log2_64(extent);
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
     // Squaring the input is one reduction whose two operands are the same
@@ -608,7 +637,6 @@ struct RmsOpInterface : public BufferizableOpInterface::ExternalModel<RmsOpInter
     Value meanWide = rewriter.create<arith::ExtSIOp>(loc, i64, mean);
     Value root = rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, rewriter.getI16Type(), meanWide,
                                                              op.getRoundingAttr());
-    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     rewriter.create<memref::StoreOp>(loc, root, *output, ValueRange{zero});
 
     replaceOpWithBufferizedValues(rewriter, op, *output);

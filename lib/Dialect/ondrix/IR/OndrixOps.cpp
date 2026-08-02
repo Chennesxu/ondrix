@@ -1071,37 +1071,56 @@ LogicalResult GoertzelOp::verify() {
 }
 
 LogicalResult MatmulOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-    return failure();
-  if (getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
-    return emitOpError("matmul requires nearest_even rounding");
+  auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
+  if (fp) {
+    if (!fp.getFormat().isF32())
+      return emitOpError("executable matmul supports the f32 floating-point format");
+    if (getRounding())
+      return emitOpError("floating-point matmul has no requantization boundary to round");
+  } else {
+    if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+      return failure();
+    if (!getRounding() || *getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
+      return emitOpError("matmul requires nearest_even rounding");
+  }
   RankedTensorType lhsType = getLhs().getType();
   RankedTensorType rhsType = getRhs().getType();
   RankedTensorType resultType = getResult().getType();
   if (failed(verifyUnencodedTensorTypes(getOperation(), {lhsType, rhsType, resultType})))
     return failure();
-  auto isStaticI16Matrix = [](RankedTensorType type) {
-    return type.getRank() == 2 && type.hasStaticShape() &&
-           type.getElementType().isSignlessInteger(16);
+  Type element =
+      fp ? Type(fp.getFormat()) : Type(cast<ondrix::ondsp::FixedAttr>(getNumeric()).getStorage());
+  auto isStaticMatrix = [&](RankedTensorType type) {
+    return type.getRank() == 2 && type.hasStaticShape() && type.getElementType() == element;
   };
   auto inRange = [](int64_t dim) { return dim >= 1 && dim <= 64; };
-  if (!isStaticI16Matrix(lhsType) || !isStaticI16Matrix(rhsType) ||
-      !isStaticI16Matrix(resultType) || lhsType.getDimSize(1) != rhsType.getDimSize(0) ||
+  if (!isStaticMatrix(lhsType) || !isStaticMatrix(rhsType) || !isStaticMatrix(resultType) ||
+      lhsType.getDimSize(1) != rhsType.getDimSize(0) ||
       resultType.getDimSize(0) != lhsType.getDimSize(0) ||
       resultType.getDimSize(1) != rhsType.getDimSize(1) || !inRange(lhsType.getDimSize(0)) ||
-      !inRange(lhsType.getDimSize(1)) || !inRange(rhsType.getDimSize(1)))
-    return emitOpError("executable matmul requires static tensor<MxKxi16> x tensor<KxNxi16> -> "
-                       "tensor<MxNxi16> with M, K, N in [1, 64]");
+      !inRange(lhsType.getDimSize(1)) || !inRange(rhsType.getDimSize(1))) {
+    llvm::StringRef name = fp ? "f32" : "i16";
+    return emitOpError() << "executable matmul requires static tensor<MxKx" << name
+                         << "> x tensor<KxNx" << name << "> -> tensor<MxNx" << name
+                         << "> with M, K, N in [1, 64]";
+  }
   return success();
 }
 
 LogicalResult RmsOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-    return failure();
-  ondrix::ondsp::RoundingMode rounding = getRounding();
-  if (rounding != ondrix::ondsp::RoundingMode::TowardNegative &&
-      rounding != ondrix::ondsp::RoundingMode::NearestEven)
-    return emitOpError("rms supports toward_negative or nearest_even rounding");
+  auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
+  if (fp) {
+    if (!fp.getFormat().isF32())
+      return emitOpError("executable rms supports the f32 floating-point format");
+    if (getRounding())
+      return emitOpError("floating-point rms rounds at no declared boundary of its own");
+  } else {
+    if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+      return failure();
+    if (!getRounding() || (*getRounding() != ondrix::ondsp::RoundingMode::TowardNegative &&
+                           *getRounding() != ondrix::ondsp::RoundingMode::NearestEven))
+      return emitOpError("rms supports toward_negative or nearest_even rounding");
+  }
   RankedTensorType inputType = getInput().getType();
   RankedTensorType resultType = getResult().getType();
   if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
@@ -1109,12 +1128,17 @@ LogicalResult RmsOp::verify() {
   int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  Type element = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), 16));
+  // The power-of-two extent exists so the fixed-point mean is a shift; an f32
+  // mean divides by a representable constant at any admitted extent.
   if (inputExtent == ShapedType::kDynamic || inputExtent < 2 || inputExtent > 4096 ||
-      !llvm::isPowerOf2_64(inputExtent) || resultExtent != 1 ||
-      !inputType.getElementType().isSignlessInteger(16) ||
-      !resultType.getElementType().isSignlessInteger(16))
-    return emitOpError("executable rms requires static tensor<Nxi16> input with power-of-two N "
-                       "in [2, 4096] and tensor<1xi16> result");
+      (!fp && !llvm::isPowerOf2_64(inputExtent)) || resultExtent != 1 ||
+      inputType.getElementType() != element || resultType.getElementType() != element) {
+    llvm::StringRef name = fp ? "f32" : "i16";
+    return emitOpError() << "executable rms requires static tensor<Nx" << name << "> input with "
+                         << (fp ? "N" : "power-of-two N") << " in [2, 4096] and tensor<1x" << name
+                         << "> result";
+  }
   return success();
 }
 

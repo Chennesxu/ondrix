@@ -22,3 +22,16 @@ func.func @rms_floor_rounding(%input: tensor<2xi16>) -> tensor<1xi16> {
   } : (tensor<2xi16>) -> tensor<1xi16>
   return %result : tensor<1xi16>
 }
+
+// The f32 profile admits any extent in range, because the power-of-two
+// requirement exists only to make the fixed-point mean a shift.
+// CHECK-LABEL: func.func @f32_rms
+// CHECK: ondrix.rms
+// CHECK-SAME: numeric = #ondsp.fp<format = f32, contract = off>
+// CHECK-NOT: rounding
+func.func @f32_rms(%input: tensor<10xf32>) -> tensor<1xf32> {
+  %result = ondrix.rms %input {
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<10xf32>) -> tensor<1xf32>
+  return %result : tensor<1xf32>
+}

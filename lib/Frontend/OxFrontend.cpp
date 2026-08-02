@@ -671,7 +671,16 @@ public:
                                 : call.kind == ReductionKind::Rms  ? "rms"
                                 : call.kind == ReductionKind::Sine ? "sine"
                                                                    : "cosine";
-      if (call.kind == ReductionKind::Rms && current.kind == TokenKind::Comma) {
+      if (call.kind == ReductionKind::Rms && policyType == SourceType::F32) {
+        if (!expect(TokenKind::Comma, "expected ',' before rms contract policy") ||
+            !expectIdentifier("contract", "expected floating-point contract policy") ||
+            !expect(TokenKind::Equal, "expected '=' after contract"))
+          return std::nullopt;
+        auto contract = parseIdentifier("expected floating-point contract mode");
+        if (!contract)
+          return std::nullopt;
+        call.fpContract = contract->spelling.str();
+      } else if (call.kind == ReductionKind::Rms && current.kind == TokenKind::Comma) {
         // The rms contract admits a declared root rounding mode while the
         // mean boundary stays nearest even; omission keeps the nearest_even
         // default. The parameter names the specific boundary (`root_`)
@@ -732,6 +741,16 @@ public:
     call.operands.push_back(resolveOperand(*rhs));
 
     if (call.kind == ReductionKind::Matmul) {
+      if (policyType == SourceType::F32) {
+        if (!expect(TokenKind::Comma, "expected ',' before matmul contract policy") ||
+            !expectIdentifier("contract", "expected floating-point contract policy") ||
+            !expect(TokenKind::Equal, "expected '=' after contract"))
+          return std::nullopt;
+        auto contract = parseIdentifier("expected floating-point contract mode");
+        if (!contract)
+          return std::nullopt;
+        call.fpContract = contract->spelling.str();
+      }
       if (!expect(TokenKind::RightParen, "expected ')' after matmul expression"))
         return std::nullopt;
       return call;
@@ -1414,13 +1433,15 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                          std::nullopt,   *stateRounding,  *stateOverflow};
   }
   if (ast.result.kind == ReductionKind::Matmul) {
+    bool isFloat = ast.primaryResult().type == SourceType::F32;
     if (ast.results.size() != 1 || !ast.primaryResult().tensor ||
-        ast.primaryResult().type != SourceType::Q15 || !lhsParameter || !rhsParameter ||
-        constexprCount != 0 || llvm::any_of(ast.parameters, [](const ParameterAst &parameter) {
-          return !parameter.isTensor();
-        })) {
+        (ast.primaryResult().type != SourceType::Q15 && !isFloat) || !lhsParameter ||
+        !rhsParameter || constexprCount != 0 ||
+        llvm::any_of(ast.parameters,
+                     [](const ParameterAst &parameter) { return !parameter.isTensor(); })) {
       diagnostics.error(ast.result.position,
-                        "matmul requires two Q15 tensor parameters and one Q15 tensor result");
+                        "matmul requires two Q15 or f32 tensor parameters and a matching "
+                        "tensor result");
       return std::nullopt;
     }
     if (!hasRank(lhsParameter->shape, 2) || !hasRank(rhsParameter->shape, 2) ||
@@ -1453,6 +1474,16 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     if (*ast.primaryResult().shape[0] != rows || *ast.primaryResult().shape[1] != columns) {
       diagnostics.error(ast.result.position, "matmul result shape must be lhs rows by rhs columns");
       return std::nullopt;
+    }
+    if (isFloat) {
+      auto contract = parseFpContract(ast.result.fpContract);
+      if (!contract) {
+        diagnostics.error(ast.result.position,
+                          llvm::Twine("unsupported floating-point contract '") +
+                              ast.result.fpContract + "'");
+        return std::nullopt;
+      }
+      return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, *contract};
     }
     return CheckedKernel{std::move(ast), std::nullopt, ondsp::RoundingMode::NearestEven,
                          std::nullopt, std::nullopt};
@@ -1989,10 +2020,16 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                               : ast.result.kind == ReductionKind::Rms           ? "rms"
                               : ast.result.kind == ReductionKind::Sine          ? "sine"
                                                                                 : "cosine";
-    if (constexprCount != 0 || !ast.primaryResult().tensor ||
-        ast.primaryResult().type != SourceType::Q15 || !lhsParameter || !lhsParameter->isTensor()) {
+    bool admitsFloat = ast.result.kind == ReductionKind::Rms;
+    bool isFloat = ast.primaryResult().type == SourceType::F32;
+    if (constexprCount != 0 || !ast.primaryResult().tensor || !lhsParameter ||
+        !lhsParameter->isTensor() ||
+        (ast.primaryResult().type != SourceType::Q15 && !(admitsFloat && isFloat))) {
       diagnostics.error(ast.result.position,
-                        llvm::Twine(builtin) + " requires a Q15 tensor input and result");
+                        llvm::Twine(builtin) + (admitsFloat ? " requires a Q15 or f32 tensor input "
+                                                              "and a matching result"
+                                                            : " requires a Q15 tensor input and "
+                                                              "result"));
       return std::nullopt;
     }
     if (!hasRank(lhsParameter->shape, 1) || !hasRank(ast.primaryResult().shape, 1)) {
@@ -2054,9 +2091,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       }
     } else if (ast.result.kind == ReductionKind::Rms) {
-      if (*inputExtent < 2 || *inputExtent > 4096 || !llvm::isPowerOf2_64(*inputExtent)) {
+      if (*inputExtent < 2 || *inputExtent > 4096 ||
+          (!isFloat && !llvm::isPowerOf2_64(*inputExtent))) {
         diagnostics.error(ast.result.position,
-                          "rms currently requires a power-of-two input extent in [2, 4096]");
+                          isFloat ? "rms currently requires an input extent in [2, 4096]"
+                                  : "rms currently requires a power-of-two input extent in "
+                                    "[2, 4096]");
         return std::nullopt;
       }
       if (*resultExtent != 1) {
@@ -2091,6 +2131,16 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       }
       rounding = *parsed;
+    }
+    if (isFloat) {
+      auto contract = parseFpContract(ast.result.fpContract);
+      if (!contract) {
+        diagnostics.error(ast.result.position,
+                          llvm::Twine("unsupported floating-point contract '") +
+                              ast.result.fpContract + "'");
+        return std::nullopt;
+      }
+      return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, *contract};
     }
     return CheckedKernel{std::move(ast), std::nullopt, rounding, std::nullopt, std::nullopt};
   } else {
@@ -2388,8 +2438,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   Value lhs = arguments.lookup(*getParameterOperand(kernel.ast.result, 0));
   if (isUnaryTensorKind(kernel.ast.result.kind)) {
     auto outputType = cast<RankedTensorType>(resultType);
-    auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
-    auto rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
+    ondsp::FixedAttr numeric;
+    ondsp::RoundingModeAttr rounding;
+    if (!kernel.fpContract) {
+      numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
+      rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
+    }
     Value result;
     if (kernel.ast.result.kind == ReductionKind::Dct) {
       unsigned stageCount = llvm::Log2_64(outputType.getDimSize(0));
@@ -2410,7 +2464,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     } else if (kernel.ast.result.kind == ReductionKind::Cosine) {
       result = builder.create<ir::CosineOp>(expressionLocation, outputType, lhs, numeric, rounding);
     } else {
-      result = builder.create<ir::RmsOp>(expressionLocation, outputType, lhs, numeric, rounding);
+      result = builder.create<ir::RmsOp>(
+          expressionLocation, outputType, lhs,
+          kernel.fpContract
+              ? Attribute(ondsp::FpAttr::get(&context, elementType, *kernel.fpContract))
+              : Attribute(numeric),
+          kernel.fpContract ? ondsp::RoundingModeAttr() : rounding);
     }
     builder.create<func::ReturnOp>(expressionLocation, result);
     module->push_back(function);
@@ -2483,8 +2542,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
 
   if (kernel.ast.result.kind == ReductionKind::Matmul) {
-    auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
-    auto rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
+    Attribute numeric =
+        kernel.fpContract ? Attribute(ondsp::FpAttr::get(&context, elementType, *kernel.fpContract))
+                          : Attribute(ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed,
+                                                            elementType, 15));
+    ondsp::RoundingModeAttr rounding;
+    if (!kernel.fpContract)
+      rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
     auto product = builder.create<ir::MatmulOp>(
         expressionLocation, cast<RankedTensorType>(resultType), lhs, rhs, numeric, rounding);
     builder.create<func::ReturnOp>(expressionLocation, product.getResult());

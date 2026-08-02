@@ -39,3 +39,20 @@ func.func @rms16_floor(%input: tensor<16xi16>) -> tensor<1xi16> {
   } : (tensor<16xi16>) -> tensor<1xi16>
   return %result : tensor<1xi16>
 }
+
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s --check-prefix=F32
+
+// Only the reduction is contract indexed; the mean and the root are single
+// operations and carry no fast-math flag under any contract.
+// F32-LABEL: func.func @f32_rms
+// F32: math.fma
+// F32: arith.divf
+// F32-NOT: fastmath
+// F32: math.sqrt
+// F32-NOT: ondsp.sqrt_fixed
+func.func @f32_rms(%input: tensor<10xf32>) -> tensor<1xf32> {
+  %result = ondrix.rms %input {
+    numeric = #ondsp.fp<format = f32, contract = fma>
+  } : (tensor<10xf32>) -> tensor<1xf32>
+  return %result : tensor<1xf32>
+}
