@@ -1,5 +1,6 @@
 #include "ondrix/InitAllDialects.h"
 #include "ondrix/InitAllPasses.h"
+#include "ondrix/Pipelines/OndrixPipelines.h"
 
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
@@ -8,6 +9,7 @@
 int main(int argc, char **argv) {
   mlir::registerAllPasses();
   ondrix::registerAllOndrixPasses();
+  ondrix::registerOndrixPipelines();
 
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);

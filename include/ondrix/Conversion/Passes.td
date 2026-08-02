@@ -44,6 +44,12 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
     Option<"vectorizeStaticCfft", "vectorize-static-cfft",
            "bool", /*default=*/"false",
            "Use fixed-length Vector arithmetic for independent static CFFT stage butterflies">,
+    Option<"preserveBufferizableReductions", "preserve-bufferizable-reductions",
+           "bool", /*default=*/"false",
+           "Keep the algorithm operations whose reductions bufferize directly "
+           "(FIR filter/decimate, conv1d, matmul, rms, dct) in contract form, "
+           "so the post-bufferization schedule stage sees their reduce_mac "
+           "loops instead of pre-lowered scalar bodies">,
     Option<"slidingWindowReuse", "sliding-window-reuse",
            "bool", /*default=*/"false",
            "Reuse exact moving-average window sums incrementally across outputs">,

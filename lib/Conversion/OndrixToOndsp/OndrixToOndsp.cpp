@@ -2244,6 +2244,13 @@ public:
                            scf::SCFDialect, tensor::TensorDialect, vector::VectorDialect,
                            ondrix::ondsp::OndspDialect>();
     target.addIllegalDialect<ondrix::ir::OndrixDialect>();
+    // In the canonical pipeline the operations whose reductions have a direct
+    // bufferization stay in contract form through this pass: bufferization
+    // lowers them to the reduce_mac loops the schedule stage authorizes over,
+    // which the scalar tensor lowering here would preempt.
+    if (preserveBufferizableReductions)
+      target.addLegalOp<ondrix::ir::FirFilterOp, ondrix::ir::FirDecimateOp, ondrix::ir::Conv1DOp,
+                        ondrix::ir::MatmulOp, ondrix::ir::RmsOp, ondrix::ir::DctOp>();
 
     if (failed(applyPartialConversion(module, target, std::move(patterns))))
       signalPassFailure();
