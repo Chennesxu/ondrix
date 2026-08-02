@@ -3,7 +3,7 @@
 // RUN: ondrix-opt %t.lowered.mlir --convert-ondsp-fixed-to-scalar --expand-strided-metadata --lower-affine --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
-// RUN: cc %S/Inputs/q31_f32_full_output_prototype_aot.c %t.o -lm -o %t
+// RUN: cc -ffp-contract=off %S/Inputs/q31_f32_full_output_prototype_aot.c %t.o -lm -o %t
 // RUN: %t
 
 // LOWERED-LABEL: func.func @q31_full_output_vector
@@ -29,6 +29,12 @@
 // LOWERED-NOT: vector.load
 // LOWERED: math.fma
 // LOWERED-NOT: vector.load
+// LOWERED-NOT: ondsp.reduce_mac
+// LOWERED-LABEL: func.func @f32_full_output_scalar_off
+// LOWERED-NOT: vector.load
+// LOWERED: arith.mulf
+// LOWERED: arith.addf
+// LOWERED-NOT: math.fma
 // LOWERED-NOT: ondsp.reduce_mac
 
 func.func @q31_full_output_vector(
@@ -145,6 +151,45 @@ func.func @f32_full_output_scalar(
           to memref<?xf32, strided<[?], offset: ?>>
     %result = ondrix.fir %window, %coefficients {
       numeric = #ondsp.fp<format = f32, contract = fma>
+    } : (memref<?xf32, strided<[?], offset: ?>>,
+         memref<?xf32, strided<[?], offset: ?>>) -> f32
+    memref.store %result, %output[%output_index]
+        : memref<?xf32, strided<[?], offset: ?>>
+  }
+  return
+}
+
+// The off contract rounds every tap product before the accumulator observes
+// it, so this twin must not be lowered through a fused update. It pairs with
+// the fused function above to gate both f32 contract modes over the same
+// strided windows.
+func.func @f32_full_output_scalar_off(
+    %input: memref<?xf32, strided<[?], offset: ?>>,
+    %coefficients: memref<?xf32, strided<[?], offset: ?>>,
+    %output: memref<?xf32, strided<[?], offset: ?>>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %input_length = memref.dim %input, %c0
+      : memref<?xf32, strided<[?], offset: ?>>
+  %coefficient_length = memref.dim %coefficients, %c0
+      : memref<?xf32, strided<[?], offset: ?>>
+  %output_length = memref.dim %output, %c0
+      : memref<?xf32, strided<[?], offset: ?>>
+  %has_coefficients = arith.cmpi ugt, %coefficient_length, %c0 : index
+  cf.assert %has_coefficients, "valid FIR requires at least one coefficient"
+  %input_covers_window = arith.cmpi uge, %input_length, %coefficient_length : index
+  cf.assert %input_covers_window, "valid FIR input must cover one coefficient window"
+  %remaining = arith.subi %input_length, %coefficient_length : index
+  %required_output_length = arith.addi %remaining, %c1 : index
+  %output_matches = arith.cmpi eq, %output_length, %required_output_length : index
+  cf.assert %output_matches, "valid FIR output length must equal input length minus coefficient length plus one"
+
+  scf.for %output_index = %c0 to %output_length step %c1 {
+    %window = memref.subview %input[%output_index] [%coefficient_length] [1]
+        : memref<?xf32, strided<[?], offset: ?>>
+          to memref<?xf32, strided<[?], offset: ?>>
+    %result = ondrix.fir %window, %coefficients {
+      numeric = #ondsp.fp<format = f32, contract = off>
     } : (memref<?xf32, strided<[?], offset: ?>>,
          memref<?xf32, strided<[?], offset: ?>>) -> f32
     memref.store %result, %output[%output_index]

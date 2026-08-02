@@ -1,7 +1,7 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-math-to-llvm --convert-arith-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
-// RUN: cc %S/Inputs/fp_scalar_dot_aot.c %t.o -lm -o %t
+// RUN: cc -ffp-contract=off %S/Inputs/fp_scalar_dot_aot.c %t.o -lm -o %t
 // RUN: %t
 
 func.func @dot_f32_off(%lhs: f32, %rhs: f32) -> f32 {

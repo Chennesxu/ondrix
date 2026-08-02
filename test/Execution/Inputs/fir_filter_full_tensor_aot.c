@@ -19,6 +19,9 @@ extern int16_t q15_full_filter_short_input(int16_t *, int16_t *, int64_t, int64_
 extern float f32_full_filter_value(float *, float *, int64_t, int64_t, int64_t, float *, float *,
                                    int64_t, int64_t, int64_t, float *, float *, int64_t, int64_t,
                                    int64_t, int64_t);
+extern float f32_full_filter_value_off(float *, float *, int64_t, int64_t, int64_t, float *,
+                                       float *, int64_t, int64_t, int64_t, float *, float *,
+                                       int64_t, int64_t, int64_t, int64_t);
 extern int16_t q15_full_shared_coeff_init(int16_t *, int16_t *, int64_t, int64_t, int64_t,
                                           int16_t *, int16_t *, int64_t, int64_t, int64_t, int64_t);
 extern int16_t q15_full_shared_input_init(int16_t *, int16_t *, int64_t, int64_t, int64_t,
@@ -114,6 +117,26 @@ static float f32_reference(const float *input, int64_t input_length, const float
   return accumulator;
 }
 
+// The off contract rounds each tap product to f32 before the accumulator adds
+// it, so this reference must spell out a separate multiply and a separate add
+// in the order the contract states. Using fmaf, or writing the tap as a single
+// a * b + c expression, would express the fused contract instead. The RUN
+// lines compile this file with -ffp-contract=off so the host compiler cannot
+// fuse the two operations back together.
+static float f32_off_reference(const float *input, int64_t input_length, const float *coefficients,
+                               int64_t coefficient_length, int64_t output_index) {
+  float accumulator = 0.0f;
+  const int64_t left_padding = coefficient_length - 1;
+  for (int64_t tap = 0; tap < coefficient_length; ++tap) {
+    const int64_t input_index = output_index + tap - left_padding;
+    if (input_index >= 0 && input_index < input_length) {
+      float product = input[input_index] * coefficients[tap];
+      accumulator = accumulator + product;
+    }
+  }
+  return accumulator;
+}
+
 int main(void) {
   int failed = 0;
 
@@ -175,6 +198,41 @@ int main(void) {
               (long long)output_index, f32_bits(expected), f32_bits(actual));
       failed = 1;
     }
+
+    float expected_off = f32_off_reference(f32_input, 4, f32_coefficients, 3, output_index);
+    float actual_off =
+        f32_full_filter_value_off(MEMREF_ARGS(f32_input, 4), MEMREF_ARGS(f32_coefficients, 3),
+                                  MEMREF_ARGS(f32_output, 6), output_index);
+    if (f32_bits(actual_off) != f32_bits(expected_off)) {
+      fprintf(stderr, "f32 off full output %lld: expected 0x%08x, got 0x%08x\n",
+              (long long)output_index, f32_bits(expected_off), f32_bits(actual_off));
+      failed = 1;
+    }
+  }
+
+  // The two taps of the middle window multiply out to -1.0 and 1 - 2^-46, so
+  // the separate multiply rounds the second product to 1.0 and cancels to
+  // zero while the fused update keeps the residual. This corpus is what makes
+  // the off gate observe the contract rather than merely repeat the fused one.
+  float contract_input[] = {-1.0f, 0x1.000002p+0f};
+  float contract_coefficients[] = {1.0f, 0x1.fffffcp-1f};
+  float contract_output[3] = {0.0f};
+  for (int64_t output_index = 0; output_index < 3; ++output_index) {
+    float expected = f32_off_reference(contract_input, 2, contract_coefficients, 2, output_index);
+    float actual = f32_full_filter_value_off(MEMREF_ARGS(contract_input, 2),
+                                             MEMREF_ARGS(contract_coefficients, 2),
+                                             MEMREF_ARGS(contract_output, 3), output_index);
+    if (f32_bits(actual) != f32_bits(expected)) {
+      fprintf(stderr, "f32 off contract output %lld: expected 0x%08x, got 0x%08x\n",
+              (long long)output_index, f32_bits(expected), f32_bits(actual));
+      failed = 1;
+    }
+  }
+  float cancelled = f32_off_reference(contract_input, 2, contract_coefficients, 2, 1);
+  if (f32_bits(cancelled) != UINT32_C(0)) {
+    fprintf(stderr, "f32 off contract reference lost the cancellation: 0x%08x\n",
+            f32_bits(cancelled));
+    failed = 1;
   }
 
   float exceptional_input[] = {1.0f};
@@ -191,6 +249,19 @@ int main(void) {
               (long long)output_index, f32_bits(expected), f32_bits(actual));
       failed = 1;
     }
+
+    float expected_off =
+        f32_off_reference(exceptional_input, 1, exceptional_coefficients, 3, output_index);
+    float actual_off = f32_full_filter_value_off(MEMREF_ARGS(exceptional_input, 1),
+                                                 MEMREF_ARGS(exceptional_coefficients, 3),
+                                                 MEMREF_ARGS(exceptional_output, 3), output_index);
+    int matches_off =
+        isnan(expected_off) ? isnan(actual_off) : f32_bits(actual_off) == f32_bits(expected_off);
+    if (!matches_off) {
+      fprintf(stderr, "exceptional f32 off full output %lld: expected 0x%08x, got 0x%08x\n",
+              (long long)output_index, f32_bits(expected_off), f32_bits(actual_off));
+      failed = 1;
+    }
   }
 
   float signed_zero_input[] = {-0.0f};
@@ -203,6 +274,17 @@ int main(void) {
   if (f32_bits(signed_zero_actual) != f32_bits(signed_zero_expected)) {
     fprintf(stderr, "signed-zero f32 full output: expected 0x%08x, got 0x%08x\n",
             f32_bits(signed_zero_expected), f32_bits(signed_zero_actual));
+    failed = 1;
+  }
+
+  float signed_zero_off_expected =
+      f32_off_reference(signed_zero_input, 1, signed_zero_coefficients, 1, 0);
+  float signed_zero_off_actual = f32_full_filter_value_off(MEMREF_ARGS(signed_zero_input, 1),
+                                                           MEMREF_ARGS(signed_zero_coefficients, 1),
+                                                           MEMREF_ARGS(signed_zero_output, 1), 0);
+  if (f32_bits(signed_zero_off_actual) != f32_bits(signed_zero_off_expected)) {
+    fprintf(stderr, "signed-zero f32 off full output: expected 0x%08x, got 0x%08x\n",
+            f32_bits(signed_zero_off_expected), f32_bits(signed_zero_off_actual));
     failed = 1;
   }
 

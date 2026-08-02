@@ -19,6 +19,9 @@ extern void q31_full_output_raw_vector(int32_t *, int32_t *, int64_t, int64_t, i
 extern void f32_full_output_scalar(float *, float *, int64_t, int64_t, int64_t, float *, float *,
                                    int64_t, int64_t, int64_t, float *, float *, int64_t, int64_t,
                                    int64_t);
+extern void f32_full_output_scalar_off(float *, float *, int64_t, int64_t, int64_t, float *,
+                                       float *, int64_t, int64_t, int64_t, float *, float *,
+                                       int64_t, int64_t, int64_t);
 
 static int64_t q31_update(int64_t accumulator, int32_t input, int32_t coefficient) {
   __int128 update = (__int128)accumulator + (__int128)input * coefficient;
@@ -97,6 +100,25 @@ static float f32_reference_sample(const float *input, int64_t input_offset, int6
   return accumulator;
 }
 
+// The off contract rounds each tap product to f32 before the accumulator adds
+// it, so this reference must spell out a separate multiply and a separate add
+// in the order the contract states. Using fmaf, or writing the tap as a single
+// a * b + c expression, would express the fused contract instead. The RUN line
+// compiles this file with -ffp-contract=off so the host compiler cannot fuse
+// the two operations back together.
+static float f32_off_reference_sample(const float *input, int64_t input_offset,
+                                      int64_t input_stride, const float *coefficients,
+                                      int64_t coefficient_offset, int64_t coefficient_stride,
+                                      int64_t tap_count) {
+  float accumulator = 0.0f;
+  for (int64_t tap = 0; tap < tap_count; ++tap) {
+    float product = input[input_offset + tap * input_stride] *
+                    coefficients[coefficient_offset + tap * coefficient_stride];
+    accumulator = accumulator + product;
+  }
+  return accumulator;
+}
+
 static int check_q31(int32_t *input, int64_t input_offset, int64_t input_length,
                      int32_t *coefficients, int64_t coefficient_offset, int64_t coefficient_length,
                      int32_t *output, int64_t output_offset) {
@@ -154,6 +176,29 @@ static int check_f32(float *input, int64_t input_offset, int64_t input_length, i
   return 0;
 }
 
+static int check_f32_off(float *input, int64_t input_offset, int64_t input_length,
+                         int64_t input_stride, float *coefficients, int64_t coefficient_offset,
+                         int64_t coefficient_length, int64_t coefficient_stride, float *output,
+                         int64_t output_offset, int64_t output_stride) {
+  int64_t output_length = input_length - coefficient_length + 1;
+  f32_full_output_scalar_off(input, input, input_offset, input_length, input_stride, coefficients,
+                             coefficients, coefficient_offset, coefficient_length,
+                             coefficient_stride, output, output, output_offset, output_length,
+                             output_stride);
+  for (int64_t index = 0; index < output_length; ++index) {
+    float expected = f32_off_reference_sample(input, input_offset + index * input_stride,
+                                              input_stride, coefficients, coefficient_offset,
+                                              coefficient_stride, coefficient_length);
+    float actual = output[output_offset + index * output_stride];
+    if (f32_bits(actual) == f32_bits(expected))
+      continue;
+    fprintf(stderr, "f32 off output %lld: expected 0x%08x, got 0x%08x\n", (long long)index,
+            f32_bits(expected), f32_bits(actual));
+    return 1;
+  }
+  return 0;
+}
+
 int main(void) {
   int32_t q31_input[32];
   int32_t q31_coefficients[16];
@@ -197,13 +242,17 @@ int main(void) {
   f32_input[1] = -0.0f;
   f32_coefficients[2] = 1.0f;
   failed |= check_f32(f32_input, 1, 17, 2, f32_coefficients, 2, 5, 3, f32_output, 3, 2);
+  failed |= check_f32_off(f32_input, 1, 17, 2, f32_coefficients, 2, 5, 3, f32_output, 3, 2);
 
   // A separate multiply rounds the second product to 1.0 and cancellation
   // produces zero. The required fused update preserves the -2^-46 residual.
+  // The two contract modes therefore disagree on this corpus, which is what
+  // makes the off gate observe the contract rather than repeat the fused one.
   f32_input[0] = -1.0f;
   f32_input[1] = 0x1.000002p+0f;
   f32_coefficients[0] = 1.0f;
   f32_coefficients[1] = 0x1.fffffcp-1f;
   failed |= check_f32(f32_input, 0, 2, 1, f32_coefficients, 0, 2, 1, f32_output, 0, 1);
+  failed |= check_f32_off(f32_input, 0, 2, 1, f32_coefficients, 0, 2, 1, f32_output, 0, 1);
   return failed;
 }

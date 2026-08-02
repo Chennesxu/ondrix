@@ -12,6 +12,10 @@ extern float f32_convolution_value(float, float, float, float, float, float, flo
                                    int64_t);
 extern float f32_correlation_value(float, float, float, float, float, float, float, float, float,
                                    int64_t);
+extern float f32_convolution_value_off(float, float, float, float, float, float, float, float,
+                                       float, int64_t);
+extern float f32_correlation_value_off(float, float, float, float, float, float, float, float,
+                                       float, int64_t);
 
 static int64_t clampI40(__int128 value) {
   const __int128 minimum = -((__int128)1 << 39);
@@ -62,6 +66,23 @@ static float f32Reference(const float input[6], const float kernel[3], unsigned 
   return accumulator;
 }
 
+// The off contract rounds each tap product to f32 before the accumulator adds
+// it, so this reference must spell out a separate multiply and a separate add
+// in the order the contract states. Using fmaf, or writing the tap as a single
+// a * b + c expression, would express the fused contract instead. The RUN
+// lines compile this file with -ffp-contract=off so the host compiler cannot
+// fuse the two operations back together.
+static float f32OffReference(const float input[6], const float kernel[3], unsigned output,
+                             int convolution) {
+  float accumulator = 0.0f;
+  for (unsigned k = 0; k < 3; ++k) {
+    unsigned kernelIndex = convolution ? 2 - k : k;
+    float product = input[output + k] * kernel[kernelIndex];
+    accumulator = accumulator + product;
+  }
+  return accumulator;
+}
+
 static uint32_t f32Bits(float value) {
   uint32_t bits;
   memcpy(&bits, &value, sizeof(bits));
@@ -89,6 +110,11 @@ int main(void) {
       {{INFINITY, -0.0f, 3.0f, NAN, -5.0f, 7.0f}, {0.25f, -2.0f, 1.5f}},
       {{0x1.000002p0f, -0x1.fffffep-1f, 0x1.000004p-2f, 8.0f, -16.0f, 32.0f},
        {0x1.000002p-1f, -0x1.000002p-2f, 0x1.fffffep-1f}},
+      // The second tap of the first window multiplies out to 1 - 2^-46, which a
+      // separate multiply rounds to 1.0 and cancels against the first tap. Only
+      // the fused update keeps the residual, so this case separates the two
+      // contract modes. The kernel is symmetric so both modes observe it.
+      {{-1.0f, 0x1.000002p+0f, 0.0f, 2.0f, -3.0f, 4.0f}, {1.0f, 0x1.fffffcp-1f, 1.0f}},
   };
 
   for (unsigned caseIndex = 0; caseIndex < sizeof(q15Cases) / sizeof(q15Cases[0]); ++caseIndex) {
@@ -129,6 +155,25 @@ int main(void) {
           f32Bits(correlation) != f32Bits(expectedCorrelation)) {
         fprintf(stderr, "f32 correlation case %u output %u: %08x/%08x\n", caseIndex, output,
                 f32Bits(correlation), f32Bits(expectedCorrelation));
+        return 1;
+      }
+
+      float convolutionOff =
+          f32_convolution_value_off(x[0], x[1], x[2], x[3], x[4], x[5], k[0], k[1], k[2], output);
+      float correlationOff =
+          f32_correlation_value_off(x[0], x[1], x[2], x[3], x[4], x[5], k[0], k[1], k[2], output);
+      float expectedConvolutionOff = f32OffReference(x, k, output, 1);
+      float expectedCorrelationOff = f32OffReference(x, k, output, 0);
+      if (!(isnan(convolutionOff) && isnan(expectedConvolutionOff)) &&
+          f32Bits(convolutionOff) != f32Bits(expectedConvolutionOff)) {
+        fprintf(stderr, "f32 off convolution case %u output %u: %08x/%08x\n", caseIndex, output,
+                f32Bits(convolutionOff), f32Bits(expectedConvolutionOff));
+        return 1;
+      }
+      if (!(isnan(correlationOff) && isnan(expectedCorrelationOff)) &&
+          f32Bits(correlationOff) != f32Bits(expectedCorrelationOff)) {
+        fprintf(stderr, "f32 off correlation case %u output %u: %08x/%08x\n", caseIndex, output,
+                f32Bits(correlationOff), f32Bits(expectedCorrelationOff));
         return 1;
       }
     }

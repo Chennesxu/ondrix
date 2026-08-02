@@ -5,7 +5,7 @@
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc -ffp-contract=off %S/Inputs/fir_stream_tensor_aot.c %t.o -lm -o %t
 // RUN: %t
-// RUN: cc %S/Inputs/fir_stream_tensor_mismatch.c %t.o -lm -o %t.mismatch
+// RUN: cc -ffp-contract=off %S/Inputs/fir_stream_tensor_mismatch.c %t.o -lm -o %t.mismatch
 // RUN: not --crash %t.mismatch coefficients
 // RUN: not --crash %t.mismatch state
 // RUN: not --crash %t.mismatch output
@@ -18,7 +18,7 @@
 // RUN: llc -relocation-model=pic -filetype=obj %t.vector.ll -o %t.vector.o
 // RUN: cc -ffp-contract=off %S/Inputs/fir_stream_tensor_aot.c %t.vector.o -lm -o %t.vector
 // RUN: %t.vector
-// RUN: cc %S/Inputs/fir_stream_tensor_mismatch.c %t.vector.o -lm -o %t.vector.mismatch
+// RUN: cc -ffp-contract=off %S/Inputs/fir_stream_tensor_mismatch.c %t.vector.o -lm -o %t.vector.mismatch
 // RUN: not --crash %t.vector.mismatch coefficients
 // RUN: not --crash %t.vector.mismatch state
 // RUN: not --crash %t.vector.mismatch output

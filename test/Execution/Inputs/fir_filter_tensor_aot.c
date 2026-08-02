@@ -18,6 +18,9 @@ extern int16_t q15_fir_filter_shared_coeff_init(int16_t *, int16_t *, int64_t, i
 extern float f32_fir_filter_value(float *, float *, int64_t, int64_t, int64_t, float *, float *,
                                   int64_t, int64_t, int64_t, float *, float *, int64_t, int64_t,
                                   int64_t, int64_t);
+extern float f32_fir_filter_value_off(float *, float *, int64_t, int64_t, int64_t, float *, float *,
+                                      int64_t, int64_t, int64_t, float *, float *, int64_t, int64_t,
+                                      int64_t, int64_t);
 extern int16_t q15_proven_fir_filter_value(int16_t *, int16_t *, int64_t, int64_t, int64_t,
                                            int16_t *, int16_t *, int64_t, int64_t, int64_t,
                                            int64_t);
@@ -91,6 +94,22 @@ static uint32_t f32_bits(float value) {
   return bits;
 }
 
+// The off contract rounds each tap product to f32 before the accumulator adds
+// it, so this reference must spell out a separate multiply and a separate add
+// in the order the contract states. Using fmaf, or writing the tap as a single
+// a * b + c expression, would express the fused contract instead. The RUN
+// lines compile this file with -ffp-contract=off so the host compiler cannot
+// fuse the two operations back together.
+static float f32_off_reference(const float *input, const float *coeffs, int64_t output_index,
+                               int64_t tap_count) {
+  float accumulator = 0.0f;
+  for (int64_t tap = 0; tap < tap_count; ++tap) {
+    float product = input[output_index + tap] * coeffs[tap];
+    accumulator = accumulator + product;
+  }
+  return accumulator;
+}
+
 int main(void) {
   int failed = 0;
 
@@ -147,6 +166,18 @@ int main(void) {
     if (f32_bits(actual) != f32_bits(expected)) {
       fprintf(stderr, "f32 output %lld: expected 0x%08x, got 0x%08x\n", (long long)index,
               f32_bits(expected), f32_bits(actual));
+      failed = 1;
+    }
+
+    // The first window multiplies out to 1 - 2^-46 against a leading -1.0, so
+    // the separate multiply cancels to zero where the fused update keeps the
+    // residual. The two contract modes therefore disagree on this corpus.
+    float expected_off = f32_off_reference(f32_input, f32_coeffs, index, 2);
+    float actual_off = f32_fir_filter_value_off(
+        MEMREF_ARGS(f32_input, 3), MEMREF_ARGS(f32_coeffs, 2), MEMREF_ARGS(f32_init, 2), index);
+    if (f32_bits(actual_off) != f32_bits(expected_off)) {
+      fprintf(stderr, "f32 off output %lld: expected 0x%08x, got 0x%08x\n", (long long)index,
+              f32_bits(expected_off), f32_bits(actual_off));
       failed = 1;
     }
   }

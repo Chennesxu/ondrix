@@ -4,9 +4,9 @@
 // RUN: FileCheck %s --check-prefix=LOWERED < %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
-// RUN: cc %S/Inputs/fir_filter_full_tensor_aot.c %t.o -lm -o %t
+// RUN: cc -ffp-contract=off %S/Inputs/fir_filter_full_tensor_aot.c %t.o -lm -o %t
 // RUN: %t
-// RUN: cc %S/Inputs/fir_filter_full_tensor_mismatch.c %t.o -lm -o %t.mismatch
+// RUN: cc -ffp-contract=off %S/Inputs/fir_filter_full_tensor_mismatch.c %t.o -lm -o %t.mismatch
 // RUN: not --crash %t.mismatch input
 // RUN: not --crash %t.mismatch coefficients
 // RUN: not --crash %t.mismatch output
@@ -14,9 +14,9 @@
 // RUN: FileCheck %s --check-prefix=LOWERED < %t.generic.mlir
 // RUN: ondrix-translate %t.generic.mlir --mlir-to-llvmir > %t.generic.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.generic.ll -o %t.generic.o
-// RUN: cc %S/Inputs/fir_filter_full_tensor_aot.c %t.generic.o -lm -o %t.generic
+// RUN: cc -ffp-contract=off %S/Inputs/fir_filter_full_tensor_aot.c %t.generic.o -lm -o %t.generic
 // RUN: %t.generic
-// RUN: cc %S/Inputs/fir_filter_full_tensor_mismatch.c %t.generic.o -lm -o %t.generic.mismatch
+// RUN: cc -ffp-contract=off %S/Inputs/fir_filter_full_tensor_mismatch.c %t.generic.o -lm -o %t.generic.mismatch
 // RUN: not --crash %t.generic.mismatch input
 // RUN: not --crash %t.generic.mismatch coefficients
 // RUN: not --crash %t.generic.mismatch output
@@ -26,9 +26,9 @@
 // RUN: FileCheck %s --check-prefix=LOWERED < %t.tiled.mlir
 // RUN: ondrix-translate %t.tiled.mlir --mlir-to-llvmir > %t.tiled.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.tiled.ll -o %t.tiled.o
-// RUN: cc %S/Inputs/fir_filter_full_tensor_aot.c %t.tiled.o -lm -o %t.tiled
+// RUN: cc -ffp-contract=off %S/Inputs/fir_filter_full_tensor_aot.c %t.tiled.o -lm -o %t.tiled
 // RUN: %t.tiled
-// RUN: cc %S/Inputs/fir_filter_full_tensor_mismatch.c %t.tiled.o -lm -o %t.tiled.mismatch
+// RUN: cc -ffp-contract=off %S/Inputs/fir_filter_full_tensor_mismatch.c %t.tiled.o -lm -o %t.tiled.mismatch
 // RUN: not --crash %t.tiled.mismatch input
 // RUN: not --crash %t.tiled.mismatch coefficients
 // RUN: not --crash %t.tiled.mismatch output
@@ -71,6 +71,11 @@
 // VECTOR-LABEL: func.func @f32_full_filter_value
 // VECTOR: scf.if
 // VECTOR: math.fma
+// VECTOR-LABEL: func.func @f32_full_filter_value_off
+// VECTOR: scf.if
+// VECTOR: arith.mulf
+// VECTOR: arith.addf
+// VECTOR-NOT: math.fma
 // VECTOR-LABEL: func.func @q15_full_shared_coeff_init
 // VECTOR: memref.alloc
 // VECTOR-NOT: memref.copy
@@ -146,6 +151,21 @@ func.func @f32_full_filter_value(
   %result = ondrix.fir_filter %input, %coeffs, %init {
     boundary = #ondrix.fir_boundary<full>,
     numeric = #ondsp.fp<format = f32, contract = fma>
+  } : (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
+  %value = tensor.extract %result[%index] : tensor<?xf32>
+  return %value : f32
+}
+
+// The off contract rounds every tap product before the accumulator observes
+// it, so this twin must not be lowered through a fused update. It pairs with
+// the fused function above to gate both f32 contract modes, including the
+// padded taps that the full boundary skips entirely.
+func.func @f32_full_filter_value_off(
+    %input: tensor<?xf32>, %coeffs: tensor<?xf32>, %init: tensor<?xf32>,
+    %index: index) -> f32 {
+  %result = ondrix.fir_filter %input, %coeffs, %init {
+    boundary = #ondrix.fir_boundary<full>,
+    numeric = #ondsp.fp<format = f32, contract = off>
   } : (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
   %value = tensor.extract %result[%index] : tensor<?xf32>
   return %value : f32
