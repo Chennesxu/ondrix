@@ -317,17 +317,33 @@ catalog builtins expose their own admissible choices at the call site
 of `rms` and `magnitude`).
 
 f32 dot and FIR support `contract=off`, `contract=fma`, and `contract=fast`.
-`off` preserves separate multiply and add operations, `fma` requires fused
-updates, and `fast` explicitly permits fast-math transformations. Only `off`
-and `fma` are bitwise differential contracts.
+`off` preserves separate multiply and add operations in the stated order, and
+`fma` pins each update as one explicit fused multiply-add event (a single
+rounding); both are exact contracts, and any authorized schedule must
+reproduce their results bit for bit. `fast` is a named relaxation profile
+that permits exactly two things: reassociation of the accumulation graph and
+multiply-add contraction. It does not assert that inputs are free of NaN or
+infinity, does not abandon signed-zero observability, and does not permit
+reciprocal division or approximate math functions — each of those would be a
+separate declaration this language does not currently offer. A `fast` result
+is therefore compared under an explicit error characterization, never bit
+for bit.
 
 No target capability or physical register information enters source IR.
 `llvm.emit_c_interface` marks the generated function for the existing AOT
 pipeline, but the resulting C ABI is not stable. In particular, tensor results
 currently use MLIR's bufferized ranked-memref descriptor convention in the test
 wrapper. That convention is not part of `.ox` source semantics. Tensor
-parameters are values; the frontend does not invent a `restrict` promise for
-them.
+parameters are values, so aliasing is not observable in the source language at
+all; the storage question only appears at the emitted ABI, and there it is a
+DECLARED precondition rather than an inference: a caller of the bufferized
+entry point must pass storage for each parameter and result that is disjoint
+from every other parameter's and result's storage. Distinct mutable `buffer`
+parameters of one kernel carry the same declared non-overlap precondition at
+the language level. Schedule transforms that reorder loads against stores rely
+on exactly this contract for function entry arguments — everything else they
+prove or refuse statically — so the precondition is part of the language and
+ABI surface, never a hidden assumption of one pass.
 
 This is not a general Python parser. Imports, classes, heap objects, arbitrary
 expressions, and dynamic Python behavior are rejected. Scalar constants,

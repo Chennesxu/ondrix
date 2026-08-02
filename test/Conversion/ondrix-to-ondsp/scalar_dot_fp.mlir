@@ -30,4 +30,4 @@ func.func @dot_fast(%lhs: f32, %rhs: f32) -> f32 {
 }
 
 // CHECK-LABEL: func.func @dot_fast
-// CHECK: math.fma {{.*}} fastmath<fast> : f32
+// CHECK: math.fma {{.*}} fastmath<reassoc,contract> : f32

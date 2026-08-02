@@ -37,5 +37,5 @@ func.func @reduce_mac_fast(%lhs: memref<8xf32>, %rhs: memref<8xf32>) -> f32 {
 }
 
 // CHECK-LABEL: func.func @reduce_mac_fast
-// CHECK: math.fma {{.*}}fastmath<fast>{{.*}} : f32
+// CHECK: math.fma {{.*}}fastmath<reassoc,contract>{{.*}} : f32
 // CHECK-NOT: ondsp.reduce_mac

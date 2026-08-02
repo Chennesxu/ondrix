@@ -88,7 +88,7 @@ func.func @mixed_static_results(
 }
 
 // CHECK-LABEL: func.func @f32_stream_fast
-// CHECK: math.fma {{.*}} fastmath<fast> : f32
+// CHECK: math.fma {{.*}} fastmath<reassoc,contract> : f32
 // CHECK-NOT: ondrix.fir_stream
 func.func @f32_stream_fast(
     %input: tensor<4xf32>, %coeffs: tensor<3xf32>, %state: tensor<2xf32>)

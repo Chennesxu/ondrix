@@ -58,7 +58,7 @@ static Value createScalarFpDot(Location loc, Value lhs, Value rhs, ondrix::ondsp
   case ondrix::ondsp::FpContractMode::Fast: {
     Value zero = rewriter.create<arith::ConstantOp>(loc, numeric.getFormat(),
                                                     rewriter.getZeroAttr(numeric.getFormat()));
-    return rewriter.create<math::FmaOp>(loc, lhs, rhs, zero, arith::FastMathFlags::fast);
+    return rewriter.create<math::FmaOp>(loc, lhs, rhs, zero, ondrix::ondsp::getFastContractFlags());
   }
   }
   llvm_unreachable("unknown floating-point contract mode");
@@ -74,7 +74,8 @@ static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value
   case ondrix::ondsp::FpContractMode::Fma:
     return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator);
   case ondrix::ondsp::FpContractMode::Fast:
-    return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator, arith::FastMathFlags::fast);
+    return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator,
+                                       ondrix::ondsp::getFastContractFlags());
   }
   llvm_unreachable("unknown floating-point contract mode");
 }
@@ -82,14 +83,14 @@ static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value
 static Value createFpMultiply(Location loc, Value lhs, Value rhs, ondrix::ondsp::FpAttr numeric,
                               OpBuilder &builder) {
   if (numeric.getContract() == ondrix::ondsp::FpContractMode::Fast)
-    return builder.create<arith::MulFOp>(loc, lhs, rhs, arith::FastMathFlags::fast);
+    return builder.create<arith::MulFOp>(loc, lhs, rhs, ondrix::ondsp::getFastContractFlags());
   return builder.create<arith::MulFOp>(loc, lhs, rhs);
 }
 
 static Value createFpAdd(Location loc, Value lhs, Value rhs, ondrix::ondsp::FpAttr numeric,
                          OpBuilder &builder) {
   if (numeric.getContract() == ondrix::ondsp::FpContractMode::Fast)
-    return builder.create<arith::AddFOp>(loc, lhs, rhs, arith::FastMathFlags::fast);
+    return builder.create<arith::AddFOp>(loc, lhs, rhs, ondrix::ondsp::getFastContractFlags());
   return builder.create<arith::AddFOp>(loc, lhs, rhs);
 }
 

@@ -74,13 +74,46 @@ def Ondsp_OverflowMode : I32EnumAttr<"OverflowMode", "overflow mode",
   let genSpecializedAttr = 0;
 }
 
+// The declared floating-point evaluation policies. Each mode fixes which
+// dynamic FP event graphs a lowering may produce for one call site, and
+// therefore which correctness relation the evidence must establish:
+//
+//   off   every multiply and every add is a separate IEEE-754 operation in
+//         the contract's stated order (emitted with NO fast-math flags, so
+//         not even mul-add contraction is permitted). Exact contract: any
+//         authorized schedule must reproduce the result bit for bit.
+//   fma   each multiply-accumulate step is one explicit fused multiply-add
+//         EVENT — an infinitely precise product-and-sum with a single
+//         rounding (`math.fma` -> `llvm.fma`), never a mere contraction
+//         permission on separate operations. Exact contract as well: the
+//         event tree is different from off's, but it is pinned, and
+//         evidence is again bit-for-bit.
+//   fast  a named RELAXATION profile that widens the correctness relation
+//         instead of pinning an event tree. It declares exactly two
+//         permissions — reassociation of the accumulation graph and
+//         mul-add contraction (fastmath<reassoc,contract>) — so schedules
+//         may regroup the chain and results are compared under an explicit
+//         error characterization, never bit-pinned. It deliberately does
+//         NOT assert the absence of NaN/Inf inputs, does not abandon
+//         signed-zero observability, and does not license reciprocal
+//         division or approximate math functions; each of those would be a
+//         separate declaration. The declaration replaces the
+//         bit-equivalence obligation only: memory disjointness, bounds,
+//         and every other structural legality obligation remain to be
+//         discharged by analysis.
+//
+// Environment contract shared by all three modes: round-to-nearest-even,
+// FP exception state unobservable, subnormals preserved (no FTZ/DAZ), and
+// NaN/Inf/signed zeros propagate per IEEE 754 unless a mode above states a
+// declared exception.
 def Ondsp_FpContractOff : I32EnumAttrCase<"Off", 0, "off">;
 def Ondsp_FpContractFma : I32EnumAttrCase<"Fma", 1, "fma">;
 def Ondsp_FpContractFast : I32EnumAttrCase<"Fast", 2, "fast">;
 def Ondsp_FpContractMode : I32EnumAttr<
     "FpContractMode",
-    "FP evaluation policy: off preserves separate operations, fma requires a "
-    "fused multiply-add, and fast permits full fast-math transformations",
+    "FP evaluation policy: off preserves separate ordered operations, fma "
+    "pins explicit fused multiply-add events, and fast declares the "
+    "reassoc+contract relaxation profile",
     [Ondsp_FpContractOff, Ondsp_FpContractFma, Ondsp_FpContractFast]> {
   let cppNamespace = "::ondrix::ondsp";
 }

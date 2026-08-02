@@ -55,9 +55,9 @@ func.func @static_off(
 }
 
 // CHECK-LABEL: func.func @static_fast
-// CHECK: arith.mulf {{.*}} fastmath<fast>
-// CHECK: math.fma {{.*}} fastmath<fast>
-// CHECK: arith.addf {{.*}} fastmath<fast>
+// CHECK: arith.mulf {{.*}} fastmath<reassoc,contract>
+// CHECK: math.fma {{.*}} fastmath<reassoc,contract>
+// CHECK: arith.addf {{.*}} fastmath<reassoc,contract>
 // CHECK-NOT: ondrix.sos_filter_tdf2
 func.func @static_fast(
     %input: tensor<4xf32>, %coeffs: tensor<2x5xf32>,

@@ -1,5 +1,6 @@
 #include "ondrix/Conversion/OndspToScalar/OndspToScalar.h"
 #include "ondrix/Conversion/Utils/ReductionUtils.h"
+#include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
@@ -82,7 +83,7 @@ public:
           }
           case ondrix::ondsp::FpContractMode::Fast:
             next = builder.create<math::FmaOp>(bodyLoc, lhs, rhs, iterArgs.front(),
-                                               arith::FastMathFlags::fast);
+                                               ondrix::ondsp::getFastContractFlags());
             break;
           }
           builder.create<scf::YieldOp>(bodyLoc, next);

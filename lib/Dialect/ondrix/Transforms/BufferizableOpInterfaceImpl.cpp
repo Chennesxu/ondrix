@@ -1,4 +1,5 @@
 #include "ondrix/Dialect/ondrix/Transforms/BufferizableOpInterfaceImpl.h"
+#include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
 #include "ondrix/Dialect/ondrix/IR/OndrixDialect.h"
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
@@ -48,7 +49,8 @@ static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value
   case ondrix::ondsp::FpContractMode::Fma:
     return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator);
   case ondrix::ondsp::FpContractMode::Fast:
-    return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator, arith::FastMathFlags::fast);
+    return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator,
+                                       ondrix::ondsp::getFastContractFlags());
   }
   llvm_unreachable("unknown floating-point contract mode");
 }

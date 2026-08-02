@@ -4,6 +4,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Operation.h"
 
 #include "llvm/ADT/STLFunctionalExtras.h"
@@ -12,6 +13,19 @@
 #include <optional>
 
 namespace ondrix::ondsp {
+
+/// The exact fast-math permission set the `fast` contract declares:
+/// reassociation of the numeric event graph plus mul-add contraction, and
+/// NOTHING else. LLVM's blanket `fast` keyword would additionally assert
+/// nnan/ninf (turning the NaN/Inf values this language never excluded into
+/// poison), abandon signed-zero observability (nsz), and license reciprocal
+/// division (arcp) and approximate math functions (afn) — each of those is a
+/// separate semantic promise a call site has not made by writing
+/// `contract = fast`, so none of them may ride along. Every lowering of the
+/// fast contract must emit exactly this set.
+inline mlir::arith::FastMathFlags getFastContractFlags() {
+  return mlir::arith::FastMathFlags::reassoc | mlir::arith::FastMathFlags::contract;
+}
 
 /// Target-independent raw storage and fractional position of a product.
 struct ProductSemantics {
