@@ -1,5 +1,6 @@
 add_ondrix_library(OndspVectorization
   OndspDecimateOutputBatching.cpp
+  OndspFpFilterOutputBatching.cpp
   OndspVectorization.cpp
 
   DEPENDS
@@ -10,6 +11,7 @@ add_ondrix_library(OndspVectorization
   MLIRArithDialect
   MLIRControlFlowDialect
   MLIRIR
+  MLIRMathDialect
   MLIRMemRefDialect
   MLIRPass
   MLIRSCFDialect

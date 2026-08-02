@@ -390,4 +390,64 @@ def VectorizeOndspFixedDecimateOutputs
   ];
 }
 
+def VectorizeOndspFpFilterOutputs
+    : Pass<"vectorize-ondsp-fp-filter-outputs", "mlir::ModuleOp"> {
+  let summary = "Batch independent f32 filter outputs into vector lanes under "
+                "the exact contracts";
+  let description = [{
+    Rewrites the bufferized valid-boundary f32 filter loop so that W
+    independent outputs are computed in the lanes of one vector, W outputs
+    per pass over the coefficients, while every remaining output keeps the
+    ordered scalar schedule.
+
+    This is the order-preserving batching axis applied to floating point.
+    The off and fma contracts pin each output's dynamic floating-point event
+    graph — f32 addition is not associative, so splitting one accumulation
+    chain across lanes is a value-changing rewrite no proof can rescue. What
+    those contracts leave open is exactly what this pass does: no output's
+    chain is split or reordered; each lane runs the declared per-output
+    events verbatim (the same +0.0 initial value, the same tap order, one
+    product-and-accumulate — separate under off, one fused event under fma —
+    per tap), and only independent outputs are laid side by side. The
+    authorization is therefore structural rather than algebraic — per-lane
+    event-graph identity — and it does not depend on any arithmetic law of
+    the element domain, which is what makes it the same axis the fixed-point
+    decimate batching uses. It does still depend on the element and
+    environment semantics: a vector lane operation must agree with the
+    corresponding scalar operation, which IEEE 754 elementwise vector
+    arithmetic provides. The fast contract is refused here: it relaxes the
+    correctness relation instead of pinning the event graph, and its
+    horizontal reduction is a different mode with different evidence.
+
+    The pass is opt-in and never part of a default pipeline. It fires only
+    for the loop shape the valid-boundary f32 filter bufferization emits,
+    with static extents, contiguous rank-1 operands in the default memory
+    space, and a +0.0 reduction seed. Unlike the decimate batching there is
+    no widened load: at tap t the lanes for outputs m .. m+W-1 read
+    input[m+t .. m+t+W-1], exactly the union of those W ordered windows, so
+    every full block of W outputs is batchable and the batched schedule
+    reads no element the ordered one did not.
+
+    Aliasing is the same separately discharged obligation as in the decimate
+    batching: the rewrite defers a block's W stores past all of that block's
+    tap loads, so the loop is refused unless the input, coefficient, and
+    output storage are statically distinct (same base-storage analysis, same
+    fail-closed treatment of opaque provenance and non-entry block
+    arguments). The remaining half is the declared function-entry
+    disjointness precondition the `.ox` ABI states.
+  }];
+  let constructor = "ondrix::createVectorizeOndspFpFilterOutputsPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::math::MathDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
+           "Number of independent outputs batched per vector">,
+  ];
+}
+
 #endif // ONDRIX_CONVERSION_PASSES
