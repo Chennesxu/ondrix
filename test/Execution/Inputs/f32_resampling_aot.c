@@ -180,25 +180,28 @@ static float randomValue(uint32_t *state) {
   return (float)raw / 8192.0f;
 }
 
-/* The residual of 1 + 2^-23 - 1 survives a fused update and is lost when the
- * product is rounded on its own, so a lowering that fuses an off term or
- * splits an fma term changes exported bits here. */
+/* A directed split witness: fusing an off term or splitting an fma term
+ * changes exported bits here. */
 static int checkContractSplit(void) {
   float decimateInput[kDecimateInput] = {0};
   float decimateCoeffs[kDecimateTaps] = {0};
   float interpolateInput[kInterpolateInput] = {0};
   float interpolateCoeffs[kInterpolateTaps] = {0};
 
-  decimateInput[0] = 1.0f;
-  decimateCoeffs[0] = 0x1.000002p+0f;
-  decimateInput[1] = -1.0f;
-  decimateCoeffs[1] = 1.0f;
+  /* Tap 0 leaves the accumulator at -1.0; tap 1 then contributes a product
+   * whose exact value needs more than 24 bits, so the cancellation exposes
+   * the bits a separate rounding drops. Output 0 of the decimation and
+   * output 2 of the interpolation carry the pair. */
+  decimateCoeffs[0] = 1.0f;
+  decimateInput[0] = -1.0f;
+  decimateCoeffs[1] = 0x1.000002p+0f;
+  decimateInput[1] = 0x1.000006p+0f;
   int failed = checkDecimate(decimateInput, decimateCoeffs, "contract split");
 
-  interpolateInput[0] = 1.0f;
-  interpolateCoeffs[0] = 0x1.000002p+0f;
+  interpolateCoeffs[0] = 1.0f;
   interpolateInput[1] = -1.0f;
-  interpolateCoeffs[2] = 1.0f;
+  interpolateCoeffs[2] = 0x1.000002p+0f;
+  interpolateInput[0] = 0x1.000006p+0f;
   failed |= checkInterpolate(interpolateInput, interpolateCoeffs, "contract split");
   return failed;
 }

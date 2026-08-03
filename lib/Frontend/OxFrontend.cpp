@@ -308,21 +308,38 @@ struct BuiltinCallAst {
   SourcePosition position;
 };
 
-// A source rational becomes the correctly rounded binary32 of its exact
-// value. binary64 division is correctly rounded to 53 bits and 53 >= 2*24+2,
-// so rounding that quotient again to binary32 lands where single rounding
-// would - provided both operands are exact in binary64 and the result is
-// normal, which is what this refuses to assume.
-std::optional<float> roundRationalToF32(int64_t numerator, int64_t denominator) {
-  constexpr int64_t kExactInBinary64 = int64_t(1) << 53;
-  if (denominator <= 0 || denominator > kExactInBinary64 || numerator > kExactInBinary64 ||
-      numerator < -kExactInBinary64)
-    return std::nullopt;
-  auto value =
-      static_cast<float>(static_cast<double>(numerator) / static_cast<double>(denominator));
-  if (numerator == 0)
-    return 0.0f;
-  return std::isnormal(value) ? std::optional<float>(value) : std::nullopt;
+// Why a source rational may be divided in binary64 and then narrowed: the
+// double rounding is innocuous when both operands are representable in the
+// NARROW format and the wide precision is at least 2p+2, which 53 >= 2*24+2
+// satisfies. The operand bound is therefore on binary32. Admitting 53-bit
+// operands makes the argument fail, and 548055821/548055723 is a reachable
+// witness whose narrowed quotient is one ulp above the correctly rounded
+// value. The argument also needs a normal result, which that same bound
+// delivers for free: every admitted quotient lies in [2^-24, 2^24].
+enum class RationalRefusal { None, Denominator, Magnitude };
+
+std::pair<float, RationalRefusal> roundRationalToF32(int64_t numerator, int64_t denominator) {
+  constexpr int64_t kExactInBinary32 = int64_t(1) << 24;
+  if (denominator <= 0)
+    return {0.0f, RationalRefusal::Denominator};
+  if (denominator > kExactInBinary32 || numerator > kExactInBinary32 ||
+      numerator < -kExactInBinary32)
+    return {0.0f, RationalRefusal::Magnitude};
+  return {static_cast<float>(static_cast<double>(numerator) / static_cast<double>(denominator)),
+          RationalRefusal::None};
+}
+
+llvm::StringRef describeRationalRefusal(RationalRefusal refusal) {
+  switch (refusal) {
+  case RationalRefusal::Denominator:
+    return "denominator must be positive";
+  case RationalRefusal::Magnitude:
+    return "numerator and denominator must not exceed 2^24, the bound that keeps the narrowed "
+           "quotient correctly rounded";
+  case RationalRefusal::None:
+    break;
+  }
+  llvm_unreachable("no refusal to describe");
 }
 
 ExpressionAst::ExpressionAst(BuiltinCallAst call)
@@ -1621,15 +1638,19 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       return std::nullopt;
     }
     if (isFloat) {
-      std::optional<float> constant =
-          roundRationalToF32(ast.result.stepSize, ast.result.fpConstantDen);
-      if (!constant) {
+      auto [constant, refusal] = roundRationalToF32(ast.result.stepSize, ast.result.fpConstantDen);
+      if (refusal != RationalRefusal::None) {
         diagnostics.error(ast.result.position,
-                          "f32 lms step size must be a rational whose binary32 value is zero "
-                          "or normal");
+                          llvm::Twine("f32 lms step size: ") + describeRationalRefusal(refusal));
         return std::nullopt;
       }
-      ast.result.fpConstant = *constant;
+      // The fixed profile admits only the non-negative raw Q1.15 range; the
+      // f32 profile matches it rather than widening by omission.
+      if (constant < 0.0f) {
+        diagnostics.error(ast.result.position, "f32 lms step size must not be negative");
+        return std::nullopt;
+      }
+      ast.result.fpConstant = constant;
       auto contract = parseFpContract(ast.result.fpContract);
       if (!contract) {
         diagnostics.error(ast.result.position,
@@ -2190,15 +2211,13 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
     } else if (ast.result.kind == ReductionKind::Gain) {
       if (isFloat) {
-        std::optional<float> constant =
-            roundRationalToF32(ast.result.gain, ast.result.fpConstantDen);
-        if (!constant) {
+        auto [constant, refusal] = roundRationalToF32(ast.result.gain, ast.result.fpConstantDen);
+        if (refusal != RationalRefusal::None) {
           diagnostics.error(ast.result.position,
-                            "f32 gain constant must be a rational whose binary32 value is zero "
-                            "or normal");
+                            llvm::Twine("f32 gain constant: ") + describeRationalRefusal(refusal));
           return std::nullopt;
         }
-        ast.result.fpConstant = *constant;
+        ast.result.fpConstant = constant;
       } else if (ast.result.gain < std::numeric_limits<int16_t>::min() ||
                  ast.result.gain > std::numeric_limits<int16_t>::max()) {
         diagnostics.error(ast.result.position,

@@ -105,3 +105,26 @@ func.func @rejects_fp_constant_on_fixed_gain(%input: tensor<8xi16>) {
   } : (tensor<8xi16>) -> tensor<8xi16>
   return
 }
+
+// -----
+
+func.func @rejects_f64_gain(%input: tensor<8xf64>) {
+  // expected-error @+1 {{executable gain supports the f32 floating-point format}}
+  %0 = ondrix.gain %input {
+    fp_gain = 5.000000e-01 : f32,
+    numeric = #ondsp.fp<format = f64, contract = off>
+  } : (tensor<8xf64>) -> tensor<8xf64>
+  return
+}
+
+// -----
+
+func.func @rejects_raw_constant_on_fp_gain(%input: tensor<8xf32>) {
+  // expected-error @+1 {{floating-point gain must not specify a raw Q1.15 constant}}
+  %0 = ondrix.gain %input {
+    gain = 19661,
+    fp_gain = 5.000000e-01 : f32,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<8xf32>) -> tensor<8xf32>
+  return
+}

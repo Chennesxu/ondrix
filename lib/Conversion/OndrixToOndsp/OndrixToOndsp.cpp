@@ -441,6 +441,16 @@ static Value createResamplingSeed(OpTy op, ondrix::ondsp::FpAttr fp, OpBuilder &
 }
 
 template <typename OpTy>
+static Value updateResamplingAccumulator(OpTy op, ondrix::ondsp::FixedAttr fixed,
+                                         ondrix::ondsp::FpAttr fp, Value accumulator, Value input,
+                                         Value coefficient, OpBuilder &builder, Location loc) {
+  if (fp)
+    return createFpAccumulatorUpdate(loc, input, coefficient, accumulator, fp, builder);
+  return builder.create<ondrix::ondsp::MacOp>(loc, *op.getAccumulator(), accumulator, input,
+                                              coefficient, fixed, *op.getProduct());
+}
+
+template <typename OpTy>
 static Value exportResamplingSample(OpTy op, ondrix::ondsp::FpAttr fp, Value accumulator,
                                     OpBuilder &builder, Location loc) {
   if (fp)
@@ -482,13 +492,8 @@ public:
                     tapBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getInput(), inputIndex);
                 Value coefficient =
                     tapBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getCoeffs(), tap);
-                Value updated = fp ? createFpAccumulatorUpdate(tapLoc, input, coefficient,
-                                                               tapArgs.front(), fp, tapBuilder)
-                                   : tapBuilder
-                                         .create<ondrix::ondsp::MacOp>(
-                                             tapLoc, *op.getAccumulator(), tapArgs.front(), input,
-                                             coefficient, fixed, *op.getProduct())
-                                         .getResult();
+                Value updated = updateResamplingAccumulator(op, fixed, fp, tapArgs.front(), input,
+                                                            coefficient, tapBuilder, tapLoc);
                 tapBuilder.create<scf::YieldOp>(tapLoc, updated);
               });
           Value output = exportResamplingSample(op, fp, tapLoop.getResult(0), builder, outputLoc);
@@ -549,13 +554,8 @@ public:
                     thenBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getInput(), inputIndex);
                 Value coefficient =
                     thenBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getCoeffs(), tap);
-                Value updated = fp ? createFpAccumulatorUpdate(tapLoc, input, coefficient,
-                                                               tapArgs.front(), fp, thenBuilder)
-                                   : thenBuilder
-                                         .create<ondrix::ondsp::MacOp>(
-                                             tapLoc, *op.getAccumulator(), tapArgs.front(), input,
-                                             coefficient, fixed, *op.getProduct())
-                                         .getResult();
+                Value updated = updateResamplingAccumulator(op, fixed, fp, tapArgs.front(), input,
+                                                            coefficient, thenBuilder, tapLoc);
                 thenBuilder.create<scf::YieldOp>(tapLoc, updated);
                 OpBuilder elseBuilder = guarded.getElseBodyBuilder();
                 elseBuilder.create<scf::YieldOp>(tapLoc, tapArgs.front());
@@ -1842,9 +1842,9 @@ public:
 
 private:
   // Doubling the rounded cosine is exact, so `c2` carries no boundary of its
-  // own. Only the coefficient product and its input addition form a
-  // multiply-add; the state subtraction and the closing energy are single
-  // IEEE operations, so they carry no contract permission in any mode.
+  // own. Everything but the coefficient product and its input addition is
+  // built unflagged, which is what bounds the derivable set the operation
+  // description declares.
   static LogicalResult rewriteFloatingPoint(ondrix::ir::GoertzelOp op, OpAdaptor adaptor,
                                             ondrix::ondsp::FpAttr numeric, int64_t extent,
                                             double cosine, ConversionPatternRewriter &rewriter) {
@@ -2112,7 +2112,6 @@ public:
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     Value sampleCount = rewriter.create<arith::ConstantIndexOp>(loc, samples);
     Value tapCount = rewriter.create<arith::ConstantIndexOp>(loc, taps);
-    Value zero64 = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
     Value zeroElement = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(element));
 
     // Zero-prehistory tap fetch: x[n - k], 0 for n < k. The prehistory term
@@ -2174,6 +2173,7 @@ public:
       return success();
     }
 
+    Value zero64 = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
     auto sampleLoop = rewriter.create<scf::ForOp>(
         loc, zero, sampleCount, one, ValueRange{copyLoop.getResult(0), errorsEmpty},
         [&](OpBuilder &builder, Location loc, Value sample, ValueRange iterArgs) {

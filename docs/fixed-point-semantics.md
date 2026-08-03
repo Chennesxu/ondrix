@@ -184,10 +184,17 @@ phase-zero interpolation as full convolution after inserting one numeric zero
 between adjacent input samples. For input length `N` and coefficient length
 `K`, it produces `(N - 1) * 2 + K` samples. Every output visits coefficients
 in increasing index order and skips terms that address an inserted zero or lie
-outside the original input. Its first executable profile is signed Q15/full
-product with an explicit signed frac30 accumulator and export policy. It has a
-generic scalar consumer; source binding, stateful block processing, polyphase
-reassociation, and Vector or target consumers remain deferred.
+outside the original input. Both resampling contracts carry two executable
+profiles: signed Q15/full product with an explicit signed frac30 accumulator
+and export policy, and f32 under a declared contract that replaces all of
+that. Both reach the source binding. Stateful block processing, polyphase
+reassociation, and target consumers remain deferred, as does Vector for
+interpolation.
+
+Skipping the inserted-zero terms is part of the contract on both profiles,
+but only the f32 one makes that observable: a materialized term would be
+`0.0 * coeffs[k]`, which is a no-op for every finite coefficient and NaN for
+an infinite one.
 
 ## Packed Q15 Real-Spectrum Transforms
 

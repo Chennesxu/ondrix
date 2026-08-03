@@ -222,9 +222,10 @@ def Ondrix_FirInterpolateOp
     signed Q15 with exact full products, a signed frac30 accumulator of at
     least 32 bits, and explicit export policy; the f32 profile carries none of
     those attributes and reduces from `+0.0` under its `#ondsp.fp` contract.
-    Under f32 the skip is a declared event and not a derivable rewrite: the
-    skipping and the zero-materializing programs agree on every finite input
-    but differ when an input is infinite, because `0.0 * inf` is NaN.
+    Under f32 the skip is a declared event and not a derivable rewrite: a
+    materialized term is `0.0 * coeffs[k]`, never a product of an input
+    sample, so the two programs agree on every finite coefficient and part
+    company only at an infinite one, where `0.0 * inf` is NaN.
     Stateful block forms, configurable phase, polyphase scheduling, Q31,
     Vector, and target selection are outside this operation.
 
@@ -900,7 +901,9 @@ def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
     rounding IS the declared constant. Every admitted bin therefore lowers,
     where the Q15 profile fails closed on inadmissible ones. Both profiles
     evaluate the quarter-turn angles exactly rather than through libm, so
-    bin `N/4` has the zero coefficient it names.
+    bin `N/4` has the zero coefficient it names; the Q15 guard already
+    quantized libm's 6.1e-17 to that zero, so this only moves the f32
+    constant.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    I64Attr:$bin,
@@ -1089,7 +1092,9 @@ def Ondrix_LmsOp : Ondrix_Op<"lms", [Pure]> {
     Two sites are contract indexed: the K-term output reduction and each
     weight update. The sample recursion is not a permission question at all -
     it is a data dependence, so no declaration reorders samples, and `fast`
-    authorizes reassociating the tap sum only. Unlike interpolation's
+    authorizes reassociating the tap sum only. As with `ondrix.gain`, `fast`
+    is still carried into the step multiply, where it finds no site to apply
+    to because that product's only consumer is a fused multiplicand. Unlike interpolation's
     inserted zeros, the zero prehistory samples `x[m < 0]` are evaluated
     rather than skipped, matching the fixed profile's shape.
   }];

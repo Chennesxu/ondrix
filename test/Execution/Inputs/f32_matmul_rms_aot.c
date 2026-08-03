@@ -145,22 +145,27 @@ static float randomValue(uint32_t *state) {
   return (float)raw / 8192.0f;
 }
 
-/* The residual of 1 + 2^-23 - 1 survives a fused update and is lost when the
- * product is rounded on its own, so a lowering that fuses an off term or
- * splits an fma term changes exported bits here. */
+/* A directed split witness: fusing an off term or splitting an fma term
+ * changes exported bits here. Term 0 leaves the accumulator at -1.0 and term
+ * 1 contributes a product needing more than 24 bits, so the cancellation
+ * exposes what a separate rounding drops. The rms sum of squares has no such
+ * cancellation, so its pair is a full-mantissa set whose accumulated
+ * roundings differ far enough to survive the closing root. */
 static int checkContractSplit(void) {
   float a[kRows * kInner] = {0};
   float b[kInner * kColumns] = {0};
   float x[kRmsLength] = {0};
 
   a[0] = 1.0f;
-  b[0] = 0x1.000002p+0f;
-  a[1] = -1.0f;
-  b[kColumns] = 1.0f;
+  b[0] = -1.0f;
+  a[1] = 0x1.000002p+0f;
+  b[kColumns] = 0x1.000006p+0f;
   int failed = checkMatmul(a, b, "contract split");
 
-  x[0] = 0x1.0p+12f;
-  x[1] = 0x1.000002p-12f;
+  const float samples[kRmsLength] = {
+      -0x1.a67d94p+2f, 0x1.3592a8p+1f,  -0x1.0a596p+0f, -0x1.d837ep+0f, 0x1.a0d1a8p+1f,
+      0x1.35ebep+1f,   -0x1.47f4c4p+2f, 0x1.396bp-1f,   0x1.d51168p+1f, -0x1.80cfe8p+2f};
+  memcpy(x, samples, sizeof x);
   failed |= checkRms(x, "contract split");
   return failed;
 }

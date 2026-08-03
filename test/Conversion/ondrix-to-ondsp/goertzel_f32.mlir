@@ -1,9 +1,7 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s
 
-// Only the coefficient product and its input addition form a multiply-add,
-// so that is the only site the contract indexes. The state subtraction and
-// the closing energy expression stay unflagged in every mode, which bounds
-// what fast may vary to that one site.
+// Pins that exactly one emitted operation carries the declared permission,
+// which is what bounds the derivable set to two elements.
 // CHECK-LABEL: func.func @f32_goertzel_fast
 // CHECK: %[[C2:.*]] = arith.constant
 // CHECK: scf.for {{.*}} iter_args
@@ -23,8 +21,8 @@ func.func @f32_goertzel_fast(%input: tensor<16xf32>) -> tensor<1xf32> {
   return %energy : tensor<1xf32>
 }
 
-// binary64 cannot represent pi/2, so an unsnapped libm cosine would give
-// about 1e-16 here instead of the zero the quarter-turn bin names.
+// The only gate on the quarter-turn constant: the energy it feeds is
+// bit-identical either way, so no object test can distinguish it.
 // CHECK-LABEL: func.func @f32_goertzel_quarter_turn
 // CHECK: arith.constant 0.000000e+00 : f32
 func.func @f32_goertzel_quarter_turn(%input: tensor<16xf32>) -> tensor<1xf32> {

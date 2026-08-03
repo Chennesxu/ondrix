@@ -1206,8 +1206,10 @@ LogicalResult GainOp::verify() {
   if (fp) {
     if (!fp.getFormat().isF32())
       return emitOpError("executable gain supports the f32 floating-point format");
-    if (getRounding() || getGain())
+    if (getRounding())
       return emitOpError("floating-point gain has no requantization boundary to round");
+    if (getGain())
+      return emitOpError("floating-point gain must not specify a raw Q1.15 constant");
     if (!getFpGain())
       return emitOpError("floating-point gain requires the fp_gain constant");
   } else {
@@ -1244,10 +1246,16 @@ LogicalResult LmsOp::verify() {
   if (fp) {
     if (!fp.getFormat().isF32())
       return emitOpError("executable lms supports the f32 floating-point format");
-    if (getRounding() || getStepSize())
+    if (getRounding())
       return emitOpError("floating-point lms rounds at no declared boundary of its own");
+    if (getStepSize())
+      return emitOpError("floating-point lms must not specify a raw Q1.15 step size");
     if (!getFpStepSize())
       return emitOpError("floating-point lms requires the fp_step_size constant");
+    // The fixed profile admits only the non-negative raw Q1.15 range, and a
+    // NaN step size fails this comparison with it.
+    if (!(getFpStepSize()->convertToFloat() >= 0.0f))
+      return emitOpError("floating-point lms step size must not be negative");
   } else {
     if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
       return failure();

@@ -64,8 +64,7 @@ static int checkGain(const float *input, const char *label) {
     const float expected = input[i] * kGain;
     failed |= compare(label, "gain off", i, off.aligned[off.offset + i * off.strides[0]], expected);
     failed |= compare(label, "gain fma", i, fma.aligned[fma.offset + i * fma.strides[0]], expected);
-    /* A lone multiply offers no rewrite to any declaration, so the fast
-     * object must agree with the other two bit for bit. */
+    /* fast must agree bitwise: see the operation description. */
     failed |=
         compare(label, "gain fast", i, fast.aligned[fast.offset + i * fast.strides[0]], expected);
   }
@@ -169,19 +168,23 @@ static float randomValue(uint32_t *state) {
   return (float)raw / 8192.0f;
 }
 
-/* The residual of 1 + 2^-23 - 1 survives a fused update and is lost when the
- * product is rounded on its own, so a lowering that fuses an off term or
- * splits an fma term changes exported bits here. */
+/* A directed split witness for lms; gain has no fused form to split. */
 static int checkContractSplit(void) {
   float input[kSamples] = {0};
   float desired[kSamples] = {0};
   float weights[kTaps] = {0};
 
-  input[0] = 1.0f;
-  weights[0] = 0x1.000002p+0f;
-  input[1] = -1.0f;
-  weights[1] = 1.0f;
-  desired[1] = 0x1.0p+8f;
+  /* Full-mantissa samples, targets and initial weights make the tap products
+   * and the weight updates inexact, so a fused term and a separately rounded
+   * term diverge in the exported error signal. */
+  const float samples[4] = {0x1.3c6ef3p+0f, -0x1.1e2d5bp+0f, 0x1.7a4c9dp+0f, 0x1.05b2c7p+0f};
+  const float targets[3] = {0x1.9e3779p+0f, -0x1.4a7f2bp+0f, 0x1.62e43p+0f};
+  const float initial[kTaps] = {0x1.000002p+0f, -0x1.7ffffep-1f, 0x1.3bd3ccp-2f, -0x1.0f876cp-3f};
+  for (int i = 0; i < 4; ++i)
+    input[i] = samples[i];
+  for (int i = 0; i < 3; ++i)
+    desired[i] = targets[i];
+  memcpy(weights, initial, sizeof weights);
   return checkLms(input, desired, weights, "contract split");
 }
 

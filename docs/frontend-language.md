@@ -369,9 +369,13 @@ offers nothing to reassociate or fuse.
 The f32 constants of `gain` and `lms` are spelled as rationals,
 `gain(x, gain=[3, 8], contract=off)` and
 `lms(x, d, w, step_size=[1, 16], contract=fma)`, because the lexer has no
-floating-point literal. The constant is the correctly rounded binary32 of the
-exact rational; a rational whose binary32 value is neither zero nor normal is
-refused rather than rounded into the subnormal range or to infinity.
+floating-point literal. The numerator and denominator must not exceed `2^24`
+and the denominator must be positive; within that bound the constant is the
+correctly rounded binary32 of the exact rational, because the double rounding
+through binary64 is innocuous only when both operands are representable in the
+narrow format. That bound also keeps every admitted quotient normal, so no
+spelling can reach the subnormal range or infinity. The `lms` step size must
+additionally be non-negative, as on the fixed profile.
 `off` preserves separate multiply and add operations in the stated order, and
 `fma` pins each update as one explicit fused multiply-add event (a single
 rounding). Both are exact contracts: every authorized schedule reproduces

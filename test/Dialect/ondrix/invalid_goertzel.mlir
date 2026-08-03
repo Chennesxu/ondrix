@@ -68,3 +68,14 @@ func.func @rejects_fp_integer_energy(%input: tensor<16xf32>) {
   } : (tensor<16xf32>) -> tensor<1xi64>
   return
 }
+
+// -----
+
+func.func @rejects_f64_goertzel(%input: tensor<16xf64>) {
+  // expected-error @+1 {{executable goertzel supports the f32 floating-point format}}
+  %0 = ondrix.goertzel %input {
+    bin = 3,
+    numeric = #ondsp.fp<format = f64, contract = off>
+  } : (tensor<16xf64>) -> tensor<1xf64>
+  return
+}

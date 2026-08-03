@@ -78,11 +78,50 @@ func.func @rejects_missing_fp_step_size(
 
 func.func @rejects_fixed_step_size_on_fp_lms(
     %input: tensor<8xf32>, %desired: tensor<8xf32>, %weights: tensor<2xf32>) {
-  // expected-error @+1 {{floating-point lms rounds at no declared boundary of its own}}
+  // expected-error @+1 {{floating-point lms must not specify a raw Q1.15 step size}}
   %0, %1 = ondrix.lms %input, %desired, %weights {
     step_size = 1024,
     fp_step_size = 6.250000e-02 : f32,
     numeric = #ondsp.fp<format = f32, contract = off>
   } : (tensor<8xf32>, tensor<8xf32>, tensor<2xf32>) -> (tensor<8xf32>, tensor<2xf32>)
+  return
+}
+
+// -----
+
+func.func @rejects_fp_step_size_on_fixed_lms(
+    %input: tensor<8xi16>, %desired: tensor<8xi16>, %weights: tensor<2xi16>) {
+  // expected-error @+1 {{fixed lms must not specify a floating-point step size}}
+  %0, %1 = ondrix.lms %input, %desired, %weights {
+    step_size = 1024,
+    fp_step_size = 6.250000e-02 : f32,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi16>, tensor<8xi16>, tensor<2xi16>) -> (tensor<8xi16>, tensor<2xi16>)
+  return
+}
+
+// -----
+
+// The fixed profile admits only the non-negative raw Q1.15 range.
+func.func @rejects_negative_fp_step_size(
+    %input: tensor<8xf32>, %desired: tensor<8xf32>, %weights: tensor<2xf32>) {
+  // expected-error @+1 {{floating-point lms step size must not be negative}}
+  %0, %1 = ondrix.lms %input, %desired, %weights {
+    fp_step_size = -6.250000e-02 : f32,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<8xf32>, tensor<8xf32>, tensor<2xf32>) -> (tensor<8xf32>, tensor<2xf32>)
+  return
+}
+
+// -----
+
+func.func @rejects_f64_lms(
+    %input: tensor<8xf64>, %desired: tensor<8xf64>, %weights: tensor<2xf64>) {
+  // expected-error @+1 {{executable lms supports the f32 floating-point format}}
+  %0, %1 = ondrix.lms %input, %desired, %weights {
+    fp_step_size = 6.250000e-02 : f32,
+    numeric = #ondsp.fp<format = f64, contract = off>
+  } : (tensor<8xf64>, tensor<8xf64>, tensor<2xf64>) -> (tensor<8xf64>, tensor<2xf64>)
   return
 }

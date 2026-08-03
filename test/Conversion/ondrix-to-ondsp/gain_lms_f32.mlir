@@ -1,8 +1,7 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s
 
-// A lone multiply has no sum to reassociate and no addend to fuse with, so
-// the three gain declarations emit the same event and differ only in the
-// permission the multiply carries.
+// The three gain declarations differ only in the permission the emitted
+// multiply carries.
 // CHECK-LABEL: func.func @f32_gain_off
 // CHECK: arith.mulf %{{.*}}, %{{.*}} : f32
 // CHECK-NOT: fastmath

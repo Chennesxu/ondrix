@@ -7,11 +7,9 @@
 // RUN: cc -ffp-contract=off %S/Inputs/f32_gain_lms_aot.c %t.o %t.lms.o -lm -o %t
 // RUN: %t
 
-// gain has one multiply per element, so its three declarations name the same
-// event graph and the objects must agree bit for bit with each other as well
-// as with the reference. lms is contract indexed at two sites, and its
-// quantized-state analogue is the plain feedback: one differing weight
-// compounds through every later sample.
+// Requires gain's three objects to agree bit for bit with each other and
+// with the reference, and pins lms against a per-step reference where one
+// differing weight compounds through every later sample.
 
 func.func @f32_gain_off(%input: tensor<16xf32>) -> tensor<16xf32>
     attributes {llvm.emit_c_interface} {

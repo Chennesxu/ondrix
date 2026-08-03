@@ -30,8 +30,9 @@ static uint32_t floatBits(float value) {
   return bits;
 }
 
-/* The quarter-turn angles are evaluated exactly: binary64 cannot represent
- * pi/2, so libm would give about 1e-16 where the exact cosine is zero. */
+/* Mirrors the lowering's quarter-turn evaluation. This does not gate the
+ * snap: the unsnapped 6.1e-17 perturbs no exported bit at these extents, so
+ * only the conversion test pins it. */
 static float doubledCoefficient(int64_t bin) {
   static const double kTwoPi = 6.28318530717958647692528676655900577;
   static const double kQuarterTurns[4] = {1.0, 0.0, -1.0, 0.0};
@@ -40,9 +41,7 @@ static float doubledCoefficient(int64_t bin) {
   return 2.0f * (float)cosine;
 }
 
-/* Only the coefficient product and its input addition are contract indexed;
- * the state subtraction and the closing energy are single IEEE operations in
- * every mode. */
+/* Independent of the lowering apart from the declared event order. */
 static float referenceGoertzel(const float *input, int64_t bin, int fused) {
   const float c2 = doubledCoefficient(bin);
   float s1 = 0.0f;
@@ -112,14 +111,15 @@ static float randomValue(uint32_t *state) {
   return (float)raw / 8192.0f;
 }
 
-/* The residual of 1 + 2^-23 - 1 survives a fused update and is lost when the
- * product is rounded on its own, so fusing an off term or splitting an fma
- * term changes exported bits here. */
+/* A directed split witness: fusing an off term or splitting an fma term
+ * changes the exported energy. */
 static int checkContractSplit(void) {
+  /* Full-mantissa samples against a full-mantissa coefficient make every
+   * recursion product inexact. */
   float input[kLength] = {0};
-  input[0] = 0x1.0p+12f;
-  input[1] = 0x1.000002p-12f;
-  input[2] = -0x1.0p+12f;
+  input[0] = 0x1.3c6ef3p+0f;
+  input[1] = -0x1.1e2d5bp+0f;
+  input[2] = 0x1.7a4c9dp+0f;
   return check(input, "contract split");
 }
 

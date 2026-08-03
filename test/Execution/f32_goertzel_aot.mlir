@@ -4,10 +4,11 @@
 // RUN: cc -ffp-contract=off %S/Inputs/f32_goertzel_aot.c %t.o -lm -o %t
 // RUN: %t
 
-// The f32 recursion is an exact contract, so this gate is bit for bit
-// against a reference that runs the declared event graph itself. Because the
-// recursion has no reduction whose terms could be reassociated, the fast
-// object must agree with the fma object exactly.
+// off and fma are exact contracts, so those are bit for bit against a
+// reference that runs the declared event graph itself. fast is checked for
+// membership in the two-element derivable set instead: the flagged event is
+// free to be fused or not, and on a target without an FMA instruction the
+// backend expands it.
 
 func.func @f32_goertzel_off(%input: tensor<16xf32>) -> tensor<1xf32>
     attributes {llvm.emit_c_interface} {
