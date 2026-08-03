@@ -1755,6 +1755,18 @@ public:
 using SineOpLowering = TrigOpLowering<ondrix::ir::SineOp, 0>;
 using CosineOpLowering = TrigOpLowering<ondrix::ir::CosineOp, 16384>;
 
+// cos(2*pi*k/N) with the quarter-turn angles evaluated exactly. binary64
+// cannot represent pi/2, so libm returns about 1e-16 where the exact cosine
+// is zero, and bin N/4 would otherwise not name the bin it says it does.
+static double turnCosine(int64_t bin, int64_t extent) {
+  constexpr double kTwoPi = 6.28318530717958647692528676655900577;
+  if (4 * bin % extent == 0) {
+    static constexpr double kQuarterTurns[4] = {1.0, 0.0, -1.0, 0.0};
+    return kQuarterTurns[(4 * bin / extent) % 4];
+  }
+  return std::cos(kTwoPi * static_cast<double>(bin) / static_cast<double>(extent));
+}
+
 class GoertzelOpLowering final : public OpConversionPattern<ondrix::ir::GoertzelOp> {
 public:
   using OpConversionPattern<ondrix::ir::GoertzelOp>::OpConversionPattern;
@@ -1763,12 +1775,13 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     int64_t extent = op.getInput().getType().getDimSize(0);
-    // The recursion coefficient is one tie-guarded compile-time cosine
+    double cosine = turnCosine(op.getBin(), extent);
+    if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric()))
+      return rewriteFloatingPoint(op, adaptor, fp, extent, cosine, rewriter);
+    // The fixed recursion coefficient is one tie-guarded compile-time cosine
     // (the same guarded quantizer as every generated table); inadmissible
     // bins fail closed.
-    constexpr double kTwoPi = 6.28318530717958647692528676655900577;
-    std::optional<ondrix::GuardedQ15Value> coefficient = ondrix::quantizeGuardedQ15(
-        std::cos(kTwoPi * static_cast<double>(op.getBin()) / static_cast<double>(extent)));
+    std::optional<ondrix::GuardedQ15Value> coefficient = ondrix::quantizeGuardedQ15(cosine);
     if (!coefficient)
       return rewriter.notifyMatchFailure(op, "bin coefficient is not tie-guard admissible");
     IntegerType i16 = rewriter.getI16Type();
@@ -1824,6 +1837,48 @@ public:
         rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
     Value result = rewriter.create<tensor::InsertOp>(loc, energy, empty, zero);
     rewriter.replaceOp(op, result);
+    return success();
+  }
+
+private:
+  // Doubling the rounded cosine is exact, so `c2` carries no boundary of its
+  // own. Only the coefficient product and its input addition form a
+  // multiply-add; the state subtraction and the closing energy are single
+  // IEEE operations, so they carry no contract permission in any mode.
+  static LogicalResult rewriteFloatingPoint(ondrix::ir::GoertzelOp op, OpAdaptor adaptor,
+                                            ondrix::ondsp::FpAttr numeric, int64_t extent,
+                                            double cosine, ConversionPatternRewriter &rewriter) {
+    Location loc = op.getLoc();
+    Type element = numeric.getFormat();
+    Value doubledCoefficient = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getFloatAttr(element, 2.0 * static_cast<double>(static_cast<float>(cosine))));
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+    Value seed = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(element));
+
+    auto sampleLoop = rewriter.create<scf::ForOp>(
+        loc, zero, extentValue, one, ValueRange{seed, seed},
+        [&](OpBuilder &builder, Location loc, Value sample, ValueRange states) {
+          Value x = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), sample);
+          Value combined =
+              createFpAccumulatorUpdate(loc, doubledCoefficient, states[0], x, numeric, builder);
+          Value next = builder.create<arith::SubFOp>(loc, combined, states[1]);
+          builder.create<scf::YieldOp>(loc, ValueRange{next, states[0]});
+        });
+    Value s1 = sampleLoop.getResult(0);
+    Value s2 = sampleLoop.getResult(1);
+    Value m = rewriter.create<arith::MulFOp>(loc, doubledCoefficient, s1);
+    Value s1Square = rewriter.create<arith::MulFOp>(loc, s1, s1);
+    Value s2Square = rewriter.create<arith::MulFOp>(loc, s2, s2);
+    Value cross = rewriter.create<arith::MulFOp>(loc, m, s2);
+    Value sum = rewriter.create<arith::AddFOp>(loc, s1Square, s2Square);
+    Value energy = rewriter.create<arith::SubFOp>(loc, sum, cross);
+
+    RankedTensorType resultType = op.getEnergy().getType();
+    Value empty =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    rewriter.replaceOp(op, rewriter.create<tensor::InsertOp>(loc, energy, empty, zero).getResult());
     return success();
   }
 };

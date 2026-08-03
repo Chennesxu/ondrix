@@ -45,3 +45,26 @@ func.func @goertzel_wrong_rounding(%input: tensor<64xi16>) -> tensor<1xi64> {
   } : (tensor<64xi16>) -> tensor<1xi64>
   return %energy : tensor<1xi64>
 }
+
+// -----
+
+func.func @rejects_fp_rounding(%input: tensor<16xf32>) {
+  // expected-error @+1 {{floating-point goertzel rounds at no declared boundary of its own}}
+  %0 = ondrix.goertzel %input {
+    bin = 3,
+    numeric = #ondsp.fp<format = f32, contract = off>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<16xf32>) -> tensor<1xf32>
+  return
+}
+
+// -----
+
+func.func @rejects_fp_integer_energy(%input: tensor<16xf32>) {
+  // expected-error @+1 {{executable goertzel requires static tensor<Nxf32> input with N in [2, 4096] and tensor<1xf32> energy}}
+  %0 = ondrix.goertzel %input {
+    bin = 3,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<16xf32>) -> tensor<1xi64>
+  return
+}

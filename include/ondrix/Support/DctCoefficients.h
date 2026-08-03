@@ -26,10 +26,14 @@ inline std::optional<int64_t> getDctCoefficientQ15(int64_t extent, int64_t k, in
   return quantized->value;
 }
 
-// The same coefficient for the f32 profile. binary64 evaluation determines
-// the correctly rounded binary32 value here with about 2^29 of margin, so the
-// Q15 tie guard has no analogue to enforce: the only question a guard could
-// ask is already answered by the width difference between the two formats.
+// The same coefficient for the f32 profile. There is no tie guard because
+// there is nothing for one to protect: the Q15 guard exists to certify that a
+// quantized table reproduces an independently specified value, while here the
+// binary32 rounding of this binary64 evaluation IS the declared constant, and
+// the differential references derive it the same way. The binary64 error
+// stays below 2^-50 against a binary32 ulp above 2^-33 over the admitted
+// extents, so the value is stable under any conforming libm, but that is a
+// reproducibility bound and not a correct-rounding claim.
 inline float getDctCoefficientF32(int64_t extent, int64_t k, int64_t n) {
   constexpr double kPi = 3.14159265358979323846264338327950288;
   double angle = kPi * static_cast<double>((2 * n + 1) * k) / (2.0 * static_cast<double>(extent));

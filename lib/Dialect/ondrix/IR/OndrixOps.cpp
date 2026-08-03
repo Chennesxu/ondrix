@@ -1092,10 +1092,18 @@ LogicalResult CosineOp::verify() {
 }
 
 LogicalResult GoertzelOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-    return failure();
-  if (getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
-    return emitOpError("goertzel requires nearest_even rounding");
+  auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
+  if (fp) {
+    if (!fp.getFormat().isF32())
+      return emitOpError("executable goertzel supports the f32 floating-point format");
+    if (getRounding())
+      return emitOpError("floating-point goertzel rounds at no declared boundary of its own");
+  } else {
+    if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+      return failure();
+    if (!getRounding() || *getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
+      return emitOpError("goertzel requires nearest_even rounding");
+  }
   RankedTensorType inputType = getInput().getType();
   RankedTensorType energyType = getEnergy().getType();
   if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, energyType})))
@@ -1103,11 +1111,18 @@ LogicalResult GoertzelOp::verify() {
   int64_t extent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
   int64_t energyExtent =
       energyType.getRank() == 1 ? energyType.getDimSize(0) : ShapedType::kDynamic;
+  // The fixed energy is the exact integer the recursion produces and needs a
+  // wider storage than its input; the f32 energy is the same format.
+  Type element = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), 16));
+  Type energyElement = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), 64));
   if (extent == ShapedType::kDynamic || extent < 2 || extent > 4096 ||
-      !inputType.getElementType().isSignlessInteger(16) || energyExtent != 1 ||
-      !energyType.getElementType().isSignlessInteger(64))
-    return emitOpError("executable goertzel requires static tensor<Nxi16> input with N in "
-                       "[2, 4096] and tensor<1xi64> energy");
+      inputType.getElementType() != element || energyExtent != 1 ||
+      energyType.getElementType() != energyElement) {
+    llvm::StringRef name = fp ? "f32" : "i16";
+    llvm::StringRef energyName = fp ? "f32" : "i64";
+    return emitOpError() << "executable goertzel requires static tensor<Nx" << name
+                         << "> input with N in [2, 4096] and tensor<1x" << energyName << "> energy";
+  }
   int64_t bin = getBin();
   if (bin < 0 || bin > extent / 2)
     return emitOpError("goertzel bin must lie in [0, N/2]");

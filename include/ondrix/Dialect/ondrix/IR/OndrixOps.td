@@ -869,11 +869,43 @@ def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
     of a different (also observable) quantization path — the Goertzel
     energy of a bin is NOT the squared magnitude of the corresponding
     staged-scaling FFT bin.
+
+    The f32 profile maps `tensor<Nxf32>` to `tensor<1xf32>` over the same
+    recursion with every boundary removed:
+
+    ```text
+    c2 = 2 * f32(cos(2*pi*k/N))   exact: doubling only moves the exponent
+    s1 = s2 = +0.0
+    per sample n:
+      t  = x[n] + c2*s1           the one contract-indexed site
+      s0 = t - s2
+    energy = (s1*s1 + s2*s2) - (c2*s1)*s2
+    ```
+
+    Only the coefficient product and its input addition form a
+    multiply-add, so that is the only site the contract indexes. The state
+    subtraction and the closing energy expression are single IEEE operations
+    in every mode, as with the mean of `ondrix.rms`.
+
+    `off` and `fma` are exact contracts. `fast` is not, even though a
+    recursion has no reduction whose terms could be reassociated: the one
+    multiply-add site remains free to be fused or not, and the emitted
+    permission genuinely leaves both open - a backend without an FMA
+    instruction expands the flagged event back into a separate multiply and
+    add. The derivable set is therefore exactly the two exact contracts'
+    results, which is small enough that the differential gate enumerates it
+    and requires membership rather than a bound. The f32 coefficient
+    needs no tie guard either: the Q15 guard certifies a quantized table
+    against an independently specified value, while here the binary32
+    rounding IS the declared constant. Every admitted bin therefore lowers,
+    where the Q15 profile fails closed on inadmissible ones. Both profiles
+    evaluate the quarter-turn angles exactly rather than through libm, so
+    bin `N/4` has the zero coefficient it names.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    I64Attr:$bin,
                    Ondsp_NumericAttr:$numeric,
-                   Ondsp_RoundingModeAttr:$rounding);
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$energy);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
