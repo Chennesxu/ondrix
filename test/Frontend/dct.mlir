@@ -10,4 +10,10 @@
 // CHECK: return %[[RESULT]] : tensor<8xi16>
 
 // EXTENT: invalid_dct_extent.ox:2:10: error: dct currently requires a power-of-two input extent in [4, 64]
-// ELEMENT: invalid_dct_element.ox:2:10: error: dct requires a Q15 tensor input and result
+// ELEMENT: invalid_dct_element.ox:2:10: error: dct requires a Q15 or f32 tensor input and a matching result
+
+// RUN: ondrix-compile %S/Inputs/f32_dct.ox | FileCheck %s --check-prefix=F32
+
+// F32-LABEL: func.func @f32_dct
+// F32: ondrix.dct
+// F32-SAME: input_numeric = #ondsp.fp<format = f32, contract = fma>

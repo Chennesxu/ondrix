@@ -342,7 +342,8 @@ catalog builtins expose their own admissible choices at the call site
 (for example `gain(..., rounding=...)` and the `root_rounding=` parameter
 of `rms` and `magnitude`).
 
-f32 dot, FIR, `matmul`, and `rms` support `contract=off`, `contract=fma`, and
+f32 dot, FIR, `matmul`, `rms`, `moving_average`, and `dct` support
+`contract=off`, `contract=fma`, and
 `contract=fast`. The floating-point spellings name a contract where their
 fixed-point counterparts name a rounding mode, because a floating-point result
 has no requantization boundary to round; `rms(x, contract=...)` also accepts

@@ -52,7 +52,10 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
            "loops instead of pre-lowered scalar bodies">,
     Option<"slidingWindowReuse", "sliding-window-reuse",
            "bool", /*default=*/"false",
-           "Ablation interface: reuse exact moving-average window sums incrementally across outputs (the canonical path recomputes each window)">,
+           "Ablation interface: reuse exact moving-average window sums incrementally "
+           "across outputs; the canonical path recomputes each window, and a "
+           "floating-point average declines the reuse because the incremental form "
+           "changes its event graph">,
     Option<"fftLoops", "fft-loops",
            "bool", /*default=*/"false",
            "Ablation interface: force the bit-reversal/stage-loop FFT lowering over in-memory twiddle tables, bit-identical to the unrolled default the canonical path uses">,

@@ -976,17 +976,32 @@ LogicalResult RfftRadix4SplitOp::verify() {
 }
 
 LogicalResult DctOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getInputNumeric(), 16, 15, "input_numeric")))
+  auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getInputNumeric());
+  if (fp) {
+    if (!fp.getFormat().isF32())
+      return emitOpError("executable DCT supports the f32 floating-point format");
+    // An f32 output needs no rescaled reading: the two numeric attributes
+    // name the same format.
+    if (getOutputNumeric() != getInputNumeric())
+      return emitOpError("floating-point DCT output_numeric must equal input_numeric");
+  } else if (failed(verifySignedFixedFormat(getOperation(), getInputNumeric(), 16, 15,
+                                            "input_numeric"))) {
     return failure();
+  }
   RankedTensorType inputType = getInput().getType();
   RankedTensorType resultType = getResult().getType();
   if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
     return failure();
   int64_t extent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  Type element = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), 16));
   if (extent < 4 || extent > 64 || !llvm::isPowerOf2_64(extent) || inputType != resultType ||
-      !inputType.getElementType().isSignlessInteger(16))
-    return emitOpError("executable DCT requires matching tensor<Nxi16> input and result "
-                       "with power-of-two N in [4, 64]");
+      inputType.getElementType() != element) {
+    llvm::StringRef name = fp ? "f32" : "i16";
+    return emitOpError() << "executable DCT requires matching tensor<Nx" << name
+                         << "> input and result with power-of-two N in [4, 64]";
+  }
+  if (fp)
+    return success();
   unsigned stageCount = llvm::Log2_64(extent);
   if (failed(verifySignedFixedFormat(getOperation(), getOutputNumeric(), 16, 14 - stageCount,
                                      "output_numeric")))
@@ -995,8 +1010,13 @@ LogicalResult DctOp::verify() {
 }
 
 LogicalResult MovingAverageOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+  auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
+  if (fp) {
+    if (!fp.getFormat().isF32())
+      return emitOpError("executable moving average supports the f32 floating-point format");
+  } else if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric"))) {
     return failure();
+  }
   RankedTensorType inputType = getInput().getType();
   RankedTensorType resultType = getResult().getType();
   if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
@@ -1007,12 +1027,14 @@ LogicalResult MovingAverageOp::verify() {
   int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  Type element = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), 16));
   if (inputExtent == ShapedType::kDynamic || inputExtent < window ||
-      resultExtent != inputExtent - window + 1 ||
-      !inputType.getElementType().isSignlessInteger(16) ||
-      !resultType.getElementType().isSignlessInteger(16))
-    return emitOpError("executable moving average requires static tensor<Nxi16> input and "
-                       "tensor<(N-K+1)xi16> result with N >= K");
+      resultExtent != inputExtent - window + 1 || inputType.getElementType() != element ||
+      resultType.getElementType() != element) {
+    llvm::StringRef name = fp ? "f32" : "i16";
+    return emitOpError() << "executable moving average requires static tensor<Nx" << name
+                         << "> input and tensor<(N-K+1)x" << name << "> result with N >= K";
+  }
   return success();
 }
 

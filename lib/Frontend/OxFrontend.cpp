@@ -671,6 +671,16 @@ public:
                                 : call.kind == ReductionKind::Rms  ? "rms"
                                 : call.kind == ReductionKind::Sine ? "sine"
                                                                    : "cosine";
+      if (call.kind == ReductionKind::Dct && policyType == SourceType::F32) {
+        if (!expect(TokenKind::Comma, "expected ',' before dct contract policy") ||
+            !expectIdentifier("contract", "expected floating-point contract policy") ||
+            !expect(TokenKind::Equal, "expected '=' after contract"))
+          return std::nullopt;
+        auto contract = parseIdentifier("expected floating-point contract mode");
+        if (!contract)
+          return std::nullopt;
+        call.fpContract = contract->spelling.str();
+      }
       if (call.kind == ReductionKind::Rms && policyType == SourceType::F32) {
         if (!expect(TokenKind::Comma, "expected ',' before rms contract policy") ||
             !expectIdentifier("contract", "expected floating-point contract policy") ||
@@ -714,6 +724,16 @@ public:
         call.gain = *constant;
       else
         call.window = *constant;
+      if (!isGain && policyType == SourceType::F32) {
+        if (!expect(TokenKind::Comma, "expected ',' before moving_average contract policy") ||
+            !expectIdentifier("contract", "expected floating-point contract policy") ||
+            !expect(TokenKind::Equal, "expected '=' after contract"))
+          return std::nullopt;
+        auto contract = parseIdentifier("expected floating-point contract mode");
+        if (!contract)
+          return std::nullopt;
+        call.fpContract = contract->spelling.str();
+      }
       if (isGain && current.kind == TokenKind::Comma) {
         // The gain contract admits two tie rules at its single
         // requantization boundary; omission keeps the nearest_even default.
@@ -2020,7 +2040,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                               : ast.result.kind == ReductionKind::Rms           ? "rms"
                               : ast.result.kind == ReductionKind::Sine          ? "sine"
                                                                                 : "cosine";
-    bool admitsFloat = ast.result.kind == ReductionKind::Rms;
+    bool admitsFloat = ast.result.kind == ReductionKind::Rms ||
+                       ast.result.kind == ReductionKind::MovingAverage ||
+                       ast.result.kind == ReductionKind::Dct;
     bool isFloat = ast.primaryResult().type == SourceType::F32;
     if (constexprCount != 0 || !ast.primaryResult().tensor || !lhsParameter ||
         !lhsParameter->isTensor() ||
@@ -2446,15 +2468,22 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     }
     Value result;
     if (kernel.ast.result.kind == ReductionKind::Dct) {
-      unsigned stageCount = llvm::Log2_64(outputType.getDimSize(0));
-      auto outputNumeric =
-          ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 14 - stageCount);
-      result =
-          builder.create<ir::DctOp>(expressionLocation, outputType, lhs, numeric, outputNumeric);
+      if (kernel.fpContract) {
+        auto fp = ondsp::FpAttr::get(&context, elementType, *kernel.fpContract);
+        result = builder.create<ir::DctOp>(expressionLocation, outputType, lhs, fp, fp);
+      } else {
+        unsigned stageCount = llvm::Log2_64(outputType.getDimSize(0));
+        auto outputNumeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType,
+                                                   14 - stageCount);
+        result =
+            builder.create<ir::DctOp>(expressionLocation, outputType, lhs, numeric, outputNumeric);
+      }
     } else if (kernel.ast.result.kind == ReductionKind::MovingAverage) {
       result = builder.create<ir::MovingAverageOp>(
           expressionLocation, outputType, lhs, builder.getI64IntegerAttr(kernel.ast.result.window),
-          numeric);
+          kernel.fpContract
+              ? Attribute(ondsp::FpAttr::get(&context, elementType, *kernel.fpContract))
+              : Attribute(numeric));
     } else if (kernel.ast.result.kind == ReductionKind::Gain) {
       result = builder.create<ir::GainOp>(expressionLocation, outputType, lhs,
                                           builder.getI64IntegerAttr(kernel.ast.result.gain),

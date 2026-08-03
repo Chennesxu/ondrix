@@ -26,6 +26,16 @@ inline std::optional<int64_t> getDctCoefficientQ15(int64_t extent, int64_t k, in
   return quantized->value;
 }
 
+// The same coefficient for the f32 profile. binary64 evaluation determines
+// the correctly rounded binary32 value here with about 2^29 of margin, so the
+// Q15 tie guard has no analogue to enforce: the only question a guard could
+// ask is already answered by the width difference between the two formats.
+inline float getDctCoefficientF32(int64_t extent, int64_t k, int64_t n) {
+  constexpr double kPi = 3.14159265358979323846264338327950288;
+  double angle = kPi * static_cast<double>((2 * n + 1) * k) / (2.0 * static_cast<double>(extent));
+  return static_cast<float>(std::cos(angle));
+}
+
 // Fail-closed admissibility of the complete coefficient matrix of one static
 // extent. A consumer checks this once and may then rely on every individual
 // coefficient query succeeding.

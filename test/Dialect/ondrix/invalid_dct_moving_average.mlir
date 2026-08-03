@@ -74,3 +74,14 @@ func.func @average_short_input(%input: tensor<4xi16>) -> tensor<1xi16> {
   } : (tensor<4xi16>) -> tensor<1xi16>
   return %result : tensor<1xi16>
 }
+
+// -----
+
+func.func @fp_dct_output_reading(%input: tensor<8xf32>) -> tensor<8xf32> {
+  // expected-error @below {{floating-point DCT output_numeric must equal input_numeric}}
+  %result = ondrix.dct %input {
+    input_numeric = #ondsp.fp<format = f32, contract = fma>,
+    output_numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<8xf32>) -> tensor<8xf32>
+  return %result : tensor<8xf32>
+}

@@ -2098,6 +2098,26 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     int64_t extent = op.getInput().getType().getDimSize(0);
+    if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getInputNumeric())) {
+      Type element = fp.getFormat();
+      RankedTensorType outputType = op.getResult().getType();
+      Value output = rewriter.create<tensor::EmptyOp>(loc, outputType.getShape(), element);
+      for (int64_t k = 0; k < extent; ++k) {
+        Value sum;
+        for (int64_t n = 0; n < extent; ++n) {
+          Value position = rewriter.create<arith::ConstantIndexOp>(loc, n);
+          Value value = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+          Value coefficient = rewriter.create<arith::ConstantOp>(
+              loc, rewriter.getFloatAttr(element, ondrix::getDctCoefficientF32(extent, k, n)));
+          sum = sum ? createFpAccumulatorUpdate(loc, value, coefficient, sum, fp, rewriter)
+                    : createFpMultiply(loc, value, coefficient, fp, rewriter);
+        }
+        Value position = rewriter.create<arith::ConstantIndexOp>(loc, k);
+        output = rewriter.create<tensor::InsertOp>(loc, sum, output, position);
+      }
+      rewriter.replaceOp(op, output);
+      return success();
+    }
     if (!ondrix::hasAdmissibleDctCoefficients(extent))
       return rewriter.notifyMatchFailure(op, "DCT coefficient quantization is not tie-guard "
                                              "admissible");
@@ -2150,6 +2170,29 @@ public:
     int64_t extent = op.getInput().getType().getDimSize(0);
     int64_t window = op.getWindow();
     IntegerType i64 = rewriter.getIntegerType(64);
+    RankedTensorType outputType = op.getResult().getType();
+    if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric())) {
+      // Sliding-window reuse is refused here: the incremental form changes
+      // the event graph, and only the exactness of the integer window sums
+      // made that value-neutral.
+      Type element = fp.getFormat();
+      Value count = rewriter.create<arith::ConstantOp>(
+          loc, rewriter.getFloatAttr(element, static_cast<double>(window)));
+      Value output = rewriter.create<tensor::EmptyOp>(loc, outputType.getShape(), element);
+      for (int64_t n = 0; n < extent - window + 1; ++n) {
+        Value sum;
+        for (int64_t k = 0; k < window; ++k) {
+          Value position = rewriter.create<arith::ConstantIndexOp>(loc, n + k);
+          Value value = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+          sum = sum ? createFpAdd(loc, sum, value, fp, rewriter) : value;
+        }
+        Value mean = rewriter.create<arith::DivFOp>(loc, sum, count);
+        Value position = rewriter.create<arith::ConstantIndexOp>(loc, n);
+        output = rewriter.create<tensor::InsertOp>(loc, mean, output, position);
+      }
+      rewriter.replaceOp(op, output);
+      return success();
+    }
     // A power-of-two window keeps its original round_shift boundary so that
     // profile's lowering stays byte-identical; every other window is the
     // round_div consumer. Both spell the same nearest-even division by K.
@@ -2285,9 +2328,15 @@ public:
     // bufferization stay in contract form through this pass: bufferization
     // lowers them to the reduce_mac loops the schedule stage authorizes over,
     // which the scalar tensor lowering here would preempt.
-    if (preserveBufferizableReductions)
+    if (preserveBufferizableReductions) {
       target.addLegalOp<ondrix::ir::FirFilterOp, ondrix::ir::FirDecimateOp, ondrix::ir::Conv1DOp,
-                        ondrix::ir::MatmulOp, ondrix::ir::RmsOp, ondrix::ir::DctOp>();
+                        ondrix::ir::MatmulOp, ondrix::ir::RmsOp>();
+      // The DCT bufferization materializes Q15 coefficient rows as memref
+      // globals; the f32 profile has no such table yet and takes the tensor
+      // lowering, so it is not preserved.
+      target.addDynamicallyLegalOp<ondrix::ir::DctOp>(
+          [](ondrix::ir::DctOp op) { return !isa<ondrix::ondsp::FpAttr>(op.getInputNumeric()); });
+    }
 
     if (failed(applyPartialConversion(module, target, std::move(patterns))))
       signalPassFailure();
