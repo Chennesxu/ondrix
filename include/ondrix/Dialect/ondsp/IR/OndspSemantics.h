@@ -26,18 +26,12 @@ enum class FastPermission {
   FuseMultiplyAdd,
 };
 
-/// Fast-math flags to attach where the COMPILER spends `permission` itself:
-/// none, for either permission. The produced schedule already embodies the
-/// choice, so what reaches the audit point is the selected graph and not a
-/// licence to select. Delegating instead — leaving `reassoc` or `contract` on
-/// the operation — hands the choice to LLVM; no lowering does, so there is no
-/// entry point for it here.
-///
-/// Delegation is not portable: `reassoc` lets the X86 backend without +fma
-/// expand `llvm.fma`, while AArch64 and the 32-bit ARM DSP targets keep it
-/// fused even with no fused instruction to keep. Which graph runs is a
-/// per-backend expansion policy, so a delegated permission cannot be reasoned
-/// about from the target. Measured — `test/Target/fp_permission_fmf.ll`.
+/// Flags to attach where the COMPILER spends `permission` itself: none, for
+/// either permission, because the produced schedule already embodies the
+/// choice. Delegating instead — leaving `reassoc` or `contract` on — hands the
+/// choice to a per-backend expansion policy no target fact can bound, so no
+/// lowering does it and there is no entry point for it here. Measured in
+/// `test/Target/fp_permission_fmf.ll`.
 inline mlir::arith::FastMathFlags consumeFastPermission(FastPermission permission) {
   (void)permission;
   return mlir::arith::FastMathFlags::none;

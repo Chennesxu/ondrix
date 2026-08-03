@@ -1,7 +1,7 @@
-// RUN: ondrix-compile --emit=contracts %S/../Frontend/Inputs/f32_matmul.ox | ondrix-opt --ondrix-default-pipeline > %t.matmul.mlir
+// RUN: ondrix-compile --emit=contracts %S/../Frontend/Inputs/f32_matmul.ox | ondrix-opt --ondrix-default-pipeline="vector-bits=256" > %t.matmul.mlir
 // RUN: ondrix-translate %t.matmul.mlir --mlir-to-llvmir > %t.matmul.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.matmul.ll -o %t.matmul.o
-// RUN: ondrix-opt %s --ondrix-default-pipeline > %t.mlir
+// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256" > %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc -ffp-contract=off %S/Inputs/f32_matmul_rms_aot.c %t.o %t.matmul.o -lm -o %t

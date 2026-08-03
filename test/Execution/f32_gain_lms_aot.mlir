@@ -1,7 +1,7 @@
-// RUN: ondrix-compile --emit=contracts %S/../Frontend/Inputs/f32_lms.ox | ondrix-opt --ondrix-default-pipeline > %t.lms.mlir
+// RUN: ondrix-compile --emit=contracts %S/../Frontend/Inputs/f32_lms.ox | ondrix-opt --ondrix-default-pipeline="vector-bits=256" > %t.lms.mlir
 // RUN: ondrix-translate %t.lms.mlir --mlir-to-llvmir > %t.lms.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.lms.ll -o %t.lms.o
-// RUN: ondrix-opt %s --ondrix-default-pipeline > %t.mlir
+// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256" > %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc -ffp-contract=off %S/Inputs/f32_gain_lms_aot.c %t.o %t.lms.o -lm -o %t

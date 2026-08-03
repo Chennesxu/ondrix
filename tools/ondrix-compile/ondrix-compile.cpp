@@ -32,6 +32,17 @@ cl::opt<EmitKind> emitKind(
                           "LLVM-dialect MLIR produced by the canonical pipeline, "
                           "schedules selected automatically under their legality analyses")),
     cl::init(EmitKind::Contracts));
+
+// Target facts for the schedule stage. Both default to assuming nothing, so an
+// undeclared target compiles to the ordered program rather than to a guess.
+cl::opt<int64_t> vectorBits("vector-bits",
+                            cl::desc("Target vector register width in bits (0 keeps every "
+                                     "ordered scalar schedule)"),
+                            cl::init(0));
+cl::opt<bool> supportsF32VectorFma("supports-f32-vector-fma",
+                                   cl::desc("Declared target capability: the target has an f32 "
+                                            "vector fused multiply-add"),
+                                   cl::init(false));
 } // namespace
 
 int main(int argc, char **argv) {
@@ -72,6 +83,8 @@ int main(int argc, char **argv) {
   if (emitKind == EmitKind::LLVMDialect) {
     mlir::PassManager passManager(&context, mlir::ModuleOp::getOperationName());
     ondrix::OndrixDefaultPipelineOptions options;
+    options.vectorBits = vectorBits.getValue();
+    options.supportsF32VectorFma = supportsF32VectorFma.getValue();
     ondrix::buildOndrixDefaultPipeline(passManager, options);
     if (failed(passManager.run(*module)))
       return 1;

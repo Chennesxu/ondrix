@@ -308,16 +308,11 @@ struct BuiltinCallAst {
   SourcePosition position;
 };
 
-// Both operands are bounded at 2^24 so that each is exactly representable in
-// binary32; the division then runs in binary32 itself, so the result is the
-// single correctly rounded quotient and no double-rounding argument is
-// needed. Admitting wider operands would reinstate one:
-// 548055821/548055723 is a reachable pair whose binary64 quotient lands on a
-// binary32 tie point and narrows one ulp above the correct value. The bound
-// also keeps every admitted quotient in [2^-24, 2^24], so no spelling can
-// reach the subnormal range or infinity. APFloat rather than host `float`
-// arithmetic, so the result does not depend on the compiler's rounding
-// environment.
+// Both operands bounded at 2^24 are exact in binary32, so dividing there
+// gives the one correctly rounded quotient and no double-rounding argument is
+// needed; 548055821/548055723 is the reachable pair that breaks the wider
+// bound. APFloat rather than host arithmetic, so the result does not depend on
+// the compiler's rounding environment. Contract: docs/frontend-language.md.
 enum class RationalRefusal { None, Denominator, Magnitude };
 
 std::pair<float, RationalRefusal> roundRationalToF32(int64_t numerator, int64_t denominator) {

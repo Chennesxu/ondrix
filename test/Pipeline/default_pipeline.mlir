@@ -1,4 +1,5 @@
-// RUN: ondrix-opt %s --ondrix-default-pipeline | FileCheck %s
+// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256" | FileCheck %s
+// RUN: ondrix-opt %s --ondrix-default-pipeline | FileCheck %s --check-prefix=SCALAR
 // RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=0" | FileCheck %s --check-prefix=SCALAR
 // RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=128" | FileCheck %s --check-prefix=NARROW
 
@@ -9,7 +10,8 @@
 // the documented priority order, and anything unauthorized keeps its ordered
 // scalar schedule. The vector width is a target fact (register bits), not a
 // user choice: the same module compiles at any width, and width zero is the
-// all-ordered program.
+// all-ordered program. Zero is also the default, so an undeclared target gets
+// the schedule that is legal everywhere instead of a guess.
 
 // The static f32 filter batches: its lanes carry independent outputs as
 // fused-event chains, visible after full lowering as a vector fma.

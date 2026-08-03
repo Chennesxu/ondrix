@@ -640,12 +640,9 @@ static LogicalResult verifySosFilterTdf2Domain(SosFilterTdf2Op op) {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
   if (!fp || !fp.getFormat().isF32())
     return op.emitOpError("currently requires an f32 numeric policy");
-  // Admission of `fast` follows the legal set, not the transform list: a legal
-  // set of one graph is provably inert and admitted (`gain`); a larger set is
-  // admitted when a derivability gate exists for what the lowering selects.
-  // A biquad body has fusable multiply-adds, so its set is larger than one,
-  // and no recurrence gate exists — this fails closed rather than silently
-  // downgrading to an ungated selection.
+  // Admission follows the legal set, not the transform list (rule:
+  // docs/f32-contract-evidence.md). A biquad body has fusable multiply-adds,
+  // so its set exceeds one graph, and no recurrence gate exists.
   if (fp.getContract() == ondrix::ondsp::FpContractMode::Fast)
     return op.emitOpError("fast is unadmitted for a state recursion; use off or fma");
   if (inputType.getElementType() != fp.getFormat() ||

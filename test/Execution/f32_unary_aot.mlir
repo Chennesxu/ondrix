@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --ondrix-default-pipeline > %t.mlir
+// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256" > %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc -ffp-contract=off %S/Inputs/f32_unary_aot.c %t.o -lm -o %t

@@ -26,18 +26,12 @@ inline std::optional<int64_t> getDctCoefficientQ15(int64_t extent, int64_t k, in
   return quantized->value;
 }
 
-// The same coefficient for the f32 profile. There is no tie guard because
-// there is nothing for one to protect: the Q15 guard exists to certify that a
-// quantized table reproduces an independently specified value, while here the
-// binary32 rounding of this binary64 evaluation IS the declared constant, and
-// the differential references derive it the same way.
-//
-// That makes the build's libm part of the declaration. The narrowed value
-// moves only if the binary64 evaluation errs by about 2^17 of its own ulps,
-// which no usable implementation does — but C requires no accuracy of `cos`,
-// so this is an assumption about the toolchain rather than a consequence of
-// conformance. test/Conversion/ondrix-to-ondsp/moving_average_dct_f32.mlir
-// pins the exported bits so a libm that broke it would be caught here.
+// The same coefficient for the f32 profile. No tie guard, because the Q15
+// guard certifies a quantized table against an independently specified value
+// while here the binary32 rounding of this binary64 evaluation IS the declared
+// constant. That makes the build's libm part of the declaration; C requires no
+// accuracy of `cos`, so the exported bits are pinned in
+// test/Conversion/ondrix-to-ondsp/moving_average_dct_f32.mlir.
 inline float getDctCoefficientF32(int64_t extent, int64_t k, int64_t n) {
   constexpr double kPi = 3.14159265358979323846264338327950288;
   double angle = kPi * static_cast<double>((2 * n + 1) * k) / (2.0 * static_cast<double>(extent));

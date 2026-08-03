@@ -42,10 +42,9 @@ bool isSupportedFastMemRefReduction(ondrix::ondsp::ReduceMacOp op, int64_t vecto
   if (!numeric || !numeric.getFormat().isF32() ||
       numeric.getContract() != ondrix::ondsp::FpContractMode::Fast)
     return false;
-  // A verified f32 reduction already has rank-1 shaped operands whose element
-  // type matches the format and carries no product; only the layout facts the
-  // Vector lowering needs are this pass's own obligation. The initial value
-  // is carried as a term rather than reproduced, so it needs no admission.
+  // A verified f32 reduction already has the rank, element type and absent
+  // product; only the layout facts the Vector lowering needs are this pass's
+  // obligation. The initial value is carried, not reproduced, so it is free.
   auto lhsType = dyn_cast<MemRefType>(op.getLhs().getType());
   auto rhsType = dyn_cast<MemRefType>(op.getRhs().getType());
   if (!lhsType || !rhsType || !ondrix::conversion::hasDefaultLLVMVectorMemorySpace(lhsType) ||
@@ -115,10 +114,9 @@ public:
       return builder.create<arith::AddFOp>(branchLoc, adaptor.getInitial(), summed).getResult();
     };
 
-    // Below one full block there are no lanes to fill, and padding up to them
-    // would be the term invention this rewrite exists to avoid. Only a
-    // dynamic extent needs the branch: a statically short one never reaches
-    // this pattern at all.
+    // Padding up to one block would be the term invention this rewrite exists
+    // to avoid. Only a dynamic extent needs the branch: a statically short one
+    // never reaches this pattern.
     if (getStaticReductionLength(bounds->lhsType, bounds->rhsType)) {
       rewriter.replaceOp(op, buildBatched(rewriter, loc));
       return success();
@@ -144,9 +142,8 @@ public:
 
 private:
   /// Folds one term into an accumulator of the same type, scalar or vector.
-  /// Both selections lie inside the declared set, so the declared capability
-  /// decides performance and not legality: an unflagged vector `llvm.fma` on
-  /// a target without the instruction becomes one libm call per lane.
+  /// Both selections are inside the declared set, so the capability decides
+  /// performance rather than legality.
   Value accumulateTerm(Location loc, Value lhs, Value rhs, Value accumulator,
                        OpBuilder &builder) const {
     if (fuseTerms)

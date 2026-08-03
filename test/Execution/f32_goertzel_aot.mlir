@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --ondrix-default-pipeline > %t.mlir
+// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256" > %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: FileCheck %s --check-prefix=PERMISSION --input-file=%t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
