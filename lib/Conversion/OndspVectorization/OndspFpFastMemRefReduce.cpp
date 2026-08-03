@@ -103,15 +103,16 @@ public:
                 bodyLoc, accumulateTerm(bodyLoc, lhs, rhs, iterArgs.front(), bodyBuilder));
           });
 
-      // MLIR 17's vector.reduction carries no fastmath attribute; it lowers
-      // to the ordered llvm.intr.vector.reduce.fadd.
-      Value folded = builder.create<vector::ReductionOp>(branchLoc, vector::CombiningKind::ADD,
-                                                         vectorLoop.getResult(0));
-      Value summed = createOrderedTail(branchLoc, adaptor, vectorEnd, bounds->upperBound,
-                                       scalarStep, folded, builder);
-      // The initial value enters the tree exactly once, moved to the root by
-      // the same reassociation that regrouped the terms.
-      return builder.create<arith::AddFOp>(branchLoc, adaptor.getInitial(), summed).getResult();
+      // The initial value is the fold's accumulator, so it enters exactly once
+      // and no synthesized start value is introduced: an implicit +0.0 here
+      // would be a term the source graph does not have, and at an all-negative
+      // -0.0 reduction it turns the declared -0.0 into +0.0. MLIR 17's
+      // vector.reduction carries no fastmath attribute, so the fold is the
+      // ordered llvm.intr.vector.reduce.fadd over that accumulator.
+      Value folded = builder.create<vector::ReductionOp>(
+          branchLoc, vector::CombiningKind::ADD, vectorLoop.getResult(0), adaptor.getInitial());
+      return createOrderedTail(branchLoc, adaptor, vectorEnd, bounds->upperBound, scalarStep,
+                               folded, builder);
     };
 
     // Padding up to one block would be the term invention this rewrite exists

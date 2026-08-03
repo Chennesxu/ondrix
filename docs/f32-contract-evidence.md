@@ -38,7 +38,7 @@ permissions are final there. It is *not* the final point for the realized
 event graph, because `llc` still consumes fast-math flags — a `reassoc` on
 `llvm.fma` is enough for the X86 backend without +fma to de-fuse it, while
 AArch64 and the 32-bit ARM DSP targets keep it fused even with no fused
-instruction to keep (`test/Target/fp_permission_fmf.ll`). Which graph runs is
+instruction to keep (`test/Target/fp_permission_fmf_*.ll`). Which graph runs is
 therefore a per-backend expansion policy that a delegated permission cannot
 bound, which is why emitted is empty rather than merely bounded.
 

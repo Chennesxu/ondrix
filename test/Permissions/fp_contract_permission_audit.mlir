@@ -18,14 +18,13 @@
 // CHECK-LABEL: define float @fma_site(
 // CHECK: = call float @llvm.fma.f32(
 
-// A fast site spends both permissions in the schedule: the lane partition is
-// the reassociation, the per-term selection is the fusion choice, and the
-// lane seed is data rather than a synthesized start value.
+// A fast site spends the reassociation on the lane partition. Neither the
+// lane seed nor the fold start is synthesized: both are data.
 // CHECK-LABEL: define float @fast_site(
 // CHECK: = fmul <8 x float> %
 // CHECK: = fmul <8 x float> %
 // CHECK: = fadd <8 x float> %
-// CHECK: = call float @llvm.vector.reduce.fadd.v8f32(float 0.000000e+00, <8 x float>
+// CHECK: = call float @llvm.vector.reduce.fadd.v8f32(float %0, <8 x float>
 // CHECK: = fmul float %
 // CHECK: = fadd float %
 
@@ -46,7 +45,7 @@
 // FUSED-LABEL: define float @fast_site(
 // FUSED: = fmul <8 x float> %
 // FUSED: = call <8 x float> @llvm.fma.v8f32(
-// FUSED: = call float @llvm.vector.reduce.fadd.v8f32(float 0.000000e+00, <8 x float>
+// FUSED: = call float @llvm.vector.reduce.fadd.v8f32(float %0, <8 x float>
 // FUSED: = call float @llvm.fma.f32(
 
 func.func @off_site(%lhs: memref<?xf32>, %rhs: memref<?xf32>) -> f32 {
@@ -61,9 +60,10 @@ func.func @fma_site(%lhs: memref<?xf32>, %rhs: memref<?xf32>) -> f32 {
   return %r : f32
 }
 
-func.func @fast_site(%lhs: memref<?xf32>, %rhs: memref<?xf32>) -> f32 {
-  %zero = arith.constant 0.0 : f32
-  %r = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fast>} : (f32, memref<?xf32>, memref<?xf32>) -> f32
+// The initial arrives as an argument so the cross-lane fold's start value
+// cannot be satisfied by a synthesized constant.
+func.func @fast_site(%init: f32, %lhs: memref<?xf32>, %rhs: memref<?xf32>) -> f32 {
+  %r = ondsp.reduce_mac %init, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fast>} : (f32, memref<?xf32>, memref<?xf32>) -> f32
   return %r : f32
 }
 

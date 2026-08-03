@@ -26,9 +26,10 @@
 // CHECK: %[[PARTIAL:.*]] = scf.for {{.*}} iter_args(%[[ACC:.*]] = %[[SEED]]) -> (vector<8xf32>)
 // CHECK: %[[P:.*]] = arith.mulf %{{.*}}, %{{.*}} : vector<8xf32>
 // CHECK: arith.addf %[[ACC]], %[[P]] : vector<8xf32>
-// CHECK: %[[REDUCED:.*]] = vector.reduction <add>, %[[PARTIAL]] : vector<8xf32> into f32
-// CHECK: %[[TAIL:.*]] = scf.for {{.*}} iter_args({{.*}} = %[[REDUCED]]) -> (f32)
-// CHECK: arith.addf %[[INIT:.*]], %[[TAIL]] : f32
+// The fold's accumulator is the operation's own initial value, so no start
+// value is synthesized anywhere in the rebuilt tree.
+// CHECK: %[[REDUCED:.*]] = vector.reduction <add>, %[[PARTIAL]], %[[INIT:.*]] : vector<8xf32> into f32
+// CHECK: scf.for {{.*}} iter_args({{.*}} = %[[REDUCED]]) -> (f32)
 // Fewer than W elements has no lane to fill, so the ordered schedule is kept
 // rather than padded up to one block.
 // CHECK: } else {

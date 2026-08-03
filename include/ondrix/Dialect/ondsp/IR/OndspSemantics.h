@@ -31,7 +31,7 @@ enum class FastPermission {
 /// choice. Delegating instead — leaving `reassoc` or `contract` on — hands the
 /// choice to a per-backend expansion policy no target fact can bound, so no
 /// lowering does it and there is no entry point for it here. Measured in
-/// `test/Target/fp_permission_fmf.ll`.
+/// `test/Target/fp_permission_fmf_*.ll`.
 inline mlir::arith::FastMathFlags consumeFastPermission(FastPermission permission) {
   (void)permission;
   return mlir::arith::FastMathFlags::none;
