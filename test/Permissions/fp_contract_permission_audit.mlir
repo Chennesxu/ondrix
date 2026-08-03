@@ -1,40 +1,56 @@
-// RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce --lower-ondsp-f32-reduce-to-scalar --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | ondrix-translate --mlir-to-llvmir | FileCheck %s --implicit-check-not=nnan --implicit-check-not=ninf --implicit-check-not=nsz --implicit-check-not=arcp --implicit-check-not=afn --implicit-check-not="fast float" --implicit-check-not="fast <8 x float>"
+// RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce --lower-ondsp-f32-reduce-to-scalar --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | ondrix-translate --mlir-to-llvmir | FileCheck %s --implicit-check-not=reassoc --implicit-check-not=contract --implicit-check-not=nnan --implicit-check-not=ninf --implicit-check-not=nsz --implicit-check-not=arcp --implicit-check-not=afn --implicit-check-not="fast float" --implicit-check-not="fast <8 x float>"
+// RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="supports-vector-fma=true" --lower-ondsp-f32-reduce-to-scalar --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | ondrix-translate --mlir-to-llvmir | FileCheck %s --check-prefix=FUSED --implicit-check-not=reassoc --implicit-check-not=contract --implicit-check-not=nnan --implicit-check-not=ninf --implicit-check-not=nsz --implicit-check-not=arcp --implicit-check-not=afn --implicit-check-not="fast float"
 
 // The permission audit runs on the translated LLVM IR because that is where
 // this flow's floating-point permissions are final: nothing between this
 // point and the object re-runs an IR optimization that could widen them.
-// The implicit-check-not list is the escalation set no contract declares —
-// including LLVM's blanket `fast` spelling, which stands for all of them.
+//
+// The implicit-check-not list is now the whole vocabulary, not just the
+// escalation set. Every fast permission is spent by the compiler, so the
+// audit point sees the selected graph and no licence to reselect. That
+// matters because a delegated permission would be acted on: `reassoc` lets
+// this toolchain's backend expand `llvm.fma` back into a multiply and an add
+// (test/Target/fp_permission_fmf.ll).
 
-// An off site keeps a separate unflagged multiply and add per element.
+// An off site keeps a separate multiply and add per element.
 // CHECK-LABEL: define float @off_site(
 // CHECK: = fmul float %
 // CHECK: = fadd float %
 
-// An fma site is an explicit fused event, not a contraction permission: the
-// intrinsic call carries no flag at all.
+// An fma site is an explicit fused event, not a contraction permission.
 // CHECK-LABEL: define float @fma_site(
 // CHECK: = call float @llvm.fma.f32(
 
-// A fast site carries exactly the two declared permissions. The cross-lane
-// fold is the ordered intrinsic with an explicit +0.0 start, so the
-// reassociation permission is spent on the lane partition and nowhere else.
+// A fast site spends both permissions in the schedule: the lane partition is
+// the reassociation, the per-term selection is the fusion choice, and the
+// lane seed is data rather than a synthesized start value.
 // CHECK-LABEL: define float @fast_site(
-// CHECK: = call reassoc contract <8 x float> @llvm.fma.v8f32(
+// CHECK: = fmul <8 x float> %
+// CHECK: = fmul <8 x float> %
+// CHECK: = fadd <8 x float> %
 // CHECK: = call float @llvm.vector.reduce.fadd.v8f32(float 0.000000e+00, <8 x float>
-// CHECK: = call reassoc contract float @llvm.fma.f32(
-// CHECK: = fadd reassoc contract float
+// CHECK: = fmul float %
+// CHECK: = fadd float %
 
 // Four sites in one function: permissions must not bleed across call sites
 // in either direction, and neighbouring plain arithmetic must stay unflagged.
-// CHECK-LABEL: define float @mixed_contract_sites(
+// The name avoids the word this file greps for, which a symbol would match.
+// CHECK-LABEL: define float @mixed_policy_sites(
 // CHECK: = fmul float %
 // CHECK: = fadd float %
 // CHECK: = call float @llvm.fma.f32(
-// CHECK: = call reassoc contract <8 x float> @llvm.fma.v8f32(
+// CHECK: = fmul <8 x float> %
 // CHECK: = fmul float %
 // CHECK: = fadd float %
 // CHECK: = fadd float %
+
+// The other selection has to be audited too: it is the one that emits fused
+// events, so it is where a delegated permission would actually appear.
+// FUSED-LABEL: define float @fast_site(
+// FUSED: = fmul <8 x float> %
+// FUSED: = call <8 x float> @llvm.fma.v8f32(
+// FUSED: = call float @llvm.vector.reduce.fadd.v8f32(float 0.000000e+00, <8 x float>
+// FUSED: = call float @llvm.fma.f32(
 
 func.func @off_site(%lhs: memref<?xf32>, %rhs: memref<?xf32>) -> f32 {
   %zero = arith.constant 0.0 : f32
@@ -54,7 +70,7 @@ func.func @fast_site(%lhs: memref<?xf32>, %rhs: memref<?xf32>) -> f32 {
   return %r : f32
 }
 
-func.func @mixed_contract_sites(%a: memref<?xf32>, %b: memref<?xf32>) -> f32 {
+func.func @mixed_policy_sites(%a: memref<?xf32>, %b: memref<?xf32>) -> f32 {
   %zero = arith.constant 0.0 : f32
   %off0 = ondsp.reduce_mac %zero, %a, %b {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, memref<?xf32>, memref<?xf32>) -> f32
   %fma = ondsp.reduce_mac %zero, %a, %b {numeric = #ondsp.fp<format = f32, contract = fma>} : (f32, memref<?xf32>, memref<?xf32>) -> f32

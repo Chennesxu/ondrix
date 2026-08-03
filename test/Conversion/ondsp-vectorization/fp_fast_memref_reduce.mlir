@@ -1,30 +1,51 @@
 // RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce | FileCheck %s
+// RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="supports-vector-fma=true" | FileCheck %s --check-prefix=FUSED
 // RUN: not ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="vector-width=1" 2>&1 | FileCheck %s --check-prefix=WIDTH
 // RUN: not ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="vector-width=5000" 2>&1 | FileCheck %s --check-prefix=WIDE
 
-// The one transform that exploits the declared fast relaxation: W-lane fused
-// partial sums, one cross-lane reduction, a scalar tail, every FP operation
-// carrying exactly fastmath<reassoc,contract>. The pass description carries
-// the authorization argument; off and fma sites below stay untouched.
+// Structure gate for the term-conserving rebuild; the pass description
+// carries the authorization argument. The whole-file NOT is the leak gate:
+// the schedule is the selection, so any flag reaching here would mean the
+// choice had been handed to the backend instead.
 
 // WIDTH: vector-width must be greater than one
 // WIDE: vector-width must not exceed 4096
 
+// CHECK-NOT: fastmath
+
 // CHECK-LABEL: func.func @f32_dot_fast_dynamic
 // CHECK: cf.assert {{.*}}equal operand lengths
-// CHECK: %[[PARTIAL:.*]] = scf.for {{.*}} iter_args(%[[ACC:.*]] = %{{.*}}) -> (vector<8xf32>)
-// CHECK: vector.load {{.*}} : memref<?xf32>, vector<8xf32>
-// CHECK: vector.load {{.*}} : memref<?xf32>, vector<8xf32>
-// CHECK: math.fma {{.*}}, %[[ACC]] fastmath<reassoc,contract> : vector<8xf32>
+// CHECK: %[[BLOCKS:.*]] = arith.subi
+// CHECK: %[[HAS:.*]] = arith.cmpi ugt, %[[BLOCKS]], %{{.*}}
+// CHECK: scf.if %[[HAS]] -> (f32) {
+// The lane seed is data: W real products, no synthesized identity vector.
+// CHECK-NOT: arith.constant dense
+// CHECK: %[[SL:.*]] = vector.load {{.*}} : memref<?xf32>, vector<8xf32>
+// CHECK: %[[SR:.*]] = vector.load {{.*}} : memref<?xf32>, vector<8xf32>
+// CHECK: %[[SEED:.*]] = arith.mulf %[[SL]], %[[SR]] : vector<8xf32>
+// CHECK: %[[PARTIAL:.*]] = scf.for {{.*}} iter_args(%[[ACC:.*]] = %[[SEED]]) -> (vector<8xf32>)
+// CHECK: %[[P:.*]] = arith.mulf %{{.*}}, %{{.*}} : vector<8xf32>
+// CHECK: arith.addf %[[ACC]], %[[P]] : vector<8xf32>
 // CHECK: %[[REDUCED:.*]] = vector.reduction <add>, %[[PARTIAL]] : vector<8xf32> into f32
 // CHECK: %[[TAIL:.*]] = scf.for {{.*}} iter_args({{.*}} = %[[REDUCED]]) -> (f32)
-// CHECK: math.fma {{.*}} fastmath<reassoc,contract> : f32
-// CHECK: arith.addf %[[TAIL]], %{{.*}} fastmath<reassoc,contract> : f32
-func.func @f32_dot_fast_dynamic(%lhs: memref<?xf32>, %rhs: memref<?xf32>) -> f32 {
-  %zero = arith.constant 0.0 : f32
-  %r = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fast>} : (f32, memref<?xf32>, memref<?xf32>) -> f32
+// CHECK: arith.addf %[[INIT:.*]], %[[TAIL]] : f32
+// Fewer than W elements has no lane to fill, so the ordered schedule is kept
+// rather than padded up to one block.
+// CHECK: } else {
+// CHECK: scf.for {{.*}} iter_args({{.*}} = %[[INIT]]) -> (f32)
+func.func @f32_dot_fast_dynamic(%lhs: memref<?xf32>, %rhs: memref<?xf32>, %init: f32) -> f32 {
+  %r = ondsp.reduce_mac %init, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fast>} : (f32, memref<?xf32>, memref<?xf32>) -> f32
   return %r : f32
 }
+
+// A declared vector FMA changes only which member of the legal set runs. The
+// seed stays a raw product because it has no addend to fuse: selection is
+// per term, not uniform across the reduction.
+// FUSED-LABEL: func.func @f32_dot_fast_dynamic
+// FUSED: %[[FSEED:.*]] = arith.mulf %{{.*}}, %{{.*}} : vector<8xf32>
+// FUSED: scf.for {{.*}} iter_args(%[[FACC:.*]] = %[[FSEED]]) -> (vector<8xf32>)
+// FUSED: math.fma %{{.*}}, %{{.*}}, %[[FACC]] : vector<8xf32>
+// FUSED-NOT: fastmath
 
 // CHECK-LABEL: func.func @f32_dot_fast_static
 // CHECK: vector.reduction <add>

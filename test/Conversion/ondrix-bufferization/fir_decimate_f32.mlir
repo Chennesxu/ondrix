@@ -20,7 +20,7 @@
 
 // VECTOR-LABEL: func.func @f32_decimate
 // VECTOR-COUNT-2: vector.load {{.*}}vector<8xf32>
-// VECTOR: math.fma {{.*}}fastmath<reassoc,contract>{{.*}} : vector<8xf32>
+// VECTOR: arith.mulf %{{[^ ]*}}, %{{[^ ]*}} : vector<8xf32>
 // VECTOR: vector.reduction <add>
 // VECTOR-NOT: ondsp.reduce_mac
 func.func @f32_decimate(

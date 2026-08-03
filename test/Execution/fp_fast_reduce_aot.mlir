@@ -16,7 +16,7 @@
 // The structural pin runs before the object is built, so a silently
 // unvectorized kernel cannot satisfy the envelope by staying scalar.
 // VECTORIZED-LABEL: func.func @f32_dot_fast
-// VECTORIZED: math.fma {{.*}}fastmath<reassoc,contract> : vector<8xf32>
+// VECTORIZED: arith.mulf %{{[^ ]*}}, %{{[^ ]*}} : vector<8xf32>
 // VECTORIZED: vector.reduction <add>
 
 // Dynamic extents on purpose: one object serves every trial length.

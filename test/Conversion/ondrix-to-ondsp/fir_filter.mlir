@@ -65,7 +65,7 @@ func.func @f32_filter_off(
 
 // CHECK-LABEL: func.func @f32_filter_fast
 // CHECK: scf.for
-// CHECK: math.fma {{.*}} fastmath<reassoc,contract> : f32
+// CHECK: math.fma %{{[^ ]*}}, %{{[^ ]*}}, %{{[^ ]*}} : f32
 // CHECK: tensor.insert
 func.func @f32_filter_fast(
     %input: tensor<8xf32>, %coeffs: tensor<3xf32>, %init: tensor<6xf32>)

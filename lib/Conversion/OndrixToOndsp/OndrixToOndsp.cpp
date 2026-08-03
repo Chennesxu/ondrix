@@ -58,7 +58,9 @@ static Value createScalarFpDot(Location loc, Value lhs, Value rhs, ondrix::ondsp
   case ondrix::ondsp::FpContractMode::Fast: {
     Value zero = rewriter.create<arith::ConstantOp>(loc, numeric.getFormat(),
                                                     rewriter.getZeroAttr(numeric.getFormat()));
-    return rewriter.create<math::FmaOp>(loc, lhs, rhs, zero, ondrix::ondsp::getFastContractFlags());
+    return rewriter.create<math::FmaOp>(
+        loc, lhs, rhs, zero,
+        ondrix::ondsp::consumeFastPermission(ondrix::ondsp::FastPermission::FuseMultiplyAdd));
   }
   }
   llvm_unreachable("unknown floating-point contract mode");
@@ -74,23 +76,22 @@ static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value
   case ondrix::ondsp::FpContractMode::Fma:
     return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator);
   case ondrix::ondsp::FpContractMode::Fast:
-    return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator,
-                                       ondrix::ondsp::getFastContractFlags());
+    // fast admits both members here; this lowering selects the fused one.
+    return builder.create<math::FmaOp>(
+        loc, lhs, rhs, accumulator,
+        ondrix::ondsp::consumeFastPermission(ondrix::ondsp::FastPermission::FuseMultiplyAdd));
   }
   llvm_unreachable("unknown floating-point contract mode");
 }
 
-static Value createFpMultiply(Location loc, Value lhs, Value rhs, ondrix::ondsp::FpAttr numeric,
-                              OpBuilder &builder) {
-  if (numeric.getContract() == ondrix::ondsp::FpContractMode::Fast)
-    return builder.create<arith::MulFOp>(loc, lhs, rhs, ondrix::ondsp::getFastContractFlags());
+// Contract-invariant sites: a bare product has no addend to fuse, and these
+// sums are built in declared order even where they form a reduction tree. A
+// permission that is not used is a permission that is not emitted.
+static Value createFpMultiply(Location loc, Value lhs, Value rhs, OpBuilder &builder) {
   return builder.create<arith::MulFOp>(loc, lhs, rhs);
 }
 
-static Value createFpAdd(Location loc, Value lhs, Value rhs, ondrix::ondsp::FpAttr numeric,
-                         OpBuilder &builder) {
-  if (numeric.getContract() == ondrix::ondsp::FpContractMode::Fast)
-    return builder.create<arith::AddFOp>(loc, lhs, rhs, ondrix::ondsp::getFastContractFlags());
+static Value createFpAdd(Location loc, Value lhs, Value rhs, OpBuilder &builder) {
   return builder.create<arith::AddFOp>(loc, lhs, rhs);
 }
 
@@ -783,15 +784,14 @@ public:
                 Value z2 = sectionBuilder.create<tensor::ExtractOp>(
                     sectionLoc, sectionArgs[1], ValueRange{section, coefficientOne});
 
-                Value scaled =
-                    createFpMultiply(sectionLoc, sectionArgs[0], scale, numeric, sectionBuilder);
+                Value scaled = createFpMultiply(sectionLoc, sectionArgs[0], scale, sectionBuilder);
                 Value output =
                     createFpAccumulatorUpdate(sectionLoc, scaled, b0, z1, numeric, sectionBuilder);
-                Value feedback1 = createFpMultiply(sectionLoc, output, a1, numeric, sectionBuilder);
+                Value feedback1 = createFpMultiply(sectionLoc, output, a1, sectionBuilder);
                 Value firstTerm = createFpAccumulatorUpdate(sectionLoc, scaled, b1, feedback1,
                                                             numeric, sectionBuilder);
-                Value nextZ1 = createFpAdd(sectionLoc, z2, firstTerm, numeric, sectionBuilder);
-                Value feedback2 = createFpMultiply(sectionLoc, output, a2, numeric, sectionBuilder);
+                Value nextZ1 = createFpAdd(sectionLoc, z2, firstTerm, sectionBuilder);
+                Value feedback2 = createFpMultiply(sectionLoc, output, a2, sectionBuilder);
                 Value nextZ2 = createFpAccumulatorUpdate(sectionLoc, scaled, b2, feedback2, numeric,
                                                          sectionBuilder);
                 Value stateWithZ1 = sectionBuilder.create<tensor::InsertOp>(
@@ -2073,7 +2073,7 @@ public:
           Value element = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
           Value scaled;
           if (fp) {
-            scaled = createFpMultiply(loc, element, gain, fp, builder);
+            scaled = createFpMultiply(loc, element, gain, builder);
           } else {
             Value wide = builder.create<arith::ExtSIOp>(loc, i64, element);
             Value product = builder.create<arith::MulIOp>(loc, wide, gain);
@@ -2164,7 +2164,7 @@ public:
             Value desired = builder.create<tensor::ExtractOp>(loc, adaptor.getDesired(), sample);
             Value error = builder.create<arith::SubFOp>(loc, desired, accLoop.getResult(0));
             Value nextErrors = builder.create<tensor::InsertOp>(loc, error, iterArgs[1], sample);
-            Value step = createFpMultiply(loc, mu, error, fp, builder);
+            Value step = createFpMultiply(loc, mu, error, builder);
 
             auto updateLoop = builder.create<scf::ForOp>(
                 loc, zero, tapCount, one, ValueRange{weights},
@@ -2259,7 +2259,7 @@ public:
           Value coefficient = rewriter.create<arith::ConstantOp>(
               loc, rewriter.getFloatAttr(element, ondrix::getDctCoefficientF32(extent, k, n)));
           sum = sum ? createFpAccumulatorUpdate(loc, value, coefficient, sum, fp, rewriter)
-                    : createFpMultiply(loc, value, coefficient, fp, rewriter);
+                    : createFpMultiply(loc, value, coefficient, rewriter);
         }
         Value position = rewriter.create<arith::ConstantIndexOp>(loc, k);
         output = rewriter.create<tensor::InsertOp>(loc, sum, output, position);
@@ -2333,7 +2333,7 @@ public:
         for (int64_t k = 0; k < window; ++k) {
           Value position = rewriter.create<arith::ConstantIndexOp>(loc, n + k);
           Value value = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
-          sum = sum ? createFpAdd(loc, sum, value, fp, rewriter) : value;
+          sum = sum ? createFpAdd(loc, sum, value, rewriter) : value;
         }
         Value mean = rewriter.create<arith::DivFOp>(loc, sum, count);
         Value position = rewriter.create<arith::ConstantIndexOp>(loc, n);

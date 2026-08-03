@@ -14,14 +14,34 @@
 
 namespace ondrix::ondsp {
 
-/// The LLVM encoding of the two rewrites the `fast` contract permits:
-/// reassociation of a reduction's additive tree maps to reassoc, selection
-/// of a fused event maps to contract. Nothing else — LLVM's blanket `fast`
-/// keyword would add nnan/ninf/nsz/arcp/afn, each a separate promise no call
-/// site made (semantics: FpContractMode in OndspEnums.td). No lowering of
-/// the fast contract may exceed this set.
-inline mlir::arith::FastMathFlags getFastContractFlags() {
-  return mlir::arith::FastMathFlags::reassoc | mlir::arith::FastMathFlags::contract;
+/// The two rewrites `contract = fast` declares, named so that a lowering has
+/// to say which one a site is spending (semantics: FpContractMode in
+/// OndspEnums.td).
+enum class FastPermission {
+  /// Regroup the additive tree of a reduction. Only a reduction has one: a
+  /// recursion body and a bare elementwise product do not.
+  ReassociateReductionTerms,
+  /// Select one fused multiply-add event for a term in place of a rounded
+  /// product followed by an addition.
+  FuseMultiplyAdd,
+};
+
+/// Fast-math flags to attach where the COMPILER spends `permission` itself:
+/// none, for either permission. The produced schedule already embodies the
+/// choice, so what reaches the audit point is the selected graph and not a
+/// licence to select. Delegating instead — leaving `reassoc` or `contract` on
+/// the operation — hands the choice to LLVM; no lowering does, so there is no
+/// entry point for it here.
+///
+/// Delegation is not decorative. Pinned toolchain characterization, LLVM
+/// 17.0.6 x86-64 without +fma: an unflagged `llvm.fma.f32` and one carrying
+/// `contract` both stay fused, while `reassoc` lets the backend expand the
+/// intrinsic into a separate multiply and add. That is measured backend
+/// behavior, in tension with LangRef's fused specification of `llvm.fma`;
+/// `test/Target/fp_permission_fmf.ll` pins all four combinations.
+inline mlir::arith::FastMathFlags consumeFastPermission(FastPermission permission) {
+  (void)permission;
+  return mlir::arith::FastMathFlags::none;
 }
 
 /// Target-independent raw storage and fractional position of a product.

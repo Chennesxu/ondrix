@@ -13,7 +13,6 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/Matchers.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
@@ -29,40 +28,44 @@ namespace {
 /// Largest accepted lane count, bounding every index the rewrite derives.
 constexpr int64_t kMaxVectorWidth = 4096;
 
-bool isSupportedFastMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
+/// Reduction length when both operand extents are known at compile time.
+std::optional<int64_t> getStaticReductionLength(MemRefType lhsType, MemRefType rhsType) {
+  if (!lhsType.isDynamicDim(0))
+    return lhsType.getDimSize(0);
+  if (!rhsType.isDynamicDim(0))
+    return rhsType.getDimSize(0);
+  return std::nullopt;
+}
+
+bool isSupportedFastMemRefReduction(ondrix::ondsp::ReduceMacOp op, int64_t vectorWidth) {
   auto numeric = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
   if (!numeric || !numeric.getFormat().isF32() ||
       numeric.getContract() != ondrix::ondsp::FpContractMode::Fast)
     return false;
-  // STOPGAP, not the final soundness argument. The rewrite seeds its lanes
-  // with synthesized +0.0 and adds the operation's initial value back at the
-  // end, which is only value-neutral when that initial is canonical +0.0:
-  // with initial -0.0 and a single term the batched result is +0.0 where both
-  // declared graphs give -0.0, and no reassociation exists at one term to
-  // authorize the difference. The synthesized lane seeds are a second, still
-  // open obligation - the term-conserving rebuild removes both. A numeric
-  // comparison would not do here, because -0.0 == +0.0.
-  llvm::APFloat initial(0.0f);
-  if (!matchPattern(op.getInitial(), m_ConstantFloat(&initial)) || !initial.isPosZero())
-    return false;
   // A verified f32 reduction already has rank-1 shaped operands whose element
   // type matches the format and carries no product; only the layout facts the
-  // Vector lowering needs are this pass's own obligation.
+  // Vector lowering needs are this pass's own obligation. The initial value
+  // is carried as a term rather than reproduced, so it needs no admission.
   auto lhsType = dyn_cast<MemRefType>(op.getLhs().getType());
   auto rhsType = dyn_cast<MemRefType>(op.getRhs().getType());
-  return lhsType && rhsType && ondrix::conversion::hasDefaultLLVMVectorMemorySpace(lhsType) &&
-         ondrix::conversion::hasDefaultLLVMVectorMemorySpace(rhsType) &&
-         isLastMemrefDimUnitStride(lhsType) && isLastMemrefDimUnitStride(rhsType);
+  if (!lhsType || !rhsType || !ondrix::conversion::hasDefaultLLVMVectorMemorySpace(lhsType) ||
+      !ondrix::conversion::hasDefaultLLVMVectorMemorySpace(rhsType) ||
+      !isLastMemrefDimUnitStride(lhsType) || !isLastMemrefDimUnitStride(rhsType))
+    return false;
+  // A statically short reduction has no lane to fill, so it keeps the ordered
+  // schedule outright instead of carrying a branch that can never be taken.
+  std::optional<int64_t> length = getStaticReductionLength(lhsType, rhsType);
+  return !length || *length >= vectorWidth;
 }
 
 class FastReduceMacOpVectorization final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
 public:
-  FastReduceMacOpVectorization(MLIRContext *context, int64_t vectorWidth)
-      : OpConversionPattern(context), vectorWidth(vectorWidth) {}
+  FastReduceMacOpVectorization(MLIRContext *context, int64_t vectorWidth, bool fuseTerms)
+      : OpConversionPattern(context), vectorWidth(vectorWidth), fuseTerms(fuseTerms) {}
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    if (!isSupportedFastMemRefReduction(op))
+    if (!isSupportedFastMemRefReduction(op, vectorWidth))
       return failure();
 
     Type elementType = rewriter.getF32Type();
@@ -74,47 +77,101 @@ public:
       return failure();
 
     Location loc = op.getLoc();
-    auto fastFlags =
-        arith::FastMathFlagsAttr::get(getContext(), ondrix::ondsp::getFastContractFlags());
     Value vectorStep = rewriter.create<arith::ConstantIndexOp>(loc, vectorWidth);
+    Value scalarStep = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     Value remainder = rewriter.create<arith::RemUIOp>(loc, bounds->upperBound, vectorStep);
     Value vectorEnd = rewriter.create<arith::SubIOp>(loc, bounds->upperBound, remainder);
     auto vectorType = VectorType::get({vectorWidth}, elementType);
-    Value zeroLanes = rewriter.create<arith::ConstantOp>(
-        loc, vectorType, DenseElementsAttr::get(vectorType, rewriter.getF32FloatAttr(0.0f)));
 
-    auto vectorLoop = rewriter.create<scf::ForOp>(
-        loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{zeroLanes},
-        [&](OpBuilder &builder, Location bodyLoc, Value base, ValueRange iterArgs) {
-          Value lhs = builder.create<vector::LoadOp>(bodyLoc, vectorType, adaptor.getLhs(), base);
-          Value rhs = builder.create<vector::LoadOp>(bodyLoc, vectorType, adaptor.getRhs(), base);
-          Value next = builder.create<math::FmaOp>(bodyLoc, lhs, rhs, iterArgs.front(), fastFlags);
-          builder.create<scf::YieldOp>(bodyLoc, next);
-        });
+    auto buildBatched = [&](OpBuilder &builder, Location branchLoc) {
+      // The lane seed is the first block's W products: real terms of the
+      // source reduction, never a synthesized identity.
+      Value seedLhs = builder.create<vector::LoadOp>(branchLoc, vectorType, adaptor.getLhs(),
+                                                     bounds->lowerBound);
+      Value seedRhs = builder.create<vector::LoadOp>(branchLoc, vectorType, adaptor.getRhs(),
+                                                     bounds->lowerBound);
+      Value lanes = builder.create<arith::MulFOp>(branchLoc, seedLhs, seedRhs);
 
-    // MLIR 17's vector.reduction carries no fastmath attribute; it lowers to
-    // the ordered llvm.intr.vector.reduce.fadd, a fixed deterministic
-    // regrouping the declared relaxation authorizes.
-    Value reduced = rewriter.create<vector::ReductionOp>(loc, vector::CombiningKind::ADD,
+      Value secondBlock = builder.create<arith::AddIOp>(branchLoc, bounds->lowerBound, vectorStep);
+      auto vectorLoop = builder.create<scf::ForOp>(
+          branchLoc, secondBlock, vectorEnd, vectorStep, ValueRange{lanes},
+          [&](OpBuilder &bodyBuilder, Location bodyLoc, Value base, ValueRange iterArgs) {
+            Value lhs =
+                bodyBuilder.create<vector::LoadOp>(bodyLoc, vectorType, adaptor.getLhs(), base);
+            Value rhs =
+                bodyBuilder.create<vector::LoadOp>(bodyLoc, vectorType, adaptor.getRhs(), base);
+            bodyBuilder.create<scf::YieldOp>(
+                bodyLoc, accumulateTerm(bodyLoc, lhs, rhs, iterArgs.front(), bodyBuilder));
+          });
+
+      // MLIR 17's vector.reduction carries no fastmath attribute; it lowers
+      // to the ordered llvm.intr.vector.reduce.fadd.
+      Value folded = builder.create<vector::ReductionOp>(branchLoc, vector::CombiningKind::ADD,
                                                          vectorLoop.getResult(0));
+      Value summed = createOrderedTail(branchLoc, adaptor, vectorEnd, bounds->upperBound,
+                                       scalarStep, folded, builder);
+      // The initial value enters the tree exactly once, moved to the root by
+      // the same reassociation that regrouped the terms.
+      return builder.create<arith::AddFOp>(branchLoc, adaptor.getInitial(), summed).getResult();
+    };
 
-    Value scalarStep = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-    auto tailLoop = rewriter.create<scf::ForOp>(
-        loc, vectorEnd, bounds->upperBound, scalarStep, ValueRange{reduced},
-        [&](OpBuilder &builder, Location bodyLoc, Value index, ValueRange iterArgs) {
-          Value lhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), index);
-          Value rhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), index);
-          Value next = builder.create<math::FmaOp>(bodyLoc, lhs, rhs, iterArgs.front(), fastFlags);
-          builder.create<scf::YieldOp>(bodyLoc, next);
+    // Below one full block there are no lanes to fill, and padding up to them
+    // would be the term invention this rewrite exists to avoid. Only a
+    // dynamic extent needs the branch: a statically short one never reaches
+    // this pattern at all.
+    if (getStaticReductionLength(bounds->lhsType, bounds->rhsType)) {
+      rewriter.replaceOp(op, buildBatched(rewriter, loc));
+      return success();
+    }
+
+    Value hasBlock = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, vectorEnd,
+                                                    bounds->lowerBound);
+    auto guarded = rewriter.create<scf::IfOp>(
+        loc, hasBlock,
+        [&](OpBuilder &builder, Location branchLoc) {
+          builder.create<scf::YieldOp>(branchLoc, buildBatched(builder, branchLoc));
+        },
+        [&](OpBuilder &builder, Location branchLoc) {
+          builder.create<scf::YieldOp>(branchLoc,
+                                       createOrderedTail(branchLoc, adaptor, bounds->lowerBound,
+                                                         bounds->upperBound, scalarStep,
+                                                         adaptor.getInitial(), builder));
         });
 
-    rewriter.replaceOpWithNewOp<arith::AddFOp>(op, tailLoop.getResult(0), adaptor.getInitial(),
-                                               fastFlags);
+    rewriter.replaceOp(op, guarded.getResult(0));
     return success();
   }
 
 private:
+  /// Folds one term into an accumulator of the same type, scalar or vector.
+  /// Both selections lie inside the declared set, so the declared capability
+  /// decides performance and not legality: an unflagged vector `llvm.fma` on
+  /// a target without the instruction becomes one libm call per lane.
+  Value accumulateTerm(Location loc, Value lhs, Value rhs, Value accumulator,
+                       OpBuilder &builder) const {
+    if (fuseTerms)
+      return builder.create<math::FmaOp>(
+          loc, lhs, rhs, accumulator,
+          ondrix::ondsp::consumeFastPermission(ondrix::ondsp::FastPermission::FuseMultiplyAdd));
+    Value product = builder.create<arith::MulFOp>(loc, lhs, rhs);
+    return builder.create<arith::AddFOp>(loc, accumulator, product);
+  }
+
+  Value createOrderedTail(Location loc, OpAdaptor adaptor, Value lowerBound, Value upperBound,
+                          Value step, Value initial, OpBuilder &builder) const {
+    auto loop = builder.create<scf::ForOp>(
+        loc, lowerBound, upperBound, step, ValueRange{initial},
+        [&](OpBuilder &bodyBuilder, Location bodyLoc, Value index, ValueRange iterArgs) {
+          Value lhs = bodyBuilder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), index);
+          Value rhs = bodyBuilder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), index);
+          bodyBuilder.create<scf::YieldOp>(
+              bodyLoc, accumulateTerm(bodyLoc, lhs, rhs, iterArgs.front(), bodyBuilder));
+        });
+    return loop.getResult(0);
+  }
+
   int64_t vectorWidth;
+  bool fuseTerms;
 };
 
 class VectorizeOndspFpFastMemRefReducePass final
@@ -137,14 +194,16 @@ public:
     }
 
     RewritePatternSet patterns(&getContext());
-    patterns.add<FastReduceMacOpVectorization>(&getContext(), vectorWidth);
+    patterns.add<FastReduceMacOpVectorization>(&getContext(), vectorWidth, supportsVectorFma);
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,
                            memref::MemRefDialect, ondrix::ondsp::OndspDialect, scf::SCFDialect,
                            vector::VectorDialect>();
     target.addDynamicallyLegalOp<ondrix::ondsp::ReduceMacOp>(
-        [](ondrix::ondsp::ReduceMacOp op) { return !isSupportedFastMemRefReduction(op); });
+        [width = vectorWidth.getValue()](ondrix::ondsp::ReduceMacOp op) {
+          return !isSupportedFastMemRefReduction(op, width);
+        });
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       signalPassFailure();

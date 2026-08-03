@@ -14,7 +14,7 @@ func.func @f32_gain_off(%input: tensor<8xf32>) -> tensor<8xf32> {
 }
 
 // CHECK-LABEL: func.func @f32_gain_fast
-// CHECK: arith.mulf %{{.*}}, %{{.*}} fastmath<reassoc,contract> : f32
+// CHECK: arith.mulf %{{[^ ]*}}, %{{[^ ]*}} : f32
 func.func @f32_gain_fast(%input: tensor<8xf32>) -> tensor<8xf32> {
   %result = ondrix.gain %input {
     fp_gain = 2.500000e-01 : f32,

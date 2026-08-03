@@ -9,7 +9,7 @@ from lit.llvm import llvm_config
 
 config.name = "ONDRIX"
 config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
-config.suffixes = [".mlir"]
+config.suffixes = [".mlir", ".ll"]
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.join(config.ondrix_obj_root, "test")
 

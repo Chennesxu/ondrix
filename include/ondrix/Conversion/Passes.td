@@ -405,28 +405,38 @@ def VectorizeOndspFpFastMemRefReduce
                 "relaxation";
   let description = [{
     Splits a rank-1 f32 `ondsp.reduce_mac` under `contract = fast` into
-    W-lane partial sums built from explicitly selected fused events, one
-    cross-lane `vector.reduction <add>`, and a scalar tail. This is the one
-    transform that consumes a permission the fast contract declares:
-    regrouping the reduction's additive tree across lanes is exactly the
-    reassociation a call site authorizes by writing `contract = fast`, and
-    exactly the value change the off and fma contracts forbid, so those two
-    are refused here — the inverse of the order-preserving batching pass's
-    refusal of fast.
+    W-lane partial sums, one cross-lane `vector.reduction <add>`, and a
+    scalar tail. This is the one transform that consumes a permission the
+    fast contract declares: regrouping the reduction's additive tree across
+    lanes is exactly the reassociation a call site authorizes by writing
+    `contract = fast`, and exactly the value change the off and fma contracts
+    forbid, so those two are refused here — the inverse of the
+    order-preserving batching pass's refusal of fast.
 
-    The produced event graph is derivable from the source graph using only
-    the declared rewrites, by construction: the vector body covers
-    `[0, floor(N/W)*W)` and the tail covers `[floor(N/W)*W, N)`, disjointly
-    and completely, so every source product `x[i]*y[i]` appears exactly once
-    with its original operands; the only changes are the grouping of the
-    additive tree and the choice of a fused event per term. The lane
-    accumulators are consumed exactly once by the final fold, whose start
-    value is an explicit `+0.0`. That fold is the ordered
-    `llvm.vector.reduce.fadd` — a narrower, fully determined choice inside
-    the permitted set rather than a further use of the reassociation
-    permission, because MLIR 17's `vector.reduction` carries no fast-math
-    attribute. The rewrite reorders reads only and produces one scalar, so
-    unlike the batching passes it carries no aliasing obligation.
+    Term conservation is what makes the produced graph derivable rather than
+    merely permitted. The source tree has `N + 1` terms: the initial value
+    and one product per index. The lane accumulators are seeded with the
+    first block's W products rather than a synthesized `+0.0`, which would
+    not be a reassociation of the declared terms and is observable at a
+    signed zero. The remaining blocks cover `[W, floor(N/W)*W)` and the
+    scalar tail covers `[floor(N/W)*W, N)`, disjointly and completely, so
+    every source product appears exactly once with its original operands, and
+    the initial value is added once at the root. Below one full block there
+    are no lanes to fill and the ordered schedule is kept; that branch also
+    covers the empty reduction. The final fold is the ordered
+    `llvm.vector.reduce.fadd`, a determined regrouping of the lane partials
+    rather than a further permission, because MLIR 17's `vector.reduction`
+    carries no fast-math attribute. The rewrite reorders reads only and
+    produces one scalar, so unlike the batching passes it carries no
+    aliasing obligation.
+
+    Folding a term by a separate product and addition or by one fused event
+    is a target question and not a legality one — both lie inside the
+    declared set — so it is read from the declared `supports-vector-fma`
+    capability and never from the host: an unflagged vector `llvm.fma` on a
+    target without the instruction becomes one libm call per lane. The
+    default is the separate product. Either way the emission carries no
+    permission of its own.
 
     A relaxed result is never bit-pinned. Its evidence is term conservation
     checked on an integer sub-domain where every derivable regrouping is
@@ -454,6 +464,9 @@ def VectorizeOndspFpFastMemRefReduce
   let options = [
     Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
            "Number of f32 lanes per partial-sum vector">,
+    Option<"supportsVectorFma", "supports-vector-fma", "bool", /*default=*/"false",
+           "Declared target capability: the target has an f32 vector "
+           "fused multiply-add. Never inferred from the host">,
   ];
 }
 
