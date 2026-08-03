@@ -33,10 +33,11 @@ enum class FastPermission {
 /// the operation — hands the choice to LLVM; no lowering does, so there is no
 /// entry point for it here.
 ///
-/// Delegation is not portable: de-fusion of `llvm.fma` needs both `reassoc`
-/// and a target with no fused instruction, so a delegated permission makes the
-/// realized graph target dependent from one declaration. Measured, not derived
-/// — `test/Target/fp_permission_fmf.ll` pins it.
+/// Delegation is not portable: `reassoc` lets the X86 backend without +fma
+/// expand `llvm.fma`, while AArch64 and the 32-bit ARM DSP targets keep it
+/// fused even with no fused instruction to keep. Which graph runs is a
+/// per-backend expansion policy, so a delegated permission cannot be reasoned
+/// about from the target. Measured — `test/Target/fp_permission_fmf.ll`.
 inline mlir::arith::FastMathFlags consumeFastPermission(FastPermission permission) {
   (void)permission;
   return mlir::arith::FastMathFlags::none;

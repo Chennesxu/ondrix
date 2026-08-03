@@ -36,11 +36,11 @@ them apart:
 The audit point is the translated `.ll`: this flow runs no LLVM middle end, so
 permissions are final there. It is *not* the final point for the realized
 event graph, because `llc` still consumes fast-math flags — a `reassoc` on
-`llvm.fma` is enough for the backend to de-fuse it where the target has no
-fused instruction, and not where it has one
-(`test/Target/fp_permission_fmf.ll`). A delegated permission therefore makes
-the realized graph target dependent, which is why emitted is empty rather than
-merely bounded.
+`llvm.fma` is enough for the X86 backend without +fma to de-fuse it, while
+AArch64 and the 32-bit ARM DSP targets keep it fused even with no fused
+instruction to keep (`test/Target/fp_permission_fmf.ll`). Which graph runs is
+therefore a per-backend expansion policy that a delegated permission cannot
+bound, which is why emitted is empty rather than merely bounded.
 
 `fast` permits two rewrites: `ReassociateReductionTerms` (regroup a
 reduction's additive tree) and `FuseMultiplyAdd` (select a fused event for a
