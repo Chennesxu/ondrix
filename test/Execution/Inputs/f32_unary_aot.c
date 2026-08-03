@@ -17,8 +17,11 @@ typedef struct {
 } MemRefF32;
 
 extern void _mlir_ciface_f32_moving_average_off(MemRefF32 *, MemRefF32 *);
+extern void _mlir_ciface_f32_moving_average_fma(MemRefF32 *, MemRefF32 *);
+extern void _mlir_ciface_f32_moving_average_fast(MemRefF32 *, MemRefF32 *);
 extern void _mlir_ciface_f32_dct_off(MemRefF32 *, MemRefF32 *);
 extern void _mlir_ciface_f32_dct_fma(MemRefF32 *, MemRefF32 *);
+extern void _mlir_ciface_f32_dct_fast(MemRefF32 *, MemRefF32 *);
 
 enum { kLength = 8, kWindow = 3, kAverages = 6, kTrialCount = 32 };
 
@@ -50,44 +53,57 @@ static float referenceDct(const float *x, int64_t k, int fused) {
   return sum;
 }
 
+static int compare(const char *label, const char *mode, int64_t index, float got, float expected) {
+  if (floatBits(got) == floatBits(expected))
+    return 0;
+  fprintf(stderr, "%s %s [%lld]: got %a, expected %a\n", label, mode, (long long)index, (double)got,
+          (double)expected);
+  return 1;
+}
+
 static int check(const float *x, const char *label) {
   float input[kLength];
   memcpy(input, x, sizeof(input));
   MemRefF32 inputRef = {input, input, 0, {kLength}, {1}};
-  MemRefF32 average, dctOff, dctFma;
+  MemRefF32 average, averageFma, averageFast, dctOff, dctFma, dctFast;
   _mlir_ciface_f32_moving_average_off(&average, &inputRef);
+  _mlir_ciface_f32_moving_average_fma(&averageFma, &inputRef);
+  _mlir_ciface_f32_moving_average_fast(&averageFast, &inputRef);
   _mlir_ciface_f32_dct_off(&dctOff, &inputRef);
   _mlir_ciface_f32_dct_fma(&dctFma, &inputRef);
+  _mlir_ciface_f32_dct_fast(&dctFast, &inputRef);
 
   int failed = 0;
+  /* One window sum in declared order and one division: no product to fuse and
+   * no tree to regroup, so all three declarations denote the same events. */
   for (int64_t n = 0; n < kAverages; ++n) {
     const float expected = referenceAverage(x, n);
-    const float actual = average.aligned[average.offset + n * average.strides[0]];
-    if (floatBits(actual) != floatBits(expected)) {
-      fprintf(stderr, "%s average [%lld]: got %a, expected %a\n", label, (long long)n,
-              (double)actual, (double)expected);
-      failed = 1;
-    }
+    failed |= compare(label, "average off", n,
+                      average.aligned[average.offset + n * average.strides[0]], expected);
+    failed |= compare(label, "average fma", n,
+                      averageFma.aligned[averageFma.offset + n * averageFma.strides[0]], expected);
+    failed |=
+        compare(label, "average fast", n,
+                averageFast.aligned[averageFast.offset + n * averageFast.strides[0]], expected);
   }
   for (int64_t k = 0; k < kLength; ++k) {
     const float expectedOff = referenceDct(x, k, 0);
     const float expectedFma = referenceDct(x, k, 1);
-    const float actualOff = dctOff.aligned[dctOff.offset + k * dctOff.strides[0]];
-    const float actualFma = dctFma.aligned[dctFma.offset + k * dctFma.strides[0]];
-    if (floatBits(actualOff) != floatBits(expectedOff)) {
-      fprintf(stderr, "%s dct off [%lld]: got %a, expected %a\n", label, (long long)k,
-              (double)actualOff, (double)expectedOff);
-      failed = 1;
-    }
-    if (floatBits(actualFma) != floatBits(expectedFma)) {
-      fprintf(stderr, "%s dct fma [%lld]: got %a, expected %a\n", label, (long long)k,
-              (double)actualFma, (double)expectedFma);
-      failed = 1;
-    }
+    failed |= compare(label, "dct off", k, dctOff.aligned[dctOff.offset + k * dctOff.strides[0]],
+                      expectedOff);
+    failed |= compare(label, "dct fma", k, dctFma.aligned[dctFma.offset + k * dctFma.strides[0]],
+                      expectedFma);
+    /* The row stays ordered under fast, so the selected member is the fused
+     * one. Pinning it pins the selection, not the contract. */
+    failed |= compare(label, "dct fast", k,
+                      dctFast.aligned[dctFast.offset + k * dctFast.strides[0]], expectedFma);
   }
   free(average.allocated);
+  free(averageFma.allocated);
+  free(averageFast.allocated);
   free(dctOff.allocated);
   free(dctFma.allocated);
+  free(dctFast.allocated);
   return failed;
 }
 

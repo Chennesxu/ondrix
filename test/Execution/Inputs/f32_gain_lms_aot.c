@@ -28,6 +28,8 @@ extern void _mlir_ciface_f32_lms_off(LmsResult *, MemRefF32Rank1 *, MemRefF32Ran
                                      MemRefF32Rank1 *);
 extern void _mlir_ciface_f32_lms_fma(LmsResult *, MemRefF32Rank1 *, MemRefF32Rank1 *,
                                      MemRefF32Rank1 *);
+extern void _mlir_ciface_f32_lms_fast(LmsResult *, MemRefF32Rank1 *, MemRefF32Rank1 *,
+                                      MemRefF32Rank1 *);
 extern void _mlir_ciface_f32_lms(LmsResult *, MemRefF32Rank1 *, MemRefF32Rank1 *, MemRefF32Rank1 *);
 
 enum { kGainLength = 16, kSamples = 32, kTaps = 4, kTrialCount = 24 };
@@ -124,9 +126,10 @@ static int checkLms(const float *input, const float *desired, const float *weigh
   MemRefF32Rank1 inputRef = {inputCopy, inputCopy, 0, {kSamples}, {1}};
   MemRefF32Rank1 desiredRef = {desiredCopy, desiredCopy, 0, {kSamples}, {1}};
   MemRefF32Rank1 weightRef = {weightCopy, weightCopy, 0, {kTaps}, {1}};
-  LmsResult off, fma, source;
+  LmsResult off, fma, fast, source;
   _mlir_ciface_f32_lms_off(&off, &inputRef, &desiredRef, &weightRef);
   _mlir_ciface_f32_lms_fma(&fma, &inputRef, &desiredRef, &weightRef);
+  _mlir_ciface_f32_lms_fast(&fast, &inputRef, &desiredRef, &weightRef);
   _mlir_ciface_f32_lms(&source, &inputRef, &desiredRef, &weightRef);
 
   float expectedError[kSamples];
@@ -136,6 +139,8 @@ static int checkLms(const float *input, const float *desired, const float *weigh
   failed |= checkLmsResult(&off, expectedError, expectedAdapted, label, "lms off");
   referenceLms(input, desired, weights, 1, expectedError, expectedAdapted);
   failed |= checkLmsResult(&fma, expectedError, expectedAdapted, label, "lms fma");
+  /* Nothing consumes a permission here, so fast selects the fused member. */
+  failed |= checkLmsResult(&fast, expectedError, expectedAdapted, label, "lms fast");
   /* The .ox binding declares fma. */
   failed |= checkLmsResult(&source, expectedError, expectedAdapted, label, "lms .ox");
 
@@ -147,6 +152,8 @@ static int checkLms(const float *input, const float *desired, const float *weigh
   }
   free(off.error.allocated);
   free(off.adapted.allocated);
+  free(fast.error.allocated);
+  free(fast.adapted.allocated);
   free(fma.error.allocated);
   free(fma.adapted.allocated);
   free(source.error.allocated);

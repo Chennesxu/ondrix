@@ -20,6 +20,7 @@ extern void _mlir_ciface_f32_decimate_off(MemRefF32Rank1 *, MemRefF32Rank1 *, Me
 extern void _mlir_ciface_f32_decimate_fma(MemRefF32Rank1 *, MemRefF32Rank1 *, MemRefF32Rank1 *);
 extern void _mlir_ciface_f32_interpolate_off(MemRefF32Rank1 *, MemRefF32Rank1 *, MemRefF32Rank1 *);
 extern void _mlir_ciface_f32_interpolate_fma(MemRefF32Rank1 *, MemRefF32Rank1 *, MemRefF32Rank1 *);
+extern void _mlir_ciface_f32_interpolate_fast(MemRefF32Rank1 *, MemRefF32Rank1 *, MemRefF32Rank1 *);
 extern void _mlir_ciface_f32_fir_decimate(MemRefF32Rank1 *, MemRefF32Rank1 *, MemRefF32Rank1 *);
 extern void _mlir_ciface_f32_fir_interpolate(MemRefF32Rank1 *, MemRefF32Rank1 *, MemRefF32Rank1 *);
 
@@ -116,9 +117,10 @@ static int checkInterpolate(const float *input, const float *coeffs, const char 
 
   MemRefF32Rank1 inputRef = {inputCopy, inputCopy, 0, {kInterpolateInput}, {1}};
   MemRefF32Rank1 coeffRef = {coeffCopy, coeffCopy, 0, {kInterpolateTaps}, {1}};
-  MemRefF32Rank1 off, fma, source;
+  MemRefF32Rank1 off, fma, fast, source;
   _mlir_ciface_f32_interpolate_off(&off, &inputRef, &coeffRef);
   _mlir_ciface_f32_interpolate_fma(&fma, &inputRef, &coeffRef);
+  _mlir_ciface_f32_interpolate_fast(&fast, &inputRef, &coeffRef);
   _mlir_ciface_f32_fir_interpolate(&source, &inputRef, &coeffRef);
 
   int failed = 0;
@@ -129,12 +131,16 @@ static int checkInterpolate(const float *input, const float *coeffs, const char 
                       expectedOff);
     failed |= compare(label, "interpolate fma", m, fma.aligned[fma.offset + m * fma.strides[0]],
                       expectedFma);
+    /* Nothing consumes a permission here, so fast selects the fused member. */
+    failed |= compare(label, "interpolate fast", m, fast.aligned[fast.offset + m * fast.strides[0]],
+                      expectedFma);
     /* The .ox binding declares off. */
     failed |= compare(label, "interpolate .ox", m,
                       source.aligned[source.offset + m * source.strides[0]], expectedOff);
   }
   free(off.allocated);
   free(fma.allocated);
+  free(fast.allocated);
   free(source.allocated);
   return failed;
 }
