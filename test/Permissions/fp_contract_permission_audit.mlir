@@ -5,12 +5,9 @@
 // this flow's floating-point permissions are final: nothing between this
 // point and the object re-runs an IR optimization that could widen them.
 //
-// The implicit-check-not list is now the whole vocabulary, not just the
-// escalation set. Every fast permission is spent by the compiler, so the
-// audit point sees the selected graph and no licence to reselect. That
-// matters because a delegated permission would be acted on: `reassoc` lets
-// this toolchain's backend expand `llvm.fma` back into a multiply and an add
-// (test/Target/fp_permission_fmf.ll).
+// The implicit-check-not list is the whole vocabulary, not just the escalation
+// set: every fast permission is spent by the compiler, so the audit point sees
+// the selected graph and no licence to reselect.
 
 // An off site keeps a separate multiply and add per element.
 // CHECK-LABEL: define float @off_site(

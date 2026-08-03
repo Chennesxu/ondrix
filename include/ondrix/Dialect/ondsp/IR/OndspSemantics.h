@@ -33,12 +33,10 @@ enum class FastPermission {
 /// the operation — hands the choice to LLVM; no lowering does, so there is no
 /// entry point for it here.
 ///
-/// Delegation is not decorative. Pinned toolchain characterization, LLVM
-/// 17.0.6 x86-64 without +fma: an unflagged `llvm.fma.f32` and one carrying
-/// `contract` both stay fused, while `reassoc` lets the backend expand the
-/// intrinsic into a separate multiply and add. That is measured backend
-/// behavior, in tension with LangRef's fused specification of `llvm.fma`;
-/// `test/Target/fp_permission_fmf.ll` pins all four combinations.
+/// Delegation is not portable: de-fusion of `llvm.fma` needs both `reassoc`
+/// and a target with no fused instruction, so a delegated permission makes the
+/// realized graph target dependent from one declaration. Measured, not derived
+/// — `test/Target/fp_permission_fmf.ll` pins it.
 inline mlir::arith::FastMathFlags consumeFastPermission(FastPermission permission) {
   (void)permission;
   return mlir::arith::FastMathFlags::none;
