@@ -440,6 +440,8 @@ LogicalResult ReduceMacOp::verify() {
       failed(verifyValueNumericType(*this, getRhs().getType(), getNumeric(), "rhs")))
     return failure();
   auto fp = cast<FpAttr>(getNumeric());
+  if (failed(verifyExecutableFpFormat(*this, fp, "reduce_mac")))
+    return failure();
   if (getInitial().getType() != fp.getFormat())
     return emitOpError("floating-point reduce_mac initial and result must match numeric format");
   return success();

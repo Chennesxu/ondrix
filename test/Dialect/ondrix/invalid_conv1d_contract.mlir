@@ -81,3 +81,15 @@ func.func @rejects_unestablished_rounding(
   } : (tensor<8xi16>, tensor<3xi16>, tensor<6xi16>) -> tensor<6xi16>
   return
 }
+
+// -----
+
+func.func @conv1d_rejects_f64(
+    %input: tensor<8xf64>, %kernel: tensor<3xf64>, %init: tensor<6xf64>) -> tensor<6xf64> {
+  // expected-error@+1 {{executable conv1d supports the f32 floating-point format}}
+  %0 = ondrix.conv1d %input, %kernel, %init {
+    mode = #ondrix.conv1d_mode<convolution>,
+    numeric = #ondsp.fp<format = f64, contract = off>
+  } : (tensor<8xf64>, tensor<3xf64>, tensor<6xf64>) -> tensor<6xf64>
+  return %0 : tensor<6xf64>
+}

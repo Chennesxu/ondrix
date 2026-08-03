@@ -86,6 +86,14 @@ struct DistributivePairingSemantics {
 mlir::LogicalResult verifyProductPolicy(mlir::Operation *op, mlir::Attribute numeric,
                                         std::optional<ProductAttr> product);
 
+/// Admits only f32 on an executable floating-point path. Every such path in
+/// the catalog is f32: nothing lowers, references, or measures another format,
+/// so accepting one would hand a program to a schedule stage no evidence
+/// covers. Widening the vocabulary is a per-operation decision with its own
+/// evidence, not a consequence of `FpAttr` being format-parametric.
+mlir::LogicalResult verifyExecutableFpFormat(mlir::Operation *op, FpAttr numeric,
+                                             llvm::StringRef executable);
+
 /// Storage geometry of one executable packed-complex butterfly profile. The
 /// two profiles differ in exactly one number, so every width-dependent rule
 /// below is derived from `storageWidth` rather than restated per profile.

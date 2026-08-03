@@ -270,6 +270,8 @@ static LogicalResult verifyFirWindow(FirOp op) {
   }
 
   auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  if (failed(ondrix::ondsp::verifyExecutableFpFormat(op, fp, "FIR window")))
+    return failure();
   if (elementType != fp.getFormat() || op.getResult().getType() != fp.getFormat())
     return op.emitOpError("floating-point FIR window and result types must match numeric format");
   return success();
@@ -351,6 +353,8 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
     return op.emitOpError(
         "floating-point FIR filter must not specify fixed-point accumulator or export policy");
   auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  if (failed(ondrix::ondsp::verifyExecutableFpFormat(op, fp, "FIR filter")))
+    return failure();
   if (inputElement != fp.getFormat() || outputElement != fp.getFormat())
     return op.emitOpError("floating-point input, coefficients, init, and result must match format");
   return success();
@@ -392,8 +396,8 @@ static LogicalResult verifyResamplingNumericProfile(OpTy op, RankedTensorType in
       return op.emitOpError(
           "floating-point resampling must not specify a fixed-point export policy");
     auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
-    if (!fp.getFormat().isF32())
-      return op.emitOpError("executable resampling supports the f32 floating-point format");
+    if (failed(ondrix::ondsp::verifyExecutableFpFormat(op, fp, "resampling")))
+      return failure();
     if (inputType.getElementType() != fp.getFormat() || initType.getElementType() != fp.getFormat())
       return op.emitOpError(
           "floating-point input, coefficients, init, and result must match format");
@@ -519,6 +523,8 @@ static LogicalResult verifyConv1DDomain(Conv1DOp op) {
     return op.emitOpError(
         "floating-point conv1d must not specify fixed-point accumulator or export policy");
   auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  if (failed(ondrix::ondsp::verifyExecutableFpFormat(op, fp, "conv1d")))
+    return failure();
   if (inputElement != fp.getFormat() || outputElement != fp.getFormat())
     return op.emitOpError("floating-point input, kernel, init, and result must match format");
   return success();
@@ -588,6 +594,8 @@ static LogicalResult verifyFirStreamDomain(FirStreamOp op) {
     return op.emitOpError(
         "floating-point FIR stream must not specify fixed-point accumulator or export policy");
   auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  if (failed(ondrix::ondsp::verifyExecutableFpFormat(op, fp, "FIR stream")))
+    return failure();
   if (inputElement != fp.getFormat() || outputElement != fp.getFormat())
     return op.emitOpError("floating-point stream values must match numeric format");
   return success();
@@ -754,6 +762,8 @@ static LogicalResult verifyDotDomain(DotOp op) {
   }
 
   auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  if (failed(ondrix::ondsp::verifyExecutableFpFormat(op, fp, "dot")))
+    return failure();
   if (lhsElement != fp.getFormat() || op.getResult().getType() != fp.getFormat())
     return op.emitOpError("floating-point dot operands and result must match numeric format");
   return success();
@@ -1006,8 +1016,8 @@ LogicalResult RfftRadix4SplitOp::verify() {
 LogicalResult DctOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getInputNumeric());
   if (fp) {
-    if (!fp.getFormat().isF32())
-      return emitOpError("executable DCT supports the f32 floating-point format");
+    if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "DCT")))
+      return failure();
     // An f32 output needs no rescaled reading: the two numeric attributes
     // name the same format.
     if (getOutputNumeric() != getInputNumeric())
@@ -1040,8 +1050,8 @@ LogicalResult DctOp::verify() {
 LogicalResult MovingAverageOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
   if (fp) {
-    if (!fp.getFormat().isF32())
-      return emitOpError("executable moving average supports the f32 floating-point format");
+    if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "moving average")))
+      return failure();
   } else if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric"))) {
     return failure();
   }
@@ -1100,8 +1110,8 @@ LogicalResult CosineOp::verify() {
 LogicalResult GoertzelOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
   if (fp) {
-    if (!fp.getFormat().isF32())
-      return emitOpError("executable goertzel supports the f32 floating-point format");
+    if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "goertzel")))
+      return failure();
     if (getRounding())
       return emitOpError("floating-point goertzel rounds at no declared boundary of its own");
   } else {
@@ -1138,8 +1148,8 @@ LogicalResult GoertzelOp::verify() {
 LogicalResult MatmulOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
   if (fp) {
-    if (!fp.getFormat().isF32())
-      return emitOpError("executable matmul supports the f32 floating-point format");
+    if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "matmul")))
+      return failure();
     if (getRounding())
       return emitOpError("floating-point matmul has no requantization boundary to round");
   } else {
@@ -1175,8 +1185,8 @@ LogicalResult MatmulOp::verify() {
 LogicalResult RmsOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
   if (fp) {
-    if (!fp.getFormat().isF32())
-      return emitOpError("executable rms supports the f32 floating-point format");
+    if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "rms")))
+      return failure();
     if (getRounding())
       return emitOpError("floating-point rms rounds at no declared boundary of its own");
   } else {
@@ -1210,8 +1220,8 @@ LogicalResult RmsOp::verify() {
 LogicalResult GainOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
   if (fp) {
-    if (!fp.getFormat().isF32())
-      return emitOpError("executable gain supports the f32 floating-point format");
+    if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "gain")))
+      return failure();
     if (getRounding())
       return emitOpError("floating-point gain has no requantization boundary to round");
     if (getGain())
@@ -1250,8 +1260,8 @@ LogicalResult GainOp::verify() {
 LogicalResult LmsOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
   if (fp) {
-    if (!fp.getFormat().isF32())
-      return emitOpError("executable lms supports the f32 floating-point format");
+    if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "lms")))
+      return failure();
     if (getRounding())
       return emitOpError("floating-point lms rounds at no declared boundary of its own");
     if (getStepSize())

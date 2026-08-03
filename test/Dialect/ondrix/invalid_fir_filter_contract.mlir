@@ -290,3 +290,15 @@ func.func @rejects_unestablished_rounding(
   } : (tensor<8xi16>, tensor<3xi16>, tensor<6xi16>) -> tensor<6xi16>
   return
 }
+
+// -----
+
+func.func @fir_filter_rejects_f64(
+    %input: tensor<8xf64>, %coeffs: tensor<3xf64>, %init: tensor<6xf64>) -> tensor<6xf64> {
+  // expected-error@+1 {{executable FIR filter supports the f32 floating-point format}}
+  %0 = ondrix.fir_filter %input, %coeffs, %init {
+    boundary = #ondrix.fir_boundary<valid>,
+    numeric = #ondsp.fp<format = f64, contract = off>
+  } : (tensor<8xf64>, tensor<3xf64>, tensor<6xf64>) -> tensor<6xf64>
+  return %0 : tensor<6xf64>
+}

@@ -24,6 +24,13 @@ LogicalResult verifyProductPolicy(Operation *op, Attribute numeric,
   return success();
 }
 
+LogicalResult verifyExecutableFpFormat(Operation *op, FpAttr numeric, StringRef executable) {
+  if (!numeric.getFormat().isF32())
+    return op->emitOpError() << "executable " << executable
+                             << " supports the f32 floating-point format";
+  return success();
+}
+
 static LogicalResult verifyButterflyScale(Operation *op, ScaleAttr scale, unsigned rightShift,
                                           unsigned storageWidth, StringRef name) {
   if (scale.getPreShiftLeft() != 0 || scale.getPostShiftRight() != rightShift)

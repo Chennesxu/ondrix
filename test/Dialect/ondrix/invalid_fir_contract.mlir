@@ -104,3 +104,11 @@ func.func @fixed_fir_rejects_builtin_integer_result(
   %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (memref<8xi16>, memref<8xi16>) -> si32
   return %0 : si32
 }
+
+// -----
+
+func.func @fir_rejects_f64(%input: memref<4xf64>, %coeffs: memref<4xf64>) -> f64 {
+  // expected-error@+1 {{executable FIR window supports the f32 floating-point format}}
+  %0 = ondrix.fir %input, %coeffs {numeric = #ondsp.fp<format = f64, contract = off>} : (memref<4xf64>, memref<4xf64>) -> f64
+  return %0 : f64
+}

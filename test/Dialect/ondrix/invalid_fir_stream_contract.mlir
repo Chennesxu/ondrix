@@ -148,3 +148,15 @@ func.func @rejects_unestablished_rounding(
       -> (tensor<4xi16>, tensor<2xi16>)
   return
 }
+
+// -----
+
+func.func @fir_stream_rejects_f64(
+    %input: tensor<4xf64>, %coeffs: tensor<3xf64>, %state: tensor<2xf64>) {
+  // expected-error @+1 {{executable FIR stream supports the f32 floating-point format}}
+  %output, %next = ondrix.fir_stream %input, %coeffs, %state {
+    numeric = #ondsp.fp<format = f64, contract = fma>
+  } : (tensor<4xf64>, tensor<3xf64>, tensor<2xf64>)
+      -> (tensor<4xf64>, tensor<2xf64>)
+  return
+}

@@ -91,3 +91,13 @@ func.func @fixed_dot_rejects_builtin_integer_result(%lhs: i16, %rhs: i16) -> ui3
   %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (i16, i16) -> ui32
   return %0 : ui32
 }
+
+// -----
+
+// The declared format is admitted per operation, not per attribute: FpAttr is
+// format-parametric, but only f32 has a lowering and a differential reference.
+func.func @dot_rejects_f64(%lhs: memref<8xf64>, %rhs: memref<8xf64>) -> f64 {
+  // expected-error@+1 {{executable dot supports the f32 floating-point format}}
+  %0 = ondrix.dot %lhs, %rhs {numeric = #ondsp.fp<format = f64, contract = off>} : (memref<8xf64>, memref<8xf64>) -> f64
+  return %0 : f64
+}

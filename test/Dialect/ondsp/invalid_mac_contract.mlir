@@ -144,3 +144,12 @@ func.func @unsigned_high_raw_product_is_undefined(
   %0 = ondsp.mac %acc, %a, %b {numeric = #ondsp.fixed<unsigned, storage = i32, frac = 31>, product = #ondsp.product<high_raw>} : (!ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>, i32, i32) -> !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>
   return %0 : !ondsp.acc<storage = i40, frac = 30, unsigned, update_overflow = saturate>
 }
+
+// -----
+
+func.func @reduce_mac_rejects_f64(%lhs: memref<8xf64>, %rhs: memref<8xf64>) -> f64 {
+  %zero = arith.constant 0.0 : f64
+  // expected-error@+1 {{executable reduce_mac supports the f32 floating-point format}}
+  %0 = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fp<format = f64, contract = fma>} : (f64, memref<8xf64>, memref<8xf64>) -> f64
+  return %0 : f64
+}
