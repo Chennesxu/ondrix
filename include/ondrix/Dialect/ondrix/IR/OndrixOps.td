@@ -1000,11 +1000,20 @@ def Ondrix_GainOp : Ondrix_Op<"gain", [Pure]> {
     programs on all 65536 inputs and proves them bit-identical. That
     certificate is per tie rule: the mergeable constant pairs genuinely
     differ between `nearest_even` and `nearest_ties_positive`.
+
+    The f32 profile scales by the declared `fp_gain` constant instead, with
+    one IEEE multiply per element and no rounding attribute, because it has
+    no requantization boundary to place a tie rule at. All three contract
+    modes denote the same event graph here: a lone multiply offers neither a
+    sum to reassociate nor an addend to fuse with, so the three declarations
+    produce bit-identical results while the `fast` declaration is still
+    carried into the emitted multiply.
   }];
   let arguments = (ins AnyRankedTensor:$input,
-                   I64Attr:$gain,
+                   OptionalAttr<I64Attr>:$gain,
+                   OptionalAttr<F32Attr>:$fp_gain,
                    Ondsp_NumericAttr:$numeric,
-                   Ondsp_RoundingModeAttr:$rounding);
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
@@ -1034,13 +1043,31 @@ def Ondrix_LmsOp : Ondrix_Op<"lms", [Pure]> {
     gain into the step size) illegal — a one-LSB difference in one update
     compounds through the feedback. The operation returns the error
     signal and the final weights.
+
+    The f32 profile keeps the same recursion with the boundaries removed and
+    the step size declared as `fp_step_size`:
+
+    ```text
+    y     = reduction_k w[k] * x[n-k]     contract indexed, from +0.0
+    e[n]  = d[n] - y                      one IEEE subtract
+    s     = mu * e[n]                     one IEEE multiply
+    w[k] += s * x[n-k]                    contract indexed, per k
+    ```
+
+    Two sites are contract indexed: the K-term output reduction and each
+    weight update. The sample recursion is not a permission question at all -
+    it is a data dependence, so no declaration reorders samples, and `fast`
+    authorizes reassociating the tap sum only. Unlike interpolation's
+    inserted zeros, the zero prehistory samples `x[m < 0]` are evaluated
+    rather than skipped, matching the fixed profile's shape.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    AnyRankedTensor:$desired,
                    AnyRankedTensor:$weights,
-                   I64Attr:$step_size,
+                   OptionalAttr<I64Attr>:$step_size,
+                   OptionalAttr<F32Attr>:$fp_step_size,
                    Ondsp_NumericAttr:$numeric,
-                   Ondsp_RoundingModeAttr:$rounding);
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$error, AnyRankedTensor:$adapted);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

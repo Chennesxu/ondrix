@@ -263,3 +263,20 @@ func.func @triple_halving_partial(%input: tensor<8xi16>) -> tensor<8xi16> {
   } : (tensor<8xi16>) -> tensor<8xi16>
   return %third : tensor<8xi16>
 }
+
+// The certificate is an exhaustive sweep of the 65536 Q15 inputs and has no
+// floating-point analogue, so an f32 cascade stays as written even where the
+// declaration would permit a reassociating consumer to fold it.
+// CHECK-LABEL: func.func @f32_cascade_refused
+// CHECK-COUNT-2: ondrix.gain
+func.func @f32_cascade_refused(%input: tensor<8xf32>) -> tensor<8xf32> {
+  %first = ondrix.gain %input {
+    fp_gain = 5.000000e-01 : f32,
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (tensor<8xf32>) -> tensor<8xf32>
+  %second = ondrix.gain %first {
+    fp_gain = 5.000000e-01 : f32,
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (tensor<8xf32>) -> tensor<8xf32>
+  return %second : tensor<8xf32>
+}

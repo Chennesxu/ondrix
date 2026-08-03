@@ -70,3 +70,38 @@ func.func @gain_wrong_numeric(%input: tensor<8xi16>) -> tensor<8xi16> {
   } : (tensor<8xi16>) -> tensor<8xi16>
   return %result : tensor<8xi16>
 }
+
+// -----
+
+func.func @rejects_fp_gain_rounding(%input: tensor<8xf32>) {
+  // expected-error @+1 {{floating-point gain has no requantization boundary to round}}
+  %0 = ondrix.gain %input {
+    fp_gain = 5.000000e-01 : f32,
+    numeric = #ondsp.fp<format = f32, contract = off>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xf32>) -> tensor<8xf32>
+  return
+}
+
+// -----
+
+func.func @rejects_missing_fp_gain(%input: tensor<8xf32>) {
+  // expected-error @+1 {{floating-point gain requires the fp_gain constant}}
+  %0 = ondrix.gain %input {
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<8xf32>) -> tensor<8xf32>
+  return
+}
+
+// -----
+
+func.func @rejects_fp_constant_on_fixed_gain(%input: tensor<8xi16>) {
+  // expected-error @+1 {{fixed gain must not specify a floating-point constant}}
+  %0 = ondrix.gain %input {
+    gain = 19661,
+    fp_gain = 5.000000e-01 : f32,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return
+}

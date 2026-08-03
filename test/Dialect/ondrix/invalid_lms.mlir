@@ -62,3 +62,27 @@ func.func @lms_dynamic_input(%x: tensor<?xi16>, %d: tensor<?xi16>, %w: tensor<4x
   } : (tensor<?xi16>, tensor<?xi16>, tensor<4xi16>) -> (tensor<?xi16>, tensor<4xi16>)
   return %e, %wf : tensor<?xi16>, tensor<4xi16>
 }
+
+// -----
+
+func.func @rejects_missing_fp_step_size(
+    %input: tensor<8xf32>, %desired: tensor<8xf32>, %weights: tensor<2xf32>) {
+  // expected-error @+1 {{floating-point lms requires the fp_step_size constant}}
+  %0, %1 = ondrix.lms %input, %desired, %weights {
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<8xf32>, tensor<8xf32>, tensor<2xf32>) -> (tensor<8xf32>, tensor<2xf32>)
+  return
+}
+
+// -----
+
+func.func @rejects_fixed_step_size_on_fp_lms(
+    %input: tensor<8xf32>, %desired: tensor<8xf32>, %weights: tensor<2xf32>) {
+  // expected-error @+1 {{floating-point lms rounds at no declared boundary of its own}}
+  %0, %1 = ondrix.lms %input, %desired, %weights {
+    step_size = 1024,
+    fp_step_size = 6.250000e-02 : f32,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<8xf32>, tensor<8xf32>, tensor<2xf32>) -> (tensor<8xf32>, tensor<2xf32>)
+  return
+}

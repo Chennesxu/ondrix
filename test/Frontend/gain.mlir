@@ -3,6 +3,8 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_gain_constant.ox 2>&1 | FileCheck %s --check-prefix=CONSTANT
 // RUN: not ondrix-compile %S/Inputs/invalid_gain_shape.ox 2>&1 | FileCheck %s --check-prefix=SHAPE
 // RUN: not ondrix-compile %S/Inputs/invalid_gain_rounding.ox 2>&1 | FileCheck %s --check-prefix=ROUNDING
+// RUN: ondrix-compile %S/Inputs/f32_gain.ox | FileCheck %s --check-prefix=FP
+// RUN: not ondrix-compile %S/Inputs/invalid_f32_gain_constant.ox 2>&1 | FileCheck %s --check-prefix=FPCONST
 
 // CHECK-LABEL: func.func @q15_gain(
 // CHECK-SAME: %[[INPUT:.*]]: tensor<64xi16>) -> tensor<64xi16>
@@ -22,3 +24,14 @@
 // CONSTANT: invalid_gain_constant.ox:2:10: error: gain constant must be a raw signed Q1.15 value in [-32768, 32767]
 // SHAPE: invalid_gain_shape.ox:2:10: error: gain result extent must equal the input extent
 // ROUNDING: invalid_gain_rounding.ox:2:10: error: gain rounding must be nearest_even or nearest_ties_positive
+
+// The lexer has no floating-point literal, so the f32 constant is spelled as
+// a rational and becomes the correctly rounded binary32 of its exact value.
+// FP-LABEL: func.func @f32_gain(
+// FP: ondrix.gain
+// FP-SAME: fp_gain = 3.750000e-01 : f32
+// FP-SAME: numeric = #ondsp.fp<format = f32, contract = off>
+
+// A rational whose binary32 value is not zero or normal is refused rather
+// than rounded into the subnormal range or to infinity.
+// FPCONST: invalid_f32_gain_constant.ox:2:10: error: f32 gain constant must be a rational whose binary32 value is zero or normal

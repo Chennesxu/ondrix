@@ -300,11 +300,30 @@ struct BuiltinCallAst {
   int64_t window = 0;
   int64_t gain = 0;
   int64_t stepSize = 0;
+  int64_t fpConstantDen = 0;
+  float fpConstant = 0.0f;
   int64_t taps = 0;
   int64_t cutoffNum = 0;
   int64_t cutoffDen = 0;
   SourcePosition position;
 };
+
+// A source rational becomes the correctly rounded binary32 of its exact
+// value. binary64 division is correctly rounded to 53 bits and 53 >= 2*24+2,
+// so rounding that quotient again to binary32 lands where single rounding
+// would - provided both operands are exact in binary64 and the result is
+// normal, which is what this refuses to assume.
+std::optional<float> roundRationalToF32(int64_t numerator, int64_t denominator) {
+  constexpr int64_t kExactInBinary64 = int64_t(1) << 53;
+  if (denominator <= 0 || denominator > kExactInBinary64 || numerator > kExactInBinary64 ||
+      numerator < -kExactInBinary64)
+    return std::nullopt;
+  auto value =
+      static_cast<float>(static_cast<double>(numerator) / static_cast<double>(denominator));
+  if (numerator == 0)
+    return 0.0f;
+  return std::isnormal(value) ? std::optional<float>(value) : std::nullopt;
+}
 
 ExpressionAst::ExpressionAst(BuiltinCallAst call)
     : call(std::make_unique<BuiltinCallAst>(std::move(call))), position(this->call->position) {}
@@ -549,20 +568,10 @@ public:
       if (!taps || !expect(TokenKind::Comma, "expected ',' before lowpass cutoff") ||
           !expectIdentifier("cutoff", "expected lowpass cutoff") ||
           !expect(TokenKind::Equal, "expected '=' after cutoff") ||
-          !expect(TokenKind::LeftBracket, "expected '[' before the rational cutoff"))
-        return std::nullopt;
-      auto cutoffNum = parseSignedInteger("expected cutoff numerator");
-      if (!cutoffNum ||
-          !expect(TokenKind::Comma, "expected ',' between cutoff numerator and denominator"))
-        return std::nullopt;
-      auto cutoffDen = parseSignedInteger("expected cutoff denominator");
-      if (!cutoffDen ||
-          !expect(TokenKind::RightBracket, "expected ']' after the rational cutoff") ||
+          !parseRationalConstant("cutoff", call.cutoffNum, call.cutoffDen) ||
           !expect(TokenKind::RightParen, "expected ')' after lowpass expression"))
         return std::nullopt;
       call.taps = *taps;
-      call.cutoffNum = *cutoffNum;
-      call.cutoffDen = *cutoffDen;
       return call;
     }
     if (isFftKind(call.kind)) {
@@ -632,12 +641,26 @@ public:
           !expectIdentifier("step_size", "expected lms step size") ||
           !expect(TokenKind::Equal, "expected '=' after step_size"))
         return std::nullopt;
-      auto stepSize = parseSignedInteger("expected lms step size");
-      if (!stepSize || !expect(TokenKind::RightParen, "expected ')' after lms expression"))
+      if (policyType == SourceType::F32) {
+        if (!parseRationalConstant("step size", call.stepSize, call.fpConstantDen) ||
+            !expect(TokenKind::Comma, "expected ',' before lms contract policy") ||
+            !expectIdentifier("contract", "expected floating-point contract policy") ||
+            !expect(TokenKind::Equal, "expected '=' after contract"))
+          return std::nullopt;
+        auto contract = parseIdentifier("expected floating-point contract mode");
+        if (!contract)
+          return std::nullopt;
+        call.fpContract = contract->spelling.str();
+      } else {
+        auto stepSize = parseSignedInteger("expected lms step size");
+        if (!stepSize)
+          return std::nullopt;
+        call.stepSize = *stepSize;
+      }
+      if (!expect(TokenKind::RightParen, "expected ')' after lms expression"))
         return std::nullopt;
       call.operands.push_back(resolveOperand(*desired));
       call.operands.push_back(resolveOperand(*weights));
-      call.stepSize = *stepSize;
       return call;
     }
     if (call.kind == ReductionKind::Butterfly || call.kind == ReductionKind::FirStream) {
@@ -717,6 +740,20 @@ public:
           !expectIdentifier(keyword, llvm::Twine("expected ") + builtin + " constant") ||
           !expect(TokenKind::Equal, llvm::Twine("expected '=' after ") + keyword))
         return std::nullopt;
+      if (isGain && policyType == SourceType::F32) {
+        if (!parseRationalConstant("gain", call.gain, call.fpConstantDen) ||
+            !expect(TokenKind::Comma, "expected ',' before gain contract policy") ||
+            !expectIdentifier("contract", "expected floating-point contract policy") ||
+            !expect(TokenKind::Equal, "expected '=' after contract"))
+          return std::nullopt;
+        auto contract = parseIdentifier("expected floating-point contract mode");
+        if (!contract)
+          return std::nullopt;
+        call.fpContract = contract->spelling.str();
+        if (!expect(TokenKind::RightParen, "expected ')' after gain expression"))
+          return std::nullopt;
+        return call;
+      }
       auto constant = parseSignedInteger(llvm::Twine("expected ") + builtin + " constant");
       if (!constant)
         return std::nullopt;
@@ -944,6 +981,25 @@ private:
     }
     diagnostics.error(current.position, message);
     return std::nullopt;
+  }
+
+  // `[num, den]` is the only spelling for a non-integer constant: the lexer
+  // has no floating-point literal, and a rational names the intended value
+  // exactly rather than through a decimal the reader must re-round.
+  bool parseRationalConstant(const llvm::Twine &name, int64_t &numerator, int64_t &denominator) {
+    if (!expect(TokenKind::LeftBracket, "expected '[' before the rational " + name))
+      return false;
+    auto parsedNumerator = parseSignedInteger("expected " + name + " numerator");
+    if (!parsedNumerator ||
+        !expect(TokenKind::Comma, "expected ',' between " + name + " numerator and denominator"))
+      return false;
+    auto parsedDenominator = parseSignedInteger("expected " + name + " denominator");
+    if (!parsedDenominator ||
+        !expect(TokenKind::RightBracket, "expected ']' after the rational " + name))
+      return false;
+    numerator = *parsedNumerator;
+    denominator = *parsedDenominator;
+    return true;
   }
 
   std::optional<int64_t> parseSignedInteger(const llvm::Twine &message) {
@@ -1521,13 +1577,15 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                          std::nullopt, std::nullopt};
   }
   if (ast.result.kind == ReductionKind::Lms) {
+    bool isFloat = ast.primaryResult().type == SourceType::F32;
     if (ast.results.size() != 2 || !ast.primaryResult().tensor || !ast.results[1].tensor ||
-        ast.primaryResult().type != SourceType::Q15 || !lhsParameter || !rhsParameter ||
-        !thirdParameter || constexprCount != 0 ||
+        (ast.primaryResult().type != SourceType::Q15 && !isFloat) || !lhsParameter ||
+        !rhsParameter || !thirdParameter || constexprCount != 0 ||
         llvm::any_of(ast.parameters,
                      [](const ParameterAst &parameter) { return !parameter.isTensor(); })) {
-      diagnostics.error(ast.result.position,
-                        "lms requires three Q15 tensor parameters and two Q15 tensor results");
+      diagnostics.error(
+          ast.result.position,
+          "lms requires three Q15 or f32 tensor parameters and two matching tensor results");
       return std::nullopt;
     }
     if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
@@ -1561,6 +1619,25 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       diagnostics.error(ast.result.position,
                         "lms adapted weights must have the initial weight extent");
       return std::nullopt;
+    }
+    if (isFloat) {
+      std::optional<float> constant =
+          roundRationalToF32(ast.result.stepSize, ast.result.fpConstantDen);
+      if (!constant) {
+        diagnostics.error(ast.result.position,
+                          "f32 lms step size must be a rational whose binary32 value is zero "
+                          "or normal");
+        return std::nullopt;
+      }
+      ast.result.fpConstant = *constant;
+      auto contract = parseFpContract(ast.result.fpContract);
+      if (!contract) {
+        diagnostics.error(ast.result.position,
+                          llvm::Twine("unsupported floating-point contract '") +
+                              ast.result.fpContract + "'");
+        return std::nullopt;
+      }
+      return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, *contract};
     }
     if (ast.result.stepSize < 0 || ast.result.stepSize > 32767) {
       diagnostics.error(ast.result.position,
@@ -2055,9 +2132,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                               : ast.result.kind == ReductionKind::Rms           ? "rms"
                               : ast.result.kind == ReductionKind::Sine          ? "sine"
                                                                                 : "cosine";
-    bool admitsFloat = ast.result.kind == ReductionKind::Rms ||
-                       ast.result.kind == ReductionKind::MovingAverage ||
-                       ast.result.kind == ReductionKind::Dct;
+    bool admitsFloat =
+        ast.result.kind == ReductionKind::Rms || ast.result.kind == ReductionKind::MovingAverage ||
+        ast.result.kind == ReductionKind::Dct || ast.result.kind == ReductionKind::Gain;
     bool isFloat = ast.primaryResult().type == SourceType::F32;
     if (constexprCount != 0 || !ast.primaryResult().tensor || !lhsParameter ||
         !lhsParameter->isTensor() ||
@@ -2112,8 +2189,18 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       }
     } else if (ast.result.kind == ReductionKind::Gain) {
-      if (ast.result.gain < std::numeric_limits<int16_t>::min() ||
-          ast.result.gain > std::numeric_limits<int16_t>::max()) {
+      if (isFloat) {
+        std::optional<float> constant =
+            roundRationalToF32(ast.result.gain, ast.result.fpConstantDen);
+        if (!constant) {
+          diagnostics.error(ast.result.position,
+                            "f32 gain constant must be a rational whose binary32 value is zero "
+                            "or normal");
+          return std::nullopt;
+        }
+        ast.result.fpConstant = *constant;
+      } else if (ast.result.gain < std::numeric_limits<int16_t>::min() ||
+                 ast.result.gain > std::numeric_limits<int16_t>::max()) {
         diagnostics.error(ast.result.position,
                           "gain constant must be a raw signed Q1.15 value in [-32768, 32767]");
         return std::nullopt;
@@ -2500,9 +2587,14 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
               ? Attribute(ondsp::FpAttr::get(&context, elementType, *kernel.fpContract))
               : Attribute(numeric));
     } else if (kernel.ast.result.kind == ReductionKind::Gain) {
-      result = builder.create<ir::GainOp>(expressionLocation, outputType, lhs,
-                                          builder.getI64IntegerAttr(kernel.ast.result.gain),
-                                          numeric, rounding);
+      result = builder.create<ir::GainOp>(
+          expressionLocation, outputType, lhs,
+          kernel.fpContract ? IntegerAttr() : builder.getI64IntegerAttr(kernel.ast.result.gain),
+          kernel.fpContract ? builder.getF32FloatAttr(kernel.ast.result.fpConstant) : FloatAttr(),
+          kernel.fpContract
+              ? Attribute(ondsp::FpAttr::get(&context, elementType, *kernel.fpContract))
+              : Attribute(numeric),
+          rounding);
     } else if (kernel.ast.result.kind == ReductionKind::Sine) {
       result = builder.create<ir::SineOp>(expressionLocation, outputType, lhs, numeric, rounding);
     } else if (kernel.ast.result.kind == ReductionKind::Cosine) {
@@ -2603,11 +2695,18 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
   if (kernel.ast.result.kind == ReductionKind::Lms) {
     Value weights = arguments.lookup(*getParameterOperand(kernel.ast.result, 2));
-    auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
-    auto rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
+    Attribute numeric =
+        kernel.fpContract ? Attribute(ondsp::FpAttr::get(&context, elementType, *kernel.fpContract))
+                          : Attribute(ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed,
+                                                            elementType, 15));
+    ondsp::RoundingModeAttr rounding;
+    if (!kernel.fpContract)
+      rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
     auto lms = builder.create<ir::LmsOp>(
         expressionLocation, resultTypes[0], resultTypes[1], lhs, rhs, weights,
-        builder.getI64IntegerAttr(kernel.ast.result.stepSize), numeric, rounding);
+        kernel.fpContract ? IntegerAttr() : builder.getI64IntegerAttr(kernel.ast.result.stepSize),
+        kernel.fpContract ? builder.getF32FloatAttr(kernel.ast.result.fpConstant) : FloatAttr(),
+        numeric, rounding);
     builder.create<func::ReturnOp>(expressionLocation,
                                    ValueRange{lms.getError(), lms.getAdapted()});
     module->push_back(function);

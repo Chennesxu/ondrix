@@ -1978,16 +1978,24 @@ public:
     Location loc = op.getLoc();
     int64_t extent = op.getInput().getType().getDimSize(0);
     IntegerType i64 = rewriter.getIntegerType(64);
+    auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
     // The product of two Q1.15 values is exact in i64; the single declared
     // boundary is the saturating requantization by 15, under the tie rule
     // the operation declares (the verifier admits nearest_even and
-    // nearest_ties_positive). One elementwise loop instead of unrolled
+    // nearest_ties_positive). The f32 profile is one multiply per element
+    // with no boundary after it. One elementwise loop instead of unrolled
     // inserts: the operation admits extents up to 4096, where a long
     // tensor.insert chain is quadratic in one-shot bufferization.
-    auto scale = ondrix::ondsp::ScaleAttr::get(
-        rewriter.getContext(), /*preShiftLeft=*/0, /*postShiftRight=*/15, op.getRounding(),
-        ondrix::ondsp::OverflowMode::Saturate, rewriter.getI16Type());
-    Value gain = rewriter.create<arith::ConstantIntOp>(loc, op.getGain(), 64);
+    ondrix::ondsp::ScaleAttr scale;
+    Value gain;
+    if (fp) {
+      gain = rewriter.create<arith::ConstantOp>(loc, op.getFpGainAttr());
+    } else {
+      scale = ondrix::ondsp::ScaleAttr::get(
+          rewriter.getContext(), /*preShiftLeft=*/0, /*postShiftRight=*/15, *op.getRounding(),
+          ondrix::ondsp::OverflowMode::Saturate, rewriter.getI16Type());
+      gain = rewriter.create<arith::ConstantIntOp>(loc, op.getGainAttr().getInt(), 64);
+    }
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
@@ -1999,10 +2007,15 @@ public:
         loc, zero, extentValue, one, ValueRange{empty},
         [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
           Value element = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
-          Value wide = builder.create<arith::ExtSIOp>(loc, i64, element);
-          Value product = builder.create<arith::MulIOp>(loc, wide, gain);
-          Value scaled = builder.create<ondrix::ondsp::RoundShiftOp>(loc, builder.getI16Type(),
-                                                                     product, scale);
+          Value scaled;
+          if (fp) {
+            scaled = createFpMultiply(loc, element, gain, fp, builder);
+          } else {
+            Value wide = builder.create<arith::ExtSIOp>(loc, i64, element);
+            Value product = builder.create<arith::MulIOp>(loc, wide, gain);
+            scaled = builder.create<ondrix::ondsp::RoundShiftOp>(loc, builder.getI16Type(), product,
+                                                                 scale);
+          }
           Value inserted =
               builder.create<tensor::InsertOp>(loc, scaled, iterArgs.front(), position);
           builder.create<scf::YieldOp>(loc, inserted);
@@ -2025,33 +2038,43 @@ public:
     IntegerType i32 = rewriter.getIntegerType(32);
     IntegerType i64 = rewriter.getIntegerType(64);
     Attribute numeric = op.getNumeric();
-    // Every rounding boundary of the recursion is one nearest-even
+    auto fp = dyn_cast<ondrix::ondsp::FpAttr>(numeric);
+    Type element = fp ? Type(fp.getFormat()) : Type(i16);
+    // Every fixed rounding boundary of the recursion is one nearest-even
     // saturating round_shift by 15; the error and weight updates use
-    // explicit saturating casts. The whole recursion is loop-form: the
-    // quantized weight state flows sample to sample as an iter_arg.
-    ondrix::ondsp::ScaleAttr scale = getNearestEvenSaturatingShift(rewriter.getContext(), 15);
-    Value mu = rewriter.create<arith::ConstantIntOp>(loc, op.getStepSize(), 64);
+    // explicit saturating casts. The f32 profile has no boundary at any of
+    // them. The whole recursion is loop-form either way: the weight state
+    // flows sample to sample as an iter_arg.
+    ondrix::ondsp::ScaleAttr scale;
+    Value mu;
+    if (fp) {
+      mu = rewriter.create<arith::ConstantOp>(loc, op.getFpStepSizeAttr());
+    } else {
+      scale = getNearestEvenSaturatingShift(rewriter.getContext(), 15);
+      mu = rewriter.create<arith::ConstantIntOp>(loc, op.getStepSizeAttr().getInt(), 64);
+    }
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     Value sampleCount = rewriter.create<arith::ConstantIndexOp>(loc, samples);
     Value tapCount = rewriter.create<arith::ConstantIndexOp>(loc, taps);
     Value zero64 = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
-    Value zero16 = rewriter.create<arith::ConstantIntOp>(loc, 0, 16);
+    Value zeroElement = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(element));
 
-    // Zero-prehistory tap fetch: x[n - k], 0 for n < k.
+    // Zero-prehistory tap fetch: x[n - k], 0 for n < k. The prehistory term
+    // is evaluated rather than skipped on both profiles.
     auto guardedInput = [&](OpBuilder &builder, Location loc, Value sample, Value tap) -> Value {
       Value offset = builder.create<arith::SubIOp>(loc, sample, tap);
       Value valid = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, offset, zero);
       Value clamped = builder.create<arith::MaxSIOp>(loc, offset, zero);
-      Value element = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), clamped);
-      return builder.create<arith::SelectOp>(loc, valid, element, zero16);
+      Value value = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), clamped);
+      return builder.create<arith::SelectOp>(loc, valid, value, zeroElement);
     };
 
     // Copy the initial weights into a fresh tensor before adapting: the
     // recursion mutates its weight state per sample, and inserting into
     // the function-argument tensor directly would let bufferization adapt
     // the caller's buffer in place.
-    Value weightsEmpty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{taps}, i16);
+    Value weightsEmpty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{taps}, element);
     auto copyLoop = rewriter.create<scf::ForOp>(
         loc, zero, tapCount, one, ValueRange{weightsEmpty},
         [&](OpBuilder &builder, Location loc, Value tap, ValueRange iterArgs) {
@@ -2060,7 +2083,42 @@ public:
           builder.create<scf::YieldOp>(loc, inserted);
         });
 
-    Value errorsEmpty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{samples}, i16);
+    Value errorsEmpty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{samples}, element);
+    if (fp) {
+      auto fpLoop = rewriter.create<scf::ForOp>(
+          loc, zero, sampleCount, one, ValueRange{copyLoop.getResult(0), errorsEmpty},
+          [&](OpBuilder &builder, Location loc, Value sample, ValueRange iterArgs) {
+            Value weights = iterArgs[0];
+            auto accLoop = builder.create<scf::ForOp>(
+                loc, zero, tapCount, one, ValueRange{zeroElement},
+                [&](OpBuilder &builder, Location loc, Value tap, ValueRange accArgs) {
+                  Value term = guardedInput(builder, loc, sample, tap);
+                  Value weight = builder.create<tensor::ExtractOp>(loc, weights, tap);
+                  Value updated =
+                      createFpAccumulatorUpdate(loc, weight, term, accArgs.front(), fp, builder);
+                  builder.create<scf::YieldOp>(loc, updated);
+                });
+            Value desired = builder.create<tensor::ExtractOp>(loc, adaptor.getDesired(), sample);
+            Value error = builder.create<arith::SubFOp>(loc, desired, accLoop.getResult(0));
+            Value nextErrors = builder.create<tensor::InsertOp>(loc, error, iterArgs[1], sample);
+            Value step = createFpMultiply(loc, mu, error, fp, builder);
+
+            auto updateLoop = builder.create<scf::ForOp>(
+                loc, zero, tapCount, one, ValueRange{weights},
+                [&](OpBuilder &builder, Location loc, Value tap, ValueRange updateArgs) {
+                  Value term = guardedInput(builder, loc, sample, tap);
+                  Value weight = builder.create<tensor::ExtractOp>(loc, updateArgs.front(), tap);
+                  Value updated = createFpAccumulatorUpdate(loc, step, term, weight, fp, builder);
+                  Value inserted =
+                      builder.create<tensor::InsertOp>(loc, updated, updateArgs.front(), tap);
+                  builder.create<scf::YieldOp>(loc, inserted);
+                });
+            builder.create<scf::YieldOp>(loc, ValueRange{updateLoop.getResult(0), nextErrors});
+          });
+      rewriter.replaceOp(op, {fpLoop.getResult(1), fpLoop.getResult(0)});
+      return success();
+    }
+
     auto sampleLoop = rewriter.create<scf::ForOp>(
         loc, zero, sampleCount, one, ValueRange{copyLoop.getResult(0), errorsEmpty},
         [&](OpBuilder &builder, Location loc, Value sample, ValueRange iterArgs) {

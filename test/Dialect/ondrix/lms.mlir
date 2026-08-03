@@ -26,3 +26,16 @@ func.func @lms_single_tap(%x: tensor<1xi16>, %d: tensor<1xi16>, %w: tensor<1xi16
   } : (tensor<1xi16>, tensor<1xi16>, tensor<1xi16>) -> (tensor<1xi16>, tensor<1xi16>)
   return %e, %wf : tensor<1xi16>, tensor<1xi16>
 }
+
+// CHECK-LABEL: func.func @f32_lms
+// CHECK: ondrix.lms
+// CHECK-SAME: fp_step_size = 6.250000e-02 : f32
+// CHECK-SAME: numeric = #ondsp.fp<format = f32, contract = fma>
+func.func @f32_lms(%input: tensor<32xf32>, %desired: tensor<32xf32>, %weights: tensor<4xf32>)
+    -> (tensor<32xf32>, tensor<4xf32>) {
+  %error, %adapted = ondrix.lms %input, %desired, %weights {
+    fp_step_size = 6.250000e-02 : f32,
+    numeric = #ondsp.fp<format = f32, contract = fma>
+  } : (tensor<32xf32>, tensor<32xf32>, tensor<4xf32>) -> (tensor<32xf32>, tensor<4xf32>)
+  return %error, %adapted : tensor<32xf32>, tensor<4xf32>
+}

@@ -39,3 +39,15 @@ func.func @gain_ties_positive(%input: tensor<64xi16>) -> tensor<64xi16> {
   } : (tensor<64xi16>) -> tensor<64xi16>
   return %result : tensor<64xi16>
 }
+
+// CHECK-LABEL: func.func @f32_gain
+// CHECK: ondrix.gain
+// CHECK-SAME: fp_gain = 2.500000e-01 : f32
+// CHECK-SAME: numeric = #ondsp.fp<format = f32, contract = fast>
+func.func @f32_gain(%input: tensor<64xf32>) -> tensor<64xf32> {
+  %result = ondrix.gain %input {
+    fp_gain = 2.500000e-01 : f32,
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (tensor<64xf32>) -> tensor<64xf32>
+  return %result : tensor<64xf32>
+}

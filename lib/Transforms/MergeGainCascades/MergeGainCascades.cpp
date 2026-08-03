@@ -69,22 +69,29 @@ public:
         // policies never merge.
         if (inner.getNumeric() != outer.getNumeric() || inner.getRounding() != outer.getRounding())
           continue;
+        // The certificate is an exhaustive sweep of the 65536 Q15 inputs and
+        // has no floating-point analogue.
+        if (!isa<ondrix::ondsp::FixedAttr>(outer.getNumeric()))
+          continue;
         // Both operations agree on the tie rule, so the pair has one common
         // mode to compute and certify the merged constant under.
-        ondrix::ondsp::RoundingMode mode = outer.getRounding();
+        ondrix::ondsp::RoundingMode mode = *outer.getRounding();
         if (!isAdmittedGainRounding(mode))
           continue;
-        int64_t merged = quantizeQ15Product(inner.getGain(), outer.getGain(), mode);
-        if (!certifyMerge(inner.getGain(), outer.getGain(), merged, mode))
+        int64_t innerGain = inner.getGainAttr().getInt();
+        int64_t outerGain = outer.getGainAttr().getInt();
+        int64_t merged = quantizeQ15Product(innerGain, outerGain, mode);
+        if (!certifyMerge(innerGain, outerGain, merged, mode))
           continue;
 
         OpBuilder builder(outer);
         auto replacement = builder.create<ondrix::ir::GainOp>(
             outer.getLoc(), outer.getResult().getType(), inner.getInput(),
-            builder.getI64IntegerAttr(merged), outer.getNumeric(), outer.getRoundingAttr());
+            builder.getI64IntegerAttr(merged), FloatAttr(), outer.getNumeric(),
+            outer.getRoundingAttr());
         NamedAttrList provenance;
-        provenance.append("inner_gain", builder.getI64IntegerAttr(inner.getGain()));
-        provenance.append("outer_gain", builder.getI64IntegerAttr(outer.getGain()));
+        provenance.append("inner_gain", builder.getI64IntegerAttr(innerGain));
+        provenance.append("outer_gain", builder.getI64IntegerAttr(outerGain));
         provenance.append("exhaustive_inputs", builder.getI64IntegerAttr(65536));
         // The certificate is only valid under the tie rule it was evaluated
         // with, so the provenance records which one that was.

@@ -357,12 +357,21 @@ catalog builtins expose their own admissible choices at the call site
 (for example `gain(..., rounding=...)` and the `root_rounding=` parameter
 of `rms` and `magnitude`).
 
-f32 dot, FIR, `matmul`, `rms`, `moving_average`, and `dct` support
-`contract=off`, `contract=fma`, and
-`contract=fast`. The floating-point spellings name a contract where their
+f32 dot, FIR, `matmul`, `rms`, `moving_average`, `dct`, `fir_decimate`,
+`fir_interpolate`, `gain`, and `lms` support `contract=off`, `contract=fma`,
+and `contract=fast`. The floating-point spellings name a contract where their
 fixed-point counterparts name a rounding mode, because a floating-point result
 has no requantization boundary to round; `rms(x, contract=...)` also accepts
-any extent in range rather than only powers of two.
+any extent in range rather than only powers of two. `gain` is the one builtin
+whose three declarations denote the same event graph, since a lone multiply
+offers nothing to reassociate or fuse.
+
+The f32 constants of `gain` and `lms` are spelled as rationals,
+`gain(x, gain=[3, 8], contract=off)` and
+`lms(x, d, w, step_size=[1, 16], contract=fma)`, because the lexer has no
+floating-point literal. The constant is the correctly rounded binary32 of the
+exact rational; a rational whose binary32 value is neither zero nor normal is
+refused rather than rounded into the subnormal range or to infinity.
 `off` preserves separate multiply and add operations in the stated order, and
 `fma` pins each update as one explicit fused multiply-add event (a single
 rounding). Both are exact contracts: every authorized schedule reproduces

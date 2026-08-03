@@ -156,7 +156,11 @@ private:
     // One numeric policy, and it is the Q1.15 policy the gain verifier pins.
     if (filter.getNumeric() != gain.getNumeric())
       return false;
-    ondrix::ondsp::RoundingMode mode = gain.getRounding();
+    // The certificate is an exhaustive Q15 sweep with no floating-point
+    // analogue, so an f32 gain is never this filter's fusable boundary.
+    if (!isa<ondrix::ondsp::FixedAttr>(gain.getNumeric()))
+      return false;
+    ondrix::ondsp::RoundingMode mode = *gain.getRounding();
     if (!isAdmittedGainRounding(mode))
       return false;
 
@@ -174,7 +178,7 @@ private:
     for (const llvm::APInt &tap : coefficients.getValues<llvm::APInt>())
       taps.push_back(tap.getSExtValue());
 
-    FilterCertificate certificate = certifyFilter(taps, gain.getGain(), mode);
+    FilterCertificate certificate = certifyFilter(taps, gain.getGainAttr().getInt(), mode);
     if (!certificate.certified()) {
       if (recordRefusals)
         recordRefusal(filter, gain, mode, certificate);
@@ -196,7 +200,7 @@ private:
     fusedFilter->setOperand(0, gain.getInput());
     fusedFilter->setOperand(1, fusedCoefficients);
     NamedAttrList provenance;
-    provenance.append("gain", builder.getI64IntegerAttr(gain.getGain()));
+    provenance.append("gain", builder.getI64IntegerAttr(gain.getGainAttr().getInt()));
     // The certificate is only valid under the tie rule it was evaluated with,
     // so the provenance records which one that was.
     provenance.append("rounding",
@@ -227,7 +231,7 @@ private:
                      ondrix::ondsp::RoundingMode mode, const FilterCertificate &certificate) {
     Builder builder(filter.getContext());
     NamedAttrList refusal;
-    refusal.append("gain", builder.getI64IntegerAttr(gain.getGain()));
+    refusal.append("gain", builder.getI64IntegerAttr(gain.getGainAttr().getInt()));
     refusal.append("rounding", builder.getStringAttr(ondrix::ondsp::stringifyRoundingMode(mode)));
     refusal.append("tap_index", builder.getI64IntegerAttr(certificate.failedIndex));
     refusal.append("tap", builder.getI64IntegerAttr(certificate.failedTap));
