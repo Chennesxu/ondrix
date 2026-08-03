@@ -9,6 +9,9 @@ rather than per operation:
 - [Fixed-point semantics](fixed-point-semantics.md) — the target-independent
   Ondsp numeric model: products, accumulators, rounding, overflow, and
   reduction legality.
+- [f32 contract evidence ledger](f32-contract-evidence.md) — per operation and
+  contract: which permissions are spent, which are emitted, and which
+  declarations have no executed evidence behind them.
 - [Experimental `.ox` frontend](frontend-language.md) — the source language
   reference and the frontend semantic boundary and design rules.
 

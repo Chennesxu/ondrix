@@ -222,10 +222,13 @@ def Ondrix_FirInterpolateOp
     signed Q15 with exact full products, a signed frac30 accumulator of at
     least 32 bits, and explicit export policy; the f32 profile carries none of
     those attributes and reduces from `+0.0` under its `#ondsp.fp` contract.
-    Under f32 the skip is a declared event and not a derivable rewrite: a
-    materialized term is `0.0 * coeffs[k]`, never a product of an input
-    sample, so the two programs agree on every finite coefficient and part
-    company only at an infinite one, where `0.0 * inf` is NaN.
+    Under f32 the skip is a declared algorithmic event, not generic
+    zero-product elimination: a materialized term is `0.0 * coeffs[k]`, never
+    a product of an input sample. The two programs are not interchangeable
+    even on all-finite data. Under `fma` an accumulator reaches `-0.0` when a
+    real product underflows, and materializing a following `+0.0 * c` term
+    with positive `c` rounds it back to `+0.0`. A non-finite coefficient
+    separates them as well, since `0.0 * inf` and `0.0 * NaN` are both NaN.
     Stateful block forms, configurable phase, polyphase scheduling, Q31,
     Vector, and target selection are outside this operation.
 
@@ -888,13 +891,18 @@ def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
     subtraction and the closing energy expression are single IEEE operations
     in every mode, as with the mean of `ondrix.rms`.
 
-    `off` and `fma` are exact contracts. `fast` is not: a recursion has no
-    reduction whose terms could be reassociated, but the one multiply-add
-    site is still free to be fused or not, so the legal set has both exact
-    contracts' graphs in it. The lowering SELECTS the fused one and emits
-    that choice carrying no permission of its own, which is what makes the
-    result pinnable - a declaration left on the emitted event is not inert,
-    because the backend may consume it and pick the other member. The f32 coefficient
+    The base graph is that pseudocode read literally: one rounded product
+    `c2*s1`, one addition of it to `x[n]`, single IEEE operations elsewhere.
+    `off` denotes exactly it and `fma` the graph that fuses the single
+    multiply-add site; both are exact contracts. `fast` denotes neither. A
+    recursion has no reduction whose terms could be reassociated, so its
+    abstract legal set is those two graphs and nothing further. The lowering
+    SELECTS the fused member and emits it carrying no permission of its own,
+    which is what makes the result pinnable: a declaration left on the
+    emitted event is not inert, because the backend may consume it and pick
+    the other member. Selecting uniformly is this lowering's policy and not a
+    rule of the language — the fusion choice is per term, and a schedule that
+    mixes both is inside the same declared set. The f32 coefficient
     needs no tie guard either: the Q15 guard certifies a quantized table
     against an independently specified value, while here the binary32
     rounding IS the declared constant. Every admitted bin therefore lowers,

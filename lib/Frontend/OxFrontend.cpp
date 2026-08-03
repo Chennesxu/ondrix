@@ -308,14 +308,16 @@ struct BuiltinCallAst {
   SourcePosition position;
 };
 
-// Why a source rational may be divided in binary64 and then narrowed: the
-// double rounding is innocuous when both operands are representable in the
-// NARROW format and the wide precision is at least 2p+2, which 53 >= 2*24+2
-// satisfies. The operand bound is therefore on binary32. Admitting 53-bit
-// operands makes the argument fail, and 548055821/548055723 is a reachable
-// witness whose narrowed quotient is one ulp above the correctly rounded
-// value. The argument also needs a normal result, which that same bound
-// delivers for free: every admitted quotient lies in [2^-24, 2^24].
+// Both operands are bounded at 2^24 so that each is exactly representable in
+// binary32; the division then runs in binary32 itself, so the result is the
+// single correctly rounded quotient and no double-rounding argument is
+// needed. Admitting wider operands would reinstate one:
+// 548055821/548055723 is a reachable pair whose binary64 quotient lands on a
+// binary32 tie point and narrows one ulp above the correct value. The bound
+// also keeps every admitted quotient in [2^-24, 2^24], so no spelling can
+// reach the subnormal range or infinity. APFloat rather than host `float`
+// arithmetic, so the result does not depend on the compiler's rounding
+// environment.
 enum class RationalRefusal { None, Denominator, Magnitude };
 
 std::pair<float, RationalRefusal> roundRationalToF32(int64_t numerator, int64_t denominator) {
@@ -325,8 +327,10 @@ std::pair<float, RationalRefusal> roundRationalToF32(int64_t numerator, int64_t 
   if (denominator > kExactInBinary32 || numerator > kExactInBinary32 ||
       numerator < -kExactInBinary32)
     return {0.0f, RationalRefusal::Magnitude};
-  return {static_cast<float>(static_cast<double>(numerator) / static_cast<double>(denominator)),
-          RationalRefusal::None};
+  llvm::APFloat quotient(static_cast<float>(numerator));
+  llvm::APFloat divisor(static_cast<float>(denominator));
+  quotient.divide(divisor, llvm::APFloat::rmNearestTiesToEven);
+  return {quotient.convertToFloat(), RationalRefusal::None};
 }
 
 llvm::StringRef describeRationalRefusal(RationalRefusal refusal) {
@@ -334,8 +338,8 @@ llvm::StringRef describeRationalRefusal(RationalRefusal refusal) {
   case RationalRefusal::Denominator:
     return "denominator must be positive";
   case RationalRefusal::Magnitude:
-    return "numerator and denominator must not exceed 2^24, the bound that keeps the narrowed "
-           "quotient correctly rounded";
+    return "numerator and denominator must not exceed 2^24, the bound that keeps both operands "
+           "exact in the target format";
   case RationalRefusal::None:
     break;
   }

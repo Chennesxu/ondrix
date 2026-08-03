@@ -53,7 +53,7 @@ static float referenceDecimate(const float *input, const float *coeffs, int64_t 
 
 /* A tap updates the accumulator only when it lands on a real input sample.
  * Terms that would multiply an inserted zero are never evaluated: that skip
- * is the declared event graph, not an optimization the contract derives. */
+ * is the declared event graph, not zero-product elimination. */
 static float referenceInterpolate(const float *input, const float *coeffs, int64_t output,
                                   int fused) {
   float accumulator = 0.0f;
@@ -139,14 +139,13 @@ static int checkInterpolate(const float *input, const float *coeffs, const char 
   return failed;
 }
 
-/* Skipping the inserted-zero terms and materializing them agree on every
- * finite input and part company at infinity, because 0.0 * inf is NaN. With
- * an infinite tap zero, output 1 skips tap 0 (its upsampled index is odd) and
- * stays finite; a lowering that summed the inserted zeros would return NaN
- * there. */
-static int checkInsertedZeroSkip(void) {
+/* Output 1 takes tap 1 only: taps 0 and 2 land on an inserted zero and an
+ * out-of-range index. A lowering that materialized those zeros instead of
+ * skipping them would be running a different event graph, and these three
+ * corpora each expose the difference at that output. */
+static int checkNonFiniteTapZero(const char *label, float tap0) {
   float input[kInterpolateInput] = {0.25f, -0.5f, 0.75f, 1.0f};
-  float coeffs[kInterpolateTaps] = {INFINITY, 0.5f, -0.25f};
+  float coeffs[kInterpolateTaps] = {tap0, 0.5f, -0.25f};
 
   MemRefF32Rank1 inputRef = {input, input, 0, {kInterpolateInput}, {1}};
   MemRefF32Rank1 coeffRef = {coeffs, coeffs, 0, {kInterpolateTaps}, {1}};
@@ -155,14 +154,40 @@ static int checkInsertedZeroSkip(void) {
 
   int failed = 0;
   const float skipped = off.aligned[off.offset + off.strides[0]];
+  /* Materializing would give 0.0 * tap0, which is NaN for both spellings. */
   if (!isfinite(skipped)) {
-    fprintf(stderr, "inserted-zero skip: output 1 is %a, expected a finite value\n",
-            (double)skipped);
+    fprintf(stderr, "%s: output 1 is %a, expected a finite value\n", label, (double)skipped);
     failed = 1;
   }
-  failed |= compare("inserted-zero skip", "interpolate off", 1, skipped,
-                    referenceInterpolate(input, coeffs, 1, 0));
+  failed |=
+      compare(label, "interpolate off", 1, skipped, referenceInterpolate(input, coeffs, 1, 0));
   free(off.allocated);
+  return failed;
+}
+
+/* The all-finite separation, which is why the skip cannot be justified as
+ * zero-product elimination. Tap 1 is fma(-0x1p-75, 0x1p-75, +0.0): the exact
+ * product underflows and the accumulator becomes -0.0. Materializing tap 2's
+ * inserted zero would then add +0.0 * 0.5 to it and round back to +0.0. */
+static int checkFiniteSignedZeroSkip(void) {
+  float input[kInterpolateInput] = {-0x1p-75f, 0.0f, 0.0f, 0.0f};
+  float coeffs[kInterpolateTaps] = {0.5f, 0x1p-75f, 0.5f};
+
+  MemRefF32Rank1 inputRef = {input, input, 0, {kInterpolateInput}, {1}};
+  MemRefF32Rank1 coeffRef = {coeffs, coeffs, 0, {kInterpolateTaps}, {1}};
+  MemRefF32Rank1 fused;
+  _mlir_ciface_f32_interpolate_fma(&fused, &inputRef, &coeffRef);
+
+  int failed = 0;
+  const float skipped = fused.aligned[fused.offset + fused.strides[0]];
+  if (floatBits(skipped) != UINT32_C(0x80000000)) {
+    fprintf(stderr, "finite inserted-zero skip: output 1 is %a (0x%08x), expected -0.0\n",
+            (double)skipped, floatBits(skipped));
+    failed = 1;
+  }
+  failed |= compare("finite inserted-zero skip", "interpolate fma", 1, skipped,
+                    referenceInterpolate(input, coeffs, 1, 1));
+  free(fused.allocated);
   return failed;
 }
 
@@ -208,7 +233,9 @@ static int checkContractSplit(void) {
 
 int main(void) {
   int failed = checkContractSplit();
-  failed |= checkInsertedZeroSkip();
+  failed |= checkNonFiniteTapZero("infinite tap zero", INFINITY);
+  failed |= checkNonFiniteTapZero("NaN tap zero", NAN);
+  failed |= checkFiniteSignedZeroSkip();
 
   float decimateInput[kDecimateInput];
   float decimateCoeffs[kDecimateTaps];

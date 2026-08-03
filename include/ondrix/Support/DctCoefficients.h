@@ -30,10 +30,14 @@ inline std::optional<int64_t> getDctCoefficientQ15(int64_t extent, int64_t k, in
 // there is nothing for one to protect: the Q15 guard exists to certify that a
 // quantized table reproduces an independently specified value, while here the
 // binary32 rounding of this binary64 evaluation IS the declared constant, and
-// the differential references derive it the same way. The binary64 error
-// stays below 2^-50 against a binary32 ulp above 2^-33 over the admitted
-// extents, so the value is stable under any conforming libm, but that is a
-// reproducibility bound and not a correct-rounding claim.
+// the differential references derive it the same way.
+//
+// That makes the build's libm part of the declaration. The narrowed value
+// moves only if the binary64 evaluation errs by about 2^17 of its own ulps,
+// which no usable implementation does — but C requires no accuracy of `cos`,
+// so this is an assumption about the toolchain rather than a consequence of
+// conformance. test/Conversion/ondrix-to-ondsp/moving_average_dct_f32.mlir
+// pins the exported bits so a libm that broke it would be caught here.
 inline float getDctCoefficientF32(int64_t extent, int64_t k, int64_t n) {
   constexpr double kPi = 3.14159265358979323846264338327950288;
   double angle = kPi * static_cast<double>((2 * n + 1) * k) / (2.0 * static_cast<double>(extent));
