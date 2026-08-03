@@ -19,3 +19,17 @@ func.func @q15_decimate_by_two(
   } : (tensor<12xi16>, tensor<5xi16>, tensor<4xi16>) -> tensor<4xi16>
   return %result : tensor<4xi16>
 }
+
+// CHECK-LABEL: func.func @f32_decimate_by_three
+// CHECK: ondrix.fir_decimate
+// CHECK-SAME: factor = 3
+// CHECK-SAME: numeric = #ondsp.fp<format = f32, contract = fast>
+func.func @f32_decimate_by_three(
+    %input: tensor<13xf32>, %coeffs: tensor<4xf32>, %init: tensor<4xf32>)
+    -> tensor<4xf32> {
+  %result = ondrix.fir_decimate %input, %coeffs, %init {
+    factor = 3,
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (tensor<13xf32>, tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
+  return %result : tensor<4xf32>
+}

@@ -218,15 +218,6 @@ static void assertValidFirDecimateShape(Location loc, Value inputLength, Value c
           "factor) plus one"));
 }
 
-static Value createReducedFirDecimateSample(FirDecimateOp op, Value window, Value coefficients,
-                                            OpBuilder &builder, Location loc) {
-  Value initial = builder.create<ondrix::ondsp::AccZeroOp>(loc, op.getAccumulator());
-  Value reduced = builder.create<ondrix::ondsp::ReduceMacOp>(
-      loc, initial.getType(), initial, window, coefficients, op.getNumeric(), op.getProduct());
-  return builder.create<ondrix::ondsp::AccExportOp>(
-      loc, op.getDst().getStorage(), reduced, op.getDst(), op.getRounding(), op.getOverflow());
-}
-
 struct FirFilterOpInterface
     : public DstBufferizableOpInterfaceExternalModel<FirFilterOpInterface, FirFilterOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand, const AnalysisState &) const {
@@ -376,8 +367,7 @@ struct FirDecimateOpInterface
               bodyLoc, *input, ArrayRef<OpFoldResult>{inputOffset},
               ArrayRef<OpFoldResult>{coefficientLength},
               ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
-          Value sample =
-              createReducedFirDecimateSample(op, inputWindow, coefficientView, builder, bodyLoc);
+          Value sample = createReducedFirSample(op, inputWindow, coefficientView, builder, bodyLoc);
           builder.create<memref::StoreOp>(bodyLoc, sample, *output, outputIndex);
           builder.create<scf::YieldOp>(bodyLoc);
         });

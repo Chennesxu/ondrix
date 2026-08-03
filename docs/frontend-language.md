@@ -146,7 +146,7 @@ uses the same increasing-tap ordered FIR equation and portable accumulator
 inference as other static Q15 feed-forward reductions. It can lower through
 the generic scalar path or through direct bufferization into ordered
 fixed-width Vector products plus a scalar tail. Other factors, dynamic shapes,
-nonzero phase, cross-output polyphase lowering, and Q31/f32 resampling are not
+nonzero phase, cross-output polyphase lowering, and Q31 resampling are not
 part of this source slice.
 
 Static phase-zero Q15 FIR interpolation by two is also available:
@@ -164,6 +164,21 @@ current source slice lowers through the generic scalar consumer;
 dynamic shapes, constexpr coefficients, configurable phase/factor, stateful
 interpolation, polyphase transforms, Vector, and target consumers remain
 outside the source contract.
+
+Both resampling builtins also accept the f32 profile, where the declared
+contract replaces the accumulator and export policy:
+
+```python
+def f32_fir_decimate(
+    input: tensor[f32,12], coefficients: tensor[f32,5]) -> tensor[f32,4]:
+  return fir_decimate(input, coefficients, factor=2, contract=fma)
+```
+
+The index relations and extent rules are unchanged; only the per-output
+reduction is contract indexed. Interpolation still skips the terms that would
+multiply an inserted zero, which under f32 is a declared event rather than a
+derivable rewrite: the two programs agree on every finite input and differ
+when a coefficient is infinite.
 
 Valid one-dimensional convolution and correlation use tensor values and the
 same fixed-point or floating-point policy syntax as full-output FIR:

@@ -19,3 +19,16 @@ func.func @q15_interpolate_by_two(
   } : (tensor<4xi16>, tensor<3xi16>, tensor<9xi16>) -> tensor<9xi16>
   return %result : tensor<9xi16>
 }
+
+// CHECK-LABEL: func.func @f32_interpolate_by_two
+// CHECK: ondrix.fir_interpolate
+// CHECK-SAME: numeric = #ondsp.fp<format = f32, contract = off>
+func.func @f32_interpolate_by_two(
+    %input: tensor<4xf32>, %coeffs: tensor<3xf32>, %init: tensor<9xf32>)
+    -> tensor<9xf32> {
+  %result = ondrix.fir_interpolate %input, %coeffs, %init {
+    factor = 2,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<4xf32>, tensor<3xf32>, tensor<9xf32>) -> tensor<9xf32>
+  return %result : tensor<9xf32>
+}

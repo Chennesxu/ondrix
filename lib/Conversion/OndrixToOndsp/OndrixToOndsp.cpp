@@ -431,6 +431,25 @@ public:
   }
 };
 
+template <typename OpTy>
+static Value createResamplingSeed(OpTy op, ondrix::ondsp::FpAttr fp, OpBuilder &builder,
+                                  Location loc) {
+  if (!fp)
+    return builder.create<ondrix::ondsp::AccZeroOp>(loc, *op.getAccumulator());
+  return builder.create<arith::ConstantOp>(loc, fp.getFormat(),
+                                           builder.getZeroAttr(fp.getFormat()));
+}
+
+template <typename OpTy>
+static Value exportResamplingSample(OpTy op, ondrix::ondsp::FpAttr fp, Value accumulator,
+                                    OpBuilder &builder, Location loc) {
+  if (fp)
+    return accumulator;
+  return builder.create<ondrix::ondsp::AccExportOp>(loc, op.getDst()->getStorage(), accumulator,
+                                                    *op.getDst(), *op.getRounding(),
+                                                    *op.getOverflow());
+}
+
 class FirDecimateOpLowering final : public OpConversionPattern<ondrix::ir::FirDecimateOp> {
 public:
   using OpConversionPattern<ondrix::ir::FirDecimateOp>::OpConversionPattern;
@@ -448,11 +467,13 @@ public:
     assertValidFirDecimateShape(loc, inputLength, coefficientLength, outputLength, factor, zero,
                                 one, rewriter);
 
+    auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
     auto outputLoop = rewriter.create<scf::ForOp>(
         loc, zero, outputLength, one, ValueRange{adaptor.getInit()},
         [&](OpBuilder &builder, Location outputLoc, Value outputIndex, ValueRange outputArgs) {
           Value inputOrigin = builder.create<arith::MulIOp>(outputLoc, outputIndex, factor);
-          Value initial = builder.create<ondrix::ondsp::AccZeroOp>(outputLoc, op.getAccumulator());
+          Value initial = createResamplingSeed(op, fp, builder, outputLoc);
           auto tapLoop = builder.create<scf::ForOp>(
               outputLoc, zero, coefficientLength, one, ValueRange{initial},
               [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange tapArgs) {
@@ -461,14 +482,16 @@ public:
                     tapBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getInput(), inputIndex);
                 Value coefficient =
                     tapBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getCoeffs(), tap);
-                Value updated = tapBuilder.create<ondrix::ondsp::MacOp>(
-                    tapLoc, op.getAccumulator(), tapArgs.front(), input, coefficient,
-                    op.getNumeric(), op.getProduct());
+                Value updated = fp ? createFpAccumulatorUpdate(tapLoc, input, coefficient,
+                                                               tapArgs.front(), fp, tapBuilder)
+                                   : tapBuilder
+                                         .create<ondrix::ondsp::MacOp>(
+                                             tapLoc, *op.getAccumulator(), tapArgs.front(), input,
+                                             coefficient, fixed, *op.getProduct())
+                                         .getResult();
                 tapBuilder.create<scf::YieldOp>(tapLoc, updated);
               });
-          Value output = builder.create<ondrix::ondsp::AccExportOp>(
-              outputLoc, op.getDst().getStorage(), tapLoop.getResult(0), op.getDst(),
-              op.getRounding(), op.getOverflow());
+          Value output = exportResamplingSample(op, fp, tapLoop.getResult(0), builder, outputLoc);
           Value next =
               builder.create<tensor::InsertOp>(outputLoc, output, outputArgs.front(), outputIndex);
           builder.create<scf::YieldOp>(outputLoc, next);
@@ -495,10 +518,12 @@ public:
     assertFirInterpolateShape(loc, inputLength, coefficientLength, outputLength, factor, zero, one,
                               rewriter);
 
+    auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
     auto outputLoop = rewriter.create<scf::ForOp>(
         loc, zero, outputLength, one, ValueRange{adaptor.getInit()},
         [&](OpBuilder &builder, Location outputLoc, Value outputIndex, ValueRange outputArgs) {
-          Value initial = builder.create<ondrix::ondsp::AccZeroOp>(outputLoc, op.getAccumulator());
+          Value initial = createResamplingSeed(op, fp, builder, outputLoc);
           auto tapLoop = builder.create<scf::ForOp>(
               outputLoc, zero, coefficientLength, one, ValueRange{initial},
               [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange tapArgs) {
@@ -524,17 +549,19 @@ public:
                     thenBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getInput(), inputIndex);
                 Value coefficient =
                     thenBuilder.create<tensor::ExtractOp>(tapLoc, adaptor.getCoeffs(), tap);
-                Value updated = thenBuilder.create<ondrix::ondsp::MacOp>(
-                    tapLoc, op.getAccumulator(), tapArgs.front(), input, coefficient,
-                    op.getNumeric(), op.getProduct());
+                Value updated = fp ? createFpAccumulatorUpdate(tapLoc, input, coefficient,
+                                                               tapArgs.front(), fp, thenBuilder)
+                                   : thenBuilder
+                                         .create<ondrix::ondsp::MacOp>(
+                                             tapLoc, *op.getAccumulator(), tapArgs.front(), input,
+                                             coefficient, fixed, *op.getProduct())
+                                         .getResult();
                 thenBuilder.create<scf::YieldOp>(tapLoc, updated);
                 OpBuilder elseBuilder = guarded.getElseBodyBuilder();
                 elseBuilder.create<scf::YieldOp>(tapLoc, tapArgs.front());
                 tapBuilder.create<scf::YieldOp>(tapLoc, guarded.getResult(0));
               });
-          Value output = builder.create<ondrix::ondsp::AccExportOp>(
-              outputLoc, op.getDst().getStorage(), tapLoop.getResult(0), op.getDst(),
-              op.getRounding(), op.getOverflow());
+          Value output = exportResamplingSample(op, fp, tapLoop.getResult(0), builder, outputLoc);
           Value next =
               builder.create<tensor::InsertOp>(outputLoc, output, outputArgs.front(), outputIndex);
           builder.create<scf::YieldOp>(outputLoc, next);

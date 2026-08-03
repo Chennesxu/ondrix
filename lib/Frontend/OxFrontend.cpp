@@ -797,10 +797,22 @@ public:
       if (!factor)
         return std::nullopt;
       call.factor = *factor;
-      call.accumulatorAuto = true;
-      call.rounding = "nearest_even";
-      call.destinationOverflow = "saturate";
-      call.updateOverflow = "wrap";
+      if (policyType == SourceType::F32) {
+        if (!expect(TokenKind::Comma,
+                    llvm::Twine("expected ',' before ") + operation + " contract policy") ||
+            !expectIdentifier("contract", "expected floating-point contract policy") ||
+            !expect(TokenKind::Equal, "expected '=' after contract"))
+          return std::nullopt;
+        auto contract = parseIdentifier("expected floating-point contract mode");
+        if (!contract)
+          return std::nullopt;
+        call.fpContract = contract->spelling.str();
+      } else {
+        call.accumulatorAuto = true;
+        call.rounding = "nearest_even";
+        call.destinationOverflow = "saturate";
+        call.updateOverflow = "wrap";
+      }
       if (!expect(TokenKind::RightParen,
                   llvm::Twine("expected ')' after ") + operation + " expression"))
         return std::nullopt;
@@ -1903,10 +1915,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     }
   } else if (isFirDecimate) {
     if (constexprCount != 0 || !ast.primaryResult().tensor ||
-        ast.primaryResult().type != SourceType::Q15 || !lhsParameter || !rhsParameter ||
-        !lhsParameter->isTensor() || !rhsParameter->isTensor()) {
+        (ast.primaryResult().type != SourceType::Q15 &&
+         ast.primaryResult().type != SourceType::F32) ||
+        !lhsParameter || !rhsParameter || !lhsParameter->isTensor() || !rhsParameter->isTensor()) {
       diagnostics.error(ast.result.position,
-                        "fir_decimate requires Q15 tensor input, coefficients, and result");
+                        "fir_decimate requires Q15 or f32 tensor input, coefficients, and result");
       return std::nullopt;
     }
     if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
@@ -1939,10 +1952,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     }
   } else if (isFirInterpolate) {
     if (constexprCount != 0 || !ast.primaryResult().tensor ||
-        ast.primaryResult().type != SourceType::Q15 || !lhsParameter || !rhsParameter ||
-        !lhsParameter->isTensor() || !rhsParameter->isTensor()) {
-      diagnostics.error(ast.result.position,
-                        "fir_interpolate requires Q15 tensor input, coefficients, and result");
+        (ast.primaryResult().type != SourceType::Q15 &&
+         ast.primaryResult().type != SourceType::F32) ||
+        !lhsParameter || !rhsParameter || !lhsParameter->isTensor() || !rhsParameter->isTensor()) {
+      diagnostics.error(
+          ast.result.position,
+          "fir_interpolate requires Q15 or f32 tensor input, coefficients, and result");
       return std::nullopt;
     }
     if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
@@ -2667,13 +2682,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     } else if (isFirDecimate) {
       result = builder.create<ir::FirDecimateOp>(
           expressionLocation, outputType, lhs, rhs, init,
-          builder.getI64IntegerAttr(kernel.ast.result.factor), cast<ondsp::FixedAttr>(numeric),
-          product, accumulator, destination, rounding, overflow);
+          builder.getI64IntegerAttr(kernel.ast.result.factor), numeric, product, accumulator,
+          destination, rounding, overflow);
     } else if (isFirInterpolate) {
       result = builder.create<ir::FirInterpolateOp>(
           expressionLocation, outputType, lhs, rhs, init,
-          builder.getI64IntegerAttr(kernel.ast.result.factor), cast<ondsp::FixedAttr>(numeric),
-          product, accumulator, destination, rounding, overflow);
+          builder.getI64IntegerAttr(kernel.ast.result.factor), numeric, product, accumulator,
+          destination, rounding, overflow);
     } else {
       ir::FirBoundaryMode boundary = kernel.ast.result.boundary == "full"
                                          ? ir::FirBoundaryMode::Full

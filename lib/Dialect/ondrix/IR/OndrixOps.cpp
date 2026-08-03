@@ -357,8 +357,7 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
 }
 
 static LogicalResult
-verifyQ15ResamplingProfile(Operation *op, RankedTensorType inputType,
-                           RankedTensorType coefficientType, RankedTensorType initType,
+verifyQ15ResamplingProfile(Operation *op, RankedTensorType inputType, RankedTensorType initType,
                            ondrix::ondsp::FixedAttr numeric, ondrix::ondsp::ProductAttr product,
                            ondrix::ondsp::AccType accumulator, ondrix::ondsp::FixedAttr destination,
                            ondrix::ondsp::RoundingMode rounding) {
@@ -378,6 +377,33 @@ verifyQ15ResamplingProfile(Operation *op, RankedTensorType inputType,
   if (initType.getElementType() != destination.getStorage())
     return op->emitOpError("init and result element type must match destination storage");
   return verifyFixedReductionResult(op, accumulator, numeric, product);
+}
+
+// The export attributes are present exactly on the fixed path and absent
+// exactly on the floating-point path; both directions are checked because
+// either mismatch would leave a lowering dereferencing an absent policy. The
+// product attribute is covered by verifyProductPolicy at the operation entry.
+template <typename OpTy>
+static LogicalResult verifyResamplingNumericProfile(OpTy op, RankedTensorType inputType,
+                                                    RankedTensorType initType) {
+  auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+  if (!fixed) {
+    if (op.getAccumulator() || op.getDst() || op.getRounding() || op.getOverflow())
+      return op.emitOpError(
+          "floating-point resampling must not specify a fixed-point export policy");
+    auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+    if (!fp.getFormat().isF32())
+      return op.emitOpError("executable resampling supports the f32 floating-point format");
+    if (inputType.getElementType() != fp.getFormat() || initType.getElementType() != fp.getFormat())
+      return op.emitOpError(
+          "floating-point input, coefficients, init, and result must match format");
+    return success();
+  }
+  if (!op.getAccumulator() || !op.getDst() || !op.getRounding() || !op.getOverflow())
+    return op.emitOpError(
+        "fixed resampling requires accumulator, dst, rounding, and overflow attributes");
+  return verifyQ15ResamplingProfile(op, inputType, initType, fixed, *op.getProduct(),
+                                    *op.getAccumulator(), *op.getDst(), *op.getRounding());
 }
 
 static LogicalResult verifyFirDecimateDomain(FirDecimateOp op) {
@@ -407,9 +433,7 @@ static LogicalResult verifyFirDecimateDomain(FirDecimateOp op) {
       return op.emitOpError() << "result length must be " << expectedOutputLength;
   }
 
-  return verifyQ15ResamplingProfile(op, inputType, coefficientType, initType, op.getNumeric(),
-                                    op.getProduct(), op.getAccumulator(), op.getDst(),
-                                    op.getRounding());
+  return verifyResamplingNumericProfile(op, inputType, initType);
 }
 
 static LogicalResult verifyFirInterpolateDomain(FirInterpolateOp op) {
@@ -443,9 +467,7 @@ static LogicalResult verifyFirInterpolateDomain(FirInterpolateOp op) {
       return op.emitOpError() << "result length must be " << expectedOutputLength;
   }
 
-  return verifyQ15ResamplingProfile(op, inputType, coefficientType, initType, op.getNumeric(),
-                                    op.getProduct(), op.getAccumulator(), op.getDst(),
-                                    op.getRounding());
+  return verifyResamplingNumericProfile(op, inputType, initType);
 }
 
 static LogicalResult verifyConv1DDomain(Conv1DOp op) {

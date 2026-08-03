@@ -157,6 +157,13 @@ def Ondrix_FirDecimateOp
     mathematical contract; consumers may batch products only while preserving
     the declared ordered updates.
 
+    The f32 profile carries none of the fixed-point accumulator or export
+    attributes: output `m` is exactly the reduction its `#ondsp.fp` contract
+    declares over increasing `k`, from `+0.0`. Decimation selects a subset of
+    output indices and neither reorders nor merges the terms of any one
+    output, so the index relation above is contract-independent and only the
+    per-output reduction is contract-indexed.
+
     Dynamic extent relationships are execution preconditions. Generic
     lowering emits dominating assertions before evaluating any window.
   }];
@@ -165,12 +172,12 @@ def Ondrix_FirDecimateOp
       AnyRankedTensor:$coeffs,
       AnyRankedTensor:$init,
       I64Attr:$factor,
-      Ondsp_FixedAttr:$numeric,
-      Ondsp_ProductAttr:$product,
-      TypeAttrOf<Ondsp_Acc>:$accumulator,
-      Ondsp_FixedAttr:$dst,
-      Ondsp_RoundingModeAttr:$rounding,
-      Ondsp_OverflowModeAttr:$overflow);
+      Ondsp_NumericAttr:$numeric,
+      OptionalAttr<Ondsp_ProductAttr>:$product,
+      OptionalAttr<TypeAttrOf<Ondsp_Acc>>:$accumulator,
+      OptionalAttr<Ondsp_FixedAttr>:$dst,
+      OptionalAttr<Ondsp_RoundingModeAttr>:$rounding,
+      OptionalAttr<Ondsp_OverflowModeAttr>:$overflow);
   let results = (outs AnyRankedTensor:$result);
   let extraClassDeclaration = [{
     std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
@@ -206,16 +213,20 @@ def Ondrix_FirInterpolateOp
 
       `output[m] = ordered_sum_k upsampled[m - k] * coeffs[k]`
 
-    Skipping inserted-zero terms is part of this fixed-point contract and does
-    not authorize reassociation of the remaining updates. The `init` tensor
+    Skipping inserted-zero terms is part of this contract and does not
+    authorize reassociation of the remaining updates. The `init` tensor
     provides destination shape and storage; its element values are not part
     of the mathematical result.
 
-    The first executable profile accepts exactly `factor = 2`, signed Q15,
-    exact full products, a signed frac30 accumulator of at least 32 bits, and
-    explicit export policy. Stateful block forms, configurable phase,
-    polyphase scheduling, floating point, Q31, Vector, and target selection
-    are outside this operation.
+    Both executable profiles accept exactly `factor = 2`. The fixed profile is
+    signed Q15 with exact full products, a signed frac30 accumulator of at
+    least 32 bits, and explicit export policy; the f32 profile carries none of
+    those attributes and reduces from `+0.0` under its `#ondsp.fp` contract.
+    Under f32 the skip is a declared event and not a derivable rewrite: the
+    skipping and the zero-materializing programs agree on every finite input
+    but differ when an input is infinite, because `0.0 * inf` is NaN.
+    Stateful block forms, configurable phase, polyphase scheduling, Q31,
+    Vector, and target selection are outside this operation.
 
     Dynamic extent relationships and index arithmetic are execution
     preconditions. Generic lowering emits dominating assertions before
@@ -226,12 +237,12 @@ def Ondrix_FirInterpolateOp
       AnyRankedTensor:$coeffs,
       AnyRankedTensor:$init,
       I64Attr:$factor,
-      Ondsp_FixedAttr:$numeric,
-      Ondsp_ProductAttr:$product,
-      TypeAttrOf<Ondsp_Acc>:$accumulator,
-      Ondsp_FixedAttr:$dst,
-      Ondsp_RoundingModeAttr:$rounding,
-      Ondsp_OverflowModeAttr:$overflow);
+      Ondsp_NumericAttr:$numeric,
+      OptionalAttr<Ondsp_ProductAttr>:$product,
+      OptionalAttr<TypeAttrOf<Ondsp_Acc>>:$accumulator,
+      OptionalAttr<Ondsp_FixedAttr>:$dst,
+      OptionalAttr<Ondsp_RoundingModeAttr>:$rounding,
+      OptionalAttr<Ondsp_OverflowModeAttr>:$overflow);
   let results = (outs AnyRankedTensor:$result);
   let extraClassDeclaration = [{
     std::pair<int64_t, int64_t> getDpsInitsPositionRange() {

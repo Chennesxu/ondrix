@@ -149,3 +149,15 @@ func.func @rejects_unestablished_rounding(
   } : (tensor<4xi16>, tensor<3xi16>, tensor<9xi16>) -> tensor<9xi16>
   return
 }
+
+// -----
+
+func.func @rejects_mixed_fp_element_types(
+    %input: tensor<4xf32>, %coeffs: tensor<3xf32>, %init: tensor<9xf64>) {
+  // expected-error @+1 {{floating-point input, coefficients, init, and result must match format}}
+  %0 = ondrix.fir_interpolate %input, %coeffs, %init {
+    factor = 2,
+    numeric = #ondsp.fp<format = f32, contract = fma>
+  } : (tensor<4xf32>, tensor<3xf32>, tensor<9xf64>) -> tensor<9xf64>
+  return
+}

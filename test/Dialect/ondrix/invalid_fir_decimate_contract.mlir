@@ -129,3 +129,45 @@ func.func @rejects_unestablished_rounding(
   } : (tensor<12xi16>, tensor<5xi16>, tensor<4xi16>) -> tensor<4xi16>
   return
 }
+
+// -----
+
+// The export policy exists to place a fixed-point requantization boundary;
+// an f32 reduction has none, so carrying one is a declaration error rather
+// than an ignorable attribute.
+
+func.func @rejects_fp_export_policy(
+    %input: tensor<12xf32>, %coeffs: tensor<5xf32>, %init: tensor<4xf32>) {
+  // expected-error @+1 {{floating-point resampling must not specify a fixed-point export policy}}
+  %0 = ondrix.fir_decimate %input, %coeffs, %init {
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    factor = 2,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<12xf32>, tensor<5xf32>, tensor<4xf32>) -> tensor<4xf32>
+  return
+}
+
+// -----
+
+func.func @rejects_missing_fixed_export_policy(
+    %input: tensor<12xi16>, %coeffs: tensor<5xi16>, %init: tensor<4xi16>) {
+  // expected-error @+1 {{fixed resampling requires accumulator, dst, rounding, and overflow attributes}}
+  %0 = ondrix.fir_decimate %input, %coeffs, %init {
+    factor = 2,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (tensor<12xi16>, tensor<5xi16>, tensor<4xi16>) -> tensor<4xi16>
+  return
+}
+
+// -----
+
+func.func @rejects_f64_resampling(
+    %input: tensor<12xf64>, %coeffs: tensor<5xf64>, %init: tensor<4xf64>) {
+  // expected-error @+1 {{executable resampling supports the f32 floating-point format}}
+  %0 = ondrix.fir_decimate %input, %coeffs, %init {
+    factor = 2,
+    numeric = #ondsp.fp<format = f64, contract = off>
+  } : (tensor<12xf64>, tensor<5xf64>, tensor<4xf64>) -> tensor<4xf64>
+  return
+}
