@@ -6,8 +6,10 @@
 
 /* Object gate for the f32 Goertzel contract. off and fma are exact, so those
  * are bit for bit against a reference that derives the same coefficient and
- * runs the same event graph; fast is checked for membership in the derivable
- * set, which here has two elements. */
+ * runs the same event graph. The fast contract's legal set still has two
+ * members here, but the lowering selects the fused one and emits it
+ * unflagged, so the object must equal the fma object bit for bit rather than
+ * merely belong to a set. */
 
 typedef struct {
   float *allocated;
@@ -79,15 +81,12 @@ static int check(const float *input, const char *label) {
   int failed = 0;
   failed |= compare(label, "goertzel off", offValue, referenceGoertzel(input, kBin, 0));
   failed |= compare(label, "goertzel fma", fmaValue, referenceGoertzel(input, kBin, 1));
-  /* The recursion has no reduction to reassociate, so the one multiply-add
-   * site is the whole of what fast may vary: it is free to be fused or not
-   * and nothing else can move. That derivable set has two elements, so this
-   * checks membership in it rather than a numeric bound. */
-  if (floatBits(fastValue) != floatBits(offValue) && floatBits(fastValue) != floatBits(fmaValue)) {
-    fprintf(stderr, "%s goertzel fast: got %a, derivable are %a and %a\n", label, (double)fastValue,
-            (double)offValue, (double)fmaValue);
-    failed = 1;
-  }
+  /* The fast contract's legal set still has two members, but the lowering
+   * selects the fused one, so this pins the chosen graph rather than
+   * membership. Restoring the declaration on the emitted event reddens it:
+   * the backend de-fuses a reassoc-flagged fma and the object drops to the
+   * off value. */
+  failed |= compare(label, "goertzel fast", fastValue, fmaValue);
   failed |= compare(label, "goertzel quarter turn", quarter.aligned[quarter.offset],
                     referenceGoertzel(input, kQuarterTurnBin, 0));
   free(off.allocated);

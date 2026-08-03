@@ -1856,13 +1856,22 @@ private:
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
     Value seed = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(element));
+    // The lowering selects the fused member of the fast contract's legal set
+    // and emits that choice unflagged. Carrying the declaration onward is not
+    // inert: on the pinned toolchain a reassoc-flagged fma is de-fused by the
+    // backend, which would hand the schedule choice to codegen.
+    ondrix::ondsp::FpAttr macNumeric =
+        numeric.getContract() == ondrix::ondsp::FpContractMode::Fast
+            ? ondrix::ondsp::FpAttr::get(rewriter.getContext(), numeric.getFormat(),
+                                         ondrix::ondsp::FpContractMode::Fma)
+            : numeric;
 
     auto sampleLoop = rewriter.create<scf::ForOp>(
         loc, zero, extentValue, one, ValueRange{seed, seed},
         [&](OpBuilder &builder, Location loc, Value sample, ValueRange states) {
           Value x = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), sample);
           Value combined =
-              createFpAccumulatorUpdate(loc, doubledCoefficient, states[0], x, numeric, builder);
+              createFpAccumulatorUpdate(loc, doubledCoefficient, states[0], x, macNumeric, builder);
           Value next = builder.create<arith::SubFOp>(loc, combined, states[1]);
           builder.create<scf::YieldOp>(loc, ValueRange{next, states[0]});
         });

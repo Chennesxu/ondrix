@@ -53,19 +53,3 @@ func.func @static_off(
       -> (tensor<4xf32>, tensor<2x2xf32>)
   return %output, %next : tensor<4xf32>, tensor<2x2xf32>
 }
-
-// CHECK-LABEL: func.func @static_fast
-// CHECK: arith.mulf {{.*}} fastmath<reassoc,contract>
-// CHECK: math.fma {{.*}} fastmath<reassoc,contract>
-// CHECK: arith.addf {{.*}} fastmath<reassoc,contract>
-// CHECK-NOT: ondrix.sos_filter_tdf2
-func.func @static_fast(
-    %input: tensor<4xf32>, %coeffs: tensor<2x5xf32>,
-    %scales: tensor<2xf32>, %state: tensor<2x2xf32>)
-    -> (tensor<4xf32>, tensor<2x2xf32>) {
-  %output, %next = ondrix.sos_filter_tdf2 %input, %coeffs, %scales, %state {
-    numeric = #ondsp.fp<format = f32, contract = fast>
-  } : (tensor<4xf32>, tensor<2x5xf32>, tensor<2xf32>, tensor<2x2xf32>)
-      -> (tensor<4xf32>, tensor<2x2xf32>)
-  return %output, %next : tensor<4xf32>, tensor<2x2xf32>
-}

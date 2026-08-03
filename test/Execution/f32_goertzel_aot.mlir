@@ -1,14 +1,15 @@
 // RUN: ondrix-opt %s --ondrix-default-pipeline > %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
+// RUN: FileCheck %s --check-prefix=PERMISSION --input-file=%t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc -ffp-contract=off %S/Inputs/f32_goertzel_aot.c %t.o -lm -o %t
 // RUN: %t
 
 // off and fma are exact contracts, so those are bit for bit against a
-// reference that runs the declared event graph itself. fast is checked for
-// membership in the two-element derivable set instead: the flagged event is
-// free to be fused or not, and on a target without an FMA instruction the
-// backend expands it.
+// reference that runs the declared event graph itself. fast still admits two
+// graphs here, but the lowering selects the fused one and emits it unflagged,
+// so the object must equal the fma object exactly. The permission pin on the
+// translated module is what keeps that choice from leaking to codegen.
 
 func.func @f32_goertzel_off(%input: tensor<16xf32>) -> tensor<1xf32>
     attributes {llvm.emit_c_interface} {
@@ -45,3 +46,12 @@ func.func @f32_goertzel_quarter_turn(%input: tensor<16xf32>) -> tensor<1xf32>
   } : (tensor<16xf32>) -> tensor<1xf32>
   return %energy : tensor<1xf32>
 }
+
+// The selected fused event reaches the audit point carrying no permission of
+// its own. reassoc in particular is not decorative here: on the pinned
+// toolchain it lets the backend de-fuse the intrinsic and pick the other
+// member of the legal set.
+// PERMISSION: define{{.*}}@f32_goertzel_fast
+// PERMISSION: call float @llvm.fma.f32
+// PERMISSION-NOT: reassoc
+// PERMISSION-NOT: contract

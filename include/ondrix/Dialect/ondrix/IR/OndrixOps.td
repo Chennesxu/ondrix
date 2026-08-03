@@ -888,14 +888,13 @@ def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
     subtraction and the closing energy expression are single IEEE operations
     in every mode, as with the mean of `ondrix.rms`.
 
-    `off` and `fma` are exact contracts. `fast` is not, even though a
-    recursion has no reduction whose terms could be reassociated: the one
-    multiply-add site remains free to be fused or not, and the emitted
-    permission genuinely leaves both open - a backend without an FMA
-    instruction expands the flagged event back into a separate multiply and
-    add. The derivable set is therefore exactly the two exact contracts'
-    results, which is small enough that the differential gate enumerates it
-    and requires membership rather than a bound. The f32 coefficient
+    `off` and `fma` are exact contracts. `fast` is not: a recursion has no
+    reduction whose terms could be reassociated, but the one multiply-add
+    site is still free to be fused or not, so the legal set has both exact
+    contracts' graphs in it. The lowering SELECTS the fused one and emits
+    that choice carrying no permission of its own, which is what makes the
+    result pinnable - a declaration left on the emitted event is not inert,
+    because the backend may consume it and pick the other member. The f32 coefficient
     needs no tie guard either: the Q15 guard certifies a quantized table
     against an independently specified value, while here the binary32
     rounding IS the declared constant. Every admitted bin therefore lowers,

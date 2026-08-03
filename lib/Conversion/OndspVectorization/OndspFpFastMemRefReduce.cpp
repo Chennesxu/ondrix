@@ -13,6 +13,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
@@ -33,9 +34,20 @@ bool isSupportedFastMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
   if (!numeric || !numeric.getFormat().isF32() ||
       numeric.getContract() != ondrix::ondsp::FpContractMode::Fast)
     return false;
+  // STOPGAP, not the final soundness argument. The rewrite seeds its lanes
+  // with synthesized +0.0 and adds the operation's initial value back at the
+  // end, which is only value-neutral when that initial is canonical +0.0:
+  // with initial -0.0 and a single term the batched result is +0.0 where both
+  // declared graphs give -0.0, and no reassociation exists at one term to
+  // authorize the difference. The synthesized lane seeds are a second, still
+  // open obligation - the term-conserving rebuild removes both. A numeric
+  // comparison would not do here, because -0.0 == +0.0.
+  llvm::APFloat initial(0.0f);
+  if (!matchPattern(op.getInitial(), m_ConstantFloat(&initial)) || !initial.isPosZero())
+    return false;
   // A verified f32 reduction already has rank-1 shaped operands whose element
-  // type and initial value match the format, and carries no product; only the
-  // layout facts the Vector lowering needs are this pass's own obligation.
+  // type matches the format and carries no product; only the layout facts the
+  // Vector lowering needs are this pass's own obligation.
   auto lhsType = dyn_cast<MemRefType>(op.getLhs().getType());
   auto rhsType = dyn_cast<MemRefType>(op.getRhs().getType());
   return lhsType && rhsType && ondrix::conversion::hasDefaultLLVMVectorMemorySpace(lhsType) &&

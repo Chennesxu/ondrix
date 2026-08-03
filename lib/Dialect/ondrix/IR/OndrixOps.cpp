@@ -632,6 +632,12 @@ static LogicalResult verifySosFilterTdf2Domain(SosFilterTdf2Op op) {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
   if (!fp || !fp.getFormat().isF32())
     return op.emitOpError("currently requires an f32 numeric policy");
+  // A biquad state recursion is not a reduction, so the declared vocabulary
+  // authorizes nothing here that off and fma do not already give. Admitting
+  // fast would need a recurrence-specific derivability gate, which does not
+  // exist, so the surface fails closed instead of silently downgrading.
+  if (fp.getContract() == ondrix::ondsp::FpContractMode::Fast)
+    return op.emitOpError("fast is unadmitted for a state recursion; use off or fma");
   if (inputType.getElementType() != fp.getFormat() ||
       coefficientType.getElementType() != fp.getFormat() ||
       scaleType.getElementType() != fp.getFormat() || stateType.getElementType() != fp.getFormat())

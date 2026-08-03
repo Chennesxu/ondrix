@@ -1,11 +1,13 @@
-// RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s --implicit-check-not=fastmath
 
-// Pins that exactly one emitted operation carries the declared permission,
-// which is what bounds the derivable set to two elements.
+// The fast contract admits both the fused and the separate form of the one
+// multiply-add. The lowering SELECTS the fused member and emits that choice
+// unflagged: carrying the declaration onward would hand the choice to the
+// backend, which de-fuses a reassoc-flagged fma on the pinned toolchain.
 // CHECK-LABEL: func.func @f32_goertzel_fast
 // CHECK: %[[C2:.*]] = arith.constant
 // CHECK: scf.for {{.*}} iter_args
-// CHECK: math.fma %[[C2]], {{.*}} fastmath<reassoc,contract> : f32
+// CHECK: math.fma %[[C2]], %{{[^ ]*}}, %{{[^ ]*}} : f32
 // CHECK: arith.subf
 // CHECK-NOT: fastmath
 // CHECK: arith.mulf %[[C2]]

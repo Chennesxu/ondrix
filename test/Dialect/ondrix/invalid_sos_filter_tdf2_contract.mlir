@@ -127,3 +127,20 @@ func.func @rejects_tensor_encoding(
       -> (tensor<4xf32, "encoded">, tensor<2x2xf32>)
   return
 }
+
+// -----
+
+// A biquad state recursion is not a reduction, so the declared vocabulary
+// authorizes nothing here that off and fma do not already give. The surface
+// fails closed rather than silently downgrading or emitting a permission no
+// site can consume.
+func.func @rejects_fast_contract(
+    %input: tensor<4xf32>, %coeffs: tensor<2x5xf32>,
+    %scales: tensor<2xf32>, %state: tensor<2x2xf32>) {
+  // expected-error @+1 {{fast is unadmitted for a state recursion; use off or fma}}
+  %output, %next = ondrix.sos_filter_tdf2 %input, %coeffs, %scales, %state {
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (tensor<4xf32>, tensor<2x5xf32>, tensor<2xf32>, tensor<2x2xf32>)
+      -> (tensor<4xf32>, tensor<2x2xf32>)
+  return
+}
