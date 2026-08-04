@@ -177,8 +177,11 @@ def f32_fir_decimate(
 The index relations and extent rules are unchanged; only the per-output
 reduction is contract indexed. Interpolation still skips the terms that would
 multiply an inserted zero, which under f32 is a declared event rather than a
-derivable rewrite: the two programs agree on every finite input and differ
-when a coefficient is infinite.
+derivable rewrite. The two are not interchangeable even on all-finite data:
+under `fma` an accumulator reaches `-0.0` when a real product underflows, and
+materializing a following `+0.0 * c` with positive `c` rounds it back to
+`+0.0`. A non-finite coefficient separates them too, since `0.0 * inf` and
+`0.0 * NaN` are both NaN.
 
 Valid one-dimensional convolution and correlation use tensor values and the
 same fixed-point or floating-point policy syntax as full-output FIR:

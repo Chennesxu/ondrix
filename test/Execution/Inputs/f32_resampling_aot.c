@@ -131,7 +131,7 @@ static int checkInterpolate(const float *input, const float *coeffs, const char 
                       expectedOff);
     failed |= compare(label, "interpolate fma", m, fma.aligned[fma.offset + m * fma.strides[0]],
                       expectedFma);
-    /* Nothing consumes a permission here, so fast selects the fused member. */
+    /* fast spends F here: the fused chain over a rounded product and an add. */
     failed |= compare(label, "interpolate fast", m, fast.aligned[fast.offset + m * fast.strides[0]],
                       expectedFma);
     /* The .ox binding declares off. */

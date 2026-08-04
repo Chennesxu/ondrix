@@ -10,19 +10,16 @@
 // between them, and a reversed traversal is exactly the mistake bit-exact
 // comparison against an independent reference catches.
 //
-// fast means different things in the two modes, which is the reason both are
-// here. conv1d bufferizes to one `ondsp.reduce_mac` per output over a kernel
-// subview: correlation reads it forward at unit stride, so the horizontal
-// rewrite accepts it and the reassociation permission is spent; convolution
-// reads it at stride -1, which the rewrite refuses, so nothing is spent and
-// the declaration is inert.
+// fast reaches a different schedule in each mode. conv1d bufferizes to one
+// `ondsp.reduce_mac` per output over a kernel subview: correlation reads it
+// forward at unit stride and the horizontal rewrite accepts it, spending R;
+// convolution reads it at stride -1, which the rewrite refuses, so the scalar
+// route runs and spends only F on its fused chain.
 //
-// The two therefore carry different evidence. The inert leg pins the
-// lowering's SELECTION bitwise - the fused member is what it builds today, and
-// a transform that starts consuming here must redden that rather than change
-// the object silently. The consuming leg is a relaxed result and is not
-// bit-pinned: it is checked for term conservation on an integer sub-domain
-// where every derivable regrouping is exact.
+// The two fast legs below have identical extents so that mode is the only
+// variable. The scalar-route leg is bit-pinned against the fused reference;
+// the batched leg is a relaxed result and is checked for term conservation on
+// an integer sub-domain where every derivable regrouping is exact.
 //
 // SCHEDULE-LABEL: llvm.func @f32_conv1d_conv_fast
 // SCHEDULE-NOT: llvm.intr.vector.reduce.fadd
@@ -49,14 +46,18 @@ func.func @f32_conv1d_conv_fma(%input: tensor<12xf32>, %kernel: tensor<4xf32>) -
   return %result : tensor<9xf32>
 }
 
-func.func @f32_conv1d_conv_fast(%input: tensor<12xf32>, %kernel: tensor<4xf32>) -> tensor<9xf32>
+// Same extents as the correlation fast leg below, so mode is the only
+// difference between them. A shorter kernel would be refused for its length
+// before the stride is ever consulted, and the refusal this pins would be
+// unobservable.
+func.func @f32_conv1d_conv_fast(%input: tensor<40xf32>, %kernel: tensor<20xf32>) -> tensor<21xf32>
     attributes {llvm.emit_c_interface} {
-  %init = tensor.empty() : tensor<9xf32>
+  %init = tensor.empty() : tensor<21xf32>
   %result = ondrix.conv1d %input, %kernel, %init {
     mode = #ondrix.conv1d_mode<convolution>,
     numeric = #ondsp.fp<format = f32, contract = fast>
-  } : (tensor<12xf32>, tensor<4xf32>, tensor<9xf32>) -> tensor<9xf32>
-  return %result : tensor<9xf32>
+  } : (tensor<40xf32>, tensor<20xf32>, tensor<21xf32>) -> tensor<21xf32>
+  return %result : tensor<21xf32>
 }
 
 func.func @f32_conv1d_corr_off(%input: tensor<12xf32>, %kernel: tensor<4xf32>) -> tensor<9xf32>

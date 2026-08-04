@@ -74,8 +74,10 @@ static int check(const float *x, const char *label) {
   _mlir_ciface_f32_dct_fast(&dctFast, &inputRef);
 
   int failed = 0;
-  /* One window sum in declared order and one division: no product to fuse and
-   * no tree to regroup, so all three declarations denote the same events. */
+  /* One window sum in declared order and one division. There is no product to
+   * fuse, but the window sum IS a reduction tree, so fast's reassociation
+   * permission applies and is simply not used: all three objects run the
+   * declared association. checkWindowAssociation pins that. */
   for (int64_t n = 0; n < kAverages; ++n) {
     const float expected = referenceAverage(x, n);
     failed |= compare(label, "average off", n,
@@ -116,6 +118,28 @@ static uint32_t nextRandom(uint32_t *state) {
   return value;
 }
 
+/* The window sum's association is observable, so "no permission consumed" has
+ * to be gated rather than asserted. With 1e8 and -1e8 adjacent, the declared
+ * (x0 + x1) + x2 keeps x2 while x0 + (x1 + x2) loses it under the 1e8 ulp of
+ * eight; the harness checks that the two associations really differ before
+ * requiring all three objects to run the declared one. */
+static int checkWindowAssociation(void) {
+  float x[kLength];
+  for (int64_t i = 0; i < kLength; ++i)
+    x[i] = 0.0f;
+  x[0] = 1.0e8f;
+  x[1] = -1.0e8f;
+  x[2] = 1.0f;
+
+  const float declared = ((x[0] + x[1]) + x[2]) / (float)kWindow;
+  const float regrouped = (x[0] + (x[1] + x[2])) / (float)kWindow;
+  if (floatBits(declared) == floatBits(regrouped)) {
+    fprintf(stderr, "window association corpus is vacuous: both groupings agree\n");
+    return 1;
+  }
+  return check(x, "window association");
+}
+
 int main(void) {
   float x[kLength];
   for (int64_t i = 0; i < kLength; ++i)
@@ -129,6 +153,8 @@ int main(void) {
   for (int64_t i = 2; i < kLength; ++i)
     x[i] = 0.0f;
   failed |= check(x, "contract split");
+
+  failed |= checkWindowAssociation();
 
   uint32_t state = UINT32_C(0x1F123BB5);
   for (int trial = 0; trial < kTrialCount; ++trial) {

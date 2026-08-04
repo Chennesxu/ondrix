@@ -44,15 +44,20 @@ static uint32_t floatBits(float value) {
 
 /* Correlation visits kernel[k], convolution kernel[K-1-k]; everything else is
  * shared, so a reversed traversal is the one difference this must catch. */
-static float reference(const float *input, const float *kernel, int64_t output, int reversed,
-                       int fused) {
+static float referenceTaps(const float *input, const float *kernel, int64_t taps, int64_t output,
+                           int reversed, int fused) {
   float accumulator = 0.0f;
-  for (int64_t k = 0; k < kTaps; ++k) {
-    const float tap = reversed ? kernel[kTaps - 1 - k] : kernel[k];
+  for (int64_t k = 0; k < taps; ++k) {
+    const float tap = reversed ? kernel[taps - 1 - k] : kernel[k];
     const float sample = input[output + k];
     accumulator = fused ? fmaf(sample, tap, accumulator) : accumulator + sample * tap;
   }
   return accumulator;
+}
+
+static float reference(const float *input, const float *kernel, int64_t output, int reversed,
+                       int fused) {
+  return referenceTaps(input, kernel, kTaps, output, reversed, fused);
 }
 
 static int compare(const char *label, const char *mode, int64_t index, float got, float expected) {
@@ -71,10 +76,9 @@ static int check(const float *input, const float *kernel, const char *label) {
 
   MemRefF32 inputRef = {inputCopy, inputCopy, 0, {kLength}, {1}};
   MemRefF32 kernelRef = {kernelCopy, kernelCopy, 0, {kTaps}, {1}};
-  MemRefF32 convOff, convFma, convFast, corrOff, corrFma;
+  MemRefF32 convOff, convFma, corrOff, corrFma;
   _mlir_ciface_f32_conv1d_conv_off(&convOff, &inputRef, &kernelRef);
   _mlir_ciface_f32_conv1d_conv_fma(&convFma, &inputRef, &kernelRef);
-  _mlir_ciface_f32_conv1d_conv_fast(&convFast, &inputRef, &kernelRef);
   _mlir_ciface_f32_conv1d_corr_off(&corrOff, &inputRef, &kernelRef);
   _mlir_ciface_f32_conv1d_corr_fma(&corrFma, &inputRef, &kernelRef);
 
@@ -84,9 +88,6 @@ static int check(const float *input, const float *kernel, const char *label) {
     const float convExpectedFma = reference(input, kernel, n, 1, 1);
     failed |= compare(label, "conv off", n, convOff.aligned[convOff.offset + n], convExpectedOff);
     failed |= compare(label, "conv fma", n, convFma.aligned[convFma.offset + n], convExpectedFma);
-    /* Nothing consumes a permission here, so fast selects the fused member. */
-    failed |=
-        compare(label, "conv fast", n, convFast.aligned[convFast.offset + n], convExpectedFma);
     failed |= compare(label, "corr off", n, corrOff.aligned[corrOff.offset + n],
                       reference(input, kernel, n, 0, 0));
     failed |= compare(label, "corr fma", n, corrFma.aligned[corrFma.offset + n],
@@ -94,7 +95,6 @@ static int check(const float *input, const float *kernel, const char *label) {
   }
   free(convOff.allocated);
   free(convFma.allocated);
-  free(convFast.allocated);
   free(corrOff.allocated);
   free(corrFma.allocated);
   return failed;
@@ -162,14 +162,16 @@ static int checkContractSplit(void) {
   return failed;
 }
 
-/* Term conservation for the one leg that spends a permission. Every product is
- * a small integer and every partial sum stays under 2^24, so all derivable
- * regroupings are rounding-free and agree on one exact integer: the assertion
- * holds for any legal schedule and still fails if a term is dropped,
- * duplicated, or misindexed by the lane partition. The batched result is
- * deliberately NOT compared against the ordered object on inexact data, which
- * would be pinning a relaxed contract. */
-static int checkBatchedCorrelation(void) {
+/* Both modes at one shape, so the only variable is the kernel index map.
+ *
+ * Correlation reaches the batched schedule and is a relaxed result, so it is
+ * checked for term conservation on an integer sub-domain: every product is a
+ * small integer and every partial sum stays under 2^24, so all derivable
+ * regroupings are rounding-free and agree on one exact integer, while a
+ * dropped, duplicated or misindexed term still changes it. Convolution's
+ * reversed subview is refused by the batching rewrite, so it takes the scalar
+ * fused route, which is one declared member and can be bit-pinned. */
+static int checkWideModes(void) {
   float input[kWideLength];
   float kernel[kWideTaps];
   for (int64_t i = 0; i < kWideLength; ++i)
@@ -179,9 +181,10 @@ static int checkBatchedCorrelation(void) {
 
   MemRefF32 inputRef = {input, input, 0, {kWideLength}, {1}};
   MemRefF32 kernelRef = {kernel, kernel, 0, {kWideTaps}, {1}};
-  MemRefF32 batched, ordered;
+  MemRefF32 batched, ordered, reversed;
   _mlir_ciface_f32_conv1d_corr_fast(&batched, &inputRef, &kernelRef);
   _mlir_ciface_f32_conv1d_corr_ordered(&ordered, &inputRef, &kernelRef);
+  _mlir_ciface_f32_conv1d_conv_fast(&reversed, &inputRef, &kernelRef);
 
   int failed = 0;
   for (int64_t n = 0; n < kWideOutputs; ++n) {
@@ -193,9 +196,12 @@ static int checkBatchedCorrelation(void) {
         compare("integer lattice", "corr fast", n, batched.aligned[batched.offset + n], expected);
     failed |= compare("integer lattice", "corr ordered", n, ordered.aligned[ordered.offset + n],
                       expected);
+    failed |= compare("integer lattice", "conv fast", n, reversed.aligned[reversed.offset + n],
+                      referenceTaps(input, kernel, kWideTaps, n, 1, 1));
   }
   free(batched.allocated);
   free(ordered.allocated);
+  free(reversed.allocated);
   return failed;
 }
 
@@ -226,7 +232,7 @@ int main(void) {
 
   failed |= checkContractSplit();
 
-  failed |= checkBatchedCorrelation();
+  failed |= checkWideModes();
 
   uint32_t state = UINT32_C(0x2545F491);
   for (int trial = 0; trial < kTrialCount; ++trial) {

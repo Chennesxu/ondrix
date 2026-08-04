@@ -56,9 +56,9 @@ func.func @f32_interpolate_fma(%input: tensor<4xf32>, %coeffs: tensor<3xf32>) ->
 }
 
 // Interpolation has no bufferization interface, so its reduction never reaches
-// the horizontal rewrite and fast consumes nothing. The selected member is the
-// fused one; pinning it keeps a later transform from changing the object here
-// without re-justifying itself.
+// the horizontal rewrite: R goes unused and the scalar route spends F on the
+// fused chain. Pinning that selection keeps a later transform from changing
+// the object here without re-justifying itself.
 func.func @f32_interpolate_fast(%input: tensor<4xf32>, %coeffs: tensor<3xf32>) -> tensor<9xf32>
     attributes {llvm.emit_c_interface} {
   %init = tensor.empty() : tensor<9xf32>

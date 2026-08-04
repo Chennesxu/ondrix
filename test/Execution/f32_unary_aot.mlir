@@ -8,13 +8,14 @@
 // recomputed per window under every contract, which is what makes the off
 // and fma legs of one window separable at all.
 //
-// The fast legs pin an inert declaration. Nothing here consumes a permission:
-// a moving average has no product to fuse and its window sum is built in
-// declared order, and the DCT rows stay ordered too. What is pinned is
-// therefore the lowering's SELECTION, not the contract - fast may legally
-// produce any member of its set, so a future transform that starts consuming
-// here must redden this gate and re-justify itself rather than change the
-// object silently.
+// The two fast legs differ in what they spend. A moving average has no product
+// to fuse, but its window sum is a reduction tree, so R applies and is simply
+// not used - checkWindowAssociation gates that the declared association is
+// what runs. The DCT rows select the fused chain, which spends F.
+//
+// Both pin a SELECTION rather than the contract: fast may legally produce any
+// member, so a transform that starts choosing differently must redden these
+// and re-justify itself rather than change the object silently.
 
 func.func @f32_moving_average_off(%input: tensor<8xf32>) -> tensor<6xf32>
     attributes {llvm.emit_c_interface} {

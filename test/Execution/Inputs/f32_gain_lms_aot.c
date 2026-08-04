@@ -139,7 +139,7 @@ static int checkLms(const float *input, const float *desired, const float *weigh
   failed |= checkLmsResult(&off, expectedError, expectedAdapted, label, "lms off");
   referenceLms(input, desired, weights, 1, expectedError, expectedAdapted);
   failed |= checkLmsResult(&fma, expectedError, expectedAdapted, label, "lms fma");
-  /* Nothing consumes a permission here, so fast selects the fused member. */
+  /* fast spends F here: the fused chain over a rounded product and an add. */
   failed |= checkLmsResult(&fast, expectedError, expectedAdapted, label, "lms fast");
   /* The .ox binding declares fma. */
   failed |= checkLmsResult(&source, expectedError, expectedAdapted, label, "lms .ox");

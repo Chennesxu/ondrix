@@ -137,7 +137,7 @@ func.func @rejects_tensor_encoding(
 func.func @rejects_fast_contract(
     %input: tensor<4xf32>, %coeffs: tensor<2x5xf32>,
     %scales: tensor<2xf32>, %state: tensor<2x2xf32>) {
-  // expected-error @+1 {{fast is unadmitted for a state recursion; use off or fma}}
+  // expected-error @+1 {{fast has no realization gate here; use off or fma}}
   %output, %next = ondrix.sos_filter_tdf2 %input, %coeffs, %scales, %state {
     numeric = #ondsp.fp<format = f32, contract = fast>
   } : (tensor<4xf32>, tensor<2x5xf32>, tensor<2xf32>, tensor<2x2xf32>)

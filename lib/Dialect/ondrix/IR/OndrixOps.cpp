@@ -642,9 +642,11 @@ static LogicalResult verifySosFilterTdf2Domain(SosFilterTdf2Op op) {
     return op.emitOpError("currently requires an f32 numeric policy");
   // Admission follows the legal set, not the transform list (rule:
   // docs/f32-contract-evidence.md). A biquad body has fusable multiply-adds,
-  // so its set exceeds one graph, and no recurrence gate exists.
+  // so its set exceeds one graph and needs a realization gate for whatever is
+  // selected. That is an evidence gap and not a property of recursions - lms
+  // is a recursion too and is admitted.
   if (fp.getContract() == ondrix::ondsp::FpContractMode::Fast)
-    return op.emitOpError("fast is unadmitted for a state recursion; use off or fma");
+    return op.emitOpError("fast has no realization gate here; use off or fma");
   if (inputType.getElementType() != fp.getFormat() ||
       coefficientType.getElementType() != fp.getFormat() ||
       scaleType.getElementType() != fp.getFormat() || stateType.getElementType() != fp.getFormat())

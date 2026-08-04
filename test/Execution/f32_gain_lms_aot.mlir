@@ -56,10 +56,9 @@ func.func @f32_lms_fma(%input: tensor<32xf32>, %desired: tensor<32xf32>, %weight
   return %error, %adapted : tensor<32xf32>, tensor<4xf32>
 }
 
-// lms has two contract-indexed sites and neither is consumed under fast: the
-// tap reduction stays on the tensor path and the weight update is a single
-// multiply-add. The selected member is the fused one, and pinning it makes a
-// later transform that starts consuming here impossible to land silently.
+// lms keeps both contract-indexed sites on the tensor path, so R goes unused
+// and the scalar route spends F on the fused tap and weight updates. Pinning
+// that selection makes a later transform impossible to land silently.
 func.func @f32_lms_fast(%input: tensor<32xf32>, %desired: tensor<32xf32>, %weights: tensor<4xf32>)
     -> (tensor<32xf32>, tensor<4xf32>) attributes {llvm.emit_c_interface} {
   %error, %adapted = ondrix.lms %input, %desired, %weights {
