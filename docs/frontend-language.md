@@ -425,6 +425,32 @@ implementation is characterized by an error budget measured against a
 higher-precision reference, which is a quality measurement rather than a
 guarantee the language makes.
 
+### Elementwise Builtins
+
+`add`, `sub`, `mult`, `abs`, `negate`, `offset`, and `shift` map static rank-1
+Q15 tensors elementwise:
+
+```python
+def q15_envelope(x: tensor[q15,32], y: tensor[q15,32]) -> tensor[q15,32]:
+  return add(mult(x, y), shift(abs(sub(x, y)), amount=-2), overflow=wrap)
+```
+
+Both boundary parameters are optional and both take the language default,
+`rounding=nearest_even` and `overflow=saturate`. `offset` names a raw Q1.15
+`bias` and `shift` a signed `amount` in `[-15, 15]`; a left shift declares a
+tie rule too, even though the amount makes it vacuous, so changing the amount
+never silently changes which rule applies.
+
+The family is fixed point only. An elementwise IEEE operation has no
+requantization boundary, so an f32 profile would add source surface without
+adding any contract to declare.
+
+These builtins are part of the composable set — the FFT family, `magnitude`,
+a `fir_filter` input stage, and the elementwise members — which is closed
+under nesting: any member may stand where an operand name may. A parameter
+may be read more than once, since a tensor operand is a value, so `mult(x, x)`
+is a squaring kernel rather than an aliasing question.
+
 ### Named Functions
 
 A file may declare several functions. The last one is the kernel the module

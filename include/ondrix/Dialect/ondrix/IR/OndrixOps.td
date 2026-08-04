@@ -1405,6 +1405,137 @@ def Ondrix_FirDesignWindowedSincOp
   let assemblyFormat = "attr-dict `:` type($coefficients)";
 }
 
+// The elementwise family. Every member maps a static rank-1 signed-Q1.15
+// tensor (`N` in [1, 4096]) elementwise and states the same thing about
+// itself: what the exact result of the operation is over the integers, and
+// what the declared boundary does to it. The exactness claim is what makes
+// the boundary the only place a value can change, so these operations
+// compose without a rewrite having to reconstruct where rounding happened.
+class Ondrix_ElementwiseOp<string mnemonic> : Ondrix_Op<mnemonic, [Pure]> {
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+  let results = (outs AnyRankedTensor:$result);
+}
+
+class Ondrix_ExactCombineOp<string mnemonic, string noun, string symbol>
+    : Ondrix_ElementwiseOp<mnemonic> {
+  let summary = "Elementwise Q15 " # noun # " with one declared overflow";
+  let description = [{
+    ```text
+    y[i] = narrow_i16(x[i] }] # symbol # [{ z[i])      the sum is exact in i17
+    ```
+
+    No information is lost below the least significant bit, so there is no
+    rounding boundary and none is declared. The }] # noun # [{ leaves Q1.15
+    exactly when the operands have the same sign and enough magnitude, which
+    the declared `overflow` resolves: `saturate` clamps to the rail and
+    `wrap` returns the exact value modulo `2^16`.
+  }];
+  let arguments = (ins AnyRankedTensor:$lhs,
+                   AnyRankedTensor:$rhs,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_OverflowModeAttr:$overflow);
+}
+
+def Ondrix_AddOp : Ondrix_ExactCombineOp<"add", "sum", "+">;
+def Ondrix_SubOp : Ondrix_ExactCombineOp<"sub", "difference", "-">;
+
+def Ondrix_MultOp : Ondrix_ElementwiseOp<"mult"> {
+  let summary = "Elementwise Q15 product with one explicit requantization";
+  let description = [{
+    ```text
+    y[i] = narrow_i16(round(x[i] * z[i] / 2^15))    the product is exact
+    ```
+
+    This is `ondrix.gain` with a tensor in place of the constant, and it has
+    the same two boundaries in the same order: the exact Q30 product loses
+    fifteen bits under the declared tie rule, and the result is narrowed
+    under the declared overflow. Saturation is reachable only at
+    `x = z = -32768`, where the product is exactly `+1.0`.
+
+    All four declared tie rules are admissible, and they genuinely disagree:
+    the rules split on halfway products, and among those `nearest_even` and
+    `nearest_ties_positive` split further on the parity of the floor
+    quotient. Unlike the constant form there is no compile-time certificate
+    to run, because neither operand is known, which is precisely why a
+    cascade of two `mult` operations has no merged form at all.
+  }];
+  let arguments = (ins AnyRankedTensor:$lhs,
+                   AnyRankedTensor:$rhs,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_RoundingModeAttr:$rounding,
+                   Ondsp_OverflowModeAttr:$overflow);
+}
+
+class Ondrix_ExactUnaryOp<string mnemonic, string noun, string formula>
+    : Ondrix_ElementwiseOp<mnemonic> {
+  let summary = "Elementwise Q15 " # noun # " with one declared overflow";
+  let description = [{
+    ```text
+    y[i] = narrow_i16(}] # formula # [{)
+    ```
+
+    The }] # noun # [{ is exact over the integers and there is no rounding
+    boundary. Its whole finite-precision content is one asymmetry: the signed
+    Q1.15 range is `[-32768, 32767]`, so `-32768` is the single input whose
+    result is unrepresentable. The declared `overflow` says what happens
+    there — `saturate` gives `32767` and `wrap` gives `-32768` back — and
+    every other input is unaffected by the choice.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_OverflowModeAttr:$overflow);
+}
+
+def Ondrix_AbsOp : Ondrix_ExactUnaryOp<"abs", "absolute value", "|x[i]|">;
+def Ondrix_NegateOp : Ondrix_ExactUnaryOp<"negate", "negation", "-x[i]">;
+
+def Ondrix_OffsetOp : Ondrix_ElementwiseOp<"offset"> {
+  let summary = "Elementwise Q15 constant bias with one declared overflow";
+  let description = [{
+    ```text
+    y[i] = narrow_i16(x[i] + bias)      the sum is exact in i17
+    ```
+
+    The constant form of `ondrix.add`, with the same exactness and the same
+    single declared boundary. `bias` is a raw signed Q1.15 value in
+    `[-32768, 32767]`.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   I64Attr:$bias,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_OverflowModeAttr:$overflow);
+}
+
+def Ondrix_ShiftOp : Ondrix_ElementwiseOp<"shift"> {
+  let summary = "Elementwise Q15 binary scaling by a declared power of two";
+  let description = [{
+    ```text
+    amount >= 0:  y[i] = narrow_i16(x[i] * 2^amount)          exact, no tie
+    amount <  0:  y[i] = narrow_i16(round(x[i] / 2^-amount))  one tie rule
+    ```
+
+    `amount` is in `[-15, 15]`. The two directions are not the same kind of
+    operation and the contract does not pretend they are: a left shift can
+    only overflow and a right shift can only round. That is why the rounding
+    mode is declared even when it is vacuous — the sign of one attribute must
+    not silently decide whether another one means anything, and a program
+    that changes the amount keeps the tie rule it asked for.
+
+    A right shift is the operation where the four tie rules are furthest
+    apart, and it is how a target's rounding convention is identified: at
+    `amount = -1` the inputs `1, 3, -1, -3` give `1, 2, 0, -1` under
+    `nearest_ties_positive`, `0, 2, 0, -2` under `nearest_even`, and
+    `0, 1, -1, -2` under `toward_negative`. Those four values separate the
+    rules completely, which no single positive input does.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   I64Attr:$amount,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_RoundingModeAttr:$rounding,
+                   Ondsp_OverflowModeAttr:$overflow);
+}
+
 def Ondrix_QuantizeOp : Ondrix_Op<"quantize", [Pure]> {
   let summary = "High-level numeric conversion intent";
   let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$src,

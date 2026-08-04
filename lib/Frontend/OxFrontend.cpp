@@ -227,8 +227,28 @@ enum class ReductionKind {
   Matmul,
   Lms,
   Lowpass,
-  CicDecimate
+  CicDecimate,
+  Add,
+  Sub,
+  Mult,
+  Abs,
+  Negate,
+  Offset,
+  Shift
 };
+
+// The elementwise family: every member is one exact integer expression plus
+// one declared boundary, and each has a statically known result shape, which
+// is what lets them appear as operands of one another.
+static bool isElementwiseKind(ReductionKind kind) {
+  return kind == ReductionKind::Add || kind == ReductionKind::Sub || kind == ReductionKind::Mult ||
+         kind == ReductionKind::Abs || kind == ReductionKind::Negate ||
+         kind == ReductionKind::Offset || kind == ReductionKind::Shift;
+}
+
+static bool isBinaryElementwiseKind(ReductionKind kind) {
+  return kind == ReductionKind::Add || kind == ReductionKind::Sub || kind == ReductionKind::Mult;
+}
 
 static bool isCfftKind(ReductionKind kind) {
   return kind == ReductionKind::Cfft || kind == ReductionKind::Icfft;
@@ -242,6 +262,13 @@ static bool isFftComposableKind(ReductionKind kind) {
   return isFftKind(kind) || kind == ReductionKind::Magnitude;
 }
 
+// The set whose members may hold one another as operands. Its checker
+// carries an element type and extent from operand to result, so a member has
+// to have a statically derivable result shape.
+static bool isComposableKind(ReductionKind kind) {
+  return isFftComposableKind(kind) || isElementwiseKind(kind);
+}
+
 static bool isUnaryTensorKind(ReductionKind kind) {
   return kind == ReductionKind::Dct || kind == ReductionKind::MovingAverage ||
          kind == ReductionKind::Gain || kind == ReductionKind::Rms || kind == ReductionKind::Sine ||
@@ -249,7 +276,8 @@ static bool isUnaryTensorKind(ReductionKind kind) {
 }
 
 static bool isUnaryKind(ReductionKind kind) {
-  return isFftComposableKind(kind) || isUnaryTensorKind(kind);
+  return isFftComposableKind(kind) || isUnaryTensorKind(kind) ||
+         (isElementwiseKind(kind) && !isBinaryElementwiseKind(kind));
 }
 
 struct ParameterAst {
@@ -309,6 +337,8 @@ struct BuiltinCallAst {
   int64_t stages = 0;
   int64_t rate = 0;
   int64_t delay = 0;
+  int64_t bias = 0;
+  int64_t amount = 0;
   SourcePosition position;
 };
 
@@ -623,15 +653,17 @@ public:
         !isIdentifier("dct") && !isIdentifier("moving_average") && !isIdentifier("gain") &&
         !isIdentifier("rms") && !isIdentifier("sine") && !isIdentifier("cosine") &&
         !isIdentifier("matmul") && !isIdentifier("lms") && !isIdentifier("lowpass") &&
-        !isIdentifier("cic_decimate")) {
+        !isIdentifier("cic_decimate") && !isIdentifier("add") && !isIdentifier("sub") &&
+        !isIdentifier("mult") && !isIdentifier("abs") && !isIdentifier("negate") &&
+        !isIdentifier("offset") && !isIdentifier("shift")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
                         "convolution(...), correlation(...), butterfly(...), cfft(...), or "
                         "icfft(...), rfft(...), irfft(...), magnitude(...), dct(...), "
                         "moving_average(...), gain(...), rms(...), sine(...), cosine(...), "
-                        "matmul(...), lms(...), cic_decimate(...), or lowpass(...) builtin "
-                        "expression");
+                        "matmul(...), lms(...), cic_decimate(...), lowpass(...), or an "
+                        "elementwise add/sub/mult/abs/negate/offset/shift builtin expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -682,6 +714,20 @@ public:
       call.kind = ReductionKind::Lms;
     else if (isIdentifier("cic_decimate"))
       call.kind = ReductionKind::CicDecimate;
+    else if (isIdentifier("add"))
+      call.kind = ReductionKind::Add;
+    else if (isIdentifier("sub"))
+      call.kind = ReductionKind::Sub;
+    else if (isIdentifier("mult"))
+      call.kind = ReductionKind::Mult;
+    else if (isIdentifier("abs"))
+      call.kind = ReductionKind::Abs;
+    else if (isIdentifier("negate"))
+      call.kind = ReductionKind::Negate;
+    else if (isIdentifier("offset"))
+      call.kind = ReductionKind::Offset;
+    else if (isIdentifier("shift"))
+      call.kind = ReductionKind::Shift;
     else
       call.kind = ReductionKind::Lowpass;
     call.position = current.position;
@@ -705,7 +751,7 @@ public:
       return call;
     }
     if (isFftKind(call.kind)) {
-      std::optional<ExpressionAst> operand = parseFftExpression();
+      std::optional<ExpressionAst> operand = parseComposedOperand();
       if (!operand)
         return std::nullopt;
       call.operands.push_back(std::move(*operand));
@@ -714,7 +760,7 @@ public:
       return call;
     }
     if (call.kind == ReductionKind::Magnitude) {
-      std::optional<ExpressionAst> operand = parseFftExpression();
+      std::optional<ExpressionAst> operand = parseComposedOperand();
       if (!operand)
         return std::nullopt;
       call.operands.push_back(std::move(*operand));
@@ -732,6 +778,49 @@ public:
         call.rounding = rounding->spelling.str();
       }
       if (!expect(TokenKind::RightParen, "expected ')' after magnitude operand"))
+        return std::nullopt;
+      return call;
+    }
+    if (isElementwiseKind(call.kind)) {
+      std::optional<ExpressionAst> lhs = parseComposedOperand();
+      if (!lhs)
+        return std::nullopt;
+      call.operands.push_back(std::move(*lhs));
+      if (isBinaryElementwiseKind(call.kind)) {
+        if (!expect(TokenKind::Comma, "expected ',' before the second elementwise operand"))
+          return std::nullopt;
+        std::optional<ExpressionAst> rhs = parseComposedOperand();
+        if (!rhs)
+          return std::nullopt;
+        call.operands.push_back(std::move(*rhs));
+      }
+      if (call.kind == ReductionKind::Offset && !parseNamedInteger("bias", call.bias))
+        return std::nullopt;
+      if (call.kind == ReductionKind::Shift && !parseNamedInteger("amount", call.amount))
+        return std::nullopt;
+      // Both boundary choices are optional and both default to the rule the
+      // rest of the language uses: unbiased, non-wrapping.
+      if (current.kind == TokenKind::Comma && next.spelling == "rounding") {
+        if (!expect(TokenKind::Comma, "expected ',' before rounding policy") ||
+            !expectIdentifier("rounding", "expected rounding policy") ||
+            !expect(TokenKind::Equal, "expected '=' after rounding"))
+          return std::nullopt;
+        auto rounding = parseIdentifier("expected rounding mode");
+        if (!rounding)
+          return std::nullopt;
+        call.rounding = rounding->spelling.str();
+      }
+      if (current.kind == TokenKind::Comma) {
+        if (!expect(TokenKind::Comma, "expected ',' before overflow policy") ||
+            !expectIdentifier("overflow", "expected overflow policy") ||
+            !expect(TokenKind::Equal, "expected '=' after overflow"))
+          return std::nullopt;
+        auto overflow = parseIdentifier("expected overflow mode");
+        if (!overflow)
+          return std::nullopt;
+        call.destinationOverflow = overflow->spelling.str();
+      }
+      if (!expect(TokenKind::RightParen, "expected ')' after elementwise expression"))
         return std::nullopt;
       return call;
     }
@@ -867,17 +956,6 @@ public:
     if (call.kind == ReductionKind::CicDecimate) {
       // state_overflow has no default: the cascade is only correct under
       // wrap, so the declaration is the source's, never the compiler's.
-      auto parseNamedInteger = [&](llvm::StringRef name, int64_t &slot) {
-        if (!expect(TokenKind::Comma, llvm::Twine("expected ',' before ") + name) ||
-            !expectIdentifier(name, llvm::Twine("expected ") + name) ||
-            !expect(TokenKind::Equal, llvm::Twine("expected '=' after ") + name))
-          return false;
-        auto value = parseSignedInteger(llvm::Twine("expected ") + name + " constant");
-        if (!value)
-          return false;
-        slot = *value;
-        return true;
-      };
       if (!parseNamedInteger("stages", call.stages) || !parseNamedInteger("rate", call.rate) ||
           !parseNamedInteger("delay", call.delay))
         return std::nullopt;
@@ -1057,7 +1135,10 @@ public:
   }
 
 private:
-  std::optional<ExpressionAst> parseFftExpression() {
+  // An operand of a composable builtin is a name or another composable
+  // expression; the whole family shares one operand grammar so that adding a
+  // member does not add a nesting rule.
+  std::optional<ExpressionAst> parseComposedOperand() {
     if (current.kind == TokenKind::Identifier && next.kind == TokenKind::LeftParen &&
         calleesByName.contains(current.spelling)) {
       // Inside a chain the composition checker establishes element types, so
@@ -1067,35 +1148,21 @@ private:
         return std::nullopt;
       return ExpressionAst(std::move(*instantiated));
     }
-    bool isFftCall = isIdentifier("cfft") || isIdentifier("icfft") || isIdentifier("rfft") ||
-                     isIdentifier("irfft");
-    if (!isFftCall || next.kind != TokenKind::LeftParen) {
-      auto parameter = parseIdentifier("expected FFT operand expression");
+    bool isNestedBuiltin = isIdentifier("cfft") || isIdentifier("icfft") || isIdentifier("rfft") ||
+                           isIdentifier("irfft") || isIdentifier("magnitude") ||
+                           isIdentifier("add") || isIdentifier("sub") || isIdentifier("mult") ||
+                           isIdentifier("abs") || isIdentifier("negate") ||
+                           isIdentifier("offset") || isIdentifier("shift");
+    if (!isNestedBuiltin || next.kind != TokenKind::LeftParen) {
+      auto parameter = parseIdentifier("expected an operand name or nested expression");
       if (!parameter)
         return std::nullopt;
       return resolveOperand(*parameter);
     }
-
-    BuiltinCallAst call;
-    call.position = current.position;
-    if (isIdentifier("cfft"))
-      call.kind = ReductionKind::Cfft;
-    else if (isIdentifier("icfft"))
-      call.kind = ReductionKind::Icfft;
-    else if (isIdentifier("rfft"))
-      call.kind = ReductionKind::Rfft;
-    else
-      call.kind = ReductionKind::Irfft;
-    advance();
-    if (!expect(TokenKind::LeftParen, "expected '(' after nested FFT builtin"))
+    std::optional<BuiltinCallAst> nested = parseBuiltinCall(SourceType::Q15);
+    if (!nested)
       return std::nullopt;
-    std::optional<ExpressionAst> operand = parseFftExpression();
-    if (!operand)
-      return std::nullopt;
-    call.operands.push_back(std::move(*operand));
-    if (!expect(TokenKind::RightParen, "expected ')' after nested FFT operand"))
-      return std::nullopt;
-    return ExpressionAst(std::move(call));
+    return ExpressionAst(std::move(*nested));
   }
 
   bool isIdentifier(llvm::StringRef spelling) const {
@@ -1369,6 +1436,18 @@ private:
     return instantiateCall(callee.result, substitution, name.position);
   }
 
+  bool parseNamedInteger(llvm::StringRef name, int64_t &slot) {
+    if (!expect(TokenKind::Comma, llvm::Twine("expected ',' before ") + name) ||
+        !expectIdentifier(name, llvm::Twine("expected ") + name) ||
+        !expect(TokenKind::Equal, llvm::Twine("expected '=' after ") + name))
+      return false;
+    auto value = parseSignedInteger(llvm::Twine("expected ") + name + " constant");
+    if (!value)
+      return false;
+    slot = *value;
+    return true;
+  }
+
   // The default fixed contract: exact where it can be exact (an inferred
   // accumulator wide enough that no update wraps, so the mode is vacuous),
   // unbiased and non-wrapping where information must be lost.
@@ -1578,11 +1657,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     diagnostics.error(ast.result.position, "builtin operand count does not match its contract");
     return std::nullopt;
   }
-  if (!isFftComposableKind(ast.result.kind) &&
+  if (!isComposableKind(ast.result.kind) &&
       llvm::any_of(ast.result.operands,
                    [](const ExpressionAst &operand) { return !operand.isParameterReference(); })) {
     diagnostics.error(ast.result.position,
-                      "nested calls are currently supported only by FFT-family builtins");
+                      "nested calls are currently supported only by the FFT-family and "
+                      "elementwise builtins");
     return std::nullopt;
   }
   size_t expectedParameterCount = isUnaryKind(ast.result.kind) ? 1
@@ -1591,7 +1671,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                                                                : 2;
   // FFT-composable kernels take however many parameters their expression
   // tree consumes; the exactly-once accounting below replaces the count.
-  if (!isFftComposableKind(ast.result.kind) && ast.parameters.size() != expectedParameterCount) {
+  if (!isComposableKind(ast.result.kind) && ast.parameters.size() != expectedParameterCount) {
     diagnostics.error(ast.position,
                       isUnaryKind(ast.result.kind)
                           ? "unary DSP kernels require exactly one parameter"
@@ -1631,7 +1711,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         llvm::Twine("duplicate parameter '") + parameter.name + "'");
       return std::nullopt;
     }
-    if (!isFftComposableKind(ast.result.kind) && parameter.type != ast.primaryResult().type) {
+    if (!isComposableKind(ast.result.kind) && parameter.type != ast.primaryResult().type) {
       diagnostics.error(parameter.position,
                         "parameter element types must match the kernel result type");
       return std::nullopt;
@@ -1648,12 +1728,13 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     if (fourthName && parameter.name == *fourthName)
       fourthParameter = &parameter;
   }
-  if (!isFftComposableKind(ast.result.kind) && (!lhsName || !parameterNames.contains(*lhsName))) {
+  if (!isComposableKind(ast.result.kind) && (!lhsName || !parameterNames.contains(*lhsName))) {
     diagnostics.error(ast.result.position, llvm::Twine("unknown builtin operand '") +
                                                (lhsName ? *lhsName : "<nested call>") + "'");
     return std::nullopt;
   }
-  if (!isUnaryKind(ast.result.kind) && (!rhsName || !parameterNames.contains(*rhsName))) {
+  if (!isUnaryKind(ast.result.kind) && !isComposableKind(ast.result.kind) &&
+      (!rhsName || !parameterNames.contains(*rhsName))) {
     diagnostics.error(ast.result.position, llvm::Twine("unknown reduction operand '") +
                                                (rhsName ? *rhsName : "<nested call>") + "'");
     return std::nullopt;
@@ -1947,44 +2028,44 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                       "DSP builtins");
     return std::nullopt;
   }
-  if (isFftComposableKind(ast.result.kind)) {
-    struct FftExpressionType {
+  if (isComposableKind(ast.result.kind)) {
+    struct ComposedType {
       SourceType elementType;
       int64_t extent;
     };
     llvm::StringMap<unsigned> parameterUses;
-    std::function<std::optional<FftExpressionType>(ExpressionAst &)> checkFftExpression;
-    std::function<std::optional<FftExpressionType>(BuiltinCallAst &)> checkFftCall;
-    checkFftExpression = [&](ExpressionAst &expression) -> std::optional<FftExpressionType> {
+    std::function<std::optional<ComposedType>(ExpressionAst &)> checkComposedExpression;
+    std::function<std::optional<ComposedType>(BuiltinCallAst &)> checkComposedCall;
+    checkComposedExpression = [&](ExpressionAst &expression) -> std::optional<ComposedType> {
       if (expression.isParameterReference()) {
         auto parameter = parametersByName.find(expression.parameter);
         if (parameter == parametersByName.end()) {
           diagnostics.error(expression.position,
-                            llvm::Twine("unknown FFT operand '") + expression.parameter + "'");
+                            llvm::Twine("unknown operand '") + expression.parameter + "'");
           return std::nullopt;
         }
         ++parameterUses[expression.parameter];
         const ParameterAst *value = parameter->second;
         if (!value->isTensor() || !hasRank(value->shape, 1)) {
           diagnostics.error(expression.position,
-                            "FFT-family builtins currently require rank-1 tensor operands");
+                            "composable builtins currently require rank-1 tensor operands");
           return std::nullopt;
         }
         const std::optional<int64_t> &extent = getRankOneExtent(value->shape);
         if (!extent) {
           diagnostics.error(expression.position,
-                            "FFT-family builtins currently require static operand extents");
+                            "composable builtins currently require static operand extents");
           return std::nullopt;
         }
-        return FftExpressionType{value->type, *extent};
+        return ComposedType{value->type, *extent};
       }
 
-      return checkFftCall(*expression.call);
+      return checkComposedCall(*expression.call);
     };
     // A fir_filter stage may feed the FFT chain: static Q15 tensors, the
     // valid boundary, and the executable Q15 export profile, explicitly
     // declared. Its coefficients are a tensor parameter or a lowpass design.
-    auto checkNestedFirFilter = [&](BuiltinCallAst &call) -> std::optional<FftExpressionType> {
+    auto checkNestedFirFilter = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       if (call.operands.size() != 2) {
         diagnostics.error(call.position, "builtin operand count does not match its contract");
         return std::nullopt;
@@ -2092,18 +2173,71 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                                              call.destinationOverflow + "'");
         return std::nullopt;
       }
-      return FftExpressionType{SourceType::Q15, inputExtent - tapCount + 1};
+      return ComposedType{SourceType::Q15, inputExtent - tapCount + 1};
     };
-    checkFftCall = [&](BuiltinCallAst &call) -> std::optional<FftExpressionType> {
+    // The elementwise family: Q15 in, Q15 out, extents equal. Only the two
+    // boundary attributes vary between members, so one checker covers all
+    // seven and a new member cannot forget a rule.
+    auto checkElementwise = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
+      std::optional<ComposedType> lhs = checkComposedExpression(call.operands.front());
+      if (!lhs)
+        return std::nullopt;
+      if (lhs->elementType != SourceType::Q15) {
+        diagnostics.error(call.position, "elementwise builtins require Q15 operand elements");
+        return std::nullopt;
+      }
+      if (lhs->extent < 1 || lhs->extent > 4096) {
+        diagnostics.error(call.position,
+                          "elementwise builtins currently require an extent in [1, 4096]");
+        return std::nullopt;
+      }
+      if (isBinaryElementwiseKind(call.kind)) {
+        std::optional<ComposedType> rhs = checkComposedExpression(call.operands[1]);
+        if (!rhs)
+          return std::nullopt;
+        if (rhs->elementType != SourceType::Q15 || rhs->extent != lhs->extent) {
+          diagnostics.error(call.position,
+                            "binary elementwise builtins require operands of the same Q15 extent");
+          return std::nullopt;
+        }
+      }
+      if (call.kind == ReductionKind::Offset && (call.bias < -32768 || call.bias > 32767)) {
+        diagnostics.error(call.position,
+                          "offset bias must be a raw signed Q1.15 value in [-32768, 32767]");
+        return std::nullopt;
+      }
+      if (call.kind == ReductionKind::Shift && (call.amount < -15 || call.amount > 15)) {
+        diagnostics.error(call.position, "shift amount must lie in [-15, 15]");
+        return std::nullopt;
+      }
+      if (call.rounding.empty())
+        call.rounding = "nearest_even";
+      if (call.destinationOverflow.empty())
+        call.destinationOverflow = "saturate";
+      if (!parseRounding(call.rounding)) {
+        diagnostics.error(call.position,
+                          llvm::Twine("unsupported rounding mode '") + call.rounding + "'");
+        return std::nullopt;
+      }
+      if (!parseOverflow(call.destinationOverflow)) {
+        diagnostics.error(call.position, llvm::Twine("unsupported overflow mode '") +
+                                             call.destinationOverflow + "'");
+        return std::nullopt;
+      }
+      return *lhs;
+    };
+    checkComposedCall = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       if (call.kind == ReductionKind::FirFilter)
         return checkNestedFirFilter(call);
+      if (isElementwiseKind(call.kind))
+        return checkElementwise(call);
       if (!isFftComposableKind(call.kind) || call.operands.size() != 1) {
         diagnostics.error(call.position,
                           "nested calls are currently supported only by unary FFT-family builtins "
                           "and a fir_filter input stage");
         return std::nullopt;
       }
-      std::optional<FftExpressionType> input = checkFftExpression(call.operands.front());
+      std::optional<ComposedType> input = checkComposedExpression(call.operands.front());
       if (!input)
         return std::nullopt;
 
@@ -2126,7 +2260,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
             return std::nullopt;
           }
         }
-        return FftExpressionType{SourceType::Q15, input->extent};
+        return ComposedType{SourceType::Q15, input->extent};
       }
       if (isCfftKind(call.kind)) {
         if (input->elementType != SourceType::ComplexQ15) {
@@ -2149,7 +2283,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                             "rfft currently supports power-of-two extents in [8, 64]");
           return std::nullopt;
         }
-        return FftExpressionType{SourceType::ComplexQ15, input->extent / 2 + 1};
+        return ComposedType{SourceType::ComplexQ15, input->extent / 2 + 1};
       }
       if (input->elementType != SourceType::ComplexQ15) {
         diagnostics.error(call.position, "irfft requires complex_q15 Hermitian operand elements");
@@ -2160,36 +2294,35 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                           "irfft currently supports only five or nine Hermitian bins");
         return std::nullopt;
       }
-      return FftExpressionType{SourceType::Q15, (input->extent - 1) * 2};
+      return ComposedType{SourceType::Q15, (input->extent - 1) * 2};
     };
 
-    std::optional<FftExpressionType> inferred = checkFftCall(ast.result);
+    std::optional<ComposedType> inferred = checkComposedCall(ast.result);
     if (!inferred)
       return std::nullopt;
+    // Reading a parameter more than once is fine: a tensor operand is a
+    // value, so `mult(x, x)` reads the same storage twice and writes neither.
     for (const ParameterAst &parameter : ast.parameters) {
-      unsigned count = parameterUses.lookup(parameter.name);
-      if (count != 1) {
-        diagnostics.error(parameter.position,
-                          llvm::Twine("parameter '") + parameter.name +
-                              (count == 0 ? "' is never consumed by the kernel expression"
-                                          : "' is consumed more than once in this slice"));
+      if (parameterUses.lookup(parameter.name) == 0) {
+        diagnostics.error(parameter.position, llvm::Twine("parameter '") + parameter.name +
+                                                  "' is never consumed by the kernel expression");
         return std::nullopt;
       }
     }
     if (!ast.primaryResult().tensor || !hasRank(ast.primaryResult().shape, 1)) {
       diagnostics.error(ast.result.position,
-                        "FFT-family builtins currently require a rank-1 tensor result");
+                        "composable builtins currently require a rank-1 tensor result");
       return std::nullopt;
     }
     const std::optional<int64_t> &resultExtent = getRankOneExtent(ast.primaryResult().shape);
     if (!resultExtent) {
       diagnostics.error(ast.result.position,
-                        "FFT-family builtins currently require a static result extent");
+                        "composable builtins currently require a static result extent");
       return std::nullopt;
     }
     if (ast.primaryResult().type != inferred->elementType || *resultExtent != inferred->extent) {
       diagnostics.error(ast.result.position,
-                        "declared FFT result type does not match the builtin expression");
+                        "declared result type does not match the builtin expression");
       return std::nullopt;
     }
     return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, std::nullopt};
@@ -2802,7 +2935,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
 
   Location expressionLocation = getLocation(context, sourceName, kernel.ast.result.position);
-  if (isFftComposableKind(kernel.ast.result.kind)) {
+  if (isComposableKind(kernel.ast.result.kind)) {
     auto layout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI16ImagHiRealLo);
     auto i16 = builder.getI16Type();
     auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, i16, 15);
@@ -2811,7 +2944,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                                               ondsp::OverflowMode::Saturate, i16);
     auto outputScale = ondsp::ScaleAttr::get(&context, 0, 1, ondsp::RoundingMode::NearestEven,
                                              ondsp::OverflowMode::Saturate, i16);
-    std::function<Value(const BuiltinCallAst &)> emitFftCall =
+    std::function<Value(const BuiltinCallAst &)> emitComposedCall =
         [&](const BuiltinCallAst &call) -> Value {
       if (call.kind == ReductionKind::FirFilter) {
         // The composed filter stage: sema pinned Q15 elements, the valid
@@ -2846,8 +2979,38 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       }
       const ExpressionAst &operand = call.operands.front();
       Value input = operand.isParameterReference() ? arguments.lookup(operand.parameter)
-                                                   : emitFftCall(*operand.call);
+                                                   : emitComposedCall(*operand.call);
       auto inputType = cast<RankedTensorType>(input.getType());
+      if (isElementwiseKind(call.kind)) {
+        Location callLocation = getLocation(context, sourceName, call.position);
+        auto rounding = ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding));
+        auto overflow =
+            ondsp::OverflowModeAttr::get(&context, *parseOverflow(call.destinationOverflow));
+        if (isBinaryElementwiseKind(call.kind)) {
+          const ExpressionAst &second = call.operands[1];
+          Value rhs = second.isParameterReference() ? arguments.lookup(second.parameter)
+                                                    : emitComposedCall(*second.call);
+          if (call.kind == ReductionKind::Add)
+            return builder.create<ir::AddOp>(callLocation, inputType, input, rhs, numeric,
+                                             overflow);
+          if (call.kind == ReductionKind::Sub)
+            return builder.create<ir::SubOp>(callLocation, inputType, input, rhs, numeric,
+                                             overflow);
+          return builder.create<ir::MultOp>(callLocation, inputType, input, rhs, numeric, rounding,
+                                            overflow);
+        }
+        if (call.kind == ReductionKind::Abs)
+          return builder.create<ir::AbsOp>(callLocation, inputType, input, numeric, overflow);
+        if (call.kind == ReductionKind::Negate)
+          return builder.create<ir::NegateOp>(callLocation, inputType, input, numeric, overflow);
+        if (call.kind == ReductionKind::Offset)
+          return builder.create<ir::OffsetOp>(callLocation, inputType, input,
+                                              builder.getI64IntegerAttr(call.bias), numeric,
+                                              overflow);
+        return builder.create<ir::ShiftOp>(callLocation, inputType, input,
+                                           builder.getI64IntegerAttr(call.amount), numeric,
+                                           rounding, overflow);
+      }
       Location callLocation = getLocation(context, sourceName, call.position);
       if (call.kind == ReductionKind::Magnitude) {
         auto outputType = RankedTensorType::get({inputType.getDimSize(0)}, builder.getI16Type());
@@ -2878,7 +3041,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       return builder.create<ir::IrfftOp>(callLocation, outputType, input, layout, numeric, product,
                                          productScale, outputScale);
     };
-    Value result = emitFftCall(kernel.ast.result);
+    Value result = emitComposedCall(kernel.ast.result);
     builder.create<func::ReturnOp>(expressionLocation, result);
     module->push_back(function);
     if (failed(verify(*module)))

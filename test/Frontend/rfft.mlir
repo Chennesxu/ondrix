@@ -32,7 +32,7 @@
 // COMPOSE: %[[ROUND_TRIP:.*]] = ondrix.irfft %[[SPECTRUM]]
 // COMPOSE: return %[[ROUND_TRIP]] : tensor<16xi16>
 
-// DYNAMIC: invalid_rfft_dynamic.ox:2:15: error: FFT-family builtins currently require static operand extents
+// DYNAMIC: invalid_rfft_dynamic.ox:2:15: error: composable builtins currently require static operand extents
 // EXTENT: invalid_rfft_extent.ox:2:10: error: rfft currently supports power-of-two extents in [8, 64]
 // ELEMENT: invalid_rfft_element.ox:2:10: error: rfft requires Q15 real operand elements
 // NESTING: invalid_rfft_nesting.ox:2:10: error: cfft currently supports only four or eight points

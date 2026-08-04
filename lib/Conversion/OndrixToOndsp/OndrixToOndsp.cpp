@@ -1661,6 +1661,163 @@ static ondrix::ondsp::ScaleAttr getNearestEvenSaturatingShift(MLIRContext *conte
                                        IntegerType::get(context, 16));
 }
 
+// The elementwise family lowers to one loop per operation whose body is the
+// exact integer expression followed by the operation's single declared
+// boundary. Widening to i32 first is what makes "exact" true of the body:
+// nothing can lose a bit before the boundary the contract names.
+template <typename SourceOp>
+class ElementwiseOpLowering final : public OpConversionPattern<SourceOp> {
+public:
+  using OpConversionPattern<SourceOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(SourceOp op, typename SourceOp::Adaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    MLIRContext *context = rewriter.getContext();
+    IntegerType i16 = rewriter.getI16Type();
+    IntegerType i32 = rewriter.getIntegerType(32);
+    RankedTensorType resultType = op.getResult().getType();
+    int64_t extent = resultType.getDimSize(0);
+
+    SmallVector<Value> sources;
+    for (Value operand : adaptor.getOperands())
+      if (isa<RankedTensorType>(operand.getType()))
+        sources.push_back(operand);
+
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+    Value empty = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), i16);
+    auto loop = rewriter.create<scf::ForOp>(
+        loc, zero, extentValue, one, ValueRange{empty},
+        [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+          SmallVector<Value> elements;
+          for (Value source : sources)
+            elements.push_back(builder.create<tensor::ExtractOp>(loc, source, position));
+          Value value = emitBody(op, elements, context, i16, i32, loc, builder);
+          Value inserted = builder.create<tensor::InsertOp>(loc, value, iterArgs.front(), position);
+          builder.create<scf::YieldOp>(loc, inserted);
+        });
+    rewriter.replaceOp(op, loop.getResult(0));
+    return success();
+  }
+
+private:
+  static ondrix::ondsp::ScaleAttr narrowingScale(MLIRContext *context, unsigned shift,
+                                                 ondrix::ondsp::RoundingMode rounding,
+                                                 ondrix::ondsp::OverflowMode overflow,
+                                                 IntegerType destination) {
+    return ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, shift, rounding, overflow,
+                                         destination);
+  }
+
+  static Value emitBody(SourceOp op, ArrayRef<Value> elements, MLIRContext *context,
+                        IntegerType i16, IntegerType i32, Location loc, OpBuilder &builder);
+};
+
+template <>
+Value ElementwiseOpLowering<ondrix::ir::AddOp>::emitBody(ondrix::ir::AddOp op,
+                                                         ArrayRef<Value> elements,
+                                                         MLIRContext *context, IntegerType i16,
+                                                         IntegerType i32, Location loc,
+                                                         OpBuilder &builder) {
+  // add_shift computes the sum one bit wider than its operands, so the i16
+  // operands give the exact i17 sum and the scale is the only boundary.
+  return builder.create<ondrix::ondsp::AddShiftOp>(
+      loc, i16, elements[0], elements[1],
+      narrowingScale(context, 0, ondrix::ondsp::RoundingMode::TowardNegative, op.getOverflow(),
+                     i16));
+}
+
+template <>
+Value ElementwiseOpLowering<ondrix::ir::SubOp>::emitBody(ondrix::ir::SubOp op,
+                                                         ArrayRef<Value> elements,
+                                                         MLIRContext *context, IntegerType i16,
+                                                         IntegerType i32, Location loc,
+                                                         OpBuilder &builder) {
+  return builder.create<ondrix::ondsp::SubShiftOp>(
+      loc, i16, elements[0], elements[1],
+      narrowingScale(context, 0, ondrix::ondsp::RoundingMode::TowardNegative, op.getOverflow(),
+                     i16));
+}
+
+template <>
+Value ElementwiseOpLowering<ondrix::ir::MultOp>::emitBody(ondrix::ir::MultOp op,
+                                                          ArrayRef<Value> elements,
+                                                          MLIRContext *context, IntegerType i16,
+                                                          IntegerType i32, Location loc,
+                                                          OpBuilder &builder) {
+  Value lhs = builder.create<arith::ExtSIOp>(loc, i32, elements[0]);
+  Value rhs = builder.create<arith::ExtSIOp>(loc, i32, elements[1]);
+  Value product = builder.create<arith::MulIOp>(loc, lhs, rhs);
+  return builder.create<ondrix::ondsp::RoundShiftOp>(
+      loc, i16, product, narrowingScale(context, 15, op.getRounding(), op.getOverflow(), i16));
+}
+
+template <>
+Value ElementwiseOpLowering<ondrix::ir::AbsOp>::emitBody(ondrix::ir::AbsOp op,
+                                                         ArrayRef<Value> elements,
+                                                         MLIRContext *context, IntegerType i16,
+                                                         IntegerType i32, Location loc,
+                                                         OpBuilder &builder) {
+  // Negating in i32 is what keeps |-32768| exact; the declared overflow then
+  // decides the one input the destination cannot hold.
+  Value wide = builder.create<arith::ExtSIOp>(loc, i32, elements[0]);
+  Value zero = builder.create<arith::ConstantIntOp>(loc, 0, i32);
+  Value negated = builder.create<arith::SubIOp>(loc, zero, wide);
+  Value magnitude = builder.create<arith::MaxSIOp>(loc, wide, negated);
+  return builder.create<ondrix::ondsp::RoundShiftOp>(
+      loc, i16, magnitude,
+      narrowingScale(context, 0, ondrix::ondsp::RoundingMode::TowardNegative, op.getOverflow(),
+                     i16));
+}
+
+template <>
+Value ElementwiseOpLowering<ondrix::ir::NegateOp>::emitBody(ondrix::ir::NegateOp op,
+                                                            ArrayRef<Value> elements,
+                                                            MLIRContext *context, IntegerType i16,
+                                                            IntegerType i32, Location loc,
+                                                            OpBuilder &builder) {
+  Value wide = builder.create<arith::ExtSIOp>(loc, i32, elements[0]);
+  Value zero = builder.create<arith::ConstantIntOp>(loc, 0, i32);
+  Value negated = builder.create<arith::SubIOp>(loc, zero, wide);
+  return builder.create<ondrix::ondsp::RoundShiftOp>(
+      loc, i16, negated,
+      narrowingScale(context, 0, ondrix::ondsp::RoundingMode::TowardNegative, op.getOverflow(),
+                     i16));
+}
+
+template <>
+Value ElementwiseOpLowering<ondrix::ir::OffsetOp>::emitBody(ondrix::ir::OffsetOp op,
+                                                            ArrayRef<Value> elements,
+                                                            MLIRContext *context, IntegerType i16,
+                                                            IntegerType i32, Location loc,
+                                                            OpBuilder &builder) {
+  Value bias = builder.create<arith::ConstantIntOp>(loc, op.getBiasAttr().getInt(), i16);
+  return builder.create<ondrix::ondsp::AddShiftOp>(
+      loc, i16, elements[0], bias,
+      narrowingScale(context, 0, ondrix::ondsp::RoundingMode::TowardNegative, op.getOverflow(),
+                     i16));
+}
+
+template <>
+Value ElementwiseOpLowering<ondrix::ir::ShiftOp>::emitBody(ondrix::ir::ShiftOp op,
+                                                           ArrayRef<Value> elements,
+                                                           MLIRContext *context, IntegerType i16,
+                                                           IntegerType i32, Location loc,
+                                                           OpBuilder &builder) {
+  int64_t amount = op.getAmountAttr().getInt();
+  Value wide = builder.create<arith::ExtSIOp>(loc, i32, elements[0]);
+  if (amount > 0) {
+    // Exact in i32: 2^15 * 2^15 still fits, so only the narrowing can lose.
+    Value shift = builder.create<arith::ConstantIntOp>(loc, amount, i32);
+    wide = builder.create<arith::ShLIOp>(loc, wide, shift);
+  }
+  unsigned right = amount < 0 ? unsigned(-amount) : 0u;
+  return builder.create<ondrix::ondsp::RoundShiftOp>(
+      loc, i16, wide, narrowingScale(context, right, op.getRounding(), op.getOverflow(), i16));
+}
+
 class CicDecimateOpLowering final : public OpConversionPattern<ondrix::ir::CicDecimateOp> {
 public:
   using OpConversionPattern<ondrix::ir::CicDecimateOp>::OpConversionPattern;
@@ -2543,7 +2700,11 @@ public:
              SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering,
              RfftRadix4SplitOpLowering, CxMagnitudeOpLowering, DctOpLowering, GainOpLowering,
              LmsOpLowering, RmsOpLowering, MatmulOpLowering, GoertzelOpLowering, SineOpLowering,
-             CosineOpLowering, CicDecimateOpLowering>(&getContext());
+             CosineOpLowering, CicDecimateOpLowering, ElementwiseOpLowering<ondrix::ir::AddOp>,
+             ElementwiseOpLowering<ondrix::ir::SubOp>, ElementwiseOpLowering<ondrix::ir::MultOp>,
+             ElementwiseOpLowering<ondrix::ir::AbsOp>, ElementwiseOpLowering<ondrix::ir::NegateOp>,
+             ElementwiseOpLowering<ondrix::ir::OffsetOp>,
+             ElementwiseOpLowering<ondrix::ir::ShiftOp>>(&getContext());
     if (vectorizeStaticCfft && fftLoops) {
       module.emitError("vectorize-static-cfft and fft-loops are mutually exclusive alternative "
                        "FFT lowerings; select at most one");

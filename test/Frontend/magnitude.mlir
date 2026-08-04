@@ -31,5 +31,5 @@
 // FLOOR-SAME: rounding = #ondsp.rounding<toward_negative>
 
 // ELEMENT: invalid_magnitude_element.ox:2:10: error: magnitude requires complex_q15 operand elements
-// MISMATCH: invalid_magnitude_result.ox:2:10: error: declared FFT result type does not match the builtin expression
+// MISMATCH: invalid_magnitude_result.ox:2:10: error: declared result type does not match the builtin expression
 // ROUNDING: invalid_magnitude_rounding.ox:2:10: error: magnitude root_rounding must be nearest_even or toward_negative

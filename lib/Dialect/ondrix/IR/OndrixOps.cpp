@@ -830,6 +830,90 @@ LogicalResult FirDecimateOp::verify() {
   return verifyFirDecimateDomain(*this);
 }
 
+// One shape and format rule for the whole elementwise family: matching static
+// rank-1 Q15 tensors. Passing every operand keeps a binary member from
+// checking only its left side.
+static LogicalResult verifyElementwiseQ15Domain(Operation *op, Attribute numeric,
+                                                llvm::ArrayRef<RankedTensorType> types) {
+  if (failed(verifySignedFixedFormat(op, numeric, 16, 15, "numeric")))
+    return failure();
+  if (failed(verifyUnencodedTensorTypes(op, types)))
+    return failure();
+  int64_t extent =
+      types.front().getRank() == 1 ? types.front().getDimSize(0) : ShapedType::kDynamic;
+  bool ok = extent != ShapedType::kDynamic && extent >= 1 && extent <= 4096;
+  for (RankedTensorType type : types)
+    ok &= type.getRank() == 1 && type.getDimSize(0) == extent &&
+          type.getElementType().isSignlessInteger(16);
+  if (!ok)
+    return op->emitOpError("executable elementwise operations require matching static "
+                           "tensor<Nxi16> operands and result with N in [1, 4096]");
+  return success();
+}
+
+// The four declared tie rules are all admissible at an elementwise
+// requantization: round_shift implements each of them and the object gate
+// runs all four.
+static LogicalResult verifyElementwiseRounding(Operation *op,
+                                               ondrix::ondsp::RoundingMode rounding) {
+  switch (rounding) {
+  case ondrix::ondsp::RoundingMode::TowardNegative:
+  case ondrix::ondsp::RoundingMode::TowardZero:
+  case ondrix::ondsp::RoundingMode::NearestEven:
+  case ondrix::ondsp::RoundingMode::NearestTiesPositive:
+    return success();
+  }
+  return op->emitOpError("unsupported rounding mode");
+}
+
+LogicalResult AddOp::verify() {
+  return verifyElementwiseQ15Domain(
+      getOperation(), getNumeric(),
+      {getLhs().getType(), getRhs().getType(), getResult().getType()});
+}
+
+LogicalResult SubOp::verify() {
+  return verifyElementwiseQ15Domain(
+      getOperation(), getNumeric(),
+      {getLhs().getType(), getRhs().getType(), getResult().getType()});
+}
+
+LogicalResult MultOp::verify() {
+  if (failed(verifyElementwiseRounding(getOperation(), getRounding())))
+    return failure();
+  return verifyElementwiseQ15Domain(
+      getOperation(), getNumeric(),
+      {getLhs().getType(), getRhs().getType(), getResult().getType()});
+}
+
+LogicalResult AbsOp::verify() {
+  return verifyElementwiseQ15Domain(getOperation(), getNumeric(),
+                                    {getInput().getType(), getResult().getType()});
+}
+
+LogicalResult NegateOp::verify() {
+  return verifyElementwiseQ15Domain(getOperation(), getNumeric(),
+                                    {getInput().getType(), getResult().getType()});
+}
+
+LogicalResult OffsetOp::verify() {
+  int64_t bias = getBiasAttr().getInt();
+  if (bias < -32768 || bias > 32767)
+    return emitOpError("offset bias must be a raw signed Q1.15 value in [-32768, 32767]");
+  return verifyElementwiseQ15Domain(getOperation(), getNumeric(),
+                                    {getInput().getType(), getResult().getType()});
+}
+
+LogicalResult ShiftOp::verify() {
+  int64_t amount = getAmountAttr().getInt();
+  if (amount < -15 || amount > 15)
+    return emitOpError("shift amount must lie in [-15, 15]");
+  if (failed(verifyElementwiseRounding(getOperation(), getRounding())))
+    return failure();
+  return verifyElementwiseQ15Domain(getOperation(), getNumeric(),
+                                    {getInput().getType(), getResult().getType()});
+}
+
 int64_t CicDecimateOp::getGrowthBits() {
   return getStages() * llvm::Log2_64(uint64_t(getRate()) * uint64_t(getDelay()));
 }
