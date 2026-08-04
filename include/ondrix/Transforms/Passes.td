@@ -108,6 +108,50 @@ def EvaluateOndrixFirDesign
   ];
 }
 
+def FuseOndrixElementwiseChains
+    : Pass<"fuse-ondrix-elementwise-chains", "::mlir::ModuleOp"> {
+  let summary = "Collapse unary elementwise chains proven equivalent by exhaustive certificate";
+  let description = [{
+    Opt-in rewrite of a two-operation chain of unary Q1.15 elementwise members
+    (`abs`, `negate`, `offset`, `shift`) into one operation, or into the input
+    when the pair is the identity. Every one of these collapses is a
+    real-arithmetic identity and none of them is unconditionally a contract
+    identity, so a candidate is authorized only by evaluating both programs on
+    all 65536 possible i16 inputs and finding them bit-identical.
+
+    The verdicts the certificate produces are not uniform, and that is the
+    point of running it per candidate rather than per rule:
+
+    ```text
+    negate(negate(x))      identity under wrap; under saturate -32768 -> -32767
+    offset(offset(x,a),b)  one offset under wrap; under saturate a=+1000 then
+                           b=-1000 clamps at 32767 and loses 1000
+    shift(shift(x,-a),-b)  one shift under toward_negative and toward_zero;
+                           under either nearest rule the double rounding
+                           diverges, which is the same double-rounding
+                           structure the round_shift cascade study describes
+    shift(shift(x,a),b)    one shift for two left shifts under either mode
+    abs(negate(x))         abs under both modes
+    ```
+
+    A binary member never enters a chain: `mult` has a 2^32 input domain and
+    neither operand is known at compile time, so the enumeration that decides
+    every case above cannot be run at all. That is a structural refusal rather
+    than a failed certificate, and it is why the constant-operand `gain` has a
+    merge pass while `mult` has none.
+
+    An intermediate value with another use, a mismatched numeric policy, or a
+    merged parameter outside the operation's declared range leaves the chain
+    untouched; the safe state is the uncollapsed program. A rewritten
+    operation records the pair and the certificate domain in an
+    `ondrix.elementwise_fusion_provenance` attribute.
+  }];
+  let constructor = "ondrix::createFuseOndrixElementwiseChainsPass()";
+  let dependentDialects = [
+    "ondrix::ir::OndrixDialect",
+  ];
+}
+
 def MergeOndrixGainCascades
     : Pass<"merge-ondrix-gain-cascades", "::mlir::ModuleOp"> {
   let summary = "Merge gain cascades proven equivalent by exhaustive certificate";
