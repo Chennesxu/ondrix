@@ -1,5 +1,8 @@
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
+#include "llvm/ADT/SetVector.h"
+
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/FunctionInterfaces.h"
 
@@ -27,11 +30,31 @@ LogicalResult verifyProductPolicy(Operation *op, Attribute numeric,
 llvm::StringRef getFastPermissionAttrName() { return "ondsp.fast_used"; }
 
 Value consumeFastPermission(Operation *op, FastPermission permission) {
+  MLIRContext *context = op->getContext();
   StringRef spelling = permission == FastPermission::ReassociateReductionTerms
                            ? "reassociate_reduction_terms"
                            : "fuse_multiply_add";
-  op->setAttr(getFastPermissionAttrName(), StringAttr::get(op->getContext(), spelling));
+  op->setAttr(getFastPermissionAttrName(), StringAttr::get(context, spelling));
   return op->getResult(0);
+}
+
+void summarizeFastPermissions(ModuleOp module) {
+  SetVector<StringRef> spent;
+  if (auto existing = module->getAttrOfType<ArrayAttr>(getFastPermissionAttrName()))
+    for (Attribute entry : existing)
+      spent.insert(cast<StringAttr>(entry).getValue());
+  module.walk([&](Operation *op) {
+    if (auto record = op->getAttrOfType<StringAttr>(getFastPermissionAttrName()))
+      spent.insert(record.getValue());
+  });
+  if (spent.empty())
+    return;
+  SmallVector<StringRef> sorted(spent.begin(), spent.end());
+  llvm::sort(sorted);
+  SmallVector<Attribute> entries;
+  for (StringRef name : sorted)
+    entries.push_back(StringAttr::get(module.getContext(), name));
+  module->setAttr(getFastPermissionAttrName(), ArrayAttr::get(module.getContext(), entries));
 }
 
 LogicalResult verifyExecutableFpFormat(Operation *op, FpAttr numeric, StringRef executable) {

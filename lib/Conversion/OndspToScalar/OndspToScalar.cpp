@@ -115,7 +115,8 @@ public:
         [](ondrix::ondsp::ReduceMacOp op) { return !isSupportedF32MemRefReduction(op); });
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
-      signalPassFailure();
+      return signalPassFailure();
+    ondrix::ondsp::summarizeFastPermissions(getOperation());
   }
 };
 

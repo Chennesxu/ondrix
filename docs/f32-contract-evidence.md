@@ -123,12 +123,21 @@ member, the object is pinned bitwise against that member. `fast` may legally
 produce any member, so the purpose is that a transform which starts consuming
 differently must redden the gate and re-justify itself.
 
-**Executed coverage is thinner than the admitted surface.** Six routes rely on
-`fp_fast_reduce_aot`, which gates the shared reduction mechanism rather than
-the path that reaches it: it cannot show that a given operation still forms the
-expected `reduce_mac`, so a bufferization change that silently stopped
-vectorizing an operation would leave it green. Per-route reachability evidence
-is owed.
+**Mechanism evidence and reachability evidence are separate.**
+`fp_fast_reduce_aot` shows that a `reduce_mac` becomes a term-conserving
+horizontal schedule, under both term selections. It cannot show that a given
+operation still forms the `reduce_mac` that reaches it, so
+`test/Permissions/fast_route_reachability.mlir` pins that composition once per
+adapter shape — whole contiguous memref, sliding unit-stride window, matrix row
+against a transposed pack, one operand used twice, and the reversed subview
+whose refusal is the point. Operations sharing a shape share the argument.
+
+**What a compilation spent is recorded, not inferred.** A consumed permission
+leaves no fast-math flag, so `consumeFastPermission` writes it down: an audit
+attribute on the produced operation, unioned onto the module, and reported by
+`ondrix-compile --emit=manifest`. The same source spends `{F}` with no declared
+width, `{R}` at 256 bits, and `{R, F}` with a declared vector FMA — which is
+the reachability layer above, made checkable per compilation.
 
 ## Format admission
 

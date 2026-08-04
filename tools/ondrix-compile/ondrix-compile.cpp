@@ -1,3 +1,4 @@
+#include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Frontend/OxFrontend.h"
 #include "ondrix/InitAllDialects.h"
 #include "ondrix/InitAllPasses.h"
@@ -8,16 +9,19 @@
 #include "mlir/InitAllPasses.h"
 #include "mlir/Pass/PassManager.h"
 
+#include "llvm/Config/llvm-config.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/ToolOutputFile.h"
 
 using namespace llvm;
 
 namespace {
-enum class EmitKind { Contracts, LLVMDialect };
+enum class EmitKind { Contracts, LLVMDialect, Manifest };
 
 cl::opt<std::string> inputFilename(cl::Positional, cl::desc("<input .ox file>"), cl::Required);
 cl::opt<std::string> outputFilename("o", cl::desc("Output MLIR file"), cl::value_desc("filename"),
@@ -30,7 +34,10 @@ cl::opt<EmitKind> emitKind(
                           "The frontend's contract-form MLIR (default)"),
                clEnumValN(EmitKind::LLVMDialect, "llvm",
                           "LLVM-dialect MLIR produced by the canonical pipeline, "
-                          "schedules selected automatically under their legality analyses")),
+                          "schedules selected automatically under their legality analyses"),
+               clEnumValN(EmitKind::Manifest, "manifest",
+                          "JSON reproduction record of the compilation that "
+                          "--emit=llvm would perform")),
     cl::init(EmitKind::Contracts));
 
 // Target facts for the schedule stage. Both default to assuming nothing, so an
@@ -44,6 +51,37 @@ cl::opt<bool> supportsF32VectorFma("supports-f32-vector-fma",
                                             "vector fused multiply-add"),
                                    cl::init(false));
 } // namespace
+
+/// What this compilation was, in the terms a rerun needs. Only facts the
+/// compiler owns are recorded: the environment around it — git revision, the
+/// llc invocation, reference compiler flags, corpus seeds, object hashes — is
+/// the harness's to add, and inventing empty fields for them here would read
+/// as though something had checked them.
+void emitManifest(mlir::ModuleOp module, const ondrix::OndrixDefaultPipelineOptions &options,
+                  raw_ostream &os) {
+  llvm::json::Array permissions;
+  if (auto spent =
+          module->getAttrOfType<mlir::ArrayAttr>(ondrix::ondsp::getFastPermissionAttrName()))
+    for (mlir::Attribute entry : spent)
+      permissions.push_back(mlir::cast<mlir::StringAttr>(entry).getValue());
+
+  const int64_t vectorBitsValue = options.vectorBits;
+  const bool fmaValue = options.supportsF32VectorFma;
+  llvm::json::Object manifest{
+      {"llvm_version", LLVM_VERSION_STRING},
+      {"pipeline", ondrix::getOndrixDefaultPipelineText(options)},
+      {"target",
+       llvm::json::Object{{"vector_bits", vectorBitsValue}, {"supports_f32_vector_fma", fmaValue}}},
+      {"fast_permissions_used", std::move(permissions)},
+      // Declared, not observed: the numeric model states these and every
+      // reference is built to match them.
+      {"fp_environment", llvm::json::Object{{"rounding", "round_to_nearest_even"},
+                                            {"subnormals", "preserved"},
+                                            {"flush_to_zero", false},
+                                            {"exception_state", "unobservable"}}},
+  };
+  os << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest))) << '\n';
+}
 
 int main(int argc, char **argv) {
   InitLLVM initLLVM(argc, argv);
@@ -80,7 +118,7 @@ int main(int argc, char **argv) {
   if (!module)
     return 1;
 
-  if (emitKind == EmitKind::LLVMDialect) {
+  if (emitKind == EmitKind::LLVMDialect || emitKind == EmitKind::Manifest) {
     mlir::PassManager passManager(&context, mlir::ModuleOp::getOperationName());
     ondrix::OndrixDefaultPipelineOptions options;
     options.vectorBits = vectorBits.getValue();
@@ -88,6 +126,11 @@ int main(int argc, char **argv) {
     ondrix::buildOndrixDefaultPipeline(passManager, options);
     if (failed(passManager.run(*module)))
       return 1;
+    if (emitKind == EmitKind::Manifest) {
+      emitManifest(*module, options, output.os());
+      output.keep();
+      return 0;
+    }
   }
 
   mlir::OpPrintingFlags flags;

@@ -761,6 +761,28 @@ def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
     The executable profile pins `input_numeric` to signed Q1.15 and
     `output_numeric` to signed i16 with `frac = 14 - m` derived from the
     result extent.
+
+    The f32 profile maps `tensor<Nxf32>` to `tensor<Nxf32>` over the same
+    coefficient matrix with the export boundary removed. Both numeric
+    attributes carry the same contract; there is no requantization after a
+    floating-point reduction, so the second exists only to keep the
+    operand shape uniform with the fixed profile:
+
+    ```text
+    a = x[0] * c[k][0]                       one rounded product
+    per n in 1 .. N-1:  a = a + x[n]*c[k][n] the contract-indexed term
+    X[k] = a
+    ```
+
+    That is the base graph. `off` denotes it; `fma` fuses each term after
+    the first, whose product has no addend; `fast` admits both plus any
+    regrouping of the row's additive tree. Every row is a reduction, so R
+    applies, but the tensor path does not reach the horizontal rewrite and
+    the lowering selects the fused chain, spending F only.
+
+    `c[k][n]` is the binary32 narrowing of a binary64 cosine, which makes
+    the build's libm part of the declared constant rather than a detail:
+    the coefficient bits are pinned, not derived.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_NumericAttr:$input_numeric,
@@ -791,6 +813,23 @@ def Ondrix_MovingAverageOp : Ondrix_Op<"moving_average", [Pure]> {
     is a different program with a different result (a gain-merge-class
     divergence), which is why the operation exists instead of a rewrite
     onto `ondrix.fir`.
+
+    The f32 profile maps `tensor<Nxf32>` to `tensor<N-K+1xf32>` over the
+    same index relation with both boundaries removed:
+
+    ```text
+    s = x[n]
+    per i in 1 .. K-1:  s = s + x[n + i]     left to right, one IEEE add
+    y[n] = s / f32(K)                        one IEEE division
+    ```
+
+    That window sum is a reduction tree, so `fast` does admit regrouping
+    it and its legal set has more than one member for `K >= 3`; the
+    lowering builds the declared association and spends nothing. There is
+    no product anywhere, so no contract can fuse, and `off`, `fma` and
+    `fast` denote the same events at every window the lowering emits. `K`
+    is exact in binary32 over the admitted range, so the division is one
+    correctly rounded event and carries no rounding attribute.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    I64Attr:$window,

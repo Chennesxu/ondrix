@@ -4,6 +4,7 @@
 #include "mlir/Pass/PassOptions.h"
 
 #include <cstdint>
+#include <string>
 
 namespace mlir {
 class OpPassManager;
@@ -41,6 +42,11 @@ struct OndrixDefaultPipelineOptions
 /// stage, and the lowering tail down to the LLVM dialect.
 void buildOndrixDefaultPipeline(mlir::OpPassManager &pm,
                                 const OndrixDefaultPipelineOptions &options);
+
+/// The canonical flow as the pipeline string `buildOndrixDefaultPipeline`
+/// parses. Exposed so a reproduction record can report the schedule that ran
+/// rather than a description of it.
+std::string getOndrixDefaultPipelineText(const OndrixDefaultPipelineOptions &options);
 
 /// Registers `-ondrix-default-pipeline` with the global pipeline registry.
 void registerOndrixPipelines();

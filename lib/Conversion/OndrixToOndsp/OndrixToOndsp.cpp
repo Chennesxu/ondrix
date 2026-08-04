@@ -2477,7 +2477,8 @@ public:
     }
 
     if (failed(applyPartialConversion(module, target, std::move(patterns))))
-      signalPassFailure();
+      return signalPassFailure();
+    ondrix::ondsp::summarizeFastPermissions(module);
   }
 };
 

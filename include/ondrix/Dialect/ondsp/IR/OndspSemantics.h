@@ -5,6 +5,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Operation.h"
 
 #include "llvm/ADT/STLFunctionalExtras.h"
@@ -42,6 +43,12 @@ mlir::Value consumeFastPermission(mlir::Operation *op, FastPermission permission
 
 /// Name of the audit attribute `consumeFastPermission` writes.
 llvm::StringRef getFastPermissionAttrName();
+
+/// Unions the per-operation records into one module-level set. The LLVM
+/// conversion drops the operation attributes, so a pass that can consume calls
+/// this before handing the module on; the module attribute is what survives to
+/// a reproduction record.
+void summarizeFastPermissions(mlir::ModuleOp module);
 
 /// Target-independent raw storage and fractional position of a product.
 struct ProductSemantics {

@@ -13,7 +13,7 @@ namespace {
 /// The canonical flow as one documented pipeline string. Textual assembly is
 /// deliberate: it is byte-comparable with the test RUN lines it generalizes,
 /// and the exact string can be recorded in a reproduction manifest.
-std::string defaultPipelineText(const ondrix::OndrixDefaultPipelineOptions &options) {
+std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &options) {
   std::string text;
   llvm::raw_string_ostream os(text);
 
@@ -72,9 +72,13 @@ std::string defaultPipelineText(const ondrix::OndrixDefaultPipelineOptions &opti
 
 } // namespace
 
+std::string ondrix::getOndrixDefaultPipelineText(const OndrixDefaultPipelineOptions &options) {
+  return buildPipelineText(options);
+}
+
 void ondrix::buildOndrixDefaultPipeline(OpPassManager &pm,
                                         const OndrixDefaultPipelineOptions &options) {
-  std::string text = defaultPipelineText(options);
+  std::string text = buildPipelineText(options);
   if (failed(parsePassPipeline(text, pm)))
     llvm::report_fatal_error(llvm::Twine("invalid ondrix default pipeline: ") + text);
 }
