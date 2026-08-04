@@ -82,12 +82,11 @@ public:
             break;
           }
           case ondrix::ondsp::FpContractMode::Fast:
-            // Ordered scalar fallback: the reassociation permission goes
-            // unused here, and the fused member is selected and emitted
-            // without a permission of its own.
-            next = builder.create<math::FmaOp>(bodyLoc, lhs, rhs, iterArgs.front(),
-                                               ondrix::ondsp::consumeFastPermission(
-                                                   ondrix::ondsp::FastPermission::FuseMultiplyAdd));
+            // Ordered scalar route: R goes unused, F is spent on the fused
+            // chain.
+            next = ondrix::ondsp::consumeFastPermission(
+                builder.create<math::FmaOp>(bodyLoc, lhs, rhs, iterArgs.front()),
+                ondrix::ondsp::FastPermission::FuseMultiplyAdd);
             break;
           }
           builder.create<scf::YieldOp>(bodyLoc, next);

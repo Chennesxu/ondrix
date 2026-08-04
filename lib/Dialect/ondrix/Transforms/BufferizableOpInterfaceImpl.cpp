@@ -49,9 +49,9 @@ static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value
   case ondrix::ondsp::FpContractMode::Fma:
     return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator);
   case ondrix::ondsp::FpContractMode::Fast:
-    return builder.create<math::FmaOp>(
-        loc, lhs, rhs, accumulator,
-        ondrix::ondsp::consumeFastPermission(ondrix::ondsp::FastPermission::FuseMultiplyAdd));
+    return ondrix::ondsp::consumeFastPermission(
+        builder.create<math::FmaOp>(loc, lhs, rhs, accumulator),
+        ondrix::ondsp::FastPermission::FuseMultiplyAdd);
   }
   llvm_unreachable("unknown floating-point contract mode");
 }

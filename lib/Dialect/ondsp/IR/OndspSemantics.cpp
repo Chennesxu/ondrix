@@ -24,6 +24,16 @@ LogicalResult verifyProductPolicy(Operation *op, Attribute numeric,
   return success();
 }
 
+llvm::StringRef getFastPermissionAttrName() { return "ondsp.fast_used"; }
+
+Value consumeFastPermission(Operation *op, FastPermission permission) {
+  StringRef spelling = permission == FastPermission::ReassociateReductionTerms
+                           ? "reassociate_reduction_terms"
+                           : "fuse_multiply_add";
+  op->setAttr(getFastPermissionAttrName(), StringAttr::get(op->getContext(), spelling));
+  return op->getResult(0);
+}
+
 LogicalResult verifyExecutableFpFormat(Operation *op, FpAttr numeric, StringRef executable) {
   if (!numeric.getFormat().isF32())
     return op->emitOpError() << "executable " << executable

@@ -18,6 +18,15 @@ if git ls-files | grep -E '\.(docx|xlsx|pdf)$' >/dev/null; then
   fail=1
 fi
 
+# A consumed fast permission leaves no flag behind, so a lowering that builds
+# reassoc or contract directly is delegating without saying so. The two names
+# are legitimate only where the model is stated and where it is measured.
+if git grep -n -E 'FastMathFlags::(reassoc|contract)' -- lib include tools \
+     | grep -v '^include/ondrix/Dialect/ondsp/IR/OndspSemantics.h:'; then
+  echo "error: build fast-math permissions through consumeFastPermission, not directly" >&2
+  fail=1
+fi
+
 tracked_text_files=$(git grep -Il '' | grep -v '^scripts/check-public-hygiene.sh$' || true)
 if [ -n "${tracked_text_files}" ]; then
   if git grep -n -E '/home/[^[:space:]]+|/Users/[^[:space:]]+|[A-Za-z]:\\' -- ${tracked_text_files}; then

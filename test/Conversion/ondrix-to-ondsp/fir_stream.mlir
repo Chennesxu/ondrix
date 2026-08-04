@@ -88,7 +88,7 @@ func.func @mixed_static_results(
 }
 
 // CHECK-LABEL: func.func @f32_stream_fast
-// CHECK: math.fma %{{[^ ]*}}, %{{[^ ]*}}, %{{[^ ]*}} : f32
+// CHECK: math.fma %{{[^ ]*}}, %{{[^ ]*}}, %{{[^ ]*}} {ondsp.fast_used = "fuse_multiply_add"} : f32
 // CHECK-NOT: ondrix.fir_stream
 func.func @f32_stream_fast(
     %input: tensor<4xf32>, %coeffs: tensor<3xf32>, %state: tensor<2xf32>)

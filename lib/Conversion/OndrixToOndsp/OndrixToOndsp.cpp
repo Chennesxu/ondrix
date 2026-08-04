@@ -58,9 +58,8 @@ static Value createScalarFpDot(Location loc, Value lhs, Value rhs, ondrix::ondsp
   case ondrix::ondsp::FpContractMode::Fast: {
     Value zero = rewriter.create<arith::ConstantOp>(loc, numeric.getFormat(),
                                                     rewriter.getZeroAttr(numeric.getFormat()));
-    return rewriter.create<math::FmaOp>(
-        loc, lhs, rhs, zero,
-        ondrix::ondsp::consumeFastPermission(ondrix::ondsp::FastPermission::FuseMultiplyAdd));
+    return ondrix::ondsp::consumeFastPermission(rewriter.create<math::FmaOp>(loc, lhs, rhs, zero),
+                                                ondrix::ondsp::FastPermission::FuseMultiplyAdd);
   }
   }
   llvm_unreachable("unknown floating-point contract mode");
@@ -76,10 +75,10 @@ static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value
   case ondrix::ondsp::FpContractMode::Fma:
     return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator);
   case ondrix::ondsp::FpContractMode::Fast:
-    // fast admits both members here; this lowering selects the fused one.
-    return builder.create<math::FmaOp>(
-        loc, lhs, rhs, accumulator,
-        ondrix::ondsp::consumeFastPermission(ondrix::ondsp::FastPermission::FuseMultiplyAdd));
+    // fast admits both members here; selecting the fused one spends F.
+    return ondrix::ondsp::consumeFastPermission(
+        builder.create<math::FmaOp>(loc, lhs, rhs, accumulator),
+        ondrix::ondsp::FastPermission::FuseMultiplyAdd);
   }
   llvm_unreachable("unknown floating-point contract mode");
 }

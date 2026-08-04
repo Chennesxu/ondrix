@@ -4,6 +4,15 @@
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc -ffp-contract=off %S/Inputs/fp_fast_reduce_aot.c %t.o -lm -o %t
 // RUN: %t
+// RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="supports-vector-fma=true" --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.fused.mlir
+// RUN: ondrix-translate %t.fused.mlir --mlir-to-llvmir > %t.fused.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.fused.ll -o %t.fused.o
+// RUN: cc -ffp-contract=off %S/Inputs/fp_fast_reduce_aot.c %t.fused.o -lm -o %t.fused
+// RUN: %t.fused
+
+// The whole envelope runs against both term selections. The fused one is not
+// only a structural variant: it is a different event graph, and running it
+// executes the compiler branch that the declared capability selects.
 
 // Object gate for the declared fast relaxation on a rank-1 f32 reduction. No
 // relaxed result is bit-pinned: the executed evidence is term conservation on

@@ -26,16 +26,22 @@ enum class FastPermission {
   FuseMultiplyAdd,
 };
 
-/// Flags to attach where the COMPILER spends `permission` itself: none, for
-/// either permission, because the produced schedule already embodies the
-/// choice. Delegating instead — leaving `reassoc` or `contract` on — hands the
-/// choice to a per-backend expansion policy no target fact can bound, so no
-/// lowering does it and there is no entry point for it here. Measured in
-/// `test/Target/fp_permission_fmf_*.ll`.
-inline mlir::arith::FastMathFlags consumeFastPermission(FastPermission permission) {
-  (void)permission;
-  return mlir::arith::FastMathFlags::none;
-}
+/// Records that `op` is the event the compiler produced by spending
+/// `permission`, and returns its result. Spending leaves no fast-math flag
+/// behind — the schedule already embodies the choice — so the accounting has
+/// to be written down explicitly or it is not observable at all. The record is
+/// a discardable audit attribute that the LLVM conversion drops; the object
+/// carries nothing.
+///
+/// Delegating instead — leaving `reassoc` or `contract` on — hands the choice
+/// to a per-backend expansion policy no target fact can bound, so no lowering
+/// does it and there is no entry point for it here. Measured in
+/// `test/Target/fp_permission_fmf_*.ll`, and `scripts/check-public-hygiene.sh`
+/// refuses those flags anywhere but this header.
+mlir::Value consumeFastPermission(mlir::Operation *op, FastPermission permission);
+
+/// Name of the audit attribute `consumeFastPermission` writes.
+llvm::StringRef getFastPermissionAttrName();
 
 /// Target-independent raw storage and fractional position of a product.
 struct ProductSemantics {

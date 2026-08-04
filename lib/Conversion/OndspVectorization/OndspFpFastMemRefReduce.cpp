@@ -103,14 +103,15 @@ public:
                 bodyLoc, accumulateTerm(bodyLoc, lhs, rhs, iterArgs.front(), bodyBuilder));
           });
 
-      // The initial value is the fold's accumulator, so it enters exactly once
-      // and no synthesized start value is introduced: an implicit +0.0 here
-      // would be a term the source graph does not have, and at an all-negative
-      // -0.0 reduction it turns the declared -0.0 into +0.0. MLIR 17's
-      // vector.reduction carries no fastmath attribute, so the fold is the
-      // ordered llvm.intr.vector.reduce.fadd over that accumulator.
-      Value folded = builder.create<vector::ReductionOp>(
-          branchLoc, vector::CombiningKind::ADD, vectorLoop.getResult(0), adaptor.getInitial());
+      // The initial is the fold's accumulator, so it enters exactly once and
+      // nothing synthesizes a start value: an implicit +0.0 is a term the
+      // source graph does not have, and it turns an all-negative-zero
+      // reduction's declared -0.0 into +0.0. The fold is also where R is
+      // recorded, since it exists only because the tree was regrouped.
+      Value folded = ondrix::ondsp::consumeFastPermission(
+          builder.create<vector::ReductionOp>(branchLoc, vector::CombiningKind::ADD,
+                                              vectorLoop.getResult(0), adaptor.getInitial()),
+          ondrix::ondsp::FastPermission::ReassociateReductionTerms);
       return createOrderedTail(branchLoc, adaptor, vectorEnd, bounds->upperBound, scalarStep,
                                folded, builder);
     };
@@ -148,9 +149,9 @@ private:
   Value accumulateTerm(Location loc, Value lhs, Value rhs, Value accumulator,
                        OpBuilder &builder) const {
     if (fuseTerms)
-      return builder.create<math::FmaOp>(
-          loc, lhs, rhs, accumulator,
-          ondrix::ondsp::consumeFastPermission(ondrix::ondsp::FastPermission::FuseMultiplyAdd));
+      return ondrix::ondsp::consumeFastPermission(
+          builder.create<math::FmaOp>(loc, lhs, rhs, accumulator),
+          ondrix::ondsp::FastPermission::FuseMultiplyAdd);
     Value product = builder.create<arith::MulFOp>(loc, lhs, rhs);
     return builder.create<arith::AddFOp>(loc, accumulator, product);
   }
