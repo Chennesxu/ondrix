@@ -1,5 +1,17 @@
 // RUN: ondrix-compile %S/Inputs/q15_sos_df2_fixed.ox | FileCheck %s
 // RUN: not ondrix-compile %S/Inputs/invalid_sos_state_ties_positive.ox 2>&1 | FileCheck %s --check-prefix=TIES
+// RUN: ondrix-compile %S/Inputs/q15_sos_df2_fixed_default_contract.ox | FileCheck %s --check-prefix=DEFAULT
+
+// Omitting the whole policy takes the same rule the feed-forward default
+// takes: three Q15 products bound a section sum by 3*2^30 < 2^39, so wrap
+// is vacuous at i40, and both exports lose information and round unbiased.
+// DEFAULT-LABEL: func.func @q15_sos_df2_fixed_default_contract(
+// DEFAULT: ondrix.sos_filter_df2_fixed
+// DEFAULT-SAME: update_overflow = wrap>
+// DEFAULT-SAME: output_overflow = #ondsp.overflow<saturate>
+// DEFAULT-SAME: output_rounding = #ondsp.rounding<nearest_even>
+// DEFAULT-SAME: state_overflow = #ondsp.overflow<saturate>
+// DEFAULT-SAME: state_rounding = #ondsp.rounding<nearest_even>
 
 // Both recurrence boundaries expose only the three established tie rules.
 // TIES: invalid_sos_state_ties_positive.ox:7:10: error: sos_df2_fixed state_rounding must be nearest_even, toward_negative, or toward_zero

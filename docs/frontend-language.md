@@ -360,6 +360,17 @@ catalog builtins expose their own admissible choices at the call site
 (for example `gain(..., rounding=...)` and the `root_rounding=` parameter
 of `rms` and `magnitude`).
 
+A fixed-point call site that names no contract past its algorithm parameters
+takes the default: an accumulator inferred wide enough that no update can
+wrap (so the update mode is vacuous), the unbiased `nearest_even` tie rule,
+and saturation at the one boundary that does lose information. This covers
+`dot`, `fir`, `fir_filter`, `fir_decimate`, `fir_interpolate`, `convolution`,
+`correlation`, `fir_stream`, and `sos_df2_fixed`. Inference needs a static
+tap count, so a dynamic coefficient extent is a diagnostic rather than a
+guessed width. Any explicit parameter still overrides the default, and the
+`.ox` object gate executes the inferred and the spelled contract against one
+exact reference rather than asserting their equivalence.
+
 `cic_decimate(x, stages=, rate=, delay=, state_overflow=, rounding=)` is the
 one builtin with a mandatory contract parameter. Omission normally keeps a
 contract default, but the cascade is only correct under `state_overflow=wrap`

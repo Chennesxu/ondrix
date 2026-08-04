@@ -644,13 +644,18 @@ public:
       if (!scales || !expect(TokenKind::Comma, "expected ',' after sos_df2_fixed scales operand"))
         return std::nullopt;
       auto state = parseIdentifier("expected sos_df2_fixed state operand");
-      if (!state || !expect(TokenKind::Comma, "expected ',' before sos_df2_fixed numeric policy"))
+      if (!state)
         return std::nullopt;
       call.operands.push_back(resolveOperand(*coefficients));
       call.operands.push_back(resolveOperand(*scales));
       call.operands.push_back(resolveOperand(*state));
-      if (!parseFixedSosPolicy(call) ||
-          !expect(TokenKind::RightParen, "expected ')' after sos_df2_fixed expression"))
+      if (current.kind == TokenKind::RightParen) {
+        applyDefaultSosPolicy(call);
+      } else if (!expect(TokenKind::Comma, "expected ',' before sos_df2_fixed numeric policy") ||
+                 !parseFixedSosPolicy(call)) {
+        return std::nullopt;
+      }
+      if (!expect(TokenKind::RightParen, "expected ')' after sos_df2_fixed expression"))
         return std::nullopt;
       return call;
     }
@@ -705,10 +710,7 @@ public:
       call.operands.push_back(resolveOperand(*rhs));
       call.operands.push_back(resolveOperand(*third));
       if (call.kind == ReductionKind::FirStream) {
-        call.accumulatorAuto = true;
-        call.rounding = "nearest_even";
-        call.destinationOverflow = "saturate";
-        call.updateOverflow = "wrap";
+        applyDefaultFixedPolicy(call);
       }
       return call;
     }
@@ -882,9 +884,18 @@ public:
           !expect(TokenKind::Equal, "expected '=' after boundary"))
         return std::nullopt;
       auto boundary = parseIdentifier("expected FIR boundary mode");
-      if (!boundary || !expect(TokenKind::Comma, "expected ',' after FIR boundary mode"))
+      if (!boundary)
         return std::nullopt;
       call.boundary = boundary->spelling.str();
+      // A fixed call site that stops at the boundary takes the same default
+      // contract the plain reductions take; f32 falls through to its
+      // mandatory contract, which has no defensible default.
+      if (current.kind == TokenKind::RightParen) {
+        if (policyType != SourceType::F32)
+          applyDefaultFixedPolicy(call);
+      } else if (!expect(TokenKind::Comma, "expected ',' after FIR boundary mode")) {
+        return std::nullopt;
+      }
     } else if (call.kind == ReductionKind::FirDecimate ||
                call.kind == ReductionKind::FirInterpolate) {
       bool isInterpolation = call.kind == ReductionKind::FirInterpolate;
@@ -908,20 +919,14 @@ public:
           return std::nullopt;
         call.fpContract = contract->spelling.str();
       } else {
-        call.accumulatorAuto = true;
-        call.rounding = "nearest_even";
-        call.destinationOverflow = "saturate";
-        call.updateOverflow = "wrap";
+        applyDefaultFixedPolicy(call);
       }
       if (!expect(TokenKind::RightParen,
                   llvm::Twine("expected ')' after ") + operation + " expression"))
         return std::nullopt;
       return call;
     } else if (current.kind == TokenKind::RightParen && policyType != SourceType::F32) {
-      call.accumulatorAuto = true;
-      call.rounding = "nearest_even";
-      call.destinationOverflow = "saturate";
-      call.updateOverflow = "wrap";
+      applyDefaultFixedPolicy(call);
     } else if (!expect(TokenKind::Comma, "expected ',' before numeric policy")) {
       return std::nullopt;
     }
@@ -1176,6 +1181,28 @@ private:
     if (!expect(TokenKind::RightBracket, "expected ']' after constexpr values"))
       return std::nullopt;
     return parameter;
+  }
+
+  // The default fixed contract: exact where it can be exact (an inferred
+  // accumulator wide enough that no update wraps, so the mode is vacuous),
+  // unbiased and non-wrapping where information must be lost.
+  static void applyDefaultFixedPolicy(BuiltinCallAst &result) {
+    result.accumulatorAuto = true;
+    result.rounding = "nearest_even";
+    result.destinationOverflow = "saturate";
+    result.updateOverflow = "wrap";
+  }
+
+  // The same rule at a fixed accumulator width. Three Q15 products bound the
+  // section sum by 3*2^30 < 2^39, so wrap is vacuous at i40 here too; both
+  // export boundaries do lose information and take the unbiased tie rule.
+  static void applyDefaultSosPolicy(BuiltinCallAst &result) {
+    result.accumulatorWidth = 40;
+    result.updateOverflow = "wrap";
+    result.stateRounding = "nearest_even";
+    result.stateOverflow = "saturate";
+    result.rounding = "nearest_even";
+    result.destinationOverflow = "saturate";
   }
 
   bool parseFixedPolicy(BuiltinCallAst &result) {
@@ -2416,15 +2443,18 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   if (ast.result.accumulatorAuto) {
     bool isScalarReduction =
         ast.result.kind == ReductionKind::Dot || ast.result.kind == ReductionKind::Fir;
+    // Every window of a full-boundary fir_filter overlaps at most K taps, so
+    // the valid-boundary bound covers both boundaries unchanged.
     bool isWindowReduction = ast.result.kind == ReductionKind::Convolution ||
                              ast.result.kind == ReductionKind::Correlation ||
                              ast.result.kind == ReductionKind::FirDecimate ||
-                             ast.result.kind == ReductionKind::FirInterpolate;
+                             ast.result.kind == ReductionKind::FirInterpolate ||
+                             ast.result.kind == ReductionKind::FirFilter;
     if (ast.primaryResult().type != SourceType::Q15 || (!isScalarReduction && !isWindowReduction)) {
       diagnostics.error(
           ast.result.position,
-          "automatic accumulation currently supports static Q15 dot, fir, fir_decimate, "
-          "fir_interpolate, and conv1d");
+          "automatic accumulation currently supports static Q15 dot, fir, fir_filter, "
+          "fir_decimate, fir_interpolate, and conv1d");
       return std::nullopt;
     }
     std::optional<int64_t> rhsExtent =

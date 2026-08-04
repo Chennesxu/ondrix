@@ -6,6 +6,20 @@
 // RUN: ondrix-compile %S/Inputs/q15_fir_filter_full.ox | FileCheck %s --check-prefix=FULL-Q15
 // RUN: ondrix-compile %S/Inputs/q31_fir_filter_full.ox | FileCheck %s --check-prefix=FULL-Q31
 // RUN: ondrix-compile %S/Inputs/f32_fir_filter_full.ox | FileCheck %s --check-prefix=FULL-F32
+// RUN: ondrix-compile %S/Inputs/q15_fir_filter_default_contract.ox | FileCheck %s --check-prefix=DEFAULT
+// RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_dynamic_default.ox 2>&1 | FileCheck %s --check-prefix=DYNDEFAULT
+
+// Stopping at the boundary takes the default contract: an accumulator wide
+// enough that no update wraps (8 taps bound the sum by 2^33), so wrap is
+// vacuous, and the unbiased tie rule with saturation at the one boundary
+// that does lose information. Inference needs a static tap count, so the
+// dynamic spelling stays fail-closed rather than picking a width.
+// DEFAULT-LABEL: func.func @q15_fir_filter_default_contract(
+// DEFAULT: ondrix.fir_filter
+// DEFAULT-SAME: accumulator = !ondsp.acc<storage = i35, frac = 30, signed, update_overflow = wrap>
+// DEFAULT-SAME: overflow = #ondsp.overflow<saturate>
+// DEFAULT-SAME: rounding = #ondsp.rounding<nearest_even>
+// DYNDEFAULT: error: automatic accumulation requires a static coefficient extent
 
 // Q15-LABEL: func.func @q15_fir_filter_valid(
 // Q15-SAME: tensor<?xi16>
