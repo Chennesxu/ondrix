@@ -1,7 +1,8 @@
 # Experimental `.ox` Frontend
 
 `ondrix-compile` is a standalone C++ frontend. Its initial executable surface
-accepts one `def` per file. Most current kernels use rank-1 buffers or tensors;
+accepts one or more `def`s per file, of which the last is the kernel the
+module exports. Most current kernels use rank-1 buffers or tensors;
 the fixed SOS slice also accepts the explicit rank-2 section layouts described
 below. A `def` declares a DSP kernel entry point; it is not a general Python
 function.
@@ -424,6 +425,41 @@ implementation is characterized by an error budget measured against a
 higher-precision reference, which is a quality measurement rather than a
 guarantee the language makes.
 
+### Named Functions
+
+A file may declare several functions. The last one is the kernel the module
+exports; each earlier one is a named body that a later function may call:
+
+```python
+def window(x: tensor[q15,71], c: tensor[q15,8]) -> tensor[q15,64]:
+  return fir_filter(x, c, boundary=valid)
+
+def spectrum(x: tensor[q15,71], c: tensor[q15,8]) -> tensor[q15,33]:
+  return magnitude(rfft(window(x, c)))
+```
+
+A call is instantiated where it appears: the callee's body replaces the call
+and the arguments replace the callee's parameter references. Every contract
+written in the callee is copied unchanged, which is what makes the contract
+travel with the name rather than being re-declared at each call site.
+
+Each callee is checked once against its own signature, so a body that cannot
+hold its declaration is reported at the callee. A call site then only has to
+match its arguments to that signature: arity, and for an argument naming one
+of the caller's parameters, the source type, container kind, and shape. The
+declared result type therefore holds at the call without the caller
+re-deriving it.
+
+Arguments are parameter or local names. A callee is visible only to functions
+declared after it, so recursion cannot be written, and a function calling
+itself is a diagnostic rather than a missing-name error. A call may appear
+anywhere a nested expression already may — the whole return expression, a
+local binding, or a stage of an FFT chain — and single-result functions only.
+
+Only the exported kernel becomes a `func.func`. Calls are not a source-level
+ABI, and no calling convention is implied: a stable public kernel ABI is still
+future work.
+
 No target capability or physical register information enters source IR.
 `llvm.emit_c_interface` marks the generated function for the existing AOT
 pipeline, but the resulting C ABI is not stable. In particular, tensor results
@@ -442,9 +478,9 @@ ABI surface, never a hidden assumption of one pass.
 
 This is not a general Python parser. Imports, classes, heap objects, arbitrary
 expressions, and dynamic Python behavior are rejected. Scalar constants,
-indexing, loops, mutable output buffers, multiple kernels, and inferred
-accumulators outside the statically bounded Q15 real-reduction slice remain
-unimplemented. Textual MLIR remains an independent and more complete compiler
+indexing, loops, mutable output buffers, multiple exported kernels, and
+inferred accumulators outside the statically bounded Q15 real-reduction slice
+remain unimplemented. Textual MLIR remains an independent and more complete compiler
 entry point.
 
 ## Semantic Boundary And Design Rules

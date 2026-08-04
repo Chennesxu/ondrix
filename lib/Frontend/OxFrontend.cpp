@@ -351,6 +351,63 @@ ExpressionAst::~ExpressionAst() = default;
 ExpressionAst::ExpressionAst(ExpressionAst &&) noexcept = default;
 ExpressionAst &ExpressionAst::operator=(ExpressionAst &&) noexcept = default;
 
+// Instantiating a named function substitutes the caller's argument
+// expressions for the callee's parameter references. Everything else — every
+// declared contract in the callee's body — is copied unchanged, which is what
+// makes the contract travel with the name.
+static ExpressionAst instantiateExpression(const ExpressionAst &expression,
+                                           const llvm::StringMap<const ExpressionAst *> &arguments,
+                                           std::optional<SourcePosition> callSite);
+
+// A null call site keeps the original positions, which is what checking a
+// callee against its own signature needs.
+static BuiltinCallAst instantiateCall(const BuiltinCallAst &call,
+                                      const llvm::StringMap<const ExpressionAst *> &arguments,
+                                      std::optional<SourcePosition> callSite) {
+  BuiltinCallAst copy;
+  copy.kind = call.kind;
+  copy.accumulatorWidth = call.accumulatorWidth;
+  copy.accumulatorAuto = call.accumulatorAuto;
+  copy.updateOverflow = call.updateOverflow;
+  copy.rounding = call.rounding;
+  copy.destinationOverflow = call.destinationOverflow;
+  copy.stateRounding = call.stateRounding;
+  copy.stateOverflow = call.stateOverflow;
+  copy.fpContract = call.fpContract;
+  copy.boundary = call.boundary;
+  copy.factor = call.factor;
+  copy.window = call.window;
+  copy.gain = call.gain;
+  copy.stepSize = call.stepSize;
+  copy.fpConstantDen = call.fpConstantDen;
+  copy.fpConstant = call.fpConstant;
+  copy.taps = call.taps;
+  copy.cutoffNum = call.cutoffNum;
+  copy.cutoffDen = call.cutoffDen;
+  copy.stages = call.stages;
+  copy.rate = call.rate;
+  copy.delay = call.delay;
+  copy.position = callSite.value_or(call.position);
+  for (const ExpressionAst &operand : call.operands)
+    copy.operands.push_back(instantiateExpression(operand, arguments, callSite));
+  return copy;
+}
+
+static ExpressionAst instantiateExpression(const ExpressionAst &expression,
+                                           const llvm::StringMap<const ExpressionAst *> &arguments,
+                                           std::optional<SourcePosition> callSite) {
+  if (expression.isParameterReference()) {
+    auto argument = arguments.find(expression.parameter);
+    if (argument == arguments.end())
+      return ExpressionAst(expression.parameter, callSite.value_or(expression.position));
+    if (argument->second->isParameterReference())
+      return ExpressionAst(argument->second->parameter,
+                           callSite.value_or(argument->second->position));
+    return ExpressionAst(instantiateCall(*argument->second->call, {}, callSite));
+  }
+  return ExpressionAst(instantiateCall(*expression.call, arguments, callSite));
+}
+
 struct ResultTypeAst {
   SourceType type;
   bool tensor = false;
@@ -368,6 +425,18 @@ struct KernelAst {
   const ResultTypeAst &primaryResult() const { return results.front(); }
 };
 
+// A callee is checked as a kernel in its own right; the check consumes the
+// ast, so it runs on a copy with the callee's own source positions.
+static KernelAst copyForChecking(const KernelAst &callee) {
+  KernelAst copy;
+  copy.name = callee.name;
+  copy.parameters = callee.parameters;
+  copy.results = callee.results;
+  copy.position = callee.position;
+  copy.result = instantiateCall(callee.result, {}, std::nullopt);
+  return copy;
+}
+
 static bool hasRank(llvm::ArrayRef<std::optional<int64_t>> shape, unsigned rank) {
   return shape.size() == rank;
 }
@@ -383,7 +452,30 @@ public:
   Parser(Lexer &lexer, Diagnostics &diagnostics)
       : lexer(lexer), diagnostics(diagnostics), current(lexer.next()), next(lexer.next()) {}
 
+  // A file declares one or more functions. The last is the kernel the module
+  // exports; every earlier one is a named body a later function may call.
   std::optional<KernelAst> parse() {
+    while (true) {
+      bindings.clear();
+      bindingsByName.clear();
+      std::optional<KernelAst> function = parseFunction();
+      if (!function)
+        return std::nullopt;
+      if (current.kind == TokenKind::Eof)
+        return function;
+      if (calleesByName.contains(function->name)) {
+        diagnostics.error(function->position,
+                          llvm::Twine("function '") + function->name + "' is already declared");
+        return std::nullopt;
+      }
+      calleesByName[function->name] = callees.size();
+      callees.push_back(std::move(*function));
+    }
+  }
+
+  llvm::ArrayRef<KernelAst> getCallees() const { return callees; }
+
+  std::optional<KernelAst> parseFunction() {
     if (!isIdentifier("def")) {
       if (current.kind == TokenKind::Identifier)
         diagnostics.error(current.position, llvm::Twine("unsupported top-level construct '") +
@@ -465,6 +557,7 @@ public:
     // moves the bound call into its use site — the checked kernel is the
     // nested expression tree direct nesting would produce.
     SourceType policyType = kernel.primaryResult().type;
+    caller = &kernel;
     while (current.kind == TokenKind::Identifier && current.spelling != "return" &&
            next.kind == TokenKind::Equal) {
       Token name = current;
@@ -492,8 +585,11 @@ public:
     if (!result)
       return std::nullopt;
     kernel.result = std::move(*result);
-    if (current.kind != TokenKind::Eof) {
-      diagnostics.error(current.position, "only one kernel is supported per file in this slice");
+    caller = nullptr;
+    if (current.kind != TokenKind::Eof && !isIdentifier("def")) {
+      diagnostics.error(current.position,
+                        "a function body is a single return statement; expected 'def' or "
+                        "end of file");
       return std::nullopt;
     }
     for (const Binding &binding : bindings) {
@@ -507,6 +603,16 @@ public:
   }
 
   std::optional<BuiltinCallAst> parseBuiltinCall(SourceType policyType) {
+    if (current.kind == TokenKind::Identifier && next.kind == TokenKind::LeftParen &&
+        calleesByName.contains(current.spelling))
+      return parseCalleeInstantiation(policyType);
+    if (caller && current.kind == TokenKind::Identifier && next.kind == TokenKind::LeftParen &&
+        current.spelling == caller->name) {
+      diagnostics.error(current.position,
+                        llvm::Twine("function '") + current.spelling +
+                            "' cannot call itself; a callee must be declared earlier in the file");
+      return std::nullopt;
+    }
     BuiltinCallAst call;
     if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter") &&
         !isIdentifier("fir_decimate") && !isIdentifier("fir_interpolate") &&
@@ -952,6 +1058,15 @@ public:
 
 private:
   std::optional<ExpressionAst> parseFftExpression() {
+    if (current.kind == TokenKind::Identifier && next.kind == TokenKind::LeftParen &&
+        calleesByName.contains(current.spelling)) {
+      // Inside a chain the composition checker establishes element types, so
+      // the call is not additionally tied to the function's result type.
+      std::optional<BuiltinCallAst> instantiated = parseCalleeInstantiation(std::nullopt);
+      if (!instantiated)
+        return std::nullopt;
+      return ExpressionAst(std::move(*instantiated));
+    }
     bool isFftCall = isIdentifier("cfft") || isIdentifier("icfft") || isIdentifier("rfft") ||
                      isIdentifier("irfft");
     if (!isFftCall || next.kind != TokenKind::LeftParen) {
@@ -1183,6 +1298,77 @@ private:
     return parameter;
   }
 
+  // A call is instantiated where it appears: the callee's body, with its
+  // declared contracts intact, replaces the call and the arguments replace
+  // the callee's parameter references. The callee is separately checked
+  // against its own signature, and the arguments are checked against that
+  // signature here, so the instantiated tree carries the declared result
+  // type without the caller having to re-derive it.
+  std::optional<BuiltinCallAst> parseCalleeInstantiation(std::optional<SourceType> policyType) {
+    Token name = current;
+    const KernelAst &callee = callees[calleesByName[name.spelling]];
+    advance();
+    advance();
+    std::vector<ExpressionAst> arguments;
+    if (current.kind != TokenKind::RightParen) {
+      do {
+        auto argument = parseIdentifier("expected a parameter or local name as a call argument");
+        if (!argument)
+          return std::nullopt;
+        arguments.push_back(resolveOperand(*argument));
+        if (current.kind != TokenKind::Comma)
+          break;
+        advance();
+      } while (true);
+    }
+    if (!expect(TokenKind::RightParen, "expected ')' after call arguments"))
+      return std::nullopt;
+    if (arguments.size() != callee.parameters.size()) {
+      diagnostics.error(name.position, llvm::Twine("'") + name.spelling + "' takes " +
+                                           llvm::Twine(callee.parameters.size()) +
+                                           " arguments, but " + llvm::Twine(arguments.size()) +
+                                           " were given");
+      return std::nullopt;
+    }
+    if (callee.results.size() != 1) {
+      diagnostics.error(name.position,
+                        llvm::Twine("'") + name.spelling +
+                            "' returns two values; only single-result functions may be called");
+      return std::nullopt;
+    }
+    if (policyType && callee.results.front().type != *policyType) {
+      diagnostics.error(name.position, llvm::Twine("'") + name.spelling +
+                                           "' returns a different source type than the calling "
+                                           "function's result");
+      return std::nullopt;
+    }
+    llvm::StringMap<const ExpressionAst *> substitution;
+    for (size_t index = 0; index < arguments.size(); ++index) {
+      const ParameterAst &declared = callee.parameters[index];
+      substitution[declared.name] = &arguments[index];
+      // An argument that names one of the caller's own parameters is checked
+      // against the declaration; a local binding carries an expression whose
+      // shape the instantiated tree establishes instead.
+      if (!arguments[index].isParameterReference() || !caller)
+        continue;
+      const ParameterAst *actual = nullptr;
+      for (const ParameterAst &parameter : caller->parameters)
+        if (parameter.name == arguments[index].parameter)
+          actual = &parameter;
+      if (!actual)
+        continue;
+      if (actual->type != declared.type || actual->container != declared.container ||
+          actual->shape != declared.shape) {
+        diagnostics.error(arguments[index].position,
+                          llvm::Twine("argument ") + llvm::Twine(index + 1) + " of '" +
+                              name.spelling + "' does not match the declared parameter '" +
+                              declared.name + "'");
+        return std::nullopt;
+      }
+    }
+    return instantiateCall(callee.result, substitution, name.position);
+  }
+
   // The default fixed contract: exact where it can be exact (an inferred
   // accumulator wide enough that no update wraps, so the mode is vacuous),
   // unbiased and non-wrapping where information must be lost.
@@ -1306,6 +1492,9 @@ private:
   Token next;
   std::vector<Binding> bindings;
   llvm::StringMap<size_t> bindingsByName;
+  std::vector<KernelAst> callees;
+  llvm::StringMap<size_t> calleesByName;
+  const KernelAst *caller = nullptr;
 };
 
 struct CheckedKernel {
@@ -1764,9 +1953,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       int64_t extent;
     };
     llvm::StringMap<unsigned> parameterUses;
-    std::function<std::optional<FftExpressionType>(const ExpressionAst &)> checkFftExpression;
-    std::function<std::optional<FftExpressionType>(const BuiltinCallAst &)> checkFftCall;
-    checkFftExpression = [&](const ExpressionAst &expression) -> std::optional<FftExpressionType> {
+    std::function<std::optional<FftExpressionType>(ExpressionAst &)> checkFftExpression;
+    std::function<std::optional<FftExpressionType>(BuiltinCallAst &)> checkFftCall;
+    checkFftExpression = [&](ExpressionAst &expression) -> std::optional<FftExpressionType> {
       if (expression.isParameterReference()) {
         auto parameter = parametersByName.find(expression.parameter);
         if (parameter == parametersByName.end()) {
@@ -1795,8 +1984,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     // A fir_filter stage may feed the FFT chain: static Q15 tensors, the
     // valid boundary, and the executable Q15 export profile, explicitly
     // declared. Its coefficients are a tensor parameter or a lowpass design.
-    auto checkNestedFirFilter =
-        [&](const BuiltinCallAst &call) -> std::optional<FftExpressionType> {
+    auto checkNestedFirFilter = [&](BuiltinCallAst &call) -> std::optional<FftExpressionType> {
       if (call.operands.size() != 2) {
         diagnostics.error(call.position, "builtin operand count does not match its contract");
         return std::nullopt;
@@ -1873,10 +2061,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                           "valid-boundary fir_filter requires input extent >= tap count");
         return std::nullopt;
       }
-      // The fir_filter grammar always consumes an explicit accumulator policy,
-      // so an inferred width cannot reach here.
-      assert(!call.accumulatorAuto && "fir_filter never infers its accumulator");
-      if (call.accumulatorWidth != 40) {
+      // A composed stage takes the same default an uncomposed one takes;
+      // the tap count is already static here, so the inference is identical.
+      if (call.accumulatorAuto) {
+        call.accumulatorAuto = false;
+        call.accumulatorWidth = inferQ15FullAccumulatorWidth(static_cast<uint64_t>(tapCount));
+      } else if (call.accumulatorWidth != 40) {
         diagnostics.error(call.position,
                           "the executable Q15 profile requires exact accumulator width 40");
         return std::nullopt;
@@ -1904,7 +2094,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       return FftExpressionType{SourceType::Q15, inputExtent - tapCount + 1};
     };
-    checkFftCall = [&](const BuiltinCallAst &call) -> std::optional<FftExpressionType> {
+    checkFftCall = [&](BuiltinCallAst &call) -> std::optional<FftExpressionType> {
       if (call.kind == ReductionKind::FirFilter)
         return checkNestedFirFilter(call);
       if (!isFftComposableKind(call.kind) || call.operands.size() != 1) {
@@ -2998,6 +3188,14 @@ OwningOpRef<ModuleOp> compileOxSource(llvm::StringRef sourceName, llvm::StringRe
   std::optional<KernelAst> ast = parser.parse();
   if (!ast || diagnostics.failed())
     return {};
+
+  // Each callee is checked once against its own signature, at its own source
+  // location. Instantiation then only has to match arguments to that
+  // signature, and the errors a user sees name the function that is wrong.
+  for (const KernelAst &callee : parser.getCallees()) {
+    if (!checkKernel(copyForChecking(callee), diagnostics) || diagnostics.failed())
+      return {};
+  }
 
   std::optional<CheckedKernel> checked = checkKernel(std::move(*ast), diagnostics);
   if (!checked || diagnostics.failed())
