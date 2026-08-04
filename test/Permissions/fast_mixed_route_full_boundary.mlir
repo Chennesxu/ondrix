@@ -14,15 +14,15 @@
 // One declaration reaching two mechanisms in one function: the interior spends
 // R, both guarded edges spend F, and docs/f32-contract-evidence.md argues why.
 
-// Exactly one site reaches the horizontal rebuild. Batching an edge would make
-// this two.
+// Mechanism CARDINALITY, not site identity: which site owns which event is the
+// per-site record's job. Batching an edge makes this two.
 // ROUTE-COUNT-1: "vector.reduction"
 // ROUTE-NOT: "vector.reduction"
 
 // RECORD-R: "vector.reduction"{{.*}}ondsp.fast_used = "rebuild_reduction_tree"
 
-// Every fused event under the default term selection is an edge event: two of
-// them, both scalar. Batching an edge removes one.
+// Two fused events exist under the default term selection and both are scalar.
+// A compensating pair of errors could keep the count, hence the record.
 // SEP-TOTAL-COUNT-2: "math.fma"
 // SEP-TOTAL-NOT: "math.fma"
 // SEP-EDGE-COUNT-2: "math.fma"{{.*}}ondsp.fast_used = "fuse_multiply_add"{{.*}}(f32, f32, f32) -> f32

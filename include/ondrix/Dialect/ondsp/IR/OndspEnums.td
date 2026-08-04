@@ -89,7 +89,7 @@ def Ondsp_OverflowMode : I32EnumAttr<"OverflowMode", "overflow mode",
 //   fast  a declared SET OF PERMITTED REWRITES over the event graph, not a
 //         pinned tree and not an error bound. It permits exactly two.
 //         First, REBUILDING THE ADDITIVE TREE OF A DESIGNATED REDUCTION:
-//         a region the source contract names as a reduction, not any
+//         an operation-defined semantic reduction instance, not any
 //         expression that happens to contain additions. The target may be
 //         any binary addition tree whose leaf sequence is the seed, if the
 //         description states one, followed by a permutation of that

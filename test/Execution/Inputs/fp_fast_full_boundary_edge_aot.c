@@ -6,8 +6,11 @@
 /* A full-boundary FIR at K = 20 and N = 32 with W = 8 splits three ways: the
  * two guarded edge ranges and an interior that reaches the horizontal rebuild.
  * The declared contract says an out-of-range tap performs NO accumulator
- * update, which is not the same as contributing a zero term - for finite
- * values the two agree, so an infinity is what separates them. */
+ * update, which is not the same as contributing a zero term. Against a nonzero
+ * finite accumulator the two agree, so a materialized zero is observable in
+ * exactly two ways: a non-finite coefficient makes the product invalid, and a
+ * finite one leaves only the sign of the zero. Both are covered below, and
+ * neither trial catches the other's implementation class. */
 
 typedef struct {
   float *allocated;
@@ -35,17 +38,23 @@ static int expectBits(const char *label, float got, float want) {
   return 1;
 }
 
-static int expectNan(const char *label, float got) {
-  if (isnan(got))
+/* The propagated value is the poison itself for an infinity and a NaN for a
+ * NaN, so reachability asserts non-finite rather than either one. */
+static int expectNonFinite(const char *label, float got) {
+  if (!isfinite(got))
     return 0;
-  fprintf(stderr, "%s: got %a (0x%08x), expected a NaN\n", label, (double)got, floatBits(got));
+  fprintf(stderr, "%s: got %a (0x%08x), expected a non-finite value\n", label, (double)got,
+          floatBits(got));
   return 1;
 }
 
-int main(void) {
+/* One poison value per trial, so a pass attributes the skip to that value
+ * alone rather than to whichever of two was reached first. */
+static int nonFiniteTrial(const char *what, float poison) {
   float input[kInputLength];
   float coefficients[kTapCount];
   float output[kOutputLength];
+  char label[80];
 
   for (int64_t i = 0; i < kInputLength; ++i)
     input[i] = 1.0f;
@@ -55,8 +64,7 @@ int main(void) {
   for (int64_t k = 0; k < kTapCount; ++k)
     coefficients[k] = 1.0f;
   coefficients[0] = 5.0f;
-  coefficients[1] = INFINITY;
-  coefficients[2] = NAN;
+  coefficients[1] = poison;
   coefficients[kTapCount - 1] = 3.0f;
 
   for (int64_t i = 0; i < kOutputLength; ++i)
@@ -69,16 +77,49 @@ int main(void) {
   _mlir_ciface_f32_fast_full(&resultRef, &inputRef, &coefficientRef, &outputRef);
 
   /* Output 0 pairs coefficient 19 with input 0 and skips taps 0..18, so the
-   * infinity and the NaN are never evaluated. Zero padding would reach
-   * 0 * Inf and return a NaN. Output 50 is the mirror case: only tap 0. */
-  int failed = expectBits("left edge, all poison taps skipped", output[0], 1.5f);
-  failed |= expectBits("right edge, all poison taps skipped", output[kOutputLength - 1], 1.25f);
+   * poison is never evaluated. Zero padding reaches 0 * poison and returns
+   * NaN. Output 50 is the mirror case: only tap 0 is in range. */
+  snprintf(label, sizeof label, "%s: left edge skips the poison tap", what);
+  int failed = expectBits(label, output[0], 1.5f);
+  snprintf(label, sizeof label, "%s: right edge skips the poison tap", what);
+  failed |= expectBits(label, output[kOutputLength - 1], 1.25f);
 
-  /* Non-vacuity. Output 18 is still an edge window but taps 1 and 2 are in
-   * range there, and output 19 is the first interior window, so both must be
-   * NaN: the poison is genuinely in the corpus and both routes evaluate it. */
-  failed |= expectNan("edge window that does reach the poison", output[18]);
-  failed |= expectNan("interior window that does reach the poison", output[19]);
+  /* Non-vacuity. Output 18 is an edge window that does include tap 1, and
+   * output 19 is the first interior window, so both must be NaN: the poison is
+   * reachable and both routes evaluate it. */
+  snprintf(label, sizeof label, "%s: edge window that reaches the poison", what);
+  failed |= expectNonFinite(label, output[18]);
+  snprintf(label, sizeof label, "%s: interior window that reaches the poison", what);
+  failed |= expectNonFinite(label, output[19]);
+  return failed;
+}
 
+/* The other separator class. With a finite coefficient a materialized zero term
+ * can only be a signed zero, so it is invisible against a nonzero accumulator
+ * and observable only in the zero's sign. This catches an implementation that
+ * guards non-finite coefficients but materializes finite ones, which the trials
+ * above cannot reach. N = 1 and K = 2 put a single skipped tap after a valid
+ * term whose exact product underflows to -0.0. */
+static int signedZeroEdgeTrial(void) {
+  float input[1] = {-0x1p-75f};
+  float coefficients[2] = {0x1p-75f, 1.0f};
+  float output[2] = {0.0f, 0.0f};
+
+  MemRefF32 inputRef = {input, input, 0, {1}, {1}};
+  MemRefF32 coefficientRef = {coefficients, coefficients, 0, {2}, {1}};
+  MemRefF32 outputRef = {output, output, 0, {2}, {1}};
+  MemRefF32 resultRef;
+  _mlir_ciface_f32_fast_full(&resultRef, &inputRef, &coefficientRef, &outputRef);
+
+  /* Output 1 takes tap 0 only. fma(-2^-75, 2^-75, +0.0) rounds -2^-150 to
+   * -0.0, and skipping tap 1 keeps it. Materializing tap 1 as
+   * fma(+0.0, 1.0, -0.0) returns +0.0. */
+  return expectBits("right edge keeps the negative zero", output[1], -0.0f);
+}
+
+int main(void) {
+  int failed = nonFiniteTrial("infinity", INFINITY);
+  failed |= nonFiniteTrial("NaN", NAN);
+  failed |= signedZeroEdgeTrial();
   return failed;
 }

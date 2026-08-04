@@ -391,11 +391,13 @@ def Ondrix_SosFilterTdf2Op
     written; a source convention using subtraction must provide negated
     `a1` and `a2` coefficients.
 
-    `mul_add` follows the `numeric` contraction policy: `off` emits separate
-    multiply and add operations, `fma` requires one fused multiply-add, and
-    `fast` permits fast-math transformations. The standalone `mul` and `add`
-    steps remain distinct operations except that `fast` attaches fast-math
-    flags. Empty input returns an empty output and the unchanged state.
+    `mul_add` follows the `numeric` contraction policy: `off` emits the stated
+    separate multiply and add, and `fma` one fused multiply-add. `fast` is not
+    admitted by this executable profile, because no realization gate covers the
+    selected biquad event graph; the verifier refuses it rather than emitting a
+    permission no site can consume. The standalone `mul` and `add` steps stay
+    distinct operations in both admitted modes and carry no fast-math flag in
+    either. Empty input returns an empty output and the unchanged state.
 
     This first contract supports `f32` only. Fixed-point SOS requires an
     independent contract because feedback-state quantization and scaling
@@ -827,9 +829,11 @@ def Ondrix_MovingAverageOp : Ondrix_Op<"moving_average", [Pure]> {
     That window sum is a designated reduction, so `fast` does admit
     rebuilding it: the legal set holds more than one tree from `K = 2`, but
     a two-operand IEEE addition is bitwise commutative for every non-NaN
-    result, so at `K = 2` only NaN sign, NaN payload and sNaN quieting can
-    differ and the contract holds none of them. The first difference in
-    value appears at `K = 3`. The lowering builds the declared tree and
+    result. At `K = 2` any remaining difference is confined to the NaN
+    result's representation or which operand it comes from, neither of which
+    the contract specifies; the invalid condition is symmetric in the
+    operands, so exchange does not change it. The first difference in value
+    appears at `K = 3`. The lowering builds the declared tree and
     spends nothing. There is no product anywhere, so no contract can fuse, and
     `off`, `fma` and `fast` denote the same events at every window the
     lowering emits. `K`

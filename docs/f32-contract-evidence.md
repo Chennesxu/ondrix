@@ -49,9 +49,12 @@ summarize it and do not extend it.
 ### R is relative to a designated reduction instance
 
 R is not defined over syntactically additive expressions. It is defined over a
-**designated reduction instance** `p` — a region the source contract names as a
-reduction. At the `ondsp` level one `ondsp.reduce_mac` operation is one such
-instance; at the `ondrix` level it is the sum the operation's description states
+**designated reduction instance** `p` — an operation-defined semantic reduction
+instance, named by operation semantics rather than by syntax, and parameterized
+by the operation, its loop family, or an output index. "Instance" is not an
+MLIR `Region`: a `dct` row and a `moving_average` window are instances without
+being region objects. At the `ondsp` level one `ondsp.reduce_mac` operation is
+one such instance; at the `ondrix` level it is the sum the operation's description states
 literally, such as a `dct` row, a `moving_average` window, or the tap sum of
 `lms`. An expression is not a reduction merely by containing additions.
 
@@ -70,8 +73,14 @@ leaf sequence is
 for a permutation `pi` of `D(p)`, parenthesized arbitrarily. The seed occurs
 exactly once and stays the first leaf; R does not permit moving it among the
 terms, and no current mechanism needs that. Where the description states no
-seed, the permutation ranges over all leaves. An empty domain evaluates to the
-seed.
+seed, the permutation ranges over all leaves.
+
+An instance with a seed and an empty domain evaluates to the seed. An instance
+with no seed must have a non-empty domain: a seedless empty reduction has no
+declared result and is not admitted. No operation in the catalogue reaches that
+corner — the seedless reductions are `dct` rows at a static power-of-two extent
+in `[4, 64]`, `rms` at `N >= 2`, and `moving_average` at `K >= 2` — so this
+closes the definition rather than a reachable case.
 
 Permutation is the part associativity does not give. Lane `i` pairs term `i`
 with term `i + W`, and reparenthesization alone preserves leaf order, so
@@ -122,9 +131,9 @@ exactly once in the selected graph.
 | Operation | Legal set under `fast` |
 | --- | --- |
 | `gain` | one graph. A lone product has no addend to fuse and is not a designated reduction — the only operation whose three declarations denote the same events. |
-| `moving_average` | the window sum is a designated reduction, so **R** applies for `K >= 2`; no product, so **F** never does. At `K = 2` the rebuilt trees are distinct event graphs whose first contract-observable difference is still absent: a two-operand IEEE addition is bitwise commutative for every non-NaN result, so only NaN sign, NaN payload and sNaN quieting can differ, and all three are outside the contract. The first observable difference in value appears at `K = 3`. |
+| `moving_average` | the window sum is a designated reduction, so **R** applies for `K >= 2`; no product, so **F** never does. At `K = 2` R already admits distinct event graphs, but operand exchange in a two-operand IEEE addition is bitwise commutative for every non-NaN result. Any remaining difference is confined to the NaN result's representation or which NaN operand it is taken from — payload and sign — neither of which the contract specifies. Signalling-NaN behaviour is outside the contract, and is not claimed here to be order-distinguishing: the invalid condition is symmetric in the operands. The first difference in value appears at `K = 3`. |
 | `dot`, `fir`, `fir_filter`, `conv1d`, `matmul`, `rms`, `dct`, `fir_decimate`, `fir_interpolate`, `lms` | products plus a designated reduction: both **R** and **F** apply. |
-| `goertzel` | exactly two graphs. No region of the recursion is a designated reduction — the sample chain is a data dependence and the closing energy is a fixed expression, not a sum over an index domain — so only **F** applies, at one multiply-add site. |
+| `goertzel` | exactly two graphs. No part of the recursion is a designated reduction — the sample chain is a data dependence and the closing energy is a fixed expression, not a sum over an index domain — so only **F** applies, at one multiply-add site. |
 | `sos_filter_tdf2` | larger than one graph — the biquad body has fusable multiply-adds — and no recurrence-level realization gate exists, so `fast` is refused at the verifier. |
 
 Admission follows this layer, not the transform list: a singleton legal set is
@@ -191,23 +200,45 @@ attribute stays byte-identical while two of three sites changed mechanism.
 
 Two gates, because neither is sufficient.
 
-`test/Permissions/fast_mixed_route_full_boundary.mlir` pins the route split by
-count — exactly one site reaches the rebuild, and under the default term
-selection exactly two fused events exist and both are scalar edge events.
+`test/Permissions/fast_mixed_route_full_boundary.mlir` pins the generated
+mechanism *cardinalities*: exactly one site reaches the rebuild, and under the
+default term selection exactly two fused events exist and both are scalar.
 Folding an edge into the vector route, recording the wrong permission at the
 edge, and dropping the R record each redden the assertion that names that
 property.
 
+What counting cannot establish is which site owns which event. Deleting one
+edge's fused event while adding one to the interior tail keeps the total at two,
+so the gate bounds how many mechanisms were generated, and the per-site
+selection record is what binds them to a route.
+
 `test/Execution/fp_fast_full_boundary_edge_aot.mlir` executes the edge
 semantics, because the structural pin cannot see them. This operation's
 contract says an out-of-range tap performs no accumulator update rather than
-contributing a zero term, and for finite values those agree — every existing
-full-boundary corpus is finite, so none of them can tell the two apart. With an
-infinity and a NaN placed at taps that only the edge windows skip, zero padding
-reaches `0 * Inf` and returns NaN where the declared graph returns a finite
-value. A zero-padding implementation written as a select plus one unconditional
-fused event leaves every operation count unchanged: the structural gate passes
-it and only the executed one rejects it.
+contributing a zero term, and against a nonzero finite accumulator those agree
+— every pre-existing full-boundary corpus is finite, so none of them could tell
+the two apart even though their references model the skip correctly.
+
+A materialized zero term is observable in exactly two ways, and there is no
+third: a non-finite coefficient makes the product invalid, and a finite one
+leaves only the sign of the zero. `0 * finite` cannot overflow, cannot produce a
+non-zero subnormal, and cannot leave a rounding residue, while exception state
+is unobservable under this contract and NaN payload is outside it. Both classes
+are gated, one poison per trial so a pass attributes the skip to that value:
+
+- **Non-finite.** An infinity, then a NaN, at a tap only the edge windows skip.
+  Zero padding reaches `0 * poison` and returns NaN where the declared graph
+  returns 1.5.
+- **Signed zero.** `N = 1`, `K = 2`, one skipped tap after a valid term whose
+  exact product underflows to `-0.0`. Skipping keeps `-0.0`; materializing the
+  tap as `fma(+0.0, 1.0, -0.0)` returns `+0.0`.
+
+The classes are independent, not belt-and-braces. Zero padding written as a
+select plus one unconditional fused event leaves every operation count
+unchanged, so the structural gate passes it and only the object rejects it; and
+an implementation that guards non-finite coefficients while materializing finite
+ones passes both non-finite trials, leaving the signed-zero trial as the only
+one that rejects it.
 
 ## What the layers show
 
