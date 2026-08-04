@@ -21,15 +21,15 @@ A declaration is not a schedule. Six things are distinct:
   language rule; nothing forbids a different member.
 - **Used** — which permissions were spent getting from the base graph to the
   selected graph. Selecting a fused event spends **F** even though the emitted
-  operation carries no flag; regrouping across lanes spends **R**.
+  operation carries no flag; rebuilding the tree across lanes spends **R**.
 - **Emitted** — permissions left on the operations that reach the audit point.
   Spending and emitting are opposites: an emitted flag hands the choice to
   LLVM instead of making it. Emitted is `{}` everywhere, gated by
   `test/Permissions/fp_contract_permission_audit.mlir` on the translated IR.
 - **Executed gate** — object-level evidence. An exact contract is pinned
   bitwise against an independent reference. A relaxed result is not pinned; its
-  evidence is term conservation on a sub-domain where every derivable
-  regrouping agrees.
+  evidence is term conservation on a sub-domain where every derivable rebuild
+  agrees.
 
 The audit point is the translated `.ll`: this flow runs no LLVM middle end, so
 permissions are final there. It is *not* the final point for the realized event
@@ -40,29 +40,91 @@ is enough for the X86 backend without +fma to de-fuse it, while AArch64 and the
 expansion policy that a delegated permission cannot bound, which is why emitted
 is empty rather than merely bounded.
 
-`fast` permits **R** (`RebuildReductionTree`) and **F** (`FuseMultiplyAdd`).
+## The two permissions
 
-**R** is a tree rebuild, not reparenthesization: the target may be any binary
-addition tree whose leaves are a bijection onto the source reduction's indexed
-terms — each exactly once, operands unchanged, no identity introduced. That
-covers permuting the terms as well as regrouping them, and the wider form is
-what a lane partition needs. Lane `i` pairs term `i` with term `i + W`, and
-reparenthesization alone preserves leaf order, so associativity by itself would
-not authorize the schedule this compiler builds. The difference is observable:
-over `[1e8, 1.0, 0, …, -1e8, …]` at N=16, W=8 the source leaf order gives 0 and
-the lane partition gives 1.
+`fast` permits **R** (`RebuildReductionTree`) and **F** (`FuseMultiplyAdd`).
+This section is the normative statement; the dialect and pass descriptions
+summarize it and do not extend it.
+
+### R is relative to a designated reduction instance
+
+R is not defined over syntactically additive expressions. It is defined over a
+**designated reduction instance** `p` — a region the source contract names as a
+reduction. At the `ondsp` level one `ondsp.reduce_mac` operation is one such
+instance; at the `ondrix` level it is the sum the operation's description states
+literally, such as a `dct` row, a `moving_average` window, or the tap sum of
+`lms`. An expression is not a reduction merely by containing additions.
+
+Each instance carries an optional distinguished seed `s(p)` — the `initial`
+operand where the description has one — an index domain `D(p)`, and one
+**indexed term occurrence** `t(p, i)` per `i` in `D(p)`, with fixed operands and
+a fixed index relation.
+
+R permits replacing the additive tree of `p` with any binary addition tree whose
+leaf sequence is
+
+```text
+[ s(p), t(p, pi(0)), ..., t(p, pi(N-1)) ]
+```
+
+for a permutation `pi` of `D(p)`, parenthesized arbitrarily. The seed occurs
+exactly once and stays the first leaf; R does not permit moving it among the
+terms, and no current mechanism needs that. Where the description states no
+seed, the permutation ranges over all leaves. An empty domain evaluates to the
+seed.
+
+Permutation is the part associativity does not give. Lane `i` pairs term `i`
+with term `i + W`, and reparenthesization alone preserves leaf order, so
+associativity by itself would not authorize the schedule this compiler builds.
+The difference is observable: over `[1e8, 1.0, 0, …, -1e8, …]` at N=16, W=8 the
+source leaf order gives 0 and the lane partition gives 1.
+
+Because the leaves are a bijection onto the term occurrences of `p`, an identity
+leaf cannot be added. That is a consequence of the definition rather than a
+second condition, so it is stated once here.
+
+### R is anchored to the declared base graph, not to the current IR
+
+The source of a rebuild is always the base graph the call site declared. A pass
+may rebuild a tree another pass already rebuilt, but the leaves keep their
+original `(p, i)` identities and admissibility is still settled against the same
+base graph. Treating an intermediate as a new source would let a chain of
+individually plausible steps leave the legal set of the declaration that
+authorized them.
+
+Today the anchor is structural rather than carried: the one R-consuming
+transform matches `ondsp.reduce_mac` itself, so the designated instance is the
+operation in front of it and there is no chain to lose. That is why no
+provenance attribute exists yet. A second R consumer, or one that ran after the
+tree was already rebuilt, would have to establish the original `(p, i)`
+identities or refuse — this paragraph is the obligation it inherits, not a
+mechanism the compiler already runs.
+
+R does not permit mixing two reduction instances — two outputs, two samples, two
+operations — splitting one instance into independent results, crossing a
+non-additive boundary such as a division, a saturation, or an export, or
+changing a term's operands or index relation.
+
+### R and F compose over term occurrences, not IR nodes
 
 **F** selects a fused multiply-add event for a term in place of a rounded
-product followed by an addition.
+product followed by an addition. Under `{R, F}` the product of `t(p, i)` is
+therefore no longer a separate operation in the result.
+
+The bijection constrains term occurrences and their provenance, not whether a
+distinct multiply survives in the emitted IR. F may fuse a term with the
+addition that consumes it, but it may not delete, duplicate, or re-source that
+term. In either order of application, every original term occurrence appears
+exactly once in the selected graph.
 
 ## Layer 1 — language: what each operation's `fast` admits
 
 | Operation | Legal set under `fast` |
 | --- | --- |
-| `gain` | one graph. A lone product has no addend to fuse and no tree to regroup — the only operation whose three declarations denote the same events. |
-| `moving_average` | the window sum is a reduction tree, so **R** applies for `K >= 2`; no product, so **F** never does. The rebuilt trees first differ in value at `K = 3`, since a two-term sum is commutative up to NaN payload. |
-| `dot`, `fir`, `fir_filter`, `conv1d`, `matmul`, `rms`, `dct`, `fir_decimate`, `fir_interpolate`, `lms` | products plus an additive tree: both **R** and **F** apply. |
-| `goertzel` | exactly two graphs. A recursion has no reduction to regroup, so only **F** applies, at one multiply-add site. |
+| `gain` | one graph. A lone product has no addend to fuse and is not a designated reduction — the only operation whose three declarations denote the same events. |
+| `moving_average` | the window sum is a designated reduction, so **R** applies for `K >= 2`; no product, so **F** never does. At `K = 2` the rebuilt trees are distinct event graphs whose first contract-observable difference is still absent: a two-operand IEEE addition is bitwise commutative for every non-NaN result, so only NaN sign, NaN payload and sNaN quieting can differ, and all three are outside the contract. The first observable difference in value appears at `K = 3`. |
+| `dot`, `fir`, `fir_filter`, `conv1d`, `matmul`, `rms`, `dct`, `fir_decimate`, `fir_interpolate`, `lms` | products plus a designated reduction: both **R** and **F** apply. |
+| `goertzel` | exactly two graphs. No region of the recursion is a designated reduction — the sample chain is a data dependence and the closing energy is a fixed expression, not a sum over an index domain — so only **F** applies, at one multiply-add site. |
 | `sos_filter_tdf2` | larger than one graph — the biquad body has fusable multiply-adds — and no recurrence-level realization gate exists, so `fast` is refused at the verifier. |
 
 Admission follows this layer, not the transform list: a singleton legal set is
@@ -120,8 +182,8 @@ by the compiler; none is handed to the backend.
 **`fast` is genuinely unused on two routes only**, and for different reasons.
 `gain` is *semantically inert*: its legal set is one graph, so there is nothing
 to spend on any target. `moving_average` is *operationally unused*: its window
-sum is a reduction tree and **R** does apply, but the lowering builds the
-declared association and no transform regroups it. The distinction matters —
+sum is a designated reduction and **R** does apply, but the lowering builds the
+declared tree and no transform rebuilds it. The distinction matters —
 the second can change when a transform lands, the first cannot.
 
 **Everything else consumes something.** The four routes that select a fused

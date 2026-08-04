@@ -287,8 +287,13 @@ def Ondsp_ReduceMacOp
     selected lowering pipeline.
 
     This ordered left-fold contract is the portable correctness baseline.
-    Consumers may reassociate or vectorize it only when the numeric policy and
-    range analysis prove that the transformed order is equivalent.
+    One operation is one designated reduction instance: `initial` is its seed,
+    the loop index is its term domain, and each index names one term
+    occurrence. That is what a permission is relative to. A consumer may
+    reorder it only when the numeric policy admits the rebuild — under f32
+    `fast` that is `RebuildReductionTree`, a reordering, not an equivalence
+    claim — or when range analysis proves the transformed order equivalent, as
+    the fixed-point routes do.
   }];
   let arguments = (ins AnyType:$initial, AnyType:$lhs, AnyType:$rhs,
                    Ondsp_NumericAttr:$numeric,

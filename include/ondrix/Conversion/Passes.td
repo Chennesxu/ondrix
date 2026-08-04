@@ -414,23 +414,25 @@ def VectorizeOndspFpFastMemRefReduce
     order-preserving batching pass's refusal of fast.
 
     Term conservation is what makes the produced graph derivable rather than
-    merely permitted. The source tree has `N + 1` terms: the initial value
-    and one product per index. The lane accumulators are seeded with the
-    first block's W products rather than a synthesized `+0.0`, which would
-    not be a reassociation of the declared terms and is observable at a
-    signed zero. The remaining blocks cover `[W, floor(N/W)*W)` and the
-    scalar tail covers `[floor(N/W)*W, N)`, disjointly and completely, so
+    merely permitted. The source tree has `N + 1` leaves: the seed, which is
+    the operation's initial value, and one term per index. The lane
+    accumulators are seeded with the first block's W products rather than a
+    synthesized `+0.0`, which is no leaf of the declared tree and is
+    observable at a signed zero. The remaining blocks cover
+    `[W, floor(N/W)*W)` and the scalar tail covers `[floor(N/W)*W, N)`,
+    disjointly and completely, so
     every source product appears exactly once with its original operands. The
     leaves are permuted as well as regrouped — lane `i` pairs term `i` with
     term `i + W` — which is why the declared permission is a tree rebuild over
     the same indexed terms and not reparenthesization alone, a distinction a
     cancelling pair makes observable. The initial value is the cross-lane
     fold's accumulator, so it enters exactly once and nothing synthesizes a
-    start value. Below one full block there
-    are no lanes to fill and the ordered schedule is kept; that branch also
-    covers the empty reduction. The final fold is the ordered
-    `llvm.vector.reduce.fadd`, a determined regrouping of the lane partials
-    rather than a further permission, because MLIR 17's `vector.reduction`
+    start value, and it stays the first leaf rather than moving among the
+    terms. Below one full block there are no lanes to fill and the ordered
+    schedule is kept; that branch also covers the empty reduction. The final
+    fold is the ordered `llvm.vector.reduce.fadd`, a determined left-to-right
+    fold of the lane partials rather than a further permission, because
+    MLIR 17's `vector.reduction`
     carries no fast-math attribute. The rewrite reorders reads only and
     produces one scalar, so unlike the batching passes it carries no
     aliasing obligation.
@@ -444,7 +446,7 @@ def VectorizeOndspFpFastMemRefReduce
     permission of its own.
 
     A relaxed result is never bit-pinned. Its evidence is term conservation
-    checked on an integer sub-domain where every derivable regrouping is
+    checked on an integer sub-domain where every derivable rebuild is
     exact, mechanism mutations that drop, duplicate, or misindex a term, an
     audit that the permissions in the translated LLVM IR do not exceed the
     declared set and do not leak into neighbouring exact sites, executed

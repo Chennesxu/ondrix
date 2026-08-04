@@ -777,9 +777,9 @@ def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
     That is the base graph. `off` denotes it; `fma` fuses each term after
     the first, whose product has no addend; `fast` admits both plus any
     rebuild of the row's additive tree over the same indexed terms. Every
-    row is a reduction, so R applies, but the tensor path does not reach the
-    horizontal rewrite and the lowering selects the fused chain, spending F
-    only.
+    row is a designated reduction, so R applies, but the tensor path does
+    not reach the horizontal rewrite and the lowering selects the fused
+    chain, spending F only.
 
     `c[k][n]` is the binary32 narrowing of a binary64 cosine, which makes
     the build's libm part of the declared constant rather than a detail:
@@ -824,11 +824,13 @@ def Ondrix_MovingAverageOp : Ondrix_Op<"moving_average", [Pure]> {
     y[n] = s / f32(K)                        one IEEE division
     ```
 
-    That window sum is a reduction tree, so `fast` does admit rebuilding
-    it: the legal set has more than one tree for `K >= 2` and they first
-    differ in value at `K = 3`, a two-term sum being commutative up to NaN
-    payload. The lowering builds the declared association and spends
-    nothing. There is no product anywhere, so no contract can fuse, and
+    That window sum is a designated reduction, so `fast` does admit
+    rebuilding it: the legal set holds more than one tree from `K = 2`, but
+    a two-operand IEEE addition is bitwise commutative for every non-NaN
+    result, so at `K = 2` only NaN sign, NaN payload and sNaN quieting can
+    differ and the contract holds none of them. The first difference in
+    value appears at `K = 3`. The lowering builds the declared tree and
+    spends nothing. There is no product anywhere, so no contract can fuse, and
     `off`, `fma` and `fast` denote the same events at every window the
     lowering emits. `K`
     is exact in binary32 over the admitted range, so the division is one
@@ -936,9 +938,12 @@ def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
     The base graph is that pseudocode read literally: one rounded product
     `c2*s1`, one addition of it to `x[n]`, single IEEE operations elsewhere.
     `off` denotes exactly it and `fma` the graph that fuses the single
-    multiply-add site; both are exact contracts. `fast` denotes neither. A
-    recursion has no reduction whose terms could be reassociated, so its
-    abstract legal set is those two graphs and nothing further. The lowering
+    multiply-add site; both are exact contracts. `fast` denotes neither. No
+    region here is a designated reduction: the sample chain is a data
+    dependence, and the closing energy is a fixed expression rather than a sum
+    over an index domain, so R has nothing to rebuild even though that
+    expression is written with additive terms. The abstract legal set is those
+    two graphs and nothing further. The lowering
     SELECTS the fused member and emits it carrying no permission of its own,
     which is what makes the result pinnable: a declaration left on the
     emitted event is not inert, because the backend may consume it and pick

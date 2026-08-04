@@ -19,12 +19,12 @@ namespace ondrix::ondsp {
 /// to say which one a site is spending (semantics: FpContractMode in
 /// OndspEnums.td).
 enum class FastPermission {
-  /// Rebuild a reduction's additive tree as any binary tree whose leaves are
-  /// a bijection onto the source's indexed terms: each exactly once, operands
-  /// unchanged, no identity introduced. Permutation as well as
-  /// reparenthesization, because a lane partition pairs term i with term
-  /// i + W and reparenthesization alone preserves leaf order. Only a
-  /// reduction has such a tree; a recursion body and a bare product do not.
+  /// Rebuild the additive tree of one designated reduction: seed first if the
+  /// description states one, then any permutation of that instance's indexed
+  /// term occurrences, parenthesized freely. A bijection, so no identity leaf
+  /// appears, and always relative to the declared base graph rather than to an
+  /// intermediate. Only a designated reduction has such a tree; a recursion
+  /// body and a bare product do not (docs/f32-contract-evidence.md).
   RebuildReductionTree,
   /// Select one fused multiply-add event for a term in place of a rounded
   /// product followed by an addition.

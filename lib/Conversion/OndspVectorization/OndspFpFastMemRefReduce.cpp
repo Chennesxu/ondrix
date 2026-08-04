@@ -103,11 +103,11 @@ public:
                 bodyLoc, accumulateTerm(bodyLoc, lhs, rhs, iterArgs.front(), bodyBuilder));
           });
 
-      // The initial is the fold's accumulator, so it enters exactly once and
-      // nothing synthesizes a start value: an implicit +0.0 is a term the
-      // source graph does not have, and it turns an all-negative-zero
-      // reduction's declared -0.0 into +0.0. The fold is also where R is
-      // recorded, since it exists only because the tree was regrouped.
+      // The initial is the fold's accumulator, so the seed enters exactly once
+      // and stays the first leaf: an implicit +0.0 is no leaf of the source
+      // tree, and it turns an all-negative-zero reduction's declared -0.0 into
+      // +0.0. The fold is also where R is recorded, since it exists only
+      // because the tree was rebuilt.
       Value folded = ondrix::ondsp::consumeFastPermission(
           builder.create<vector::ReductionOp>(branchLoc, vector::CombiningKind::ADD,
                                               vectorLoop.getResult(0), adaptor.getInitial()),

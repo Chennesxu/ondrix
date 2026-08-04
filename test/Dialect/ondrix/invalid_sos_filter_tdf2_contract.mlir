@@ -130,10 +130,8 @@ func.func @rejects_tensor_encoding(
 
 // -----
 
-// A biquad state recursion is not a reduction, so the declared vocabulary
-// authorizes nothing here that off and fma do not already give. The surface
-// fails closed rather than silently downgrading or emitting a permission no
-// site can consume.
+// The biquad body does have fusable multiply-adds, so this is refused for
+// having no realization gate, not for having nothing fast could authorize.
 func.func @rejects_fast_contract(
     %input: tensor<4xf32>, %coeffs: tensor<2x5xf32>,
     %scales: tensor<2xf32>, %state: tensor<2x2xf32>) {

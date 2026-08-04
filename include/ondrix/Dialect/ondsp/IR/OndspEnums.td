@@ -88,15 +88,20 @@ def Ondsp_OverflowMode : I32EnumAttr<"OverflowMode", "overflow mode",
 //         different event tree from off's, equally pinned.
 //   fast  a declared SET OF PERMITTED REWRITES over the event graph, not a
 //         pinned tree and not an error bound. It permits exactly two.
-//         First, REBUILDING A REDUCTION'S ADDITIVE TREE: the target may be
-//         any binary addition tree whose leaves are a bijection onto the
-//         source reduction's indexed terms — each exactly once, operands
-//         unchanged, no identity introduced. This covers permuting the
-//         terms as well as reparenthesizing them, and the wider form is
-//         what a lane partition needs: pairing term i with term i+W is a
-//         reordering, and reparenthesization alone preserves leaf order.
+//         First, REBUILDING THE ADDITIVE TREE OF A DESIGNATED REDUCTION:
+//         a region the source contract names as a reduction, not any
+//         expression that happens to contain additions. The target may be
+//         any binary addition tree whose leaf sequence is the seed, if the
+//         description states one, followed by a permutation of that
+//         instance's indexed term occurrences — a bijection, so no
+//         identity leaf can appear. Permutation and not only
+//         reparenthesization, because a lane partition pairs term i with
+//         term i+W while reparenthesization preserves leaf order.
 //         Second, selection of a fused multiply-add event at a permitted
-//         multiply-accumulate site.
+//         multiply-accumulate site, which fuses a term rather than
+//         re-sourcing it. Both are relative to the base graph the call
+//         site declared, never to an intermediate a previous pass left.
+//         docs/f32-contract-evidence.md states this normatively.
 //         Declaring it selects a different numeric obligation rather than
 //         discharging one — a schedule is admissible when its event graph
 //         is DERIVABLE from the source graph using only those rewrites
@@ -127,7 +132,7 @@ def Ondsp_FpContractMode : I32EnumAttr<
     "FpContractMode",
     "FP evaluation policy: off preserves separate ordered operations, fma "
     "pins explicit fused multiply-add events, and fast declares the "
-    "reassoc+contract relaxation profile",
+    "rebuild-reduction-tree and fuse-multiply-add permissions",
     [Ondsp_FpContractOff, Ondsp_FpContractFma, Ondsp_FpContractFast]> {
   let cppNamespace = "::ondrix::ondsp";
 }
