@@ -158,6 +158,7 @@ At the default width, `supports-vector-fma=false`:
 | `goertzel` | scalar fused | {F} | `f32_goertzel_aot`, bitwise against `fma` plus a `.ll` permission pin |
 | `moving_average` | ordered scalar | {} | `f32_unary_aot`, association witness |
 | `gain` | base graph | {} | `f32_gain_lms_aot`, three objects agree |
+| `fir_filter`, `boundary = full` | mixed: guarded ordered edges, horizontal interior | {F} at each edge, {R} in the interior | `fp_fast_full_boundary_edge_aot`, executed edge skip |
 
 What moves a route between rows:
 
@@ -173,6 +174,40 @@ What moves a route between rows:
   mechanism.
 - **Declared FMA capability.** `supports-vector-fma=true` moves every {R} row
   to {R, F}.
+
+### The mixed route, and why the module union is not a record
+
+A full-boundary `fir_filter` is the one route where a single declaration
+reaches two mechanisms inside one function. Its output splits three ways: the
+edge ranges, whose windows have out-of-range taps, keep the guarded ordered tap
+loop and spend only F, while the interior emits `ondsp.reduce_mac` on a
+unit-stride subview and reaches the horizontal rebuild, spending R.
+
+The module-level summary reports `{F, R}` for this compilation. That is true of
+the compilation and false of every site in it, and it is the granularity the
+static selection record has to replace. The gate makes the gap concrete rather
+than arguing it: fold the left edge into the interior route and the module
+attribute stays byte-identical while two of three sites changed mechanism.
+
+Two gates, because neither is sufficient.
+
+`test/Permissions/fast_mixed_route_full_boundary.mlir` pins the route split by
+count — exactly one site reaches the rebuild, and under the default term
+selection exactly two fused events exist and both are scalar edge events.
+Folding an edge into the vector route, recording the wrong permission at the
+edge, and dropping the R record each redden the assertion that names that
+property.
+
+`test/Execution/fp_fast_full_boundary_edge_aot.mlir` executes the edge
+semantics, because the structural pin cannot see them. This operation's
+contract says an out-of-range tap performs no accumulator update rather than
+contributing a zero term, and for finite values those agree — every existing
+full-boundary corpus is finite, so none of them can tell the two apart. With an
+infinity and a NaN placed at taps that only the edge windows skip, zero padding
+reaches `0 * Inf` and returns NaN where the declared graph returns a finite
+value. A zero-padding implementation written as a select plus one unconditional
+fused event leaves every operation count unchanged: the structural gate passes
+it and only the executed one rejects it.
 
 ## What the layers show
 
