@@ -776,9 +776,10 @@ def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
 
     That is the base graph. `off` denotes it; `fma` fuses each term after
     the first, whose product has no addend; `fast` admits both plus any
-    rebuild of the row's additive tree over the same indexed terms. Every row is a reduction, so R
-    applies, but the tensor path does not reach the horizontal rewrite and
-    the lowering selects the fused chain, spending F only.
+    rebuild of the row's additive tree over the same indexed terms. Every
+    row is a reduction, so R applies, but the tensor path does not reach the
+    horizontal rewrite and the lowering selects the fused chain, spending F
+    only.
 
     `c[k][n]` is the binary32 narrowing of a binary64 cosine, which makes
     the build's libm part of the declared constant rather than a detail:
@@ -827,9 +828,9 @@ def Ondrix_MovingAverageOp : Ondrix_Op<"moving_average", [Pure]> {
     it: the legal set has more than one tree for `K >= 2` and they first
     differ in value at `K = 3`, a two-term sum being commutative up to NaN
     payload. The lowering builds the declared association and spends
-    nothing. There is
-    no product anywhere, so no contract can fuse, and `off`, `fma` and
-    `fast` denote the same events at every window the lowering emits. `K`
+    nothing. There is no product anywhere, so no contract can fuse, and
+    `off`, `fma` and `fast` denote the same events at every window the
+    lowering emits. `K`
     is exact in binary32 over the admitted range, so the division is one
     correctly rounded event and carries no rounding attribute.
   }];
@@ -1145,9 +1146,8 @@ def Ondrix_LmsOp : Ondrix_Op<"lms", [Pure]> {
     site for either permission — its product's only consumer is a fused
     multiplicand — so it spends nothing and carries nothing, while the tap
     reduction and the weight updates select fused events and spend F. Unlike
-    interpolation's
-    inserted zeros, the zero prehistory samples `x[m < 0]` are evaluated
-    rather than skipped, matching the fixed profile's shape.
+    interpolation's inserted zeros, the zero prehistory samples `x[m < 0]`
+    are evaluated rather than skipped, matching the fixed profile's shape.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    AnyRankedTensor:$desired,
