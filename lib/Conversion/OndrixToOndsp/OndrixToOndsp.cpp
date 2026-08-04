@@ -1990,6 +1990,226 @@ static LogicalResult lowerQ15Trig(Operation *op, Value input, Value result, Attr
   return success();
 }
 
+// The two exponential tables, generated under the same guarded quantizer the
+// trigonometric table uses. Each has 129 entries so the interpolation's upper
+// neighbour is a real entry rather than a wrapped one: the endpoints are the
+// exact 2048 and 65536, which is what makes the top of each binade land on
+// the next one instead of a rounded approximation of it.
+static std::optional<SmallVector<int32_t>> buildLog2Table() {
+  SmallVector<int32_t> table;
+  table.reserve(129);
+  for (int64_t k = 0; k <= 128; ++k) {
+    if (k == 128) {
+      table.push_back(2048);
+      break;
+    }
+    double exact = std::log2(1.0 + double(k) / 128.0) * 2048.0;
+    double rounded = std::nearbyint(exact);
+    // The same tie guard the design tables use: an entry within 2^-20 of a
+    // halfway point is not admissible evidence of which integer it is.
+    if (std::abs(exact - rounded) > 0.5 - 9.5367431640625e-07)
+      return std::nullopt;
+    table.push_back(int32_t(rounded));
+  }
+  return table;
+}
+
+static std::optional<SmallVector<int32_t>> buildExp2Table() {
+  SmallVector<int32_t> table;
+  table.reserve(129);
+  for (int64_t k = 0; k <= 128; ++k) {
+    if (k == 128) {
+      table.push_back(65536);
+      break;
+    }
+    double exact = std::exp2(double(k) / 128.0) * 32768.0;
+    double rounded = std::nearbyint(exact);
+    if (std::abs(exact - rounded) > 0.5 - 9.5367431640625e-07)
+      return std::nullopt;
+    table.push_back(int32_t(rounded));
+  }
+  return table;
+}
+
+class Log2OpLowering final : public OpConversionPattern<ondrix::ir::Log2Op> {
+public:
+  using OpConversionPattern<ondrix::ir::Log2Op>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::Log2Op op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    std::optional<SmallVector<int32_t>> table = buildLog2Table();
+    if (!table)
+      return rewriter.notifyMatchFailure(op, "log2 table entry is not tie-guard admissible");
+
+    Location loc = op.getLoc();
+    MLIRContext *context = rewriter.getContext();
+    IntegerType i16 = rewriter.getI16Type();
+    IntegerType i32 = rewriter.getIntegerType(32);
+    RankedTensorType resultType = op.getResult().getType();
+    int64_t extent = resultType.getDimSize(0);
+    auto interpolation =
+        ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, /*postShiftRight=*/8,
+                                      op.getRounding(), ondrix::ondsp::OverflowMode::Saturate, i32);
+
+    Value tableConstant = rewriter.create<arith::ConstantOp>(
+        loc,
+        DenseElementsAttr::get(RankedTensorType::get({129}, i32), llvm::ArrayRef<int32_t>(*table)));
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+    Value zero32 = rewriter.create<arith::ConstantIntOp>(loc, 0, i32);
+    Value one32 = rewriter.create<arith::ConstantIntOp>(loc, 1, i32);
+    Value fifteen = rewriter.create<arith::ConstantIntOp>(loc, 15, i32);
+    Value eight = rewriter.create<arith::ConstantIntOp>(loc, 8, i32);
+    Value indexMask = rewriter.create<arith::ConstantIntOp>(loc, 127, i32);
+    Value fractionMask = rewriter.create<arith::ConstantIntOp>(loc, 255, i32);
+    Value scale = rewriter.create<arith::ConstantIntOp>(loc, 2048, i32);
+    Value bias = rewriter.create<arith::ConstantIntOp>(loc, 16, i32);
+    Value pole = rewriter.create<arith::ConstantIntOp>(loc, -32768, i32);
+    Value empty = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), i16);
+
+    auto loop = rewriter.create<scf::ForOp>(
+        loc, zero, extentValue, one, ValueRange{empty},
+        [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+          Value element = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+          Value magnitude = builder.create<arith::ExtUIOp>(loc, i32, element);
+          // The exponent is the index of the highest set bit; the count of
+          // leading zeros gives it directly and is defined at every nonzero
+          // input, which the pole branch handles separately.
+          Value leading = builder.create<math::CountLeadingZerosOp>(loc, magnitude);
+          Value thirtyOne = builder.create<arith::ConstantIntOp>(loc, 31, i32);
+          Value exponent = builder.create<arith::SubIOp>(loc, thirtyOne, leading);
+          Value shift = builder.create<arith::SubIOp>(loc, fifteen, exponent);
+          Value mantissa = builder.create<arith::ShLIOp>(loc, magnitude, shift);
+          Value tableIndex = builder.create<arith::AndIOp>(
+              loc, builder.create<arith::ShRUIOp>(loc, mantissa, eight), indexMask);
+          Value fraction = builder.create<arith::AndIOp>(loc, mantissa, fractionMask);
+          Value lowerIdx =
+              builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), tableIndex);
+          Value upperIdx = builder.create<arith::IndexCastOp>(
+              loc, builder.getIndexType(), builder.create<arith::AddIOp>(loc, tableIndex, one32));
+          Value lower = builder.create<tensor::ExtractOp>(loc, tableConstant, lowerIdx);
+          Value upper = builder.create<tensor::ExtractOp>(loc, tableConstant, upperIdx);
+          Value delta = builder.create<arith::SubIOp>(loc, upper, lower);
+          Value product = builder.create<arith::MulIOp>(loc, delta, fraction);
+          Value interpolated =
+              builder.create<ondrix::ondsp::RoundShiftOp>(loc, i32, product, interpolation);
+          Value binade = builder.create<arith::MulIOp>(
+              loc, builder.create<arith::SubIOp>(loc, exponent, bias), scale);
+          Value sum = builder.create<arith::AddIOp>(
+              loc, binade, builder.create<arith::AddIOp>(loc, lower, interpolated));
+          Value isPole =
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, magnitude, zero32);
+          Value selected = builder.create<arith::SelectOp>(loc, isPole, pole, sum);
+          Value narrowed = builder.create<arith::TruncIOp>(loc, i16, selected);
+          Value inserted =
+              builder.create<tensor::InsertOp>(loc, narrowed, iterArgs.front(), position);
+          builder.create<scf::YieldOp>(loc, inserted);
+        });
+    rewriter.replaceOp(op, loop.getResult(0));
+    return success();
+  }
+};
+
+class Exp2OpLowering final : public OpConversionPattern<ondrix::ir::Exp2Op> {
+public:
+  using OpConversionPattern<ondrix::ir::Exp2Op>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::Exp2Op op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    std::optional<SmallVector<int32_t>> table = buildExp2Table();
+    if (!table)
+      return rewriter.notifyMatchFailure(op, "exp2 table entry is not tie-guard admissible");
+
+    Location loc = op.getLoc();
+    MLIRContext *context = rewriter.getContext();
+    IntegerType i16 = rewriter.getI16Type();
+    IntegerType i32 = rewriter.getIntegerType(32);
+    RankedTensorType resultType = op.getResult().getType();
+    int64_t extent = resultType.getDimSize(0);
+    auto interpolation =
+        ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, /*postShiftRight=*/4,
+                                      op.getRounding(), ondrix::ondsp::OverflowMode::Saturate, i32);
+
+    Value tableConstant = rewriter.create<arith::ConstantOp>(
+        loc,
+        DenseElementsAttr::get(RankedTensorType::get({129}, i32), llvm::ArrayRef<int32_t>(*table)));
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+    Value zero32 = rewriter.create<arith::ConstantIntOp>(loc, 0, i32);
+    Value one32 = rewriter.create<arith::ConstantIntOp>(loc, 1, i32);
+    Value four = rewriter.create<arith::ConstantIntOp>(loc, 4, i32);
+    Value eleven = rewriter.create<arith::ConstantIntOp>(loc, 11, i32);
+    Value fractionMask = rewriter.create<arith::ConstantIntOp>(loc, 2047, i32);
+    Value indexMask = rewriter.create<arith::ConstantIntOp>(loc, 15, i32);
+    Value minusOne = rewriter.create<arith::ConstantIntOp>(loc, -1, i32);
+    Value ceiling = rewriter.create<arith::ConstantIntOp>(loc, 65535, i32);
+    Value empty = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), i16);
+
+    auto loop = rewriter.create<scf::ForOp>(
+        loc, zero, extentValue, one, ValueRange{empty},
+        [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+          Value element = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+          Value value = builder.create<arith::ExtSIOp>(loc, i32, element);
+          // Arithmetic shift and mask split the Q5.11 value into a floor
+          // exponent and a non-negative fraction at every input, including
+          // the negative ones the range is made of.
+          Value exponent = builder.create<arith::ShRSIOp>(loc, value, eleven);
+          Value fraction = builder.create<arith::AndIOp>(loc, value, fractionMask);
+          Value tableIndex = builder.create<arith::ShRUIOp>(loc, fraction, four);
+          Value interpolant = builder.create<arith::AndIOp>(loc, fraction, indexMask);
+          Value lowerIdx =
+              builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), tableIndex);
+          Value upperIdx = builder.create<arith::IndexCastOp>(
+              loc, builder.getIndexType(), builder.create<arith::AddIOp>(loc, tableIndex, one32));
+          Value lower = builder.create<tensor::ExtractOp>(loc, tableConstant, lowerIdx);
+          Value upper = builder.create<tensor::ExtractOp>(loc, tableConstant, upperIdx);
+          Value delta = builder.create<arith::SubIOp>(loc, upper, lower);
+          Value product = builder.create<arith::MulIOp>(loc, delta, interpolant);
+          Value interpolated =
+              builder.create<ondrix::ondsp::RoundShiftOp>(loc, i32, product, interpolation);
+          Value mantissa = builder.create<arith::AddIOp>(loc, lower, interpolated);
+          // The binade placement is a shift by an input-dependent amount, so
+          // it is written out rather than expressed as a round_shift, whose
+          // amount is part of its attribute.
+          Value places = builder.create<arith::SubIOp>(loc, minusOne, exponent);
+          // The top binade shifts by zero, where the half a nearest rule
+          // compares against does not exist; the amount is clamped away from
+          // an undefined shift and the whole rounding is selected out.
+          Value shifting =
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, places, zero32);
+          Value safePlaces = builder.create<arith::MaxSIOp>(loc, places, one32);
+          Value half = builder.create<arith::ShLIOp>(
+              loc, one32, builder.create<arith::SubIOp>(loc, safePlaces, one32));
+          Value quotient = builder.create<arith::ShRSIOp>(loc, mantissa, safePlaces);
+          Value remainder = builder.create<arith::SubIOp>(
+              loc, mantissa, builder.create<arith::ShLIOp>(loc, quotient, safePlaces));
+          Value aboveHalf =
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, remainder, half);
+          Value atHalf =
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, remainder, half);
+          Value odd = builder.create<arith::CmpIOp>(
+              loc, arith::CmpIPredicate::ne, builder.create<arith::AndIOp>(loc, quotient, one32),
+              zero32);
+          Value stepUp = builder.create<arith::OrIOp>(
+              loc, aboveHalf, builder.create<arith::AndIOp>(loc, atHalf, odd));
+          Value shifted = builder.create<arith::AddIOp>(
+              loc, quotient, builder.create<arith::SelectOp>(loc, stepUp, one32, zero32));
+          Value rounded = builder.create<arith::SelectOp>(loc, shifting, shifted, mantissa);
+          Value aboveRange =
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, value, zero32);
+          Value selected = builder.create<arith::SelectOp>(loc, aboveRange, ceiling, rounded);
+          Value narrowed = builder.create<arith::TruncIOp>(loc, i16, selected);
+          Value inserted =
+              builder.create<tensor::InsertOp>(loc, narrowed, iterArgs.front(), position);
+          builder.create<scf::YieldOp>(loc, inserted);
+        });
+    rewriter.replaceOp(op, loop.getResult(0));
+    return success();
+  }
+};
+
 template <typename TrigOp, int64_t PhaseOffset>
 class TrigOpLowering final : public OpConversionPattern<TrigOp> {
 public:
@@ -2694,17 +2914,17 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns
-        .add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
-             Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
-             SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering,
-             RfftRadix4SplitOpLowering, CxMagnitudeOpLowering, DctOpLowering, GainOpLowering,
-             LmsOpLowering, RmsOpLowering, MatmulOpLowering, GoertzelOpLowering, SineOpLowering,
-             CosineOpLowering, CicDecimateOpLowering, ElementwiseOpLowering<ondrix::ir::AddOp>,
-             ElementwiseOpLowering<ondrix::ir::SubOp>, ElementwiseOpLowering<ondrix::ir::MultOp>,
-             ElementwiseOpLowering<ondrix::ir::AbsOp>, ElementwiseOpLowering<ondrix::ir::NegateOp>,
-             ElementwiseOpLowering<ondrix::ir::OffsetOp>,
-             ElementwiseOpLowering<ondrix::ir::ShiftOp>>(&getContext());
+    patterns.add<
+        FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
+        Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering,
+        DotOpLowering, ButterflyOpLowering, QuantizeOpLowering, RfftRadix4SplitOpLowering,
+        CxMagnitudeOpLowering, DctOpLowering, GainOpLowering, LmsOpLowering, RmsOpLowering,
+        MatmulOpLowering, GoertzelOpLowering, SineOpLowering, CosineOpLowering, Log2OpLowering,
+        Exp2OpLowering, CicDecimateOpLowering, ElementwiseOpLowering<ondrix::ir::AddOp>,
+        ElementwiseOpLowering<ondrix::ir::SubOp>, ElementwiseOpLowering<ondrix::ir::MultOp>,
+        ElementwiseOpLowering<ondrix::ir::AbsOp>, ElementwiseOpLowering<ondrix::ir::NegateOp>,
+        ElementwiseOpLowering<ondrix::ir::OffsetOp>, ElementwiseOpLowering<ondrix::ir::ShiftOp>>(
+        &getContext());
     if (vectorizeStaticCfft && fftLoops) {
       module.emitError("vectorize-static-cfft and fft-loops are mutually exclusive alternative "
                        "FFT lowerings; select at most one");

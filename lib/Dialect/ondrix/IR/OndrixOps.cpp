@@ -1220,6 +1220,56 @@ static LogicalResult verifyTrigValueDomain(Operation *op, Attribute numeric,
   return success();
 }
 
+// The two readings are opposite ends of the same pair, so one helper states
+// which is which and neither operation can quietly declare the other's.
+static LogicalResult verifyExponentialDomain(Operation *op, ondrix::ondsp::FixedAttr numeric,
+                                             ondrix::ondsp::FixedAttr outputNumeric,
+                                             ondrix::ondsp::RoundingMode rounding,
+                                             RankedTensorType inputType,
+                                             RankedTensorType resultType, bool inputIsMagnitude) {
+  auto isMagnitude = [](ondrix::ondsp::FixedAttr attr) {
+    return attr.getSignedness() == ondrix::ondsp::Signedness::Unsigned &&
+           attr.getStorage().isSignlessInteger(16) && attr.getFrac() == 16;
+  };
+  auto isExponent = [](ondrix::ondsp::FixedAttr attr) {
+    return attr.getSignedness() == ondrix::ondsp::Signedness::Signed &&
+           attr.getStorage().isSignlessInteger(16) && attr.getFrac() == 11;
+  };
+  bool ok = inputIsMagnitude ? (isMagnitude(numeric) && isExponent(outputNumeric))
+                             : (isExponent(numeric) && isMagnitude(outputNumeric));
+  if (!ok)
+    return op->emitOpError() << "requires "
+                             << (inputIsMagnitude
+                                     ? "an unsigned Q0.16 input and a signed Q5.11 result"
+                                     : "a signed Q5.11 input and an unsigned Q0.16 result")
+                             << ", each declared in its own numeric attribute";
+  if (rounding != ondrix::ondsp::RoundingMode::NearestEven)
+    return op->emitOpError("exponential operations require nearest_even rounding");
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
+    return failure();
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if (inputExtent == ShapedType::kDynamic || inputExtent < 1 || inputExtent > 4096 ||
+      resultExtent != inputExtent || !inputType.getElementType().isSignlessInteger(16) ||
+      !resultType.getElementType().isSignlessInteger(16))
+    return op->emitOpError("executable exponential operations require matching static "
+                           "tensor<Nxi16> input and result with N in [1, 4096]");
+  return success();
+}
+
+LogicalResult Log2Op::verify() {
+  return verifyExponentialDomain(getOperation(), getNumeric(), getOutputNumeric(), getRounding(),
+                                 getInput().getType(), getResult().getType(),
+                                 /*inputIsMagnitude=*/true);
+}
+
+LogicalResult Exp2Op::verify() {
+  return verifyExponentialDomain(getOperation(), getNumeric(), getOutputNumeric(), getRounding(),
+                                 getInput().getType(), getResult().getType(),
+                                 /*inputIsMagnitude=*/false);
+}
+
 LogicalResult SineOp::verify() {
   return verifyTrigValueDomain(getOperation(), getNumeric(), getRounding(), getInput().getType(),
                                getResult().getType());

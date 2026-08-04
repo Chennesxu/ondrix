@@ -425,6 +425,16 @@ implementation is characterized by an error budget measured against a
 higher-precision reference, which is a quality measurement rather than a
 guarantee the language makes.
 
+### Transcendental Builtins
+
+`log2(x)` and `exp2(x)` are inverses of each other over static rank-1 Q15
+tensors. The source type system names only the i16 storage, so the two
+readings their contract distinguishes — the unsigned `Q0.16` magnitude and
+the signed `Q5.11` exponent — are supplied by the binding rather than spelled
+at the call site, the same projection `dct`'s derived output fraction uses.
+Neither is part of the composable set yet, so like `dct`, `rms`, `sine`, and
+`cosine` they take an operand name rather than a nested expression.
+
 ### Elementwise Builtins
 
 `add`, `sub`, `mult`, `abs`, `negate`, `offset`, and `shift` map static rank-1

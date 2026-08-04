@@ -951,6 +951,84 @@ def Ondrix_CosineOp : Ondrix_TrigOp<"cosine"> {
   }];
 }
 
+// The two fixed-point transcendentals that are inverses of each other, and
+// the reason they can be exact contracts at all: the operation is not
+// "approximately log" but "exactly this declared table with this declared
+// interpolation", so its result is a bit-determined function of its input
+// and the distance to the mathematical function is a documented property
+// rather than a looseness in the contract.
+class Ondrix_ExponentialOp<string mnemonic> : Ondrix_Op<mnemonic, [Pure]> {
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_FixedAttr:$numeric,
+                   Ondsp_FixedAttr:$output_numeric,
+                   Ondsp_RoundingModeAttr:$rounding);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondrix_Log2Op : Ondrix_ExponentialOp<"log2"> {
+  let summary = "Fixed-point base-two logarithm, exponent plus a mantissa table";
+  let description = [{
+    `ondrix.log2` maps a static rank-1 tensor (`N` in `[1, 4096]`)
+    elementwise. The raw i16 input is read as the UNSIGNED `Q0.16` magnitude
+    `u / 2^16` in `[0, 1)`, and the result reads as signed `Q5.11`, which
+    holds the whole output range `[-16, 0)` exactly. Both readings are in the
+    attributes; neither is a scaling.
+
+    ```text
+    u == 0   -> -32768                    the declared value at the pole
+    e        = highest set bit of u                       0 .. 15
+    m        = u << (15 - e)              mantissa, in [2^15, 2^16)
+    i        = (m >> 8) & 127             129-entry table index
+    f        = m & 255                    Q8 interpolation fraction
+    t[k]     = q11(log2(1 + k/128))       tie-guarded, t[128] = 2048 exactly
+    y        = (e - 16) * 2048 + t[i] + round((t[i+1] - t[i]) * f / 2^8)
+    ```
+
+    One rounding boundary per element, at the interpolation; the exponent
+    term is exact and its addition cannot leave the destination, because
+    `e - 16` is at most `-1` and the mantissa term is under one. The whole
+    65536-value input domain is finite, so the contract is gated
+    exhaustively rather than sampled. An input of zero has no logarithm and
+    the operation does not pretend otherwise: `-32768` is the declared floor
+    of the output format, named here rather than produced by a saturation
+    the caller cannot see.
+  }];
+}
+
+def Ondrix_Exp2Op : Ondrix_ExponentialOp<"exp2"> {
+  let summary = "Fixed-point base-two exponential, the declared inverse of log2";
+  let description = [{
+    `ondrix.exp2` reverses `ondrix.log2`'s readings: the input is signed
+    `Q5.11` and the result is the unsigned `Q0.16` magnitude. Inputs at or
+    above zero have no `Q0.16` result and produce the declared ceiling
+    `65535`.
+
+    ```text
+    v >= 0   -> 65535                     the declared value above the range
+    e        = v >> 11                    exponent, -16 .. -1
+    p        = v & 2047                   fractional part, Q11
+    i        = p >> 4                     129-entry table index
+    g        = p & 15                     Q4 interpolation fraction
+    m[k]     = q15(2^(k/128))             tie-guarded, m[128] = 65536 exactly
+    mantissa = m[i] + round((m[i+1] - m[i]) * g / 2^4)
+    y        = round(mantissa / 2^(-e-1))
+    ```
+
+    Two rounding boundaries per element under one declared tie rule: the
+    mantissa interpolation and the binade placement. They are separate
+    events and the contract says so rather than folding them, because the
+    second one is a shift by an input-dependent amount and no single rounding
+    of the exact product would denote the same function.
+
+    `exp2(log2(x))` is not the identity and the contract does not claim it
+    is: each direction rounds once or twice, and the round trip is gated as
+    a bounded discrepancy over the whole input domain rather than as an
+    equality.
+  }];
+}
+
 def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
   let summary = "Single-bin Goertzel energy with quantized recursion state";
   let description = [{

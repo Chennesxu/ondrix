@@ -234,7 +234,9 @@ enum class ReductionKind {
   Abs,
   Negate,
   Offset,
-  Shift
+  Shift,
+  Log2,
+  Exp2
 };
 
 // The elementwise family: every member is one exact integer expression plus
@@ -272,7 +274,8 @@ static bool isComposableKind(ReductionKind kind) {
 static bool isUnaryTensorKind(ReductionKind kind) {
   return kind == ReductionKind::Dct || kind == ReductionKind::MovingAverage ||
          kind == ReductionKind::Gain || kind == ReductionKind::Rms || kind == ReductionKind::Sine ||
-         kind == ReductionKind::Cosine || kind == ReductionKind::CicDecimate;
+         kind == ReductionKind::Cosine || kind == ReductionKind::CicDecimate ||
+         kind == ReductionKind::Log2 || kind == ReductionKind::Exp2;
 }
 
 static bool isUnaryKind(ReductionKind kind) {
@@ -655,7 +658,8 @@ public:
         !isIdentifier("matmul") && !isIdentifier("lms") && !isIdentifier("lowpass") &&
         !isIdentifier("cic_decimate") && !isIdentifier("add") && !isIdentifier("sub") &&
         !isIdentifier("mult") && !isIdentifier("abs") && !isIdentifier("negate") &&
-        !isIdentifier("offset") && !isIdentifier("shift")) {
+        !isIdentifier("offset") && !isIdentifier("shift") && !isIdentifier("log2") &&
+        !isIdentifier("exp2")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
@@ -728,6 +732,10 @@ public:
       call.kind = ReductionKind::Offset;
     else if (isIdentifier("shift"))
       call.kind = ReductionKind::Shift;
+    else if (isIdentifier("log2"))
+      call.kind = ReductionKind::Log2;
+    else if (isIdentifier("exp2"))
+      call.kind = ReductionKind::Exp2;
     else
       call.kind = ReductionKind::Lowpass;
     call.position = current.position;
@@ -910,10 +918,13 @@ public:
       return call;
     }
     if (call.kind == ReductionKind::Dct || call.kind == ReductionKind::Rms ||
-        call.kind == ReductionKind::Sine || call.kind == ReductionKind::Cosine) {
+        call.kind == ReductionKind::Sine || call.kind == ReductionKind::Cosine ||
+        call.kind == ReductionKind::Log2 || call.kind == ReductionKind::Exp2) {
       llvm::StringRef builtin = call.kind == ReductionKind::Dct    ? "dct"
                                 : call.kind == ReductionKind::Rms  ? "rms"
                                 : call.kind == ReductionKind::Sine ? "sine"
+                                : call.kind == ReductionKind::Log2 ? "log2"
+                                : call.kind == ReductionKind::Exp2 ? "exp2"
                                                                    : "cosine";
       if (call.kind == ReductionKind::Dct && policyType == SourceType::F32) {
         if (!expect(TokenKind::Comma, "expected ',' before dct contract policy") ||
@@ -2549,6 +2560,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                               : ast.result.kind == ReductionKind::Rms           ? "rms"
                               : ast.result.kind == ReductionKind::Sine          ? "sine"
                               : ast.result.kind == ReductionKind::CicDecimate   ? "cic_decimate"
+                              : ast.result.kind == ReductionKind::Log2          ? "log2"
+                              : ast.result.kind == ReductionKind::Exp2          ? "exp2"
                                                                                 : "cosine";
     bool admitsFloat =
         ast.result.kind == ReductionKind::Rms || ast.result.kind == ReductionKind::MovingAverage ||
@@ -3091,6 +3104,21 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
           builder.getI64IntegerAttr(kernel.ast.result.rate),
           builder.getI64IntegerAttr(kernel.ast.result.delay), numeric,
           ondsp::OverflowModeAttr::get(&context, *kernel.stateOverflow), rounding);
+    } else if (kernel.ast.result.kind == ReductionKind::Log2 ||
+               kernel.ast.result.kind == ReductionKind::Exp2) {
+      // The source type system names only the i16 storage, so the two
+      // readings the contract distinguishes are supplied here rather than
+      // spelled at the call site; the projection is safe because the pair
+      // does not compose with anything that would misread the scale.
+      auto magnitude =
+          ondsp::FixedAttr::get(&context, ondsp::Signedness::Unsigned, elementType, 16);
+      auto exponent = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 11);
+      if (kernel.ast.result.kind == ReductionKind::Log2)
+        result = builder.create<ir::Log2Op>(expressionLocation, outputType, lhs, magnitude,
+                                            exponent, rounding);
+      else
+        result = builder.create<ir::Exp2Op>(expressionLocation, outputType, lhs, exponent,
+                                            magnitude, rounding);
     } else if (kernel.ast.result.kind == ReductionKind::Sine) {
       result = builder.create<ir::SineOp>(expressionLocation, outputType, lhs, numeric, rounding);
     } else if (kernel.ast.result.kind == ReductionKind::Cosine) {
