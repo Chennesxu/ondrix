@@ -268,6 +268,24 @@ def VectorizeOndspConstantSaturatingMemRefReduce
   ];
 }
 
+def VerifyOndspFastAuditInput
+    : Pass<"verify-ondsp-fast-audit-input", "::mlir::ModuleOp"> {
+  let summary = "Refuse input that already carries a fast decision record";
+  let description = [{
+    The audit attributes the schedule stage writes are ordinary discardable
+    ones, so nothing stops a caller from handing the compiler its own
+    conclusion. This pass runs first and refuses a module whose input already
+    carries one, which is what lets the later summary trust a record it finds
+    without re-deriving it from events that pretty-printing may have dropped.
+
+    Refusing rather than clearing is deliberate: a collision between user
+    metadata and a compiler-owned name is a fact worth reporting, not one worth
+    silently repairing.
+  }];
+  let constructor = "ondrix::createVerifyOndspFastAuditInputPass()";
+  let dependentDialects = ["ondrix::ondsp::OndspDialect"];
+}
+
 def VerifyOndspConstantReassociationProofTrace
     : Pass<"verify-ondsp-constant-reassociation-proof-trace", "::mlir::ModuleOp"> {
   let summary = "Revalidate an experimental constant-reassociation proof trace";

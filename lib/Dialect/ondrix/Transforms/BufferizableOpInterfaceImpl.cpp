@@ -40,7 +40,9 @@ static Value createInitialAccumulator(OpTy op, OpBuilder &builder, Location loc)
 }
 
 static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value accumulator,
-                                       ondrix::ondsp::FpAttr numeric, OpBuilder &builder) {
+                                       ondrix::ondsp::FpAttr numeric,
+                                       const ondrix::ondsp::FastSelectionPlan &plan,
+                                       OpBuilder &builder) {
   switch (numeric.getContract()) {
   case ondrix::ondsp::FpContractMode::Off: {
     Value product = builder.create<arith::MulFOp>(loc, lhs, rhs);
@@ -51,7 +53,7 @@ static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value
   case ondrix::ondsp::FpContractMode::Fast:
     return ondrix::ondsp::consumeFastPermission(
         builder.create<math::FmaOp>(loc, lhs, rhs, accumulator),
-        ondrix::ondsp::FastPermission::FuseMultiplyAdd);
+        ondrix::ondsp::FastPermission::FuseMultiplyAdd, plan);
   }
   llvm_unreachable("unknown floating-point contract mode");
 }
@@ -66,19 +68,27 @@ static Value exportFirSample(OpTy op, Value accumulator, OpBuilder &builder, Loc
 }
 
 template <typename OpTy>
-static Value createReducedFirSample(OpTy op, Value window, Value coefficients, OpBuilder &builder,
-                                    Location loc) {
+static Value createReducedFirSample(OpTy op, Value window, Value coefficients,
+                                    llvm::StringRef routeRole, llvm::StringRef instanceDomain,
+                                    OpBuilder &builder, Location loc) {
   Value initial = createInitialAccumulator(op, builder, loc);
-  Value reduced = builder.create<ondrix::ondsp::ReduceMacOp>(
+  auto reduce = builder.create<ondrix::ondsp::ReduceMacOp>(
       loc, initial.getType(), initial, window, coefficients, op.getNumeric(),
       op.getProduct().value_or(ondrix::ondsp::ProductAttr()));
-  return exportFirSample(op, reduced, builder, loc);
+  // Not the schedule yet: whichever pass rewrites this reduction reads the site
+  // from here, so bufferization and the schedule stage name one site. Only a
+  // fast declaration has a selection to record.
+  if (ondrix::ondsp::declaresFastPermissions(op.getNumeric()))
+    ondrix::ondsp::stampFastSourceSite(
+        reduce, ondrix::ondsp::planFastSelection(op, routeRole, instanceDomain, "unselected"));
+  return exportFirSample(op, reduce.getResult(), builder, loc);
 }
 
 static Value createGuardedFullFirSample(FirFilterOp op, Value input, Value coefficients,
                                         Value outputIndex, Value inputLength,
                                         Value coefficientLength, Value leftPadding, Value zero,
-                                        Value one, OpBuilder &builder, Location loc) {
+                                        Value one, const ondrix::ondsp::FastSelectionPlan &plan,
+                                        OpBuilder &builder, Location loc) {
   Value initial = createInitialAccumulator(op, builder, loc);
   auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
@@ -111,7 +121,7 @@ static Value createGuardedFullFirSample(FirFilterOp op, Value input, Value coeff
                                                              coefficient, fixed, *op.getProduct());
         } else {
           updated = createFpAccumulatorUpdate(tapLoc, inputValue, coefficient,
-                                              accumulatorArgs.front(), fp, thenBuilder);
+                                              accumulatorArgs.front(), fp, plan, thenBuilder);
         }
         thenBuilder.create<scf::YieldOp>(tapLoc, updated);
 
@@ -249,7 +259,8 @@ struct FirFilterOpInterface
     Value coefficientView = rewriter.create<memref::SubViewOp>(
         loc, *coefficients, coefficientOffsets, coefficientSizes, coefficientStrides);
 
-    auto createValidRange = [&](Value lower, Value upper) {
+    auto createValidRange = [&](Value lower, Value upper, llvm::StringRef routeRole,
+                                llvm::StringRef instanceDomain) {
       rewriter.create<scf::ForOp>(
           loc, lower, upper, one, ValueRange{},
           [&](OpBuilder &builder, Location bodyLoc, Value localOutputIndex, ValueRange) {
@@ -267,14 +278,15 @@ struct FirFilterOpInterface
             SmallVector<OpFoldResult> strides{builder.getIndexAttr(1)};
             Value window =
                 builder.create<memref::SubViewOp>(bodyLoc, *input, offsets, sizes, strides);
-            Value sample = createReducedFirSample(op, window, coefficientView, builder, bodyLoc);
+            Value sample = createReducedFirSample(op, window, coefficientView, routeRole,
+                                                  instanceDomain, builder, bodyLoc);
             builder.create<memref::StoreOp>(bodyLoc, sample, *output, localOutputIndex);
             builder.create<scf::YieldOp>(bodyLoc);
           });
     };
 
     if (op.getBoundary() == FirBoundaryMode::Valid) {
-      createValidRange(zero, outputLength);
+      createValidRange(zero, outputLength, "whole", "0 <= g < N-K+1");
     } else {
       if (op.getOutputOrigin())
         assertFullFirFilterTileShape(loc, inputLength, coefficientLength, outputLength,
@@ -283,7 +295,8 @@ struct FirFilterOpInterface
         assertFullFirFilterShape(loc, inputLength, coefficientLength, outputLength, zero, one,
                                  rewriter);
       Value leftPadding = rewriter.create<arith::SubIOp>(loc, coefficientLength, one);
-      auto createGuardedRange = [&](Value lower, Value upper) {
+      auto createGuardedRange = [&](Value lower, Value upper, llvm::StringRef routeRole,
+                                    llvm::StringRef instanceDomain) {
         rewriter.create<scf::ForOp>(
             loc, lower, upper, one, ValueRange{},
             [&](OpBuilder &builder, Location bodyLoc, Value localOutputIndex, ValueRange) {
@@ -293,7 +306,10 @@ struct FirFilterOpInterface
                     builder.create<arith::AddIOp>(bodyLoc, globalOutputOrigin, localOutputIndex);
               Value sample = createGuardedFullFirSample(
                   op, *input, coefficientView, globalOutputIndex, inputLength, coefficientLength,
-                  leftPadding, zero, one, builder, bodyLoc);
+                  leftPadding, zero, one,
+                  ondrix::ondsp::planFastSelection(op, routeRole, instanceDomain,
+                                                   "guarded_ordered_fused"),
+                  builder, bodyLoc);
               builder.create<memref::StoreOp>(bodyLoc, sample, *output, localOutputIndex);
               builder.create<scf::YieldOp>(bodyLoc);
             });
@@ -306,7 +322,7 @@ struct FirFilterOpInterface
       Value leftEnd = rewriter.create<arith::MinUIOp>(loc, globalOutputEnd, leftPadding);
       leftEnd = rewriter.create<arith::MaxUIOp>(loc, leftEnd, globalOutputOrigin);
       Value localLeftEnd = rewriter.create<arith::SubIOp>(loc, leftEnd, globalOutputOrigin);
-      createGuardedRange(zero, localLeftEnd);
+      createGuardedRange(zero, localLeftEnd, "full_left_edge", "0 <= g < K-1");
 
       Value interiorStart = rewriter.create<arith::MaxUIOp>(loc, globalOutputOrigin, leftPadding);
       Value interiorEnd = rewriter.create<arith::MinUIOp>(loc, globalOutputEnd, inputLength);
@@ -314,13 +330,13 @@ struct FirFilterOpInterface
       Value localInteriorStart =
           rewriter.create<arith::SubIOp>(loc, interiorStart, globalOutputOrigin);
       Value localInteriorEnd = rewriter.create<arith::SubIOp>(loc, interiorEnd, globalOutputOrigin);
-      createValidRange(localInteriorStart, localInteriorEnd);
+      createValidRange(localInteriorStart, localInteriorEnd, "full_interior", "K-1 <= g < N");
 
       Value rightBoundary = rewriter.create<arith::MaxUIOp>(loc, inputLength, leftPadding);
       Value rightStart = rewriter.create<arith::MaxUIOp>(loc, globalOutputOrigin, rightBoundary);
       rightStart = rewriter.create<arith::MinUIOp>(loc, rightStart, globalOutputEnd);
       Value localRightStart = rewriter.create<arith::SubIOp>(loc, rightStart, globalOutputOrigin);
-      createGuardedRange(localRightStart, outputLength);
+      createGuardedRange(localRightStart, outputLength, "full_right_edge", "N <= g < N+K-1");
     }
 
     replaceOpWithBufferizedValues(rewriter, op, *output);
@@ -368,7 +384,8 @@ struct FirDecimateOpInterface
               bodyLoc, *input, ArrayRef<OpFoldResult>{inputOffset},
               ArrayRef<OpFoldResult>{coefficientLength},
               ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
-          Value sample = createReducedFirSample(op, inputWindow, coefficientView, builder, bodyLoc);
+          Value sample = createReducedFirSample(op, inputWindow, coefficientView, "whole",
+                                                "0 <= k < K", builder, bodyLoc);
           builder.create<memref::StoreOp>(bodyLoc, sample, *output, outputIndex);
           builder.create<scf::YieldOp>(bodyLoc);
         });
@@ -842,7 +859,8 @@ struct Conv1DOpInterface
               bodyLoc, *input, ArrayRef<OpFoldResult>{outputIndex},
               ArrayRef<OpFoldResult>{kernelLength},
               ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
-          Value sample = createReducedFirSample(op, inputWindow, kernelView, builder, bodyLoc);
+          Value sample = createReducedFirSample(op, inputWindow, kernelView, "whole", "0 <= k < K",
+                                                builder, bodyLoc);
           builder.create<memref::StoreOp>(bodyLoc, sample, *output, outputIndex);
           builder.create<scf::YieldOp>(bodyLoc);
         });

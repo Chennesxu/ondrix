@@ -19,20 +19,20 @@
 // ROUTE-COUNT-1: "vector.reduction"
 // ROUTE-NOT: "vector.reduction"
 
-// RECORD-R: "vector.reduction"{{.*}}ondsp.fast_used = "rebuild_reduction_tree"
+// RECORD-R: "vector.reduction"{{.*}}used_permissions = ["rebuild_reduction_tree"]
 
 // Two fused events exist under the default term selection and both are scalar.
 // A compensating pair of errors could keep the count, hence the record.
 // SEP-TOTAL-COUNT-2: "math.fma"
 // SEP-TOTAL-NOT: "math.fma"
-// SEP-EDGE-COUNT-2: "math.fma"{{.*}}ondsp.fast_used = "fuse_multiply_add"{{.*}}(f32, f32, f32) -> f32
+// SEP-EDGE-COUNT-2: "math.fma"{{.*}}used_permissions = ["fuse_multiply_add"]{{.*}}(f32, f32, f32) -> f32
 // SEP-EDGE-NOT: "math.fma"
 
 // A declared vector FMA adds F to the interior — lane body, tail, and short
 // branch — and leaves the edges as they were.
 // FMA-TOTAL-COUNT-5: "math.fma"
 // FMA-TOTAL-NOT: "math.fma"
-// FMA-LANE-COUNT-1: "math.fma"{{.*}}ondsp.fast_used = "fuse_multiply_add"{{.*}}(vector<8xf32>, vector<8xf32>, vector<8xf32>) -> vector<8xf32>
+// FMA-LANE-COUNT-1: "math.fma"{{.*}}used_permissions = ["fuse_multiply_add"]{{.*}}(vector<8xf32>, vector<8xf32>, vector<8xf32>) -> vector<8xf32>
 // FMA-LANE-NOT: "math.fma"{{.*}}vector<8xf32>
 
 // The union is identical across two different site distributions, which is the

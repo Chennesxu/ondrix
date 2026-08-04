@@ -86,7 +86,8 @@ public:
             // chain.
             next = ondrix::ondsp::consumeFastPermission(
                 builder.create<math::FmaOp>(bodyLoc, lhs, rhs, iterArgs.front()),
-                ondrix::ondsp::FastPermission::FuseMultiplyAdd);
+                ondrix::ondsp::FastPermission::FuseMultiplyAdd,
+                ondrix::ondsp::continueFastSelection(op, "ordered_fused"));
             break;
           }
           builder.create<scf::YieldOp>(bodyLoc, next);
@@ -116,7 +117,8 @@ public:
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       return signalPassFailure();
-    ondrix::ondsp::summarizeFastPermissions(getOperation());
+    if (failed(ondrix::ondsp::summarizeFastPermissions(getOperation())))
+      return signalPassFailure();
   }
 };
 

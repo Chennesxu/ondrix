@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256" | FileCheck %s --implicit-check-not=ondsp.reduce_mac
+// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256" | FileCheck %s --implicit-check-not='ondsp.reduce_mac %'
 
 // fp_fast_reduce_aot proves that a reduce_mac becomes a term-conserving
 // horizontal schedule. It cannot prove that any given operation still forms
@@ -16,6 +16,9 @@
 // Read after full lowering: the permission record is a schedule-stage audit
 // attribute that the LLVM conversion drops, and what has to hold here is that
 // the composition survived to the object shape.
+//
+// The negative names the operation form, not the bare name: a decision record
+// legitimately mentions `ondsp.reduce_mac` as the site it belongs to.
 //
 // Nothing is left half-lowered on any route. Stated as an implicit check on
 // the RUN line: a CHECK-NOT placed before the first positive directive only

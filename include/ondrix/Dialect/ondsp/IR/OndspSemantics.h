@@ -12,6 +12,7 @@
 #include "llvm/ADT/SmallVector.h"
 
 #include <optional>
+#include <string>
 
 namespace ondrix::ondsp {
 
@@ -31,11 +32,63 @@ enum class FastPermission {
   FuseMultiplyAdd,
 };
 
-/// Records that `op` is the event the compiler produced by spending
-/// `permission`, and returns its result. Spending leaves no fast-math flag
-/// behind — the schedule already embodies the choice — so the accounting has
-/// to be written down explicitly or it is not observable at all. The record is
-/// a discardable audit attribute that the LLVM conversion drops; the object
+/// One static selection site: which mechanism the compiler generated, for which
+/// part of which source operation, and under what runtime condition. A single
+/// declaration can reach several of these — a full-boundary filter generates
+/// guarded ordered edges and a horizontal interior — so a module-level union
+/// answers a question no site asked.
+///
+/// This is AUDIT origin, deliberately not the term provenance R's soundness
+/// rests on. Conflating them would make an audit attribute load-bearing for
+/// legality.
+struct FastSelectionPlan {
+  /// Stable across passes: the enclosing symbol, the source operation name, and
+  /// its ordinal among operations of that name. Never a pointer, an SSA name, a
+  /// printing order, or a location — the three ranges of a full-boundary filter
+  /// share one location.
+  std::string sourceSiteId;
+  /// Source operation name, e.g. `ondrix.fir_filter`.
+  llvm::StringRef sourceOperation;
+  /// Which part of the source operation this site is, e.g. `full_left_edge`.
+  llvm::StringRef routeRole;
+  /// The dynamic instances this static site covers, e.g. `0 <= g < K-1`.
+  llvm::StringRef instanceDomain;
+  /// The schedule generated here, e.g. `horizontal_separate`.
+  llvm::StringRef mechanism;
+  /// When this mechanism runs, for a site that generates more than one. Empty
+  /// means unconditional.
+  llvm::StringRef condition;
+};
+
+/// Builds a plan anchored at the operation being lowered. Reads the stable id an
+/// earlier pass stamped, and computes one when nothing did — textual MLIR
+/// entering at the ondsp level is its own source site.
+FastSelectionPlan planFastSelection(mlir::Operation *sourceOp, llvm::StringRef routeRole,
+                                    llvm::StringRef instanceDomain, llvm::StringRef mechanism,
+                                    llvm::StringRef condition = {});
+
+/// Copies a plan's site identity onto an operation a later pass will pick up,
+/// so two passes name the same site without sharing a pointer. Carries the role
+/// and the domain as well as the id: a pass that rewrites this operation decides
+/// the mechanism, not which part of which source operation it is.
+void stampFastSourceSite(mlir::Operation *op, const FastSelectionPlan &plan);
+
+/// Whether `numeric` is the declaration that makes a site a selection site at
+/// all. Only `fast` has anything to spend, so only `fast` gets an audit record;
+/// stamping an exact contract would put fast vocabulary on a path that has none.
+bool declaresFastPermissions(mlir::Attribute numeric);
+
+/// Continues a stamped site, replacing only what the calling pass decides. With
+/// no stamp the operation is its own site, which is what textual MLIR entering
+/// at the ondsp level is.
+FastSelectionPlan continueFastSelection(mlir::Operation *op, llvm::StringRef mechanism,
+                                        llvm::StringRef condition = {});
+
+/// Records that `event` is what the compiler produced by spending `permission`
+/// at `plan`, and returns its result. Spending leaves no fast-math flag behind —
+/// the schedule already embodies the choice — so the accounting has to be
+/// written down explicitly or it is not observable at all. The record is a
+/// discardable audit attribute that the LLVM conversion drops; the object
 /// carries nothing.
 ///
 /// Delegating instead — leaving `reassoc` or `contract` on — hands the choice
@@ -43,16 +96,26 @@ enum class FastPermission {
 /// does it and there is no entry point for it here. Measured in
 /// `test/Target/fp_permission_fmf_*.ll`, and `scripts/check-public-hygiene.sh`
 /// refuses those flags anywhere but this header.
-mlir::Value consumeFastPermission(mlir::Operation *op, FastPermission permission);
+mlir::Value consumeFastPermission(mlir::Operation *event, FastPermission permission,
+                                  const FastSelectionPlan &plan);
 
-/// Name of the audit attribute `consumeFastPermission` writes.
+/// Names of the compiler-owned audit attributes. Input carrying any of them is
+/// refused rather than trusted, so a decision record cannot be forged.
 llvm::StringRef getFastPermissionAttrName();
+llvm::StringRef getFastSelectionAttrName();
+llvm::StringRef getFastSourceSiteAttrName();
 
-/// Unions the per-operation records into one module-level set. The LLVM
-/// conversion drops the operation attributes, so a pass that can consume calls
-/// this before handing the module on; the module attribute is what survives to
-/// a reproduction record.
-void summarizeFastPermissions(mlir::ModuleOp module);
+/// Recomputes the module's decision record from the selection records currently
+/// on operations, discarding whatever the module carried. Grouping is by site,
+/// so a site that generates several conditional schedules reports each. Fails if
+/// two sites collide on one id, which would make the record ambiguous rather
+/// than merely coarse.
+mlir::LogicalResult summarizeFastPermissions(mlir::ModuleOp module);
+
+/// Refuses input that already carries a compiler-owned audit attribute. Run at
+/// pipeline entry: these attributes are ordinary discardable ones, so trusting
+/// them would let a caller hand the compiler its own conclusion.
+mlir::LogicalResult refuseForgedFastRecords(mlir::ModuleOp module);
 
 /// Target-independent raw storage and fractional position of a product.
 struct ProductSemantics {

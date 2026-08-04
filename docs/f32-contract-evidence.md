@@ -192,11 +192,51 @@ edge ranges, whose windows have out-of-range taps, keep the guarded ordered tap
 loop and spend only F, while the interior emits `ondsp.reduce_mac` on a
 unit-stride subview and reaches the horizontal rebuild, spending R.
 
-The module-level summary reports `{F, R}` for this compilation. That is true of
-the compilation and false of every site in it, and it is the granularity the
-static selection record has to replace. The gate makes the gap concrete rather
-than arguing it: fold the left edge into the interior route and the module
-attribute stays byte-identical while two of three sites changed mechanism.
+The module-level set reports `{F, R}` for this compilation. That is true of the
+compilation and false of every site in it. The gate makes the gap concrete
+rather than arguing it: fold the left edge into the interior route and that set
+stays byte-identical while two of three sites changed mechanism.
+
+### The selection record
+
+`ondsp.fast_selection` is per static site, not per operation and not per
+compilation. Each entry names the source site, the route role within it, the
+dynamic instances the role covers, the mechanism generated, the permissions that
+mechanism spent, and the condition under which it runs. The module-level set is
+derived from these rather than being the record.
+
+The full-boundary filter reports three roles under one source site — two guarded
+edges spending `{F}` and an interior spending `{R}`, or `{R, F}` with a declared
+vector FMA — and the interior reports two conditional cases, because a dynamic
+extent generates the batched schedule only where a block exists.
+
+Four properties the mechanism needs, and how each is held:
+
+- **Stable identity across passes.** The site id is the enclosing symbol, the
+  source operation name, and its ordinal — never a pointer, an SSA name, a
+  printing order, or a location, since the three ranges of a full-boundary
+  filter share one location. Bufferization stamps it on the `reduce_mac` it
+  creates; the schedule stage inherits it rather than inventing one. Two records
+  that disagree about one route and condition are an error, not a merge.
+- **Audit origin is not term provenance.** The record says which site chose what.
+  R's soundness rests on term occurrences, which no attribute carries. Keeping
+  them separate is what stops an audit attribute becoming load-bearing for
+  legality.
+- **Recomputed, not accumulated.** A union outlives the decision it described.
+  The summary replaces the module record whenever it finds events to replace it
+  from — and leaves it alone when it finds none, because `vector.reduction`'s
+  custom form drops its attribute dictionary, so a second invocation over
+  printed IR must not erase what it cannot rederive.
+- **Not forgeable.** Those attributes are ordinary discardable ones, so
+  `verify-ondsp-fast-audit-input` runs first in the canonical pipeline and
+  refuses input already carrying one. Refusing rather than clearing keeps a
+  collision between user metadata and a compiler-owned name a reported fact.
+  Gated per attribute in `test/Permissions/invalid_forged_fast_record.mlir`.
+
+One case is deliberately absent: a generated branch that spends nothing leaves
+no event to carry a record, so the interior's `term_domain < W` branch appears
+only under a declared vector FMA. Absence of a case means nothing was spent
+there, not that the branch does not exist.
 
 Two gates, because neither is sufficient.
 

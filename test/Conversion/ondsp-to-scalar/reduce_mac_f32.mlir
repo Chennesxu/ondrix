@@ -37,5 +37,5 @@ func.func @reduce_mac_fast(%lhs: memref<8xf32>, %rhs: memref<8xf32>) -> f32 {
 }
 
 // CHECK-LABEL: func.func @reduce_mac_fast
-// CHECK: math.fma %{{[^ ]*}}, %{{[^ ]*}}, %{{[^ ]*}} {ondsp.fast_used = "fuse_multiply_add"} : f32
+// CHECK: math.fma %{{[^ ]*}}, %{{[^ ]*}}, %{{[^ ]*}} {{.*}}used_permissions = ["fuse_multiply_add"]{{.*}} : f32
 // CHECK-NOT: ondsp.reduce_mac
