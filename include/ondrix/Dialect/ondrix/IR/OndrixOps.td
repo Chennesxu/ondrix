@@ -188,6 +188,63 @@ def Ondrix_FirDecimateOp
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_CicDecimateOp : Ondrix_Op<"cic_decimate", [Pure]> {
+  let summary = "Multiplier-free cascaded integrator-comb decimation";
+  let description = [{
+    `ondrix.cic_decimate` decimates a static rank-1 signed-Q1.15 tensor of
+    `R * L` samples to `L` samples (`L` in `[1, 4096]`) through `S`
+    integrator stages at the input rate, a rate change by `R`, and `S` comb
+    stages with differential delay `M` at the output rate. `S` is in
+    `[1, 8]`, `R` is a power of two in `[2, 4096]`, and `M` is 1 or 2, so
+    the transfer gain `(R*M)^S` is the exact power of two `2^G` with
+    `G = S * log2(R*M)`, and the normalizing output shift is exact. All
+    state is carried in one declared register width:
+
+    ```text
+    W       = 16 + G                          at most 64
+    s[-1,n] = x[n]                            sign extended to W bits
+    s[j,n]  = combine_W(s[j,n-1], s[j-1,n])   j = 0 .. S-1, state starts at 0
+    v[m]    = s[S-1, m*R + R-1]               the rate change
+    c[-1,m] = v[m]
+    c[j,m]  = combine_W(c[j-1,m], -c[j-1,m-M])  c[j,m<0] = 0
+    y[m]    = sat_i16(round(c[S-1,m] / 2^G))
+    ```
+
+    `combine_W` is `overflow`-declared: the exact sum is `wrap`ped to `W`
+    bits or `saturate`d to them. The declaration is load bearing, and it is
+    the reason this operation exists. Every integrator has an unbounded
+    impulse response, so for a sustained input its state leaves any finite
+    width; Hogenauer's result is that two's-complement `wrap` at a width
+    that holds the *comb output* still yields the exact result, because the
+    comb differences recover the true value modulo `2^W` and that value fits.
+    Under `saturate` the same program is simply wrong once an integrator
+    reaches the rail. This is the one operation in the catalog whose
+    correctness selects the overflow mode rather than merely observing it,
+    so no default is inferred: the source must say `wrap`.
+
+    Only the final requantization rounds, and `G < W` makes that shift the
+    single boundary; saturation there is declared and unreachable for
+    in-range inputs, since the exact DC gain is `2^G`. Decimation is
+    phase `R-1` — the last input sample of each block — which is the phase
+    that makes the cascade causal with no output-side history.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   I64Attr:$stages,
+                   I64Attr:$rate,
+                   I64Attr:$delay,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_OverflowModeAttr:$overflow,
+                   Ondsp_RoundingModeAttr:$rounding);
+  let results = (outs AnyRankedTensor:$result);
+  let extraClassDeclaration = [{
+    /// Bits of transfer gain, `S * log2(R*M)`. Valid once the verifier has
+    /// accepted the attributes.
+    int64_t getGrowthBits();
+  }];
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_FirInterpolateOp
     : Ondrix_Op<"fir_interpolate", [
         DestinationStyleOpInterface,

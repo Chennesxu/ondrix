@@ -360,6 +360,13 @@ catalog builtins expose their own admissible choices at the call site
 (for example `gain(..., rounding=...)` and the `root_rounding=` parameter
 of `rms` and `magnitude`).
 
+`cic_decimate(x, stages=, rate=, delay=, state_overflow=, rounding=)` is the
+one builtin with a mandatory contract parameter. Omission normally keeps a
+contract default, but the cascade is only correct under `state_overflow=wrap`
+and no reading of the source would justify choosing that silently, so leaving
+it out is a parse error. `rounding=` keeps its usual optional form, since both
+tie rules the boundary admits are defensible.
+
 f32 dot, FIR, `matmul`, `rms`, `moving_average`, `dct`, `fir_decimate`,
 `fir_interpolate`, `gain`, and `lms` support `contract=off`, `contract=fma`,
 and `contract=fast`. The floating-point spellings name a contract where their

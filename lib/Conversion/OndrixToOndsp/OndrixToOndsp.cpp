@@ -1661,6 +1661,102 @@ static ondrix::ondsp::ScaleAttr getNearestEvenSaturatingShift(MLIRContext *conte
                                        IntegerType::get(context, 16));
 }
 
+class CicDecimateOpLowering final : public OpConversionPattern<ondrix::ir::CicDecimateOp> {
+public:
+  using OpConversionPattern<ondrix::ir::CicDecimateOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::CicDecimateOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    MLIRContext *context = rewriter.getContext();
+    int64_t stages = op.getStages();
+    int64_t rate = op.getRate();
+    int64_t delay = op.getDelay();
+    int64_t growth = op.getGrowthBits();
+    int64_t outputs = op.getResult().getType().getDimSize(0);
+    auto carrier = IntegerType::get(context, 16 + growth);
+
+    // Every state combine is the declared-overflow boundary at the carrier
+    // width; only the export rounds. The rounding field of the state scale
+    // is vacuous at post_shift_right = 0.
+    auto stateScale = ondrix::ondsp::ScaleAttr::get(
+        context, /*preShiftLeft=*/0, /*postShiftRight=*/0,
+        ondrix::ondsp::RoundingMode::TowardNegative, op.getOverflow(), carrier);
+    auto exportScale = ondrix::ondsp::ScaleAttr::get(
+        context, /*preShiftLeft=*/0, /*postShiftRight=*/unsigned(growth), op.getRounding(),
+        ondrix::ondsp::OverflowMode::Saturate, rewriter.getI16Type());
+
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value rateValue = rewriter.create<arith::ConstantIndexOp>(loc, rate);
+    Value outputCount = rewriter.create<arith::ConstantIndexOp>(loc, outputs);
+    Value carrierZero = rewriter.create<arith::ConstantIntOp>(loc, 0, carrier);
+
+    // Integrator bank at the input rate, then phase R-1 selection. The state
+    // vector rides the outer loop so the rate change costs no buffer.
+    RankedTensorType decimatedType = RankedTensorType::get({outputs}, carrier);
+    SmallVector<Value> integratorInit(stages, carrierZero);
+    integratorInit.push_back(
+        rewriter.create<tensor::EmptyOp>(loc, decimatedType.getShape(), carrier));
+    auto integrate = rewriter.create<scf::ForOp>(
+        loc, zero, outputCount, one, integratorInit,
+        [&](OpBuilder &builder, Location loc, Value block, ValueRange outer) {
+          Value base = builder.create<arith::MulIOp>(loc, block, rateValue);
+          auto phases = builder.create<scf::ForOp>(
+              loc, zero, rateValue, one, outer.drop_back(),
+              [&](OpBuilder &builder, Location loc, Value phase, ValueRange state) {
+                Value position = builder.create<arith::AddIOp>(loc, base, phase);
+                Value sample = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+                Value carried = builder.create<arith::ExtSIOp>(loc, carrier, sample);
+                SmallVector<Value> next;
+                for (Value stage : state) {
+                  carried = builder.create<ondrix::ondsp::AddShiftOp>(loc, carrier, stage, carried,
+                                                                      stateScale);
+                  next.push_back(carried);
+                }
+                builder.create<scf::YieldOp>(loc, next);
+              });
+          Value inserted = builder.create<tensor::InsertOp>(loc, phases.getResults().back(),
+                                                            outer.back(), block);
+          SmallVector<Value> next(phases.getResults().begin(), phases.getResults().end());
+          next.push_back(inserted);
+          builder.create<scf::YieldOp>(loc, next);
+        });
+
+    // Comb bank at the output rate. Each stage keeps its own M-deep delay
+    // line as loop-carried values, so the differencing needs no history
+    // tensor and the zero prehistory is the initial state.
+    RankedTensorType resultType = op.getResult().getType();
+    SmallVector<Value> combInit(stages * delay, carrierZero);
+    combInit.push_back(
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType()));
+    Value decimated = integrate.getResults().back();
+    auto comb = rewriter.create<scf::ForOp>(
+        loc, zero, outputCount, one, combInit,
+        [&](OpBuilder &builder, Location loc, Value index, ValueRange state) {
+          Value carried = builder.create<tensor::ExtractOp>(loc, decimated, index);
+          SmallVector<Value> next;
+          for (int64_t stage = 0; stage < stages; ++stage) {
+            // line[t] holds this stage's input delayed by t+1 outputs, so
+            // line.back() is the c[j-1, m-M] the difference needs.
+            ValueRange line = state.slice(stage * delay, delay);
+            Value differenced = builder.create<ondrix::ondsp::SubShiftOp>(loc, carrier, carried,
+                                                                          line.back(), stateScale);
+            next.push_back(carried);
+            for (int64_t tap = 1; tap < delay; ++tap)
+              next.push_back(line[tap - 1]);
+            carried = differenced;
+          }
+          Value exported = builder.create<ondrix::ondsp::RoundShiftOp>(loc, builder.getI16Type(),
+                                                                       carried, exportScale);
+          next.push_back(builder.create<tensor::InsertOp>(loc, exported, state.back(), index));
+          builder.create<scf::YieldOp>(loc, next);
+        });
+    rewriter.replaceOp(op, comb.getResults().back());
+    return success();
+  }
+};
+
 // Shared table-plus-interpolation lowering for ondrix.sine/cosine. The
 // phase offset is 0 for sine and 16384 (one exact quarter turn) for
 // cosine; everything else — the tie-guarded 256-entry table, the Q8
@@ -2441,13 +2537,13 @@ public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
     RewritePatternSet patterns(&getContext());
-    patterns.add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering,
-                 FirInterpolateOpLowering, Conv1DOpLowering, FirStreamOpLowering,
-                 SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, DotOpLowering,
-                 ButterflyOpLowering, QuantizeOpLowering, RfftRadix4SplitOpLowering,
-                 CxMagnitudeOpLowering, DctOpLowering, GainOpLowering, LmsOpLowering, RmsOpLowering,
-                 MatmulOpLowering, GoertzelOpLowering, SineOpLowering, CosineOpLowering>(
-        &getContext());
+    patterns
+        .add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
+             Conv1DOpLowering, FirStreamOpLowering, SosFilterTdf2OpLowering,
+             SosFilterDf2FixedOpLowering, DotOpLowering, ButterflyOpLowering, QuantizeOpLowering,
+             RfftRadix4SplitOpLowering, CxMagnitudeOpLowering, DctOpLowering, GainOpLowering,
+             LmsOpLowering, RmsOpLowering, MatmulOpLowering, GoertzelOpLowering, SineOpLowering,
+             CosineOpLowering, CicDecimateOpLowering>(&getContext());
     if (vectorizeStaticCfft && fftLoops) {
       module.emitError("vectorize-static-cfft and fft-loops are mutually exclusive alternative "
                        "FFT lowerings; select at most one");

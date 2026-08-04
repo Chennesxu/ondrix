@@ -36,19 +36,19 @@ func.func @sat_cast_rejects_unranked_memref_result(
 
 // -----
 
-func.func @sat_add_shift_rejects_memref_operand(
+func.func @add_shift_rejects_memref_operand(
     %lhs: memref<1xi16>, %rhs: i16) -> i16 {
   // expected-error@+1 {{value-only operation does not accept memref operands}}
-  %0 = ondsp.sat_add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (memref<1xi16>, i16) -> i16
+  %0 = ondsp.add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (memref<1xi16>, i16) -> i16
   return %0 : i16
 }
 
 // -----
 
-func.func @sat_sub_shift_rejects_memref_result(
+func.func @sub_shift_rejects_memref_result(
     %lhs: i16, %rhs: i16) -> memref<1xi16> {
   // expected-error@+1 {{value-only operation does not produce memref results}}
-  %0 = ondsp.sat_sub_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (i16, i16) -> memref<1xi16>
+  %0 = ondsp.sub_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (i16, i16) -> memref<1xi16>
   return %0 : memref<1xi16>
 }
 
@@ -79,8 +79,8 @@ func.func @elementwise_value_ops_accept_shaped_values(
     -> (vector<2xi16>, tensor<2xi16>, vector<2xi16>, tensor<2xi16>) {
   %0 = ondsp.round_shift %vector {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = wrap, saturate_to = i16>} : (vector<2xi16>) -> vector<2xi16>
   %1 = ondsp.sat_cast %tensor {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tensor<2xi16>) -> tensor<2xi16>
-  %2 = ondsp.sat_add_shift %vector, %vector {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<2xi16>) -> vector<2xi16>
-  %3 = ondsp.sat_sub_shift %tensor, %tensor {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tensor<2xi16>, tensor<2xi16>) -> tensor<2xi16>
+  %2 = ondsp.add_shift %vector, %vector {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<2xi16>) -> vector<2xi16>
+  %3 = ondsp.sub_shift %tensor, %tensor {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tensor<2xi16>, tensor<2xi16>) -> tensor<2xi16>
   return %0, %1, %2, %3 : vector<2xi16>, tensor<2xi16>, vector<2xi16>, tensor<2xi16>
 }
 
@@ -176,10 +176,10 @@ func.func @round_shift_rejects_wrong_result_element(
 
 // -----
 
-func.func @sat_add_shift_rejects_mismatched_shapes(
+func.func @add_shift_rejects_mismatched_shapes(
     %lhs: vector<2xi16>, %rhs: vector<4xi16>) -> vector<2xi16> {
   // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
-  %0 = ondsp.sat_add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<4xi16>) -> vector<2xi16>
+  %0 = ondsp.add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<4xi16>) -> vector<2xi16>
   return %0 : vector<2xi16>
 }
 
@@ -221,10 +221,10 @@ func.func @round_shift_rejects_tuple_as_scalar(
 
 // -----
 
-func.func @sat_add_shift_rejects_tuple_operands(
+func.func @add_shift_rejects_tuple_operands(
     %lhs: tuple<i32>, %rhs: tuple<i32>) -> i16 {
   // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
-  %0 = ondsp.sat_add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tuple<i32>, tuple<i32>) -> i16
+  %0 = ondsp.add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tuple<i32>, tuple<i32>) -> i16
   return %0 : i16
 }
 
@@ -238,8 +238,8 @@ func.func @round_shift_rejects_float_input(%input: f32) -> i16 {
 
 // -----
 
-func.func @sat_add_shift_rejects_float_inputs(%lhs: f32, %rhs: f32) -> i16 {
+func.func @add_shift_rejects_float_inputs(%lhs: f32, %rhs: f32) -> i16 {
   // expected-error@+1 {{lhs must use a signless integer element type}}
-  %0 = ondsp.sat_add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (f32, f32) -> i16
+  %0 = ondsp.add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (f32, f32) -> i16
   return %0 : i16
 }

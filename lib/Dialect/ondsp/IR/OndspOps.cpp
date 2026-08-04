@@ -338,13 +338,13 @@ static LogicalResult verifyBinaryShiftValueDomain(Operation *op, Value lhs, Valu
   return verifyResultElementType(op, result.getType(), scale.getSaturateTo());
 }
 
-LogicalResult SatAddShiftOp::verify() {
+LogicalResult AddShiftOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();
   return verifyBinaryShiftValueDomain(*this, getLhs(), getRhs(), getResult(), getScale());
 }
 
-LogicalResult SatSubShiftOp::verify() {
+LogicalResult SubShiftOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();
   return verifyBinaryShiftValueDomain(*this, getLhs(), getRhs(), getResult(), getScale());

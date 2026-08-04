@@ -152,19 +152,31 @@ def Ondsp_SqrtFixedOp : Ondsp_Op<"sqrt_fixed", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-class Ondsp_BinaryShiftOp<string mnemonic, string opSummary>
+class Ondsp_BinaryShiftOp<string mnemonic, string noun, string symbol, string verb>
     : Ondsp_Op<mnemonic, [Pure]> {
-  let summary = opSummary;
+  let summary = "Exact " # noun # " followed by one explicit scaling boundary";
+  let description = [{
+    With signed `lhs` and `rhs` read as mathematical integers:
+
+    ```
+    exact  = lhs }] # symbol # [{ rhs                  one bit wider: never overflows
+    result = round_shift(exact, scale)   the operation's single boundary
+    ```
+
+    The scale carries the whole finite-precision decision, so the overflow
+    mode names what happens to the exact }] # noun # [{ rather than the
+    operation fixing it: `saturate` clamps to the destination range and
+    `wrap` truncates two's-complement. At `post_shift_right = 0` the rounding
+    mode is vacuous and this is a pure declared-overflow }] # verb # [{.
+  }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_ScaleAttr:$scale);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-def Ondsp_SatAddShiftOp
-    : Ondsp_BinaryShiftOp<"sat_add_shift", "Saturating add plus scaling">;
-def Ondsp_SatSubShiftOp
-    : Ondsp_BinaryShiftOp<"sat_sub_shift", "Saturating subtract plus scaling">;
+def Ondsp_AddShiftOp : Ondsp_BinaryShiftOp<"add_shift", "sum", "+", "add">;
+def Ondsp_SubShiftOp : Ondsp_BinaryShiftOp<"sub_shift", "difference", "-", "subtract">;
 
 // A value that carries either one lane or one lane per accumulator lane.
 // Coefficients deliberately stay scalar: the per-lane splat is part of the

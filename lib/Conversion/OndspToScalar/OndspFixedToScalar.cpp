@@ -819,6 +819,43 @@ public:
   }
 };
 
+// The exact sum or difference of two W-bit values needs W+1 bits, so the
+// carrier is widened before the scale runs; nothing is lost before the
+// operation's single declared boundary.
+template <typename ShiftOp, typename ArithOp>
+class BinaryShiftOpLowering final : public OpConversionPattern<ShiftOp> {
+public:
+  using OpConversionPattern<ShiftOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ShiftOp op, typename ShiftOp::Adaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    IntegerType inputElement = getSignlessIntegerElementOrNull(adaptor.getLhs().getType());
+    if (!inputElement)
+      return op.emitOpError("fixed scalar lowering supports scalar or fixed-width vector "
+                            "signless integer operands");
+    ondrix::ondsp::ScaleAttr scale = op.getScale();
+    if (scale.getPreShiftLeft() != 0)
+      return op.emitOpError("fixed scalar lowering requires pre_shift_left = 0");
+    unsigned carrierWidth = inputElement.getWidth() + 1;
+    if (scale.getPostShiftRight() >= carrierWidth)
+      return op.emitOpError("fixed scalar lowering requires post_shift_right narrower than the "
+                            "exact carrier");
+    if (cast<IntegerType>(scale.getSaturateTo()).getWidth() > carrierWidth)
+      return op.emitOpError("fixed scalar lowering does not widen past the exact carrier");
+
+    Location loc = op.getLoc();
+    Type carrierType = getIntegerTypeLike(adaptor.getLhs().getType(), carrierWidth, rewriter);
+    Value lhs = rewriter.create<arith::ExtSIOp>(loc, carrierType, adaptor.getLhs());
+    Value rhs = rewriter.create<arith::ExtSIOp>(loc, carrierType, adaptor.getRhs());
+    Value exact = rewriter.create<ArithOp>(loc, lhs, rhs);
+    rewriter.replaceOp(op, requantizeSignedValue(loc, exact, scale, rewriter));
+    return success();
+  }
+};
+
+using AddShiftOpLowering = BinaryShiftOpLowering<ondrix::ondsp::AddShiftOp, arith::AddIOp>;
+using SubShiftOpLowering = BinaryShiftOpLowering<ondrix::ondsp::SubShiftOp, arith::SubIOp>;
+
 class RoundDivOpLowering final : public OpConversionPattern<ondrix::ondsp::RoundDivOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::RoundDivOp>::OpConversionPattern;
@@ -1071,8 +1108,9 @@ public:
     OndspFixedToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
-                 MacOpLowering, MacSubOpLowering, ReduceMacOpLowering, RoundDivOpLowering,
-                 RoundShiftOpLowering, SatCastOpLowering>(typeConverter, &getContext());
+                 AddShiftOpLowering, MacOpLowering, MacSubOpLowering, ReduceMacOpLowering,
+                 RoundDivOpLowering, RoundShiftOpLowering, SatCastOpLowering, SubShiftOpLowering>(
+        typeConverter, &getContext());
     patterns.add<SqrtFixedOpLowering>(typeConverter, &getContext(), sqrtEstimate);
     patterns.add<CxButterflyOpLowering>(typeConverter, &getContext(), specializeCanonicalTwiddles);
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);

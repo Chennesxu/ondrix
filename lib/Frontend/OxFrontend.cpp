@@ -226,7 +226,8 @@ enum class ReductionKind {
   Cosine,
   Matmul,
   Lms,
-  Lowpass
+  Lowpass,
+  CicDecimate
 };
 
 static bool isCfftKind(ReductionKind kind) {
@@ -244,7 +245,7 @@ static bool isFftComposableKind(ReductionKind kind) {
 static bool isUnaryTensorKind(ReductionKind kind) {
   return kind == ReductionKind::Dct || kind == ReductionKind::MovingAverage ||
          kind == ReductionKind::Gain || kind == ReductionKind::Rms || kind == ReductionKind::Sine ||
-         kind == ReductionKind::Cosine;
+         kind == ReductionKind::Cosine || kind == ReductionKind::CicDecimate;
 }
 
 static bool isUnaryKind(ReductionKind kind) {
@@ -305,6 +306,9 @@ struct BuiltinCallAst {
   int64_t taps = 0;
   int64_t cutoffNum = 0;
   int64_t cutoffDen = 0;
+  int64_t stages = 0;
+  int64_t rate = 0;
+  int64_t delay = 0;
   SourcePosition position;
 };
 
@@ -512,14 +516,16 @@ public:
         !isIdentifier("rfft") && !isIdentifier("irfft") && !isIdentifier("magnitude") &&
         !isIdentifier("dct") && !isIdentifier("moving_average") && !isIdentifier("gain") &&
         !isIdentifier("rms") && !isIdentifier("sine") && !isIdentifier("cosine") &&
-        !isIdentifier("matmul") && !isIdentifier("lms") && !isIdentifier("lowpass")) {
+        !isIdentifier("matmul") && !isIdentifier("lms") && !isIdentifier("lowpass") &&
+        !isIdentifier("cic_decimate")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
                         "convolution(...), correlation(...), butterfly(...), cfft(...), or "
                         "icfft(...), rfft(...), irfft(...), magnitude(...), dct(...), "
                         "moving_average(...), gain(...), rms(...), sine(...), cosine(...), "
-                        "matmul(...), lms(...), or lowpass(...) builtin expression");
+                        "matmul(...), lms(...), cic_decimate(...), or lowpass(...) builtin "
+                        "expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -568,6 +574,8 @@ public:
       call.kind = ReductionKind::Matmul;
     else if (isIdentifier("lms"))
       call.kind = ReductionKind::Lms;
+    else if (isIdentifier("cic_decimate"))
+      call.kind = ReductionKind::CicDecimate;
     else
       call.kind = ReductionKind::Lowpass;
     call.position = current.position;
@@ -745,6 +753,45 @@ public:
         call.rounding = rounding->spelling.str();
       }
       if (!expect(TokenKind::RightParen, llvm::Twine("expected ')' after ") + builtin + " operand"))
+        return std::nullopt;
+      return call;
+    }
+    if (call.kind == ReductionKind::CicDecimate) {
+      // state_overflow has no default: the cascade is only correct under
+      // wrap, so the declaration is the source's, never the compiler's.
+      auto parseNamedInteger = [&](llvm::StringRef name, int64_t &slot) {
+        if (!expect(TokenKind::Comma, llvm::Twine("expected ',' before ") + name) ||
+            !expectIdentifier(name, llvm::Twine("expected ") + name) ||
+            !expect(TokenKind::Equal, llvm::Twine("expected '=' after ") + name))
+          return false;
+        auto value = parseSignedInteger(llvm::Twine("expected ") + name + " constant");
+        if (!value)
+          return false;
+        slot = *value;
+        return true;
+      };
+      if (!parseNamedInteger("stages", call.stages) || !parseNamedInteger("rate", call.rate) ||
+          !parseNamedInteger("delay", call.delay))
+        return std::nullopt;
+      if (!expect(TokenKind::Comma, "expected ',' before state_overflow policy") ||
+          !expectIdentifier("state_overflow", "expected state_overflow policy") ||
+          !expect(TokenKind::Equal, "expected '=' after state_overflow"))
+        return std::nullopt;
+      auto overflow = parseIdentifier("expected state overflow mode");
+      if (!overflow)
+        return std::nullopt;
+      call.stateOverflow = overflow->spelling.str();
+      if (current.kind == TokenKind::Comma) {
+        if (!expect(TokenKind::Comma, "expected ',' before rounding policy") ||
+            !expectIdentifier("rounding", "expected rounding policy") ||
+            !expect(TokenKind::Equal, "expected '=' after rounding"))
+          return std::nullopt;
+        auto rounding = parseIdentifier("expected rounding mode");
+        if (!rounding)
+          return std::nullopt;
+        call.rounding = rounding->spelling.str();
+      }
+      if (!expect(TokenKind::RightParen, "expected ')' after cic_decimate expression"))
         return std::nullopt;
       return call;
     }
@@ -2151,6 +2198,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                               : ast.result.kind == ReductionKind::Gain          ? "gain"
                               : ast.result.kind == ReductionKind::Rms           ? "rms"
                               : ast.result.kind == ReductionKind::Sine          ? "sine"
+                              : ast.result.kind == ReductionKind::CicDecimate   ? "cic_decimate"
                                                                                 : "cosine";
     bool admitsFloat =
         ast.result.kind == ReductionKind::Rms || ast.result.kind == ReductionKind::MovingAverage ||
@@ -2232,6 +2280,34 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         diagnostics.error(ast.result.position, "gain result extent must equal the input extent");
         return std::nullopt;
       }
+    } else if (ast.result.kind == ReductionKind::CicDecimate) {
+      int64_t stages = ast.result.stages;
+      int64_t rate = ast.result.rate;
+      int64_t delay = ast.result.delay;
+      if (stages < 1 || stages > 8) {
+        diagnostics.error(ast.result.position, "cic_decimate requires stages in [1, 8]");
+        return std::nullopt;
+      }
+      if (rate < 2 || rate > 4096 || !llvm::isPowerOf2_64(uint64_t(rate))) {
+        diagnostics.error(ast.result.position,
+                          "cic_decimate requires a power-of-two rate in [2, 4096]");
+        return std::nullopt;
+      }
+      if (delay != 1 && delay != 2) {
+        diagnostics.error(ast.result.position,
+                          "cic_decimate requires a differential delay of 1 or 2");
+        return std::nullopt;
+      }
+      if (16 + stages * int64_t(llvm::Log2_64(uint64_t(rate * delay))) > 64) {
+        diagnostics.error(ast.result.position,
+                          "cic_decimate requires stages * log2(rate * delay) <= 48");
+        return std::nullopt;
+      }
+      if (*resultExtent < 1 || *resultExtent > 4096 || *inputExtent != *resultExtent * rate) {
+        diagnostics.error(ast.result.position,
+                          "cic_decimate input extent must be the rate times the result extent");
+        return std::nullopt;
+      }
     } else if (ast.result.kind == ReductionKind::Rms) {
       if (*inputExtent < 2 || *inputExtent > 4096 ||
           (!isFloat && !llvm::isPowerOf2_64(*inputExtent))) {
@@ -2263,16 +2339,29 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     ondsp::RoundingMode rounding = ondsp::RoundingMode::NearestEven;
     if (!ast.result.rounding.empty()) {
       bool isGain = ast.result.kind == ReductionKind::Gain;
-      ondsp::RoundingMode alternative =
-          isGain ? ondsp::RoundingMode::NearestTiesPositive : ondsp::RoundingMode::TowardNegative;
+      bool isCic = ast.result.kind == ReductionKind::CicDecimate;
+      ondsp::RoundingMode alternative = isGain || isCic ? ondsp::RoundingMode::NearestTiesPositive
+                                                        : ondsp::RoundingMode::TowardNegative;
       std::optional<ondsp::RoundingMode> parsed = parseRounding(ast.result.rounding);
       if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven && *parsed != alternative)) {
-        diagnostics.error(ast.result.position,
-                          isGain ? "gain rounding must be nearest_even or nearest_ties_positive"
-                                 : "rms root_rounding must be nearest_even or toward_negative");
+        diagnostics.error(
+            ast.result.position,
+            isGain  ? "gain rounding must be nearest_even or nearest_ties_positive"
+            : isCic ? "cic_decimate rounding must be nearest_even or nearest_ties_positive"
+                    : "rms root_rounding must be nearest_even or toward_negative");
         return std::nullopt;
       }
       rounding = *parsed;
+    }
+    if (ast.result.kind == ReductionKind::CicDecimate) {
+      std::optional<ondsp::OverflowMode> overflow = parseOverflow(ast.result.stateOverflow);
+      if (!overflow) {
+        diagnostics.error(ast.result.position, llvm::Twine("unsupported state overflow mode '") +
+                                                   ast.result.stateOverflow + "'");
+        return std::nullopt;
+      }
+      return CheckedKernel{std::move(ast), std::nullopt, rounding, std::nullopt,
+                           std::nullopt,   std::nullopt, *overflow};
     }
     if (isFloat) {
       auto contract = parseFpContract(ast.result.fpContract);
@@ -2613,6 +2702,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
               ? Attribute(ondsp::FpAttr::get(&context, elementType, *kernel.fpContract))
               : Attribute(numeric),
           rounding);
+    } else if (kernel.ast.result.kind == ReductionKind::CicDecimate) {
+      result = builder.create<ir::CicDecimateOp>(
+          expressionLocation, outputType, lhs, builder.getI64IntegerAttr(kernel.ast.result.stages),
+          builder.getI64IntegerAttr(kernel.ast.result.rate),
+          builder.getI64IntegerAttr(kernel.ast.result.delay), numeric,
+          ondsp::OverflowModeAttr::get(&context, *kernel.stateOverflow), rounding);
     } else if (kernel.ast.result.kind == ReductionKind::Sine) {
       result = builder.create<ir::SineOp>(expressionLocation, outputType, lhs, numeric, rounding);
     } else if (kernel.ast.result.kind == ReductionKind::Cosine) {

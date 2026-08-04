@@ -830,6 +830,44 @@ LogicalResult FirDecimateOp::verify() {
   return verifyFirDecimateDomain(*this);
 }
 
+int64_t CicDecimateOp::getGrowthBits() {
+  return getStages() * llvm::Log2_64(uint64_t(getRate()) * uint64_t(getDelay()));
+}
+
+LogicalResult CicDecimateOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  if (getRounding() != ondrix::ondsp::RoundingMode::NearestEven &&
+      getRounding() != ondrix::ondsp::RoundingMode::NearestTiesPositive)
+    return emitOpError("cic decimation requires nearest_even or nearest_ties_positive rounding");
+  int64_t stages = getStages();
+  int64_t rate = getRate();
+  int64_t delay = getDelay();
+  if (stages < 1 || stages > 8)
+    return emitOpError("cic decimation requires stages in [1, 8]");
+  if (rate < 2 || rate > 4096 || !llvm::isPowerOf2_64(uint64_t(rate)))
+    return emitOpError("cic decimation requires a power-of-two rate in [2, 4096]");
+  if (delay != 1 && delay != 2)
+    return emitOpError("cic decimation requires a differential delay of 1 or 2");
+  // W = 16 + G must stay inside the widest carrier the fixed lowerings use.
+  if (16 + getGrowthBits() > 64)
+    return emitOpError("cic decimation requires stages * log2(rate * delay) <= 48");
+  RankedTensorType inputType = getInput().getType();
+  RankedTensorType resultType = getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
+    return failure();
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if (inputExtent == ShapedType::kDynamic || resultExtent == ShapedType::kDynamic ||
+      resultExtent < 1 || resultExtent > 4096 || inputExtent != resultExtent * rate ||
+      !inputType.getElementType().isSignlessInteger(16) ||
+      !resultType.getElementType().isSignlessInteger(16))
+    return emitOpError("executable cic decimation requires static tensor<(R*L)xi16> input and "
+                       "tensor<Lxi16> result with L in [1, 4096]");
+  return success();
+}
+
 Speculation::Speculatability FirInterpolateOp::getSpeculatability() {
   return (ondrix::requiresConservativeDSPSpeculation(getInput().getType()) ||
           ondrix::requiresConservativeDSPSpeculation(getCoeffs().getType()) ||
