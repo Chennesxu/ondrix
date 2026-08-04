@@ -31,9 +31,8 @@ llvm::StringRef getFastPermissionAttrName() { return "ondsp.fast_used"; }
 
 Value consumeFastPermission(Operation *op, FastPermission permission) {
   MLIRContext *context = op->getContext();
-  StringRef spelling = permission == FastPermission::ReassociateReductionTerms
-                           ? "reassociate_reduction_terms"
-                           : "fuse_multiply_add";
+  StringRef spelling = permission == FastPermission::RebuildReductionTree ? "rebuild_reduction_tree"
+                                                                          : "fuse_multiply_add";
   op->setAttr(getFastPermissionAttrName(), StringAttr::get(context, spelling));
   return op->getResult(0);
 }

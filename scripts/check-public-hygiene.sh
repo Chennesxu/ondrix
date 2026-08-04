@@ -21,9 +21,11 @@ fi
 # A consumed fast permission leaves no flag behind, so a lowering that builds
 # reassoc or contract directly is delegating without saying so. The two names
 # are legitimate only where the model is stated and where it is measured.
-if git grep -n -E 'FastMathFlags::(reassoc|contract)' -- lib include tools \
+if git grep -n -E 'FastMathFlags::(reassoc|contract|nnan|ninf|nsz|arcp|afn|fast)|FastMathFlagsAttr::get' \
+     -- lib include tools \
      | grep -v '^include/ondrix/Dialect/ondsp/IR/OndspSemantics.h:'; then
-  echo "error: build fast-math permissions through consumeFastPermission, not directly" >&2
+  echo "error: no production lowering delegates a floating-point permission; build" >&2
+  echo "       events through consumeFastPermission instead of constructing flags" >&2
   fail=1
 fi
 

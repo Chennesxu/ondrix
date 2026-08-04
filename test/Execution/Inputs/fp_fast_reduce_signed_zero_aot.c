@@ -17,8 +17,9 @@ typedef struct {
 extern float _mlir_ciface_fast_reduce_8(float, MemRefF32 *, MemRefF32 *);
 extern float _mlir_ciface_fast_reduce_9(float, MemRefF32 *, MemRefF32 *);
 extern float _mlir_ciface_fast_reduce_16(float, MemRefF32 *, MemRefF32 *);
+extern float _mlir_ciface_fast_reduce_dynamic(float, MemRefF32 *, MemRefF32 *);
 
-enum { kMaxLength = 16 };
+enum { kMaxLength = 32 };
 
 static uint32_t floatBits(float value) {
   uint32_t bits;
@@ -44,9 +45,21 @@ static int check(const char *label, int64_t length,
   return 1;
 }
 
+/* The dynamic kernel takes its extent at runtime, so one object covers the
+ * empty reduction, the short branch, the boundary, the tail, and a full loop
+ * iteration followed by a tail. */
+static int checkDynamic(int64_t length) {
+  char label[32];
+  snprintf(label, sizeof label, "dynamic N = %lld", (long long)length);
+  return check(label, length, _mlir_ciface_fast_reduce_dynamic);
+}
+
 int main(void) {
   int failed = check("N = W", 8, _mlir_ciface_fast_reduce_8);
   failed |= check("N = W + 1", 9, _mlir_ciface_fast_reduce_9);
   failed |= check("N = 2W", 16, _mlir_ciface_fast_reduce_16);
+  static const int64_t kDynamicLengths[] = {0, 1, 7, 8, 9, 17};
+  for (size_t i = 0; i < sizeof kDynamicLengths / sizeof *kDynamicLengths; ++i)
+    failed |= checkDynamic(kDynamicLengths[i]);
   return failed;
 }

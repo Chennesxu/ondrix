@@ -87,9 +87,16 @@ def Ondsp_OverflowMode : I32EnumAttr<"OverflowMode", "overflow mode",
 //         permission on separate operations. Exact contract as well: a
 //         different event tree from off's, equally pinned.
 //   fast  a declared SET OF PERMITTED REWRITES over the event graph, not a
-//         pinned tree and not an error bound. It permits exactly two:
-//         reassociation of a reduction's additive tree, and selection of a
-//         fused multiply-add event at a permitted multiply-accumulate site.
+//         pinned tree and not an error bound. It permits exactly two.
+//         First, REBUILDING A REDUCTION'S ADDITIVE TREE: the target may be
+//         any binary addition tree whose leaves are a bijection onto the
+//         source reduction's indexed terms — each exactly once, operands
+//         unchanged, no identity introduced. This covers permuting the
+//         terms as well as reparenthesizing them, and the wider form is
+//         what a lane partition needs: pairing term i with term i+W is a
+//         reordering, and reparenthesization alone preserves leaf order.
+//         Second, selection of a fused multiply-add event at a permitted
+//         multiply-accumulate site.
 //         Declaring it selects a different numeric obligation rather than
 //         discharging one — a schedule is admissible when its event graph
 //         is DERIVABLE from the source graph using only those rewrites

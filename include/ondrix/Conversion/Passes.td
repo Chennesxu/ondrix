@@ -407,8 +407,8 @@ def VectorizeOndspFpFastMemRefReduce
     Splits a rank-1 f32 `ondsp.reduce_mac` under `contract = fast` into
     W-lane partial sums, one cross-lane `vector.reduction <add>`, and a
     scalar tail. This is the one transform that consumes a permission the
-    fast contract declares: regrouping the reduction's additive tree across
-    lanes is exactly the reassociation a call site authorizes by writing
+    fast contract declares: rebuilding the reduction's additive tree across
+    lanes is exactly the reordering a call site authorizes by writing
     `contract = fast`, and exactly the value change the off and fma contracts
     forbid, so those two are refused here — the inverse of the
     order-preserving batching pass's refusal of fast.
@@ -420,8 +420,13 @@ def VectorizeOndspFpFastMemRefReduce
     not be a reassociation of the declared terms and is observable at a
     signed zero. The remaining blocks cover `[W, floor(N/W)*W)` and the
     scalar tail covers `[floor(N/W)*W, N)`, disjointly and completely, so
-    every source product appears exactly once with its original operands, and
-    the initial value is added once at the root. Below one full block there
+    every source product appears exactly once with its original operands. The
+    leaves are permuted as well as regrouped — lane `i` pairs term `i` with
+    term `i + W` — which is why the declared permission is a tree rebuild over
+    the same indexed terms and not reparenthesization alone, a distinction a
+    cancelling pair makes observable. The initial value is the cross-lane
+    fold's accumulator, so it enters exactly once and nothing synthesizes a
+    start value. Below one full block there
     are no lanes to fill and the ordered schedule is kept; that branch also
     covers the empty reduction. The final fold is the ordered
     `llvm.vector.reduce.fadd`, a determined regrouping of the lane partials

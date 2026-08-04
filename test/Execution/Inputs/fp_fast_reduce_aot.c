@@ -5,11 +5,11 @@
 
 /* Object gate for the fast-contract f32 reduction. The contract declares a
  * relaxation, so no trial pins a relaxed result to a bit pattern; the envelope
- * trials carry the error bound and the determinism check, and the directed
- * corpora additionally carry an executed divergence. Two families run without
- * the envelope: the integer-lattice corpus, whose sub-domain admits only exact
- * schedules, and the special-value corpus, where a finite bound is
- * meaningless. */
+ * trials carry an empirical quality tolerance and the determinism check, and
+ * the directed corpora additionally carry an executed divergence. Two families
+ * run without the envelope: the integer-lattice corpus, whose sub-domain
+ * admits only exact schedules, and the special-value corpus, where a magnitude
+ * tolerance is meaningless. */
 
 typedef struct {
   float *allocated;
@@ -98,13 +98,22 @@ static int checkTrial(const char *name, const float *lhs, const float *rhs, int6
 
   double absoluteSum = 0.0;
   const double expected = referenceDouble(lhs, rhs, count, &absoluteSum);
-  /* 2^-24 is the f32 unit roundoff and 4*N bounds the rounding events any
-   * regrouping of N products can accumulate; the floor keeps an all-zero
-   * corpus from demanding an exact result for a relaxed contract. */
-  const double tolerance = 4.0 * (double)count * 0x1p-24 * absoluteSum + 1e-30;
+  /* An EMPIRICAL QUALITY TOLERANCE, not an error bound for the contract. The
+   * model term is a relative-error heuristic over finite normal values: it
+   * does not cover gradual underflow, and the floor is a harness constant with
+   * no derivation, chosen so an all-zero corpus does not demand an exact
+   * result. The binary64 reference is itself a rounded sequential sum, not an
+   * exact oracle. What bounds this contract is the derivability argument; this
+   * number only says the implementation is not wildly off on the corpus it
+   * runs. A freeze-round leg replaces it with an exact accumulator and reports
+   * the measured distribution, and the subnormal region needs its own bucket
+   * because the floor swamps it. */
+  const double modelBudget = 4.0 * (double)count * 0x1p-24 * absoluteSum;
+  const double testFloor = 1e-30;
+  const double tolerance = modelBudget > testFloor ? modelBudget : testFloor;
   const double error = fabs((double)first - expected);
   if (!(error <= tolerance)) {
-    fprintf(stderr, "%s (N=%lld): got %a, reference %a, error %a exceeds %a\n", name,
+    fprintf(stderr, "%s (N=%lld): got %a, reference %a, deviation %a exceeds tolerance %a\n", name,
             (long long)count, (double)first, expected, error, tolerance);
     failed = 1;
   }

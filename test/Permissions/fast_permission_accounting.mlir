@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s --check-prefix=SCALAR
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s --check-prefix=SCALAR --implicit-check-not=fastmath
 
 // Which permission a schedule spends leaves no fast-math flag behind, so it is
 // recorded instead. Getting the enum wrong, or dropping the record, changes
@@ -8,8 +8,8 @@
 // These are also the structural membership pins for the four routes that
 // select a fused chain: each builds explicit fused events in declared order,
 // none carries a fast-math flag, and the record says which permission bought
-// them.
-// SCALAR-NOT: fastmath
+// them. The absence of fast-math flags is an implicit check on the RUN line,
+// because a SCALAR-NOT before the first label would only guard the preamble.
 
 // A reduction on the tensor path never reaches the horizontal rewrite, so R
 // goes unused and the fused chain spends F.

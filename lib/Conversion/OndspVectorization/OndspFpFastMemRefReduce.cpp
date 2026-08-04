@@ -111,7 +111,7 @@ public:
       Value folded = ondrix::ondsp::consumeFastPermission(
           builder.create<vector::ReductionOp>(branchLoc, vector::CombiningKind::ADD,
                                               vectorLoop.getResult(0), adaptor.getInitial()),
-          ondrix::ondsp::FastPermission::ReassociateReductionTerms);
+          ondrix::ondsp::FastPermission::RebuildReductionTree);
       return createOrderedTail(branchLoc, adaptor, vectorEnd, bounds->upperBound, scalarStep,
                                folded, builder);
     };

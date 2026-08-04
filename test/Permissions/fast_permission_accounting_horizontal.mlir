@@ -6,9 +6,9 @@
 // is not spent; declaring a vector FMA moves the same route to {R, F}. Read
 // generically because vector.reduction has no attr-dict in its custom form.
 
-// SEPARATE: ondsp.fast_used = "reassociate_reduction_terms"
+// SEPARATE: ondsp.fast_used = "rebuild_reduction_tree"
 // SEPARATE-NOT: ondsp.fast_used = "fuse_multiply_add"
-// FUSED-DAG: ondsp.fast_used = "reassociate_reduction_terms"
+// FUSED-DAG: ondsp.fast_used = "rebuild_reduction_tree"
 // FUSED-DAG: ondsp.fast_used = "fuse_multiply_add"
 func.func @horizontal_route(%init: f32, %lhs: memref<32xf32>, %rhs: memref<32xf32>) -> f32 {
   %result = ondsp.reduce_mac %init, %lhs, %rhs {

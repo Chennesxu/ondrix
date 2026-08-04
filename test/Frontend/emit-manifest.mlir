@@ -20,13 +20,13 @@
 // The same source at 256 bits reaches the horizontal route and spends R
 // instead, with separate terms.
 // SEPARATE: "fast_permissions_used": [
-// SEPARATE-NEXT: "reassociate_reduction_terms"
+// SEPARATE-NEXT: "rebuild_reduction_tree"
 // SEPARATE-NEXT: ]
 
 // Declaring a vector FMA moves that route to both.
 // FUSED: "fast_permissions_used": [
 // FUSED-NEXT: "fuse_multiply_add"
-// FUSED-NEXT: "reassociate_reduction_terms"
+// FUSED-NEXT: "rebuild_reduction_tree"
 // FUSED-NEXT: ]
 // FUSED: "supports_f32_vector_fma": true
 

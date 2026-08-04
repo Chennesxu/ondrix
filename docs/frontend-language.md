@@ -367,7 +367,7 @@ fixed-point counterparts name a rounding mode, because a floating-point result
 has no requantization boundary to round; `rms(x, contract=...)` also accepts
 any extent in range rather than only powers of two. `gain` is the one builtin
 whose three declarations denote the same event graph, since a lone multiply
-offers nothing to reassociate or fuse.
+offers no tree to rebuild and no addend to fuse.
 
 The f32 constants of `gain` and `lms` are spelled as rationals,
 `gain(x, gain=[3, 8], contract=off)` and
@@ -389,7 +389,8 @@ bitwise. An output can be NaN even when no input is, so the qualification is
 stated over outputs rather than inputs.
 
 `contract=fast` names a set of permitted numeric rewrites rather than an
-error bound: reassociation of the reduction's additive tree, and selection
+error bound: rebuilding the reduction's additive tree over the same indexed
+terms — permutation as well as reparenthesization — and selection
 of a fused multiply-add event at a permitted multiply-accumulate site.
 Declaring it does not discharge the numeric obligation; it selects a
 different one. A schedule is admissible under `fast` when its numeric event

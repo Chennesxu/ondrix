@@ -776,7 +776,7 @@ def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
 
     That is the base graph. `off` denotes it; `fma` fuses each term after
     the first, whose product has no addend; `fast` admits both plus any
-    regrouping of the row's additive tree. Every row is a reduction, so R
+    rebuild of the row's additive tree over the same indexed terms. Every row is a reduction, so R
     applies, but the tensor path does not reach the horizontal rewrite and
     the lowering selects the fused chain, spending F only.
 
@@ -823,9 +823,11 @@ def Ondrix_MovingAverageOp : Ondrix_Op<"moving_average", [Pure]> {
     y[n] = s / f32(K)                        one IEEE division
     ```
 
-    That window sum is a reduction tree, so `fast` does admit regrouping
-    it and its legal set has more than one member for `K >= 3`; the
-    lowering builds the declared association and spends nothing. There is
+    That window sum is a reduction tree, so `fast` does admit rebuilding
+    it: the legal set has more than one tree for `K >= 2` and they first
+    differ in value at `K = 3`, a two-term sum being commutative up to NaN
+    payload. The lowering builds the declared association and spends
+    nothing. There is
     no product anywhere, so no contract can fuse, and `off`, `fma` and
     `fast` denote the same events at every window the lowering emits. `K`
     is exact in binary32 over the admitted range, so the division is one
@@ -1086,9 +1088,10 @@ def Ondrix_GainOp : Ondrix_Op<"gain", [Pure]> {
     one IEEE multiply per element and no rounding attribute, because it has
     no requantization boundary to place a tie rule at. All three contract
     modes denote the same event graph here: a lone multiply offers neither a
-    sum to reassociate nor an addend to fuse with, so the three declarations
-    produce bit-identical results while the `fast` declaration is still
-    carried into the emitted multiply.
+    tree to rebuild nor an addend to fuse with, so the three declarations
+    produce bit-identical results. The declaration remains at the call site;
+    the emitted multiply carries no permission, because there is none to
+    spend.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    OptionalAttr<I64Attr>:$gain,
@@ -1138,9 +1141,11 @@ def Ondrix_LmsOp : Ondrix_Op<"lms", [Pure]> {
     Two sites are contract indexed: the K-term output reduction and each
     weight update. The sample recursion is not a permission question at all -
     it is a data dependence, so no declaration reorders samples, and `fast`
-    authorizes reassociating the tap sum only. As with `ondrix.gain`, `fast`
-    is still carried into the step multiply, where it finds no site to apply
-    to because that product's only consumer is a fused multiplicand. Unlike interpolation's
+    authorizes rebuilding the tap sum's tree only. The step multiply has no
+    site for either permission — its product's only consumer is a fused
+    multiplicand — so it spends nothing and carries nothing, while the tap
+    reduction and the weight updates select fused events and spend F. Unlike
+    interpolation's
     inserted zeros, the zero prehistory samples `x[m < 0]` are evaluated
     rather than skipped, matching the fixed profile's shape.
   }];

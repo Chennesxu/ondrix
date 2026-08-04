@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256" | FileCheck %s
+// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256" | FileCheck %s --implicit-check-not=ondsp.reduce_mac
 
 // fp_fast_reduce_aot proves that a reduce_mac becomes a term-conserving
 // horizontal schedule. It cannot prove that any given operation still forms
@@ -17,8 +17,9 @@
 // attribute that the LLVM conversion drops, and what has to hold here is that
 // the composition survived to the object shape.
 //
-// Nothing is left half-lowered on any route.
-// CHECK-NOT: ondsp.reduce_mac
+// Nothing is left half-lowered on any route. Stated as an implicit check on
+// the RUN line: a CHECK-NOT placed before the first positive directive only
+// guards the preamble, not each function after it.
 
 // Adapter shape 1, whole contiguous memref: the operands are the reduction.
 // CHECK-LABEL: llvm.func @shape_contiguous_dot

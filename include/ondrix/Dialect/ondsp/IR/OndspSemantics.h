@@ -19,9 +19,13 @@ namespace ondrix::ondsp {
 /// to say which one a site is spending (semantics: FpContractMode in
 /// OndspEnums.td).
 enum class FastPermission {
-  /// Regroup the additive tree of a reduction. Only a reduction has one: a
-  /// recursion body and a bare elementwise product do not.
-  ReassociateReductionTerms,
+  /// Rebuild a reduction's additive tree as any binary tree whose leaves are
+  /// a bijection onto the source's indexed terms: each exactly once, operands
+  /// unchanged, no identity introduced. Permutation as well as
+  /// reparenthesization, because a lane partition pairs term i with term
+  /// i + W and reparenthesization alone preserves leaf order. Only a
+  /// reduction has such a tree; a recursion body and a bare product do not.
+  RebuildReductionTree,
   /// Select one fused multiply-add event for a term in place of a rounded
   /// product followed by an addition.
   FuseMultiplyAdd,

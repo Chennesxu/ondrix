@@ -40,15 +40,27 @@ is enough for the X86 backend without +fma to de-fuse it, while AArch64 and the
 expansion policy that a delegated permission cannot bound, which is why emitted
 is empty rather than merely bounded.
 
-`fast` permits **R** (`ReassociateReductionTerms`: regroup a reduction's
-additive tree) and **F** (`FuseMultiplyAdd`: select a fused event for a term).
+`fast` permits **R** (`RebuildReductionTree`) and **F** (`FuseMultiplyAdd`).
+
+**R** is a tree rebuild, not reparenthesization: the target may be any binary
+addition tree whose leaves are a bijection onto the source reduction's indexed
+terms — each exactly once, operands unchanged, no identity introduced. That
+covers permuting the terms as well as regrouping them, and the wider form is
+what a lane partition needs. Lane `i` pairs term `i` with term `i + W`, and
+reparenthesization alone preserves leaf order, so associativity by itself would
+not authorize the schedule this compiler builds. The difference is observable:
+over `[1e8, 1.0, 0, …, -1e8, …]` at N=16, W=8 the source leaf order gives 0 and
+the lane partition gives 1.
+
+**F** selects a fused multiply-add event for a term in place of a rounded
+product followed by an addition.
 
 ## Layer 1 — language: what each operation's `fast` admits
 
 | Operation | Legal set under `fast` |
 | --- | --- |
 | `gain` | one graph. A lone product has no addend to fuse and no tree to regroup — the only operation whose three declarations denote the same events. |
-| `moving_average` | window ≥ 2 sums are a reduction tree, so **R** applies; no product, so **F** never does. Window 1 is the singleton case. |
+| `moving_average` | the window sum is a reduction tree, so **R** applies for `K >= 2`; no product, so **F** never does. The rebuilt trees first differ in value at `K = 3`, since a two-term sum is commutative up to NaN payload. |
 | `dot`, `fir`, `fir_filter`, `conv1d`, `matmul`, `rms`, `dct`, `fir_decimate`, `fir_interpolate`, `lms` | products plus an additive tree: both **R** and **F** apply. |
 | `goertzel` | exactly two graphs. A recursion has no reduction to regroup, so only **F** applies, at one multiply-add site. |
 | `sos_filter_tdf2` | larger than one graph — the biquad body has fusable multiply-adds — and no recurrence-level realization gate exists, so `fast` is refused at the verifier. |
