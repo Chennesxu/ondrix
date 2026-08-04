@@ -30,4 +30,4 @@ func.func @dot_fast(%lhs: f32, %rhs: f32) -> f32 {
 }
 
 // CHECK-LABEL: func.func @dot_fast
-// CHECK: math.fma %{{[^ ]*}}, %{{[^ ]*}}, %{{[^ ]*}} {{.*}}used_permissions = ["fuse_multiply_add"]{{.*}} : f32
+// CHECK: math.fma %{{[^ ]*}}, %{{[^ ]*}}, %{{[^ ]*}} {ondsp.fast_used = ["fuse_multiply_add"]} : f32

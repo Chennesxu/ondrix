@@ -11,32 +11,28 @@
 // RUN: FileCheck %s --check-prefix=UNION < %t.sep.mlir
 // RUN: FileCheck %s --check-prefix=UNION < %t.fma.mlir
 
-// One declaration reaching two mechanisms in one function: the interior spends
-// R, both guarded edges spend F, and docs/f32-contract-evidence.md argues why.
+// One declaration, two mechanisms in one function; the argument is in
+// docs/f32-contract-evidence.md.
 
-// Mechanism CARDINALITY, not site identity: which site owns which event is the
-// per-site record's job. Batching an edge makes this two.
+// Mechanism cardinality, not site identity.
 // ROUTE-COUNT-1: "vector.reduction"
 // ROUTE-NOT: "vector.reduction"
 
-// RECORD-R: "vector.reduction"{{.*}}used_permissions = ["rebuild_reduction_tree"]
+// RECORD-R: "vector.reduction"{{.*}}ondsp.fast_used = ["rebuild_reduction_tree"]
 
-// Two fused events exist under the default term selection and both are scalar.
-// A compensating pair of errors could keep the count, hence the record.
+// Both fused events are scalar edge events; a compensating pair keeps the count.
 // SEP-TOTAL-COUNT-2: "math.fma"
 // SEP-TOTAL-NOT: "math.fma"
-// SEP-EDGE-COUNT-2: "math.fma"{{.*}}used_permissions = ["fuse_multiply_add"]{{.*}}(f32, f32, f32) -> f32
+// SEP-EDGE-COUNT-2: "math.fma"{{.*}}ondsp.fast_used = ["fuse_multiply_add"]{{.*}}(f32, f32, f32) -> f32
 // SEP-EDGE-NOT: "math.fma"
 
-// A declared vector FMA adds F to the interior — lane body, tail, and short
-// branch — and leaves the edges as they were.
+// A declared vector FMA adds F to the interior and leaves the edges alone.
 // FMA-TOTAL-COUNT-5: "math.fma"
 // FMA-TOTAL-NOT: "math.fma"
-// FMA-LANE-COUNT-1: "math.fma"{{.*}}used_permissions = ["fuse_multiply_add"]{{.*}}(vector<8xf32>, vector<8xf32>, vector<8xf32>) -> vector<8xf32>
+// FMA-LANE-COUNT-1: "math.fma"{{.*}}ondsp.fast_used = ["fuse_multiply_add"]{{.*}}(vector<8xf32>, vector<8xf32>, vector<8xf32>) -> vector<8xf32>
 // FMA-LANE-NOT: "math.fma"{{.*}}vector<8xf32>
 
-// The union is identical across two different site distributions, which is the
-// granularity the static selection record has to replace.
+// The set is the compilation's, identical across two site distributions.
 // UNION: ondsp.fast_used = ["fuse_multiply_add", "rebuild_reduction_tree"]
 
 func.func @full_boundary_mixed_route(

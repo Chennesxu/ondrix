@@ -21,7 +21,6 @@ std::unique_ptr<mlir::Pass> createParallelizeOndspFixedWrapVectorReducePass();
 std::unique_ptr<mlir::Pass> createVectorizeOndspConstantSaturatingMemRefReducePass();
 std::unique_ptr<mlir::Pass> createVectorizeOndspConstantSaturatingMemRefReducePass(
     const VectorizeOndspConstantSaturatingMemRefReduceOptions &options);
-std::unique_ptr<mlir::Pass> createVerifyOndspFastAuditInputPass();
 std::unique_ptr<mlir::Pass> createVerifyOndspConstantReassociationProofTracePass();
 std::unique_ptr<mlir::Pass> createVectorizeOndspFixedMemRefReducePass();
 std::unique_ptr<mlir::Pass>

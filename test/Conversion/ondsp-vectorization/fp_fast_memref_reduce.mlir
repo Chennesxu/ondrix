@@ -45,7 +45,7 @@ func.func @f32_dot_fast_dynamic(%lhs: memref<?xf32>, %rhs: memref<?xf32>, %init:
 // FUSED-LABEL: func.func @f32_dot_fast_dynamic
 // FUSED: %[[FSEED:.*]] = arith.mulf %{{.*}}, %{{.*}} : vector<8xf32>
 // FUSED: scf.for {{.*}} iter_args(%[[FACC:.*]] = %[[FSEED]]) -> (vector<8xf32>)
-// FUSED: math.fma %{{.*}}, %{{.*}}, %[[FACC]] {{.*}}used_permissions = ["fuse_multiply_add"]{{.*}} : vector<8xf32>
+// FUSED: math.fma %{{.*}}, %{{.*}}, %[[FACC]] {ondsp.fast_used = ["fuse_multiply_add"]} : vector<8xf32>
 // FUSED-NOT: fastmath
 
 // CHECK-LABEL: func.func @f32_dot_fast_static

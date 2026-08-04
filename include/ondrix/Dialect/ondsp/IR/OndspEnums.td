@@ -87,21 +87,14 @@ def Ondsp_OverflowMode : I32EnumAttr<"OverflowMode", "overflow mode",
 //         permission on separate operations. Exact contract as well: a
 //         different event tree from off's, equally pinned.
 //   fast  a declared SET OF PERMITTED REWRITES over the event graph, not a
-//         pinned tree and not an error bound. It permits exactly two.
-//         First, REBUILDING THE ADDITIVE TREE OF A DESIGNATED REDUCTION:
-//         an operation-defined semantic reduction instance, not any
-//         expression that happens to contain additions. The target may be
-//         any binary addition tree whose leaf sequence is the seed, if the
-//         description states one, followed by a permutation of that
-//         instance's indexed term occurrences — a bijection, so no
-//         identity leaf can appear. Permutation and not only
-//         reparenthesization, because a lane partition pairs term i with
-//         term i+W while reparenthesization preserves leaf order.
-//         Second, selection of a fused multiply-add event at a permitted
-//         multiply-accumulate site, which fuses a term rather than
-//         re-sourcing it. Both are relative to the base graph the call
-//         site declared, never to an intermediate a previous pass left.
-//         docs/f32-contract-evidence.md states this normatively.
+//         pinned tree and not an error bound. It permits exactly two:
+//         rebuilding the additive tree of a designated reduction, and
+//         selecting a fused multiply-add event at a permitted site. Both are
+//         relative to the base graph the call site declared, never to an
+//         intermediate a previous pass left.
+//         docs/f32-contract-evidence.md states both normatively - leaf order,
+//         the seed rule, and how the two compose - and is the only place that
+//         does; this comment is a summary and must not extend it.
 //         Declaring it selects a different numeric obligation rather than
 //         discharging one — a schedule is admissible when its event graph
 //         is DERIVABLE from the source graph using only those rewrites

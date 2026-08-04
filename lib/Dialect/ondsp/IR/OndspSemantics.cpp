@@ -1,6 +1,5 @@
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
-#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SetVector.h"
 
 #include "mlir/IR/BuiltinOps.h"
@@ -8,7 +7,6 @@
 #include "mlir/IR/FunctionInterfaces.h"
 
 #include <limits>
-#include <tuple>
 
 using namespace mlir;
 
@@ -30,227 +28,43 @@ LogicalResult verifyProductPolicy(Operation *op, Attribute numeric,
 }
 
 llvm::StringRef getFastPermissionAttrName() { return "ondsp.fast_used"; }
-llvm::StringRef getFastSelectionAttrName() { return "ondsp.fast_selection"; }
-llvm::StringRef getFastSourceSiteAttrName() { return "ondsp.fast_source_site"; }
 
-namespace {
-
-StringRef spellPermission(FastPermission permission) {
-  return permission == FastPermission::RebuildReductionTree ? "rebuild_reduction_tree"
-                                                            : "fuse_multiply_add";
-}
-
-/// The ordinal of `op` among operations of its own name in the enclosing
-/// symbol. Computed only when no earlier pass stamped an id; a collision it
-/// could still produce is reported by the summary rather than tolerated.
-std::string computeSourceSiteId(Operation *op) {
-  auto symbol = op->getParentOfType<FunctionOpInterface>();
-  StringRef scope = symbol ? SymbolTable::getSymbolName(symbol).getValue() : "<no-symbol>";
-  int64_t ordinal = 0;
-  if (symbol) {
-    StringRef name = op->getName().getStringRef();
-    symbol->walk([&](Operation *other) {
-      if (other == op)
-        return WalkResult::interrupt();
-      if (other->getName().getStringRef() == name)
-        ++ordinal;
-      return WalkResult::advance();
-    });
-  }
-  return (scope + "/" + op->getName().getStringRef() + "#" + Twine(ordinal)).str();
-}
-
-/// Field order is the printed order, so the dictionary is byte-stable.
-DictionaryAttr buildSelectionAttr(MLIRContext *context, const FastSelectionPlan &plan,
-                                  ArrayRef<StringRef> used) {
-  SmallVector<Attribute> permissions;
-  for (StringRef name : used)
-    permissions.push_back(StringAttr::get(context, name));
-  SmallVector<NamedAttribute> fields{
-      {StringAttr::get(context, "instance_domain"), StringAttr::get(context, plan.instanceDomain)},
-      {StringAttr::get(context, "mechanism"), StringAttr::get(context, plan.mechanism)},
-      {StringAttr::get(context, "route_role"), StringAttr::get(context, plan.routeRole)},
-      {StringAttr::get(context, "source_operation"),
-       StringAttr::get(context, plan.sourceOperation)},
-      {StringAttr::get(context, "source_site_id"), StringAttr::get(context, plan.sourceSiteId)},
-      {StringAttr::get(context, "used_permissions"), ArrayAttr::get(context, permissions)},
-      {StringAttr::get(context, "when"), StringAttr::get(context, plan.condition)}};
-  return DictionaryAttr::get(context, fields);
-}
-
-} // namespace
-
-FastSelectionPlan planFastSelection(Operation *sourceOp, StringRef routeRole,
-                                    StringRef instanceDomain, StringRef mechanism,
-                                    StringRef condition) {
-  FastSelectionPlan plan;
-  if (auto stamped = sourceOp->getAttrOfType<DictionaryAttr>(getFastSourceSiteAttrName()))
-    plan.sourceSiteId = stamped.getAs<StringAttr>("source_site_id").getValue().str();
-  else
-    plan.sourceSiteId = computeSourceSiteId(sourceOp);
-  plan.sourceOperation = sourceOp->getName().getStringRef();
-  plan.routeRole = routeRole;
-  plan.instanceDomain = instanceDomain;
-  plan.mechanism = mechanism;
-  plan.condition = condition;
-  return plan;
-}
-
-void stampFastSourceSite(Operation *op, const FastSelectionPlan &plan) {
+Value consumeFastPermission(Operation *op, FastPermission permission) {
   MLIRContext *context = op->getContext();
-  SmallVector<NamedAttribute> fields{
-      {StringAttr::get(context, "instance_domain"), StringAttr::get(context, plan.instanceDomain)},
-      {StringAttr::get(context, "route_role"), StringAttr::get(context, plan.routeRole)},
-      {StringAttr::get(context, "source_operation"),
-       StringAttr::get(context, plan.sourceOperation)},
-      {StringAttr::get(context, "source_site_id"), StringAttr::get(context, plan.sourceSiteId)}};
-  op->setAttr(getFastSourceSiteAttrName(), DictionaryAttr::get(context, fields));
-}
-
-bool declaresFastPermissions(Attribute numeric) {
-  auto fp = dyn_cast_or_null<FpAttr>(numeric);
-  return fp && fp.getContract() == FpContractMode::Fast;
-}
-
-FastSelectionPlan continueFastSelection(Operation *op, StringRef mechanism, StringRef condition) {
-  FastSelectionPlan plan;
-  auto stamped = op->getAttrOfType<DictionaryAttr>(getFastSourceSiteAttrName());
-  if (stamped) {
-    plan.sourceSiteId = stamped.getAs<StringAttr>("source_site_id").getValue().str();
-    plan.sourceOperation = stamped.getAs<StringAttr>("source_operation").getValue();
-    plan.routeRole = stamped.getAs<StringAttr>("route_role").getValue();
-    plan.instanceDomain = stamped.getAs<StringAttr>("instance_domain").getValue();
-  } else {
-    plan.sourceSiteId = computeSourceSiteId(op);
-    plan.sourceOperation = op->getName().getStringRef();
-    plan.routeRole = "whole";
-    plan.instanceDomain = "0 <= i < N";
-  }
-  plan.mechanism = mechanism;
-  plan.condition = condition;
-  return plan;
-}
-
-Value consumeFastPermission(Operation *event, FastPermission permission,
-                            const FastSelectionPlan &plan) {
-  MLIRContext *context = event->getContext();
+  StringRef spelling = permission == FastPermission::RebuildReductionTree ? "rebuild_reduction_tree"
+                                                                          : "fuse_multiply_add";
   SetVector<StringRef> used;
-  // A site may spend both, and the previous single string silently overwrote.
-  if (auto existing = event->getAttrOfType<DictionaryAttr>(getFastSelectionAttrName()))
-    if (auto prior = existing.getAs<ArrayAttr>("used_permissions"))
-      for (Attribute entry : prior)
-        used.insert(cast<StringAttr>(entry).getValue());
-  used.insert(spellPermission(permission));
+  if (auto existing = op->getAttrOfType<ArrayAttr>(getFastPermissionAttrName()))
+    for (Attribute entry : existing)
+      used.insert(cast<StringAttr>(entry).getValue());
+  used.insert(spelling);
   SmallVector<StringRef> sorted(used.begin(), used.end());
   llvm::sort(sorted);
-  event->setAttr(getFastSelectionAttrName(), buildSelectionAttr(context, plan, sorted));
-  return event->getResult(0);
+  SmallVector<Attribute> entries;
+  for (StringRef name : sorted)
+    entries.push_back(StringAttr::get(context, name));
+  op->setAttr(getFastPermissionAttrName(), ArrayAttr::get(context, entries));
+  return op->getResult(0);
 }
 
-LogicalResult summarizeFastPermissions(ModuleOp module) {
-  MLIRContext *context = module.getContext();
-  // The route role is part of the identity, not a detail of it: one source
-  // operation owns several roles, and each may generate a conditional schedule
-  // per branch. Several events under one case spend different permissions - the
-  // lane body spends F while the cross-lane fold spends R - so the case's set
-  // is their union and disagreement is only about the rest.
-  using RecordKey = std::tuple<StringRef, StringRef, StringRef>;
-  struct Case {
-    DictionaryAttr shape;
-    SetVector<StringRef> used;
-  };
-  llvm::MapVector<RecordKey, Case> cases;
+void summarizeFastPermissions(ModuleOp module) {
   SetVector<StringRef> spent;
-
-  WalkResult walk = module.walk([&](Operation *op) {
-    auto record = op->getAttrOfType<DictionaryAttr>(getFastSelectionAttrName());
-    if (!record)
-      return WalkResult::advance();
-    auto site = record.getAs<StringAttr>("source_site_id");
-    auto role = record.getAs<StringAttr>("route_role");
-    auto when = record.getAs<StringAttr>("when");
-    auto used = record.getAs<ArrayAttr>("used_permissions");
-    if (!site || !role || !when || !used) {
-      op->emitError("fast selection record is missing a required field");
-      return WalkResult::interrupt();
-    }
-    RecordKey key{site.getValue(), role.getValue(), when.getValue()};
-    auto [it, inserted] = cases.insert({key, Case{record, {}}});
-    if (!inserted &&
-        it->second.shape.getAs<StringAttr>("mechanism") != record.getAs<StringAttr>("mechanism")) {
-      op->emitError("one route and condition reports two mechanisms: ")
-          << site.getValue() << '/' << role.getValue();
-      return WalkResult::interrupt();
-    }
-    for (Attribute entry : used) {
-      StringRef name = cast<StringAttr>(entry).getValue();
-      it->second.used.insert(name);
-      spent.insert(name);
-    }
-    return WalkResult::advance();
+  if (auto existing = module->getAttrOfType<ArrayAttr>(getFastPermissionAttrName()))
+    for (Attribute entry : existing)
+      spent.insert(cast<StringAttr>(entry).getValue());
+  module.walk([&](Operation *op) {
+    if (auto record = op->getAttrOfType<ArrayAttr>(getFastPermissionAttrName()))
+      for (Attribute entry : record)
+        spent.insert(cast<StringAttr>(entry).getValue());
   });
-  if (walk.wasInterrupted())
-    return failure();
-  // Replaced when there is something to replace it with, never accumulated: a
-  // union outlives the decision it described. Not cleared when nothing is
-  // found, because a record can legitimately outlive the events it came from -
-  // vector.reduction's custom form drops its attribute dictionary, so a second
-  // invocation over printed IR sees no events and must not erase what it cannot
-  // recompute. Input arriving with a record of its own is refused at entry
-  // instead, by refuseForgedFastRecords.
-  if (cases.empty())
-    return success();
-  module->removeAttr(getFastSelectionAttrName());
-  module->removeAttr(getFastPermissionAttrName());
-
-  SmallVector<DictionaryAttr> records;
-  for (auto &entry : cases) {
-    SmallVector<StringRef> used(entry.second.used.begin(), entry.second.used.end());
-    llvm::sort(used);
-    SmallVector<Attribute> permissions;
-    for (StringRef name : used)
-      permissions.push_back(StringAttr::get(context, name));
-    SmallVector<NamedAttribute> fields;
-    for (NamedAttribute field : entry.second.shape)
-      fields.push_back(field.getName() == "used_permissions"
-                           ? NamedAttribute(field.getName(), ArrayAttr::get(context, permissions))
-                           : field);
-    records.push_back(DictionaryAttr::get(context, fields));
-  }
-  llvm::sort(records, [](DictionaryAttr lhs, DictionaryAttr rhs) {
-    auto key = [](DictionaryAttr attr) {
-      return std::make_tuple(attr.getAs<StringAttr>("source_site_id").getValue(),
-                             attr.getAs<StringAttr>("route_role").getValue(),
-                             attr.getAs<StringAttr>("when").getValue());
-    };
-    return key(lhs) < key(rhs);
-  });
-  SmallVector<Attribute> entries(records.begin(), records.end());
-  module->setAttr(getFastSelectionAttrName(), ArrayAttr::get(context, entries));
-
-  SmallVector<StringRef> sortedSpent(spent.begin(), spent.end());
-  llvm::sort(sortedSpent);
-  SmallVector<Attribute> permissions;
-  for (StringRef name : sortedSpent)
-    permissions.push_back(StringAttr::get(context, name));
-  module->setAttr(getFastPermissionAttrName(), ArrayAttr::get(context, permissions));
-  return success();
-}
-
-LogicalResult refuseForgedFastRecords(ModuleOp module) {
-  StringRef names[] = {getFastPermissionAttrName(), getFastSelectionAttrName(),
-                       getFastSourceSiteAttrName()};
-  WalkResult walk = module.walk([&](Operation *op) {
-    for (StringRef name : names)
-      if (op->hasAttr(name)) {
-        op->emitError("'")
-            << name
-            << "' is a compiler-owned audit attribute; input must not carry a decision record";
-        return WalkResult::interrupt();
-      }
-    return WalkResult::advance();
-  });
-  return failure(walk.wasInterrupted());
+  if (spent.empty())
+    return;
+  SmallVector<StringRef> sorted(spent.begin(), spent.end());
+  llvm::sort(sorted);
+  SmallVector<Attribute> entries;
+  for (StringRef name : sorted)
+    entries.push_back(StringAttr::get(module.getContext(), name));
+  module->setAttr(getFastPermissionAttrName(), ArrayAttr::get(module.getContext(), entries));
 }
 
 LogicalResult verifyExecutableFpFormat(Operation *op, FpAttr numeric, StringRef executable) {

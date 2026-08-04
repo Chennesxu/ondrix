@@ -20,8 +20,6 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // Design evaluation must precede conversion (no other pass lowers the
   // design ops); reductions with a direct bufferization stay in contract
   // form so the schedule stage sees their `reduce_mac` loops.
-  // First, so that a decision record can only come from this compilation.
-  os << "verify-ondsp-fast-audit-input,";
   os << "evaluate-ondrix-fir-design,";
   os << "convert-ondrix-to-ondsp{preserve-bufferizable-reductions=true},";
   // Forwarding must precede bufferization so a forwarded intermediate is

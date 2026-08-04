@@ -46,7 +46,6 @@ static Value createReductionZero(Location loc, Type resultType,
 }
 
 static Value createScalarFpDot(Location loc, Value lhs, Value rhs, ondrix::ondsp::FpAttr numeric,
-                               const ondrix::ondsp::FastSelectionPlan &plan,
                                ConversionPatternRewriter &rewriter) {
   switch (numeric.getContract()) {
   case ondrix::ondsp::FpContractMode::Off:
@@ -60,17 +59,14 @@ static Value createScalarFpDot(Location loc, Value lhs, Value rhs, ondrix::ondsp
     Value zero = rewriter.create<arith::ConstantOp>(loc, numeric.getFormat(),
                                                     rewriter.getZeroAttr(numeric.getFormat()));
     return ondrix::ondsp::consumeFastPermission(rewriter.create<math::FmaOp>(loc, lhs, rhs, zero),
-                                                ondrix::ondsp::FastPermission::FuseMultiplyAdd,
-                                                plan);
+                                                ondrix::ondsp::FastPermission::FuseMultiplyAdd);
   }
   }
   llvm_unreachable("unknown floating-point contract mode");
 }
 
 static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value accumulator,
-                                       ondrix::ondsp::FpAttr numeric,
-                                       const ondrix::ondsp::FastSelectionPlan &plan,
-                                       OpBuilder &builder) {
+                                       ondrix::ondsp::FpAttr numeric, OpBuilder &builder) {
   switch (numeric.getContract()) {
   case ondrix::ondsp::FpContractMode::Off: {
     Value product = builder.create<arith::MulFOp>(loc, lhs, rhs);
@@ -82,7 +78,7 @@ static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value
     // fast admits both members here; selecting the fused one spends F.
     return ondrix::ondsp::consumeFastPermission(
         builder.create<math::FmaOp>(loc, lhs, rhs, accumulator),
-        ondrix::ondsp::FastPermission::FuseMultiplyAdd, plan);
+        ondrix::ondsp::FastPermission::FuseMultiplyAdd);
   }
   llvm_unreachable("unknown floating-point contract mode");
 }
@@ -383,11 +379,8 @@ public:
                         tapLoc, *op.getAccumulator(), accumulatorArgs.front(), inputValue,
                         coefficient, fixed, *op.getProduct());
                   } else {
-                    next = createFpAccumulatorUpdate(
-                        tapLoc, inputValue, coefficient, accumulatorArgs.front(), fp,
-                        ondrix::ondsp::planFastSelection(op, "whole", "0 <= k < K",
-                                                         "ordered_fused"),
-                        tapBuilder);
+                    next = createFpAccumulatorUpdate(tapLoc, inputValue, coefficient,
+                                                     accumulatorArgs.front(), fp, tapBuilder);
                   }
                 } else {
                   Value pastLeftPadding = tapBuilder.create<arith::CmpIOp>(
@@ -411,11 +404,8 @@ public:
                         tapLoc, *op.getAccumulator(), accumulatorArgs.front(), inputValue,
                         coefficient, fixed, *op.getProduct());
                   } else {
-                    updated = createFpAccumulatorUpdate(
-                        tapLoc, inputValue, coefficient, accumulatorArgs.front(), fp,
-                        ondrix::ondsp::planFastSelection(op, "full_guarded", "0 <= k < K",
-                                                         "ordered_fused"),
-                        thenBuilder);
+                    updated = createFpAccumulatorUpdate(tapLoc, inputValue, coefficient,
+                                                        accumulatorArgs.front(), fp, thenBuilder);
                   }
                   thenBuilder.create<scf::YieldOp>(tapLoc, updated);
                   OpBuilder elseBuilder = guarded.getElseBodyBuilder();
@@ -455,9 +445,7 @@ static Value updateResamplingAccumulator(OpTy op, ondrix::ondsp::FixedAttr fixed
                                          ondrix::ondsp::FpAttr fp, Value accumulator, Value input,
                                          Value coefficient, OpBuilder &builder, Location loc) {
   if (fp)
-    return createFpAccumulatorUpdate(
-        loc, input, coefficient, accumulator, fp,
-        ondrix::ondsp::planFastSelection(op, "whole", "0 <= k < K", "ordered_fused"), builder);
+    return createFpAccumulatorUpdate(loc, input, coefficient, accumulator, fp, builder);
   return builder.create<ondrix::ondsp::MacOp>(loc, *op.getAccumulator(), accumulator, input,
                                               coefficient, fixed, *op.getProduct());
 }
@@ -629,10 +617,8 @@ public:
                       tapLoc, *op.getAccumulator(), accumulatorArgs.front(), inputValue,
                       kernelValue, fixed, *op.getProduct());
                 } else {
-                  next = createFpAccumulatorUpdate(
-                      tapLoc, inputValue, kernelValue, accumulatorArgs.front(), fp,
-                      ondrix::ondsp::planFastSelection(op, "whole", "0 <= k < K", "ordered_fused"),
-                      tapBuilder);
+                  next = createFpAccumulatorUpdate(tapLoc, inputValue, kernelValue,
+                                                   accumulatorArgs.front(), fp, tapBuilder);
                 }
                 tapBuilder.create<scf::YieldOp>(tapLoc, next);
               });
@@ -707,10 +693,8 @@ public:
                       tapLoc, *op.getAccumulator(), accumulatorArgs.front(), selected.getResult(0),
                       coefficient, fixed, *op.getProduct());
                 } else {
-                  next = createFpAccumulatorUpdate(
-                      tapLoc, selected.getResult(0), coefficient, accumulatorArgs.front(), fp,
-                      ondrix::ondsp::planFastSelection(op, "whole", "0 <= k < K", "ordered_fused"),
-                      tapBuilder);
+                  next = createFpAccumulatorUpdate(tapLoc, selected.getResult(0), coefficient,
+                                                   accumulatorArgs.front(), fp, tapBuilder);
                 }
                 tapBuilder.create<scf::YieldOp>(tapLoc, next);
               });
@@ -800,24 +784,15 @@ public:
                     sectionLoc, sectionArgs[1], ValueRange{section, coefficientOne});
 
                 Value scaled = createFpMultiply(sectionLoc, sectionArgs[0], scale, sectionBuilder);
-                Value output = createFpAccumulatorUpdate(
-                    sectionLoc, scaled, b0, z1, numeric,
-                    ondrix::ondsp::planFastSelection(op, "biquad_section", "0 <= s < S",
-                                                     "ordered_fused"),
-                    sectionBuilder);
+                Value output =
+                    createFpAccumulatorUpdate(sectionLoc, scaled, b0, z1, numeric, sectionBuilder);
                 Value feedback1 = createFpMultiply(sectionLoc, output, a1, sectionBuilder);
-                Value firstTerm = createFpAccumulatorUpdate(
-                    sectionLoc, scaled, b1, feedback1, numeric,
-                    ondrix::ondsp::planFastSelection(op, "biquad_section", "0 <= s < S",
-                                                     "ordered_fused"),
-                    sectionBuilder);
+                Value firstTerm = createFpAccumulatorUpdate(sectionLoc, scaled, b1, feedback1,
+                                                            numeric, sectionBuilder);
                 Value nextZ1 = createFpAdd(sectionLoc, z2, firstTerm, sectionBuilder);
                 Value feedback2 = createFpMultiply(sectionLoc, output, a2, sectionBuilder);
-                Value nextZ2 = createFpAccumulatorUpdate(
-                    sectionLoc, scaled, b2, feedback2, numeric,
-                    ondrix::ondsp::planFastSelection(op, "biquad_section", "0 <= s < S",
-                                                     "ordered_fused"),
-                    sectionBuilder);
+                Value nextZ2 = createFpAccumulatorUpdate(sectionLoc, scaled, b2, feedback2, numeric,
+                                                         sectionBuilder);
                 Value stateWithZ1 = sectionBuilder.create<tensor::InsertOp>(
                     sectionLoc, nextZ1, sectionArgs[1], ValueRange{section, coefficientZero});
                 Value nextState = sectionBuilder.create<tensor::InsertOp>(
@@ -940,10 +915,8 @@ public:
         return success();
       }
       auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
-      rewriter.replaceOp(op, createScalarFpDot(op.getLoc(), adaptor.getLhs(), adaptor.getRhs(), fp,
-                                               ondrix::ondsp::planFastSelection(
-                                                   op, "whole", "single product", "ordered_fused"),
-                                               rewriter));
+      rewriter.replaceOp(
+          op, createScalarFpDot(op.getLoc(), adaptor.getLhs(), adaptor.getRhs(), fp, rewriter));
       return success();
     }
 
@@ -1886,11 +1859,8 @@ private:
         loc, zero, extentValue, one, ValueRange{seed, seed},
         [&](OpBuilder &builder, Location loc, Value sample, ValueRange states) {
           Value x = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), sample);
-          Value combined = createFpAccumulatorUpdate(
-              loc, doubledCoefficient, states[0], x, numeric,
-              ondrix::ondsp::planFastSelection(op, "recursion_multiply_add", "0 <= n < N",
-                                               "ordered_fused"),
-              builder);
+          Value combined =
+              createFpAccumulatorUpdate(loc, doubledCoefficient, states[0], x, numeric, builder);
           Value next = builder.create<arith::SubFOp>(loc, combined, states[1]);
           builder.create<scf::YieldOp>(loc, ValueRange{next, states[0]});
         });
@@ -1955,11 +1925,8 @@ public:
                       Value right = builder.create<tensor::ExtractOp>(loc, adaptor.getRhs(),
                                                                       ValueRange{index, column});
                       if (fp) {
-                        Value updated = createFpAccumulatorUpdate(
-                            loc, left, right, accArgs.front(), fp,
-                            ondrix::ondsp::planFastSelection(op, "whole", "0 <= k < K",
-                                                             "ordered_fused"),
-                            builder);
+                        Value updated = createFpAccumulatorUpdate(loc, left, right, accArgs.front(),
+                                                                  fp, builder);
                         builder.create<scf::YieldOp>(loc, updated);
                         return;
                       }
@@ -2006,10 +1973,8 @@ public:
           loc, index, bound, step, ValueRange{seed},
           [&](OpBuilder &builder, Location bodyLoc, Value position, ValueRange iterArgs) {
             Value value = builder.create<tensor::ExtractOp>(bodyLoc, adaptor.getInput(), position);
-            Value updated = createFpAccumulatorUpdate(
-                bodyLoc, value, value, iterArgs.front(), fp,
-                ondrix::ondsp::planFastSelection(op, "whole", "0 <= n < N", "ordered_fused"),
-                builder);
+            Value updated =
+                createFpAccumulatorUpdate(bodyLoc, value, value, iterArgs.front(), fp, builder);
             builder.create<scf::YieldOp>(bodyLoc, updated);
           });
       Value count = rewriter.create<arith::ConstantOp>(
@@ -2181,11 +2146,8 @@ public:
                 [&](OpBuilder &builder, Location loc, Value tap, ValueRange accArgs) {
                   Value term = guardedInput(builder, loc, sample, tap);
                   Value weight = builder.create<tensor::ExtractOp>(loc, weights, tap);
-                  Value updated = createFpAccumulatorUpdate(
-                      loc, weight, term, accArgs.front(), fp,
-                      ondrix::ondsp::planFastSelection(op, "tap_reduction", "0 <= k < K",
-                                                       "ordered_fused"),
-                      builder);
+                  Value updated =
+                      createFpAccumulatorUpdate(loc, weight, term, accArgs.front(), fp, builder);
                   builder.create<scf::YieldOp>(loc, updated);
                 });
             Value desired = builder.create<tensor::ExtractOp>(loc, adaptor.getDesired(), sample);
@@ -2198,11 +2160,7 @@ public:
                 [&](OpBuilder &builder, Location loc, Value tap, ValueRange updateArgs) {
                   Value term = guardedInput(builder, loc, sample, tap);
                   Value weight = builder.create<tensor::ExtractOp>(loc, updateArgs.front(), tap);
-                  Value updated = createFpAccumulatorUpdate(
-                      loc, step, term, weight, fp,
-                      ondrix::ondsp::planFastSelection(op, "weight_update", "0 <= k < K",
-                                                       "ordered_fused"),
-                      builder);
+                  Value updated = createFpAccumulatorUpdate(loc, step, term, weight, fp, builder);
                   Value inserted =
                       builder.create<tensor::InsertOp>(loc, updated, updateArgs.front(), tap);
                   builder.create<scf::YieldOp>(loc, inserted);
@@ -2289,11 +2247,7 @@ public:
           Value value = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
           Value coefficient = rewriter.create<arith::ConstantOp>(
               loc, rewriter.getFloatAttr(element, ondrix::getDctCoefficientF32(extent, k, n)));
-          sum = sum ? createFpAccumulatorUpdate(
-                          loc, value, coefficient, sum, fp,
-                          ondrix::ondsp::planFastSelection(op, "row_reduction", "0 <= n < N",
-                                                           "ordered_fused"),
-                          rewriter)
+          sum = sum ? createFpAccumulatorUpdate(loc, value, coefficient, sum, fp, rewriter)
                     : createFpMultiply(loc, value, coefficient, rewriter);
         }
         Value position = rewriter.create<arith::ConstantIndexOp>(loc, k);
@@ -2524,8 +2478,7 @@ public:
 
     if (failed(applyPartialConversion(module, target, std::move(patterns))))
       return signalPassFailure();
-    if (failed(ondrix::ondsp::summarizeFastPermissions(module)))
-      return signalPassFailure();
+    ondrix::ondsp::summarizeFastPermissions(module);
   }
 };
 

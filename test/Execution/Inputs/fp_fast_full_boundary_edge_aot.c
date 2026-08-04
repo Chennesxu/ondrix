@@ -3,14 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
-/* A full-boundary FIR at K = 20 and N = 32 with W = 8 splits three ways: the
- * two guarded edge ranges and an interior that reaches the horizontal rebuild.
- * The declared contract says an out-of-range tap performs NO accumulator
- * update, which is not the same as contributing a zero term. Against a nonzero
- * finite accumulator the two agree, so a materialized zero is observable in
- * exactly two ways: a non-finite coefficient makes the product invalid, and a
- * finite one leaves only the sign of the zero. Both are covered below, and
- * neither trial catches the other's implementation class. */
+/* An out-of-range tap performs no accumulator update, which a materialized zero
+ * term differs from in exactly the two ways gated below (ledger: why no third). */
 
 typedef struct {
   float *allocated;

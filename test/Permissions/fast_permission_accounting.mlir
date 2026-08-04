@@ -14,7 +14,7 @@
 // A reduction on the tensor path never reaches the horizontal rewrite, so R
 // goes unused and the fused chain spends F.
 // SCALAR-LABEL: func.func @tensor_route
-// SCALAR: math.fma {{.*}}used_permissions = ["fuse_multiply_add"]
+// SCALAR: math.fma {{.*}}{ondsp.fast_used = ["fuse_multiply_add"]}
 func.func @tensor_route(%input: tensor<8xf32>) -> tensor<8xf32> {
   %result = ondrix.dct %input {
     input_numeric = #ondsp.fp<format = f32, contract = fast>,
@@ -25,7 +25,7 @@ func.func @tensor_route(%input: tensor<8xf32>) -> tensor<8xf32> {
 
 // A lone product has nothing to spend on any target.
 // SCALAR-LABEL: func.func @elementwise_route
-// SCALAR-NOT: ondsp.fast_selection
+// SCALAR-NOT: ondsp.fast_used
 // SCALAR: arith.mulf
 func.func @elementwise_route(%input: tensor<8xf32>) -> tensor<8xf32> {
   %result = ondrix.gain %input {
@@ -38,7 +38,7 @@ func.func @elementwise_route(%input: tensor<8xf32>) -> tensor<8xf32> {
 // The other three fused-chain routes. lms has two contract-indexed sites, the
 // tap reduction and the weight update.
 // SCALAR-LABEL: func.func @lms_route
-// SCALAR-COUNT-2: math.fma {{.*}}used_permissions = ["fuse_multiply_add"]
+// SCALAR-COUNT-2: math.fma {{.*}}{ondsp.fast_used = ["fuse_multiply_add"]}
 func.func @lms_route(%input: tensor<8xf32>, %desired: tensor<8xf32>, %weights: tensor<2xf32>)
     -> (tensor<8xf32>, tensor<2xf32>) {
   %error, %adapted = ondrix.lms %input, %desired, %weights {
@@ -49,7 +49,7 @@ func.func @lms_route(%input: tensor<8xf32>, %desired: tensor<8xf32>, %weights: t
 }
 
 // SCALAR-LABEL: func.func @interpolate_route
-// SCALAR: math.fma {{.*}}used_permissions = ["fuse_multiply_add"]
+// SCALAR: math.fma {{.*}}{ondsp.fast_used = ["fuse_multiply_add"]}
 func.func @interpolate_route(%input: tensor<4xf32>, %coeffs: tensor<3xf32>) -> tensor<9xf32> {
   %init = tensor.empty() : tensor<9xf32>
   %r = ondrix.fir_interpolate %input, %coeffs, %init {
@@ -62,7 +62,7 @@ func.func @interpolate_route(%input: tensor<4xf32>, %coeffs: tensor<3xf32>) -> t
 // The reversed subview is refused by the batching rewrite, so this route also
 // lands on the fused chain; its refusal is pinned in fast_route_reachability.
 // SCALAR-LABEL: func.func @reversed_subview_route
-// SCALAR: math.fma {{.*}}used_permissions = ["fuse_multiply_add"]
+// SCALAR: math.fma {{.*}}{ondsp.fast_used = ["fuse_multiply_add"]}
 func.func @reversed_subview_route(%input: tensor<12xf32>, %kernel: tensor<4xf32>)
     -> tensor<9xf32> {
   %init = tensor.empty() : tensor<9xf32>
@@ -75,7 +75,7 @@ func.func @reversed_subview_route(%input: tensor<12xf32>, %kernel: tensor<4xf32>
 
 // Neither exact contract spends anything, in any route.
 // SCALAR-LABEL: func.func @exact_routes
-// SCALAR-NOT: ondsp.fast_selection
+// SCALAR-NOT: ondsp.fast_used
 func.func @exact_routes(%input: tensor<8xf32>) -> (tensor<8xf32>, tensor<8xf32>) {
   %off = ondrix.dct %input {
     input_numeric = #ondsp.fp<format = f32, contract = off>,

@@ -10,7 +10,7 @@
 // CHECK-LABEL: func.func @f32_goertzel_fast
 // CHECK: %[[C2:.*]] = arith.constant 0.765366852 : f32
 // CHECK: scf.for {{.*}} iter_args
-// CHECK: math.fma %[[C2]], %{{[^ ]*}}, %{{[^ ]*}} {{.*}}used_permissions = ["fuse_multiply_add"]{{.*}} : f32
+// CHECK: math.fma %[[C2]], %{{[^ ]*}}, %{{[^ ]*}} {ondsp.fast_used = ["fuse_multiply_add"]} : f32
 // CHECK: arith.subf
 // CHECK-NOT: fastmath
 // CHECK: arith.mulf %[[C2]]

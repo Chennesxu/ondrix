@@ -33,7 +33,6 @@
 namespace ondrix {
 #define GEN_PASS_DEF_VECTORIZEONDSPCONSTANTSATURATINGMEMREFREDUCE
 #define GEN_PASS_DEF_VECTORIZEONDSPFIXEDMEMREFREDUCE
-#define GEN_PASS_DEF_VERIFYONDSPFASTAUDITINPUT
 #define GEN_PASS_DEF_VERIFYONDSPCONSTANTREASSOCIATIONPROOFTRACE
 #include "ondrix/Conversion/Passes.h.inc"
 } // namespace ondrix
@@ -548,24 +547,6 @@ std::unique_ptr<Pass> ondrix::createVectorizeOndspConstantSaturatingMemRefReduce
 std::unique_ptr<Pass> ondrix::createVectorizeOndspConstantSaturatingMemRefReducePass(
     const VectorizeOndspConstantSaturatingMemRefReduceOptions &options) {
   return std::make_unique<VectorizeOndspConstantSaturatingMemRefReducePass>(options);
-}
-
-namespace {
-class VerifyOndspFastAuditInputPass final
-    : public ondrix::impl::VerifyOndspFastAuditInputBase<VerifyOndspFastAuditInputPass> {
-public:
-  using ondrix::impl::VerifyOndspFastAuditInputBase<
-      VerifyOndspFastAuditInputPass>::VerifyOndspFastAuditInputBase;
-
-  void runOnOperation() override {
-    if (failed(ondrix::ondsp::refuseForgedFastRecords(getOperation())))
-      signalPassFailure();
-  }
-};
-} // namespace
-
-std::unique_ptr<Pass> ondrix::createVerifyOndspFastAuditInputPass() {
-  return std::make_unique<VerifyOndspFastAuditInputPass>();
 }
 
 std::unique_ptr<Pass> ondrix::createVerifyOndspConstantReassociationProofTracePass() {

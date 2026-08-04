@@ -82,16 +82,6 @@ public:
     Value vectorEnd = rewriter.create<arith::SubIOp>(loc, bounds->upperBound, remainder);
     auto vectorType = VectorType::get({vectorWidth}, elementType);
 
-    // A dynamic extent generates two conditional schedules for one site: the
-    // batched one runs only where a full block exists.
-    bool dynamicExtent = !getStaticReductionLength(bounds->lhsType, bounds->rhsType);
-    StringRef batchedMechanism = fuseTerms ? "horizontal_fused" : "horizontal_separate";
-    StringRef orderedMechanism = fuseTerms ? "ordered_fused" : "ordered_separate";
-    ondrix::ondsp::FastSelectionPlan batchedPlan = ondrix::ondsp::continueFastSelection(
-        op, batchedMechanism, dynamicExtent ? StringRef("term_domain >= W") : StringRef());
-    ondrix::ondsp::FastSelectionPlan orderedPlan =
-        ondrix::ondsp::continueFastSelection(op, orderedMechanism, "term_domain < W");
-
     auto buildBatched = [&](OpBuilder &builder, Location branchLoc) {
       // The lane seed is the first block's W products: real terms of the
       // source reduction, never a synthesized identity.
@@ -110,8 +100,7 @@ public:
             Value rhs =
                 bodyBuilder.create<vector::LoadOp>(bodyLoc, vectorType, adaptor.getRhs(), base);
             bodyBuilder.create<scf::YieldOp>(
-                bodyLoc,
-                accumulateTerm(bodyLoc, lhs, rhs, iterArgs.front(), batchedPlan, bodyBuilder));
+                bodyLoc, accumulateTerm(bodyLoc, lhs, rhs, iterArgs.front(), bodyBuilder));
           });
 
       // The initial is the fold's accumulator, so the seed enters exactly once
@@ -122,9 +111,9 @@ public:
       Value folded = ondrix::ondsp::consumeFastPermission(
           builder.create<vector::ReductionOp>(branchLoc, vector::CombiningKind::ADD,
                                               vectorLoop.getResult(0), adaptor.getInitial()),
-          ondrix::ondsp::FastPermission::RebuildReductionTree, batchedPlan);
+          ondrix::ondsp::FastPermission::RebuildReductionTree);
       return createOrderedTail(branchLoc, adaptor, vectorEnd, bounds->upperBound, scalarStep,
-                               folded, batchedPlan, builder);
+                               folded, builder);
     };
 
     // Padding up to one block would be the term invention this rewrite exists
@@ -143,10 +132,10 @@ public:
           builder.create<scf::YieldOp>(branchLoc, buildBatched(builder, branchLoc));
         },
         [&](OpBuilder &builder, Location branchLoc) {
-          builder.create<scf::YieldOp>(
-              branchLoc,
-              createOrderedTail(branchLoc, adaptor, bounds->lowerBound, bounds->upperBound,
-                                scalarStep, adaptor.getInitial(), orderedPlan, builder));
+          builder.create<scf::YieldOp>(branchLoc,
+                                       createOrderedTail(branchLoc, adaptor, bounds->lowerBound,
+                                                         bounds->upperBound, scalarStep,
+                                                         adaptor.getInitial(), builder));
         });
 
     rewriter.replaceOp(op, guarded.getResult(0));
@@ -158,25 +147,24 @@ private:
   /// Both selections are inside the declared set, so the capability decides
   /// performance rather than legality.
   Value accumulateTerm(Location loc, Value lhs, Value rhs, Value accumulator,
-                       const ondrix::ondsp::FastSelectionPlan &plan, OpBuilder &builder) const {
+                       OpBuilder &builder) const {
     if (fuseTerms)
       return ondrix::ondsp::consumeFastPermission(
           builder.create<math::FmaOp>(loc, lhs, rhs, accumulator),
-          ondrix::ondsp::FastPermission::FuseMultiplyAdd, plan);
+          ondrix::ondsp::FastPermission::FuseMultiplyAdd);
     Value product = builder.create<arith::MulFOp>(loc, lhs, rhs);
     return builder.create<arith::AddFOp>(loc, accumulator, product);
   }
 
   Value createOrderedTail(Location loc, OpAdaptor adaptor, Value lowerBound, Value upperBound,
-                          Value step, Value initial, const ondrix::ondsp::FastSelectionPlan &plan,
-                          OpBuilder &builder) const {
+                          Value step, Value initial, OpBuilder &builder) const {
     auto loop = builder.create<scf::ForOp>(
         loc, lowerBound, upperBound, step, ValueRange{initial},
         [&](OpBuilder &bodyBuilder, Location bodyLoc, Value index, ValueRange iterArgs) {
           Value lhs = bodyBuilder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), index);
           Value rhs = bodyBuilder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), index);
           bodyBuilder.create<scf::YieldOp>(
-              bodyLoc, accumulateTerm(bodyLoc, lhs, rhs, iterArgs.front(), plan, bodyBuilder));
+              bodyLoc, accumulateTerm(bodyLoc, lhs, rhs, iterArgs.front(), bodyBuilder));
         });
     return loop.getResult(0);
   }
@@ -218,8 +206,7 @@ public:
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       return signalPassFailure();
-    if (failed(ondrix::ondsp::summarizeFastPermissions(getOperation())))
-      return signalPassFailure();
+    ondrix::ondsp::summarizeFastPermissions(getOperation());
   }
 };
 

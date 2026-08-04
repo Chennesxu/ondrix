@@ -57,6 +57,11 @@ cl::opt<bool> supportsF32VectorFma("supports-f32-vector-fma",
 /// invocation, reference compiler flags, corpus seeds, object hashes — is the
 /// harness's to add, and inventing empty fields for them here would read as
 /// though something had checked them.
+///
+/// The permission set is the compilation's, not any one site's. A source
+/// operation reaching two mechanisms is summarized rather than broken out;
+/// per-site attribution is deferred with the rest of the contract verification
+/// work (docs/f32-contract-evidence.md).
 void emitManifest(mlir::ModuleOp module, const ondrix::OndrixDefaultPipelineOptions &options,
                   raw_ostream &os) {
   llvm::json::Array permissions;
@@ -64,36 +69,6 @@ void emitManifest(mlir::ModuleOp module, const ondrix::OndrixDefaultPipelineOpti
           module->getAttrOfType<mlir::ArrayAttr>(ondrix::ondsp::getFastPermissionAttrName()))
     for (mlir::Attribute entry : spent)
       permissions.push_back(mlir::cast<mlir::StringAttr>(entry).getValue());
-
-  // Per static selection site, because the set above is true of the
-  // compilation and false of every site in it: one full-boundary filter
-  // generates guarded ordered edges and a horizontal interior, and a site with
-  // a dynamic extent generates one case per branch.
-  llvm::json::Array sites;
-  if (auto records =
-          module->getAttrOfType<mlir::ArrayAttr>(ondrix::ondsp::getFastSelectionAttrName()))
-    for (mlir::Attribute entry : records) {
-      auto record = mlir::cast<mlir::DictionaryAttr>(entry);
-      auto text = [&](llvm::StringRef field) {
-        return record.getAs<mlir::StringAttr>(field).getValue();
-      };
-      llvm::json::Array used;
-      for (mlir::Attribute name : record.getAs<mlir::ArrayAttr>("used_permissions"))
-        used.push_back(mlir::cast<mlir::StringAttr>(name).getValue());
-      llvm::json::Object site{
-          {"source_site_id", text("source_site_id")},
-          {"source_operation", text("source_operation")},
-          {"route_role", text("route_role")},
-          {"instance_domain", text("instance_domain")},
-          {"mechanism", text("mechanism")},
-          {"used_permissions", std::move(used)},
-      };
-      // Omitted rather than empty for an unconditional site: an empty
-      // condition would read as a condition that was checked.
-      if (!text("when").empty())
-        site["when"] = text("when");
-      sites.push_back(std::move(site));
-    }
 
   const int64_t vectorBitsValue = options.vectorBits;
   const bool fmaValue = options.supportsF32VectorFma;
@@ -103,7 +78,6 @@ void emitManifest(mlir::ModuleOp module, const ondrix::OndrixDefaultPipelineOpti
       {"declared_target_facts",
        llvm::json::Object{{"vector_bits", vectorBitsValue}, {"supports_f32_vector_fma", fmaValue}}},
       {"fast_permissions_used", std::move(permissions)},
-      {"fast_selection_sites", std::move(sites)},
       // Declared, not observed: the numeric model states these and every
       // reference is built to match them.
       {"required_fp_environment", llvm::json::Object{{"rounding", "round_to_nearest_even"},
