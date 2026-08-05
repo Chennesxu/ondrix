@@ -987,8 +987,10 @@ def Ondrix_Log2Op : Ondrix_ExponentialOp<"log2"> {
     ```
 
     One rounding boundary per element, at the interpolation; the exponent
-    term is exact and its addition cannot leave the destination, because
-    `e - 16` is at most `-1` and the mantissa term is under one. The whole
+    term is exact and its addition cannot leave the destination: the sum
+    ranges over exactly `[-32768, 0]`, reaching `0` at the top input because
+    the mantissa term reaches exactly one there (at `u = 65535` the
+    interpolation rounds up to `t[128] = 2048`). The whole
     65536-value input domain is finite, so the contract is gated
     exhaustively rather than sampled. An input of zero has no logarithm and
     the operation does not pretend otherwise: `-32768` is the declared floor

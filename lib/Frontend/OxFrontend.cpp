@@ -311,7 +311,10 @@ struct ExpressionAst {
   ~ExpressionAst();
   ExpressionAst(ExpressionAst &&) noexcept;
   ExpressionAst &operator=(ExpressionAst &&) noexcept;
-  ExpressionAst(const ExpressionAst &) = delete;
+  // A deep copy, so instantiating a callee copies its call tree WHOLE. The
+  // one field-by-field copier this replaced silently dropped the two fields
+  // added after it was written; a compiler-generated copy cannot repeat that.
+  ExpressionAst(const ExpressionAst &);
   ExpressionAst &operator=(const ExpressionAst &) = delete;
 
   bool isParameterReference() const { return !call; }
@@ -383,6 +386,10 @@ ExpressionAst::ExpressionAst(BuiltinCallAst call)
     : call(std::make_unique<BuiltinCallAst>(std::move(call))), position(this->call->position) {}
 ExpressionAst::~ExpressionAst() = default;
 ExpressionAst::ExpressionAst(ExpressionAst &&) noexcept = default;
+ExpressionAst::ExpressionAst(const ExpressionAst &other)
+    : parameter(other.parameter),
+      call(other.call ? std::make_unique<BuiltinCallAst>(*other.call) : nullptr),
+      position(other.position) {}
 ExpressionAst &ExpressionAst::operator=(ExpressionAst &&) noexcept = default;
 
 // Instantiating a named function substitutes the caller's argument
@@ -398,30 +405,9 @@ static ExpressionAst instantiateExpression(const ExpressionAst &expression,
 static BuiltinCallAst instantiateCall(const BuiltinCallAst &call,
                                       const llvm::StringMap<const ExpressionAst *> &arguments,
                                       std::optional<SourcePosition> callSite) {
-  BuiltinCallAst copy;
-  copy.kind = call.kind;
-  copy.accumulatorWidth = call.accumulatorWidth;
-  copy.accumulatorAuto = call.accumulatorAuto;
-  copy.updateOverflow = call.updateOverflow;
-  copy.rounding = call.rounding;
-  copy.destinationOverflow = call.destinationOverflow;
-  copy.stateRounding = call.stateRounding;
-  copy.stateOverflow = call.stateOverflow;
-  copy.fpContract = call.fpContract;
-  copy.boundary = call.boundary;
-  copy.factor = call.factor;
-  copy.window = call.window;
-  copy.gain = call.gain;
-  copy.stepSize = call.stepSize;
-  copy.fpConstantDen = call.fpConstantDen;
-  copy.fpConstant = call.fpConstant;
-  copy.taps = call.taps;
-  copy.cutoffNum = call.cutoffNum;
-  copy.cutoffDen = call.cutoffDen;
-  copy.stages = call.stages;
-  copy.rate = call.rate;
-  copy.delay = call.delay;
+  BuiltinCallAst copy = call;
   copy.position = callSite.value_or(call.position);
+  copy.operands.clear();
   for (const ExpressionAst &operand : call.operands)
     copy.operands.push_back(instantiateExpression(operand, arguments, callSite));
   return copy;
@@ -458,18 +444,6 @@ struct KernelAst {
   ResultTypeAst &primaryResult() { return results.front(); }
   const ResultTypeAst &primaryResult() const { return results.front(); }
 };
-
-// A callee is checked as a kernel in its own right; the check consumes the
-// ast, so it runs on a copy with the callee's own source positions.
-static KernelAst copyForChecking(const KernelAst &callee) {
-  KernelAst copy;
-  copy.name = callee.name;
-  copy.parameters = callee.parameters;
-  copy.results = callee.results;
-  copy.position = callee.position;
-  copy.result = instantiateCall(callee.result, {}, std::nullopt);
-  return copy;
-}
 
 static bool hasRank(llvm::ArrayRef<std::optional<int64_t>> shape, unsigned rank) {
   return shape.size() == rank;
@@ -3421,7 +3395,7 @@ OwningOpRef<ModuleOp> compileOxSource(llvm::StringRef sourceName, llvm::StringRe
   // location. Instantiation then only has to match arguments to that
   // signature, and the errors a user sees name the function that is wrong.
   for (const KernelAst &callee : parser.getCallees()) {
-    if (!checkKernel(copyForChecking(callee), diagnostics) || diagnostics.failed())
+    if (!checkKernel(KernelAst(callee), diagnostics) || diagnostics.failed())
       return {};
   }
 

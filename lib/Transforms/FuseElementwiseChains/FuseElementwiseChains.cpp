@@ -160,8 +160,10 @@ public:
 
         OpBuilder builder(op);
         Value replacement;
-        NamedAttrList provenance;
         if (certifyUnaryChainIsIdentity(inner->step, outer->step)) {
+          // An identity collapse builds nothing, so there is nothing to
+          // stamp: the input's producer was not part of this certificate
+          // and must not inherit its provenance.
           replacement = inner->input;
         } else {
           std::optional<ElementwiseUnaryStep> merged = proposeMerge(inner->step, outer->step);
@@ -169,16 +171,15 @@ public:
             continue;
           replacement = buildStep(builder, op->getLoc(), op->getResult(0).getType(), inner->input,
                                   *merged, outer->numeric);
+          NamedAttrList provenance;
           provenance.append("merged", builder.getStringAttr(describeKind(merged->kind)));
           provenance.append("parameter", builder.getI64IntegerAttr(merged->parameter));
+          provenance.append("inner", builder.getStringAttr(describeKind(inner->step.kind)));
+          provenance.append("outer", builder.getStringAttr(describeKind(outer->step.kind)));
+          provenance.append("exhaustive_inputs", builder.getI64IntegerAttr(65536));
+          replacement.getDefiningOp()->setAttr("ondrix.elementwise_fusion_provenance",
+                                               provenance.getDictionary(builder.getContext()));
         }
-        provenance.append("inner", builder.getStringAttr(describeKind(inner->step.kind)));
-        provenance.append("outer", builder.getStringAttr(describeKind(outer->step.kind)));
-        provenance.append("exhaustive_inputs", builder.getI64IntegerAttr(65536));
-        if (Operation *produced = replacement.getDefiningOp())
-          if (produced->getBlock() == op->getBlock() && readUnary(produced))
-            produced->setAttr("ondrix.elementwise_fusion_provenance",
-                              provenance.getDictionary(builder.getContext()));
         op->getResult(0).replaceAllUsesWith(replacement);
         op->erase();
         innerOp->erase();

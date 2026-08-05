@@ -58,6 +58,35 @@ func.func @shift_cascade_under_a_nearest_rule(%a: tensor<8xi16>) -> tensor<8xi16
   return %1 : tensor<8xi16>
 }
 
+// The exception the certificate found and a per-rule verdict would miss:
+// nearest_even at amounts -1,-1 composes exactly (0 diverging inputs), while
+// nearest_ties_positive diverges on 16384 inputs at the same amounts.
+// CHECK-LABEL: func.func @nearest_even_unit_pair_is_the_exception
+// CHECK: ondrix.shift
+// CHECK-SAME: amount = -2
+// CHECK-NOT: ondrix.shift
+func.func @nearest_even_unit_pair_is_the_exception(%a: tensor<8xi16>) -> tensor<8xi16> {
+  %0 = ondrix.shift %a {amount = -1 : i64, numeric = #q15,
+    rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>}
+    : (tensor<8xi16>) -> tensor<8xi16>
+  %1 = ondrix.shift %0 {amount = -1 : i64, numeric = #q15,
+    rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>}
+    : (tensor<8xi16>) -> tensor<8xi16>
+  return %1 : tensor<8xi16>
+}
+
+// CHECK-LABEL: func.func @ties_positive_unit_pair_is_not
+// CHECK-COUNT-2: ondrix.shift
+func.func @ties_positive_unit_pair_is_not(%a: tensor<8xi16>) -> tensor<8xi16> {
+  %0 = ondrix.shift %a {amount = -1 : i64, numeric = #q15,
+    rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>}
+    : (tensor<8xi16>) -> tensor<8xi16>
+  %1 = ondrix.shift %0 {amount = -1 : i64, numeric = #q15,
+    rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>}
+    : (tensor<8xi16>) -> tensor<8xi16>
+  return %1 : tensor<8xi16>
+}
+
 // Two left shifts collapse under either overflow mode.
 // CHECK-LABEL: func.func @left_shift_cascade
 // CHECK: ondrix.shift

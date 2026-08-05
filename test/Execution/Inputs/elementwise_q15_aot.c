@@ -233,8 +233,10 @@ int main(void) {
         rhs[i] = (i & 2) ? INT16_MIN : INT16_MAX;
       }
     if (block == 1)
-      /* A halfway product with an even floor quotient at both signs: this is
-       * where nearest_even and nearest_ties_positive part company. */
+      /* Halfway products at both signs. The negative one is the separator:
+       * -16384 * 3 has floor quotient -2 (even), where nearest_even stays
+       * and nearest_ties_positive steps up; the positive one has floor
+       * quotient 1 (odd), where the two rules agree. */
       for (int64_t i = 0; i < kBlock; ++i) {
         lhs[i] = (int16_t)((i & 1) ? -16384 : 16384);
         rhs[i] = 3;

@@ -2060,6 +2060,11 @@ public:
     std::optional<SmallVector<int32_t>> table = buildArctangentTable();
     if (!table)
       return rewriter.notifyMatchFailure(op, "arctangent table entry is not tie-guard admissible");
+    // The ratio division below writes nearest-even inline (its divisor is a
+    // runtime value, so round_div cannot carry it). Same self-guard as exp2:
+    // one operation must not follow two tie rules without a diagnostic.
+    if (op.getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
+      return rewriter.notifyMatchFailure(op, "cx_phase lowering implements nearest_even only");
 
     Location loc = op.getLoc();
     MLIRContext *context = rewriter.getContext();
@@ -2268,6 +2273,12 @@ public:
     std::optional<SmallVector<int32_t>> table = buildExp2Table();
     if (!table)
       return rewriter.notifyMatchFailure(op, "exp2 table entry is not tie-guard admissible");
+    // The binade placement below writes nearest-even inline (its shift
+    // amount is input-dependent, so round_shift cannot carry it). The
+    // verifier pins the mode; this guard keeps the lowering from silently
+    // applying two different rules if that pin is ever widened.
+    if (op.getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
+      return rewriter.notifyMatchFailure(op, "exp2 lowering implements nearest_even only");
 
     Location loc = op.getLoc();
     MLIRContext *context = rewriter.getContext();

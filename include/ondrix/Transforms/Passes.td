@@ -127,9 +127,12 @@ def FuseOndrixElementwiseChains
     offset(offset(x,a),b)  one offset under wrap; under saturate a=+1000 then
                            b=-1000 clamps at 32767 and loses 1000
     shift(shift(x,-a),-b)  one shift under toward_negative and toward_zero;
-                           under either nearest rule the double rounding
-                           diverges, which is the same double-rounding
-                           structure the round_shift cascade study describes
+                           under a nearest rule the double rounding
+                           diverges — with one exception the certificate
+                           found and the rule-of-thumb misses: nearest_even
+                           at amounts -1,-1 composes exactly (ties_positive
+                           does not even there). Same double-rounding
+                           structure as the round_shift cascade study
     shift(shift(x,a),b)    one shift for two left shifts under either mode
     abs(negate(x))         abs under both modes
     ```
