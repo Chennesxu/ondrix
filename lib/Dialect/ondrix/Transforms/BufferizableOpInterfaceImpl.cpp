@@ -692,7 +692,19 @@ static Value getOrCreateDctRowTable(RewriterBase &rewriter, Location loc, Module
   }
   {
     OpBuilder::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPointToStart(module.getBody());
+    // Insert in symbol order among the reserved DCT globals: module text must
+    // not depend on which function bufferizes first, or byte-level module
+    // comparisons and data-layout-sensitive timing pick up spurious variance.
+    Block *body = module.getBody();
+    Block::iterator position = body->begin();
+    while (position != body->end()) {
+      auto global = dyn_cast<memref::GlobalOp>(&*position);
+      if (!global || !global.getSymName().starts_with("__ondrix_dct") ||
+          global.getSymName() >= symbol)
+        break;
+      ++position;
+    }
+    rewriter.setInsertionPoint(body, position);
     rewriter.create<memref::GlobalOp>(loc, symbol, rewriter.getStringAttr("private"), tableType,
                                       expectedInitializer,
                                       /*constant=*/true, IntegerAttr());

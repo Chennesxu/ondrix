@@ -1,6 +1,7 @@
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" | FileCheck %s
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-constant-saturating-memref-reduce="vector-width=4 max-elements=64 proof-trace-output=%t.proof.json" | FileCheck %s --check-prefix=FULL-VECTOR --implicit-check-not=ondsp.reduce_mac
 // RUN: FileCheck %s --check-prefix=TRACE --input-file=%t.proof.json
+// RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" | FileCheck %s --check-prefix=ORDER
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries allow-return-allocs" --canonicalize --vectorize-ondsp-constant-saturating-memref-reduce="vector-width=4 max-elements=64" | FileCheck %s --check-prefix=DYNAMIC-LAYOUT --implicit-check-not=vector.load --implicit-check-not=vector.reduction
 
 // The bufferized form is a second consumer of the same DCT contract: one
@@ -20,6 +21,14 @@
 // CHECK-DAG: memref.global "private" constant @__ondrix_dct8_row4 : memref<8xi16> = dense<[23170, -23170, -23170, 23170, 23170, -23170, -23170, 23170]>
 // CHECK-DAG: memref.global "private" constant @__ondrix_dct8_row7 : memref<8xi16> = dense<[6393, -18205, 27246, -32138, 32138, -27246, 18205, -6393]>
 // CHECK-DAG: memref.global "private" constant @__ondrix_dct4_row1 : memref<4xi16> = dense<[30274, 12540, -12540, -30274]>
+
+// The reserved globals appear in symbol order whatever order the functions
+// bufferize in; emission-order placement fails these ordered checks.
+// ORDER: memref.global "private" constant @__ondrix_dct4_row1
+// ORDER: memref.global "private" constant @__ondrix_dct8_row0
+// ORDER: memref.global "private" constant @__ondrix_dct8_row1
+// ORDER: memref.global "private" constant @__ondrix_dct8_row4
+// ORDER: memref.global "private" constant @__ondrix_dct8_row7
 
 // CHECK-LABEL: func.func @dct8_q15(
 // CHECK-SAME: %[[INPUT:.*]]: memref<8xi16>)
