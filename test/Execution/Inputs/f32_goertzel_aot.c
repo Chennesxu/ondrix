@@ -1,4 +1,5 @@
-#include <math.h>
+#include "goertzel_f32_reference.h"
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,32 +33,6 @@ static uint32_t floatBits(float value) {
   return bits;
 }
 
-/* Mirrors the lowering's quarter-turn evaluation. This does not gate the
- * snap: the unsnapped 6.1e-17 perturbs no exported bit at these extents, so
- * only the conversion test pins it. */
-static float doubledCoefficient(int64_t bin) {
-  static const double kTwoPi = 6.28318530717958647692528676655900577;
-  static const double kQuarterTurns[4] = {1.0, 0.0, -1.0, 0.0};
-  double cosine = 4 * bin % kLength == 0 ? kQuarterTurns[(4 * bin / kLength) % 4]
-                                         : cos(kTwoPi * (double)bin / (double)kLength);
-  return 2.0f * (float)cosine;
-}
-
-/* Independent of the lowering apart from the declared event order. */
-static float referenceGoertzel(const float *input, int64_t bin, int fused) {
-  const float c2 = doubledCoefficient(bin);
-  float s1 = 0.0f;
-  float s2 = 0.0f;
-  for (int64_t n = 0; n < kLength; ++n) {
-    const float combined = fused ? fmaf(c2, s1, input[n]) : input[n] + c2 * s1;
-    const float next = combined - s2;
-    s2 = s1;
-    s1 = next;
-  }
-  const float m = c2 * s1;
-  return (s1 * s1 + s2 * s2) - m * s2;
-}
-
 static int compare(const char *label, const char *mode, float got, float expected) {
   if (floatBits(got) == floatBits(expected))
     return 0;
@@ -79,8 +54,8 @@ static int check(const float *input, const char *label) {
   const float fmaValue = fma.aligned[fma.offset];
   const float fastValue = fast.aligned[fast.offset];
   int failed = 0;
-  failed |= compare(label, "goertzel off", offValue, referenceGoertzel(input, kBin, 0));
-  failed |= compare(label, "goertzel fma", fmaValue, referenceGoertzel(input, kBin, 1));
+  failed |= compare(label, "goertzel off", offValue, goertzelReference(input, kLength, kBin, 0));
+  failed |= compare(label, "goertzel fma", fmaValue, goertzelReference(input, kLength, kBin, 1));
   /* The fast contract's legal set still has two members, but the lowering
    * selects the fused one, so this pins the chosen graph rather than
    * membership. Restoring the declaration on the emitted event reddens it:
@@ -88,7 +63,7 @@ static int check(const float *input, const char *label) {
    * off value. */
   failed |= compare(label, "goertzel fast", fastValue, fmaValue);
   failed |= compare(label, "goertzel quarter turn", quarter.aligned[quarter.offset],
-                    referenceGoertzel(input, kQuarterTurnBin, 0));
+                    goertzelReference(input, kLength, kQuarterTurnBin, 0));
   free(off.allocated);
   free(fma.allocated);
   free(fast.allocated);

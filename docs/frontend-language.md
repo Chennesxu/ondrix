@@ -256,18 +256,23 @@ intermediate stage-scaling and requantization boundaries remain observable;
 in particular, `irfft(rfft(input))` is not folded to an identity.
 
 A kernel body may also name intermediate stages with local bindings before
-its single return statement. Each local binds exactly one builtin call and is
-consumed exactly once by a later statement; the binding is spelling for the
-same nested expression tree, so it adds readability, not expressiveness, and
-unused or doubly-consumed locals are compile errors. Within this slice a
-`fir_filter` stage may feed the FFT chain — static Q15 tensors, the `valid`
-boundary, and the explicit executable accumulator profile — and its
-coefficients may come from a runtime tensor parameter or from a compile-time
-`lowpass` design expression, which names the Hamming-windowed-sinc design
-contract (`taps` odd, rational `cutoff` strictly inside (0, 1/2)). The design
-is evaluated at compile time under the fail-closed quantization tie guard;
-`lowpass` is legal only in the coefficient slot. The composed four-stage
-program is:
+its single return statement. Each local binds one builtin call, and every
+later reference instantiates that call, so a local may be read any number of
+times; a local no statement reads is a compile error. Reading a local twice
+is not a second evaluation: the duplicated subtrees are `Pure` Ondrix
+operations and the canonical pipeline's `canonicalize`/`cse` collapses them,
+which is what lets an intermediate be reused, as in `add(mult(t, t), t)`.
+Within this slice a `fir_filter` stage may feed the FFT chain — static Q15
+tensors, the `valid` boundary, and the explicit executable accumulator
+profile — and its coefficients may come from a runtime tensor parameter or
+from a compile-time design expression. The available designs are `lowpass`,
+which names the Hamming-windowed-sinc contract (`taps` odd in [3, 4095],
+rational `cutoff` strictly inside (0, 1/2)), and the four window designs
+`hamming(taps=N)`, `hann(taps=N)`, `blackman(taps=N)`, and
+`kaiser(taps=N, beta=[num,den])`, each with `taps` in [2, 4096] and Kaiser's
+rational `beta` in (0, 50]. Every design is evaluated at compile time under
+the fail-closed quantization tie guard and is legal only in the coefficient
+slot. The composed four-stage program is:
 
 ```python
 def q15_filtered_spectrum(signal: tensor[q15,72]) -> tensor[q15,33]:
@@ -380,8 +385,10 @@ it out is a parse error. `rounding=` keeps its usual optional form, since both
 tie rules the boundary admits are defensible.
 
 f32 dot, FIR, `matmul`, `rms`, `moving_average`, `dct`, `fir_decimate`,
-`fir_interpolate`, `gain`, and `lms` support `contract=off`, `contract=fma`,
-and `contract=fast`. The floating-point spellings name a contract where their
+`fir_interpolate`, `gain`, `lms`, and `goertzel` support `contract=off`,
+`contract=fma`, and `contract=fast`; `sos_tdf2` admits only the two exact
+modes, because its operation contract has no realization gate for `fast`.
+The floating-point spellings name a contract where their
 fixed-point counterparts name a rounding mode, because a floating-point result
 has no requantization boundary to round; `rms(x, contract=...)` also accepts
 any extent in range rather than only powers of two. `gain` is the one builtin
@@ -466,6 +473,33 @@ a `fir_filter` input stage, and the elementwise members — which is closed
 under nesting: any member may stand where an operand name may. A parameter
 may be read more than once, since a tensor operand is a value, so `mult(x, x)`
 is a squaring kernel rather than an aliasing question.
+
+### Single-Bin And Recursive Builtins
+
+`goertzel(x, bin=, contract=)` returns the squared magnitude of one DFT bin as
+a single-element tensor, over the quantized recursion the operation contract
+states. Only the f32 profile has a source spelling: the Q15 energy is
+`tensor<1xi64>` and no source type names that storage width. The bin must lie
+in `[0, N/2]` and the input extent in `[2, 4096]`.
+
+`sos_tdf2` is the f32 transposed-direct-form-II cascade and the second
+recursive source binding beside the fixed `sos_df2_fixed`:
+
+```python
+def f32_sos_tdf2(
+    input: tensor[f32],
+    coefficients: tensor[f32,2,5],
+    scales: tensor[f32,2],
+    state: tensor[f32,2,2])
+    -> (tensor[f32], tensor[f32,2,2]):
+  return sos_tdf2(input, coefficients, scales, state, contract=off)
+```
+
+Coefficients are `[sections, 5]` in the order `[b0, b1, b2, a1, a2]`, scales
+are `[sections]`, and state is `[sections, 2]` in `[z1, z2]` order; the
+section count is static and at least one. Denominator feedback is added, so a
+subtractive source convention supplies negated `a1`/`a2`. Empty input returns
+an empty output and the unchanged state.
 
 ### Named Functions
 

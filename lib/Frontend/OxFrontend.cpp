@@ -227,7 +227,13 @@ enum class ReductionKind {
   Cosine,
   Matmul,
   Lms,
+  Goertzel,
+  SosTdf2,
   Lowpass,
+  Hamming,
+  Hann,
+  Blackman,
+  Kaiser,
   CicDecimate,
   Add,
   Sub,
@@ -253,6 +259,32 @@ static bool isBinaryElementwiseKind(ReductionKind kind) {
   return kind == ReductionKind::Add || kind == ReductionKind::Sub || kind == ReductionKind::Mult;
 }
 
+// The compile-time coefficient designs. None has a runtime form, so each is
+// legal only in the coefficient slot of a composed fir_filter.
+static bool isWindowDesignKind(ReductionKind kind) {
+  return kind == ReductionKind::Hamming || kind == ReductionKind::Hann ||
+         kind == ReductionKind::Blackman || kind == ReductionKind::Kaiser;
+}
+
+static bool isDesignKind(ReductionKind kind) {
+  return kind == ReductionKind::Lowpass || isWindowDesignKind(kind);
+}
+
+static llvm::StringRef describeDesignKind(ReductionKind kind) {
+  switch (kind) {
+  case ReductionKind::Hamming:
+    return "hamming";
+  case ReductionKind::Hann:
+    return "hann";
+  case ReductionKind::Blackman:
+    return "blackman";
+  case ReductionKind::Kaiser:
+    return "kaiser";
+  default:
+    return "lowpass";
+  }
+}
+
 static bool isCfftKind(ReductionKind kind) {
   return kind == ReductionKind::Cfft || kind == ReductionKind::Icfft;
 }
@@ -276,7 +308,8 @@ static bool isUnaryTensorKind(ReductionKind kind) {
   return kind == ReductionKind::Dct || kind == ReductionKind::MovingAverage ||
          kind == ReductionKind::Gain || kind == ReductionKind::Rms || kind == ReductionKind::Sine ||
          kind == ReductionKind::Cosine || kind == ReductionKind::CicDecimate ||
-         kind == ReductionKind::Log2 || kind == ReductionKind::Exp2;
+         kind == ReductionKind::Log2 || kind == ReductionKind::Exp2 ||
+         kind == ReductionKind::Goertzel;
 }
 
 static bool isUnaryKind(ReductionKind kind) {
@@ -341,6 +374,9 @@ struct BuiltinCallAst {
   int64_t taps = 0;
   int64_t cutoffNum = 0;
   int64_t cutoffDen = 0;
+  int64_t betaNum = 0;
+  int64_t betaDen = 0;
+  int64_t bin = 0;
   int64_t stages = 0;
   int64_t rate = 0;
   int64_t delay = 0;
@@ -561,9 +597,9 @@ public:
       return std::nullopt;
 
     // Local bindings before the single return statement: each names one
-    // builtin call and is consumed exactly once by a later statement, which
-    // moves the bound call into its use site — the checked kernel is the
-    // nested expression tree direct nesting would produce.
+    // builtin call that a later statement reads at least once, and each read
+    // instantiates the bound call — the checked kernel is the nested
+    // expression tree direct nesting would produce.
     SourceType policyType = kernel.primaryResult().type;
     caller = &kernel;
     while (current.kind == TokenKind::Identifier && current.spelling != "return" &&
@@ -625,6 +661,8 @@ public:
     if (!isIdentifier("dot") && !isIdentifier("fir") && !isIdentifier("fir_filter") &&
         !isIdentifier("fir_decimate") && !isIdentifier("fir_interpolate") &&
         !isIdentifier("fir_stream") && !isIdentifier("sos_df2_fixed") &&
+        !isIdentifier("sos_tdf2") && !isIdentifier("goertzel") && !isIdentifier("hamming") &&
+        !isIdentifier("hann") && !isIdentifier("blackman") && !isIdentifier("kaiser") &&
         !isIdentifier("convolution") && !isIdentifier("correlation") &&
         !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft") &&
         !isIdentifier("rfft") && !isIdentifier("irfft") && !isIdentifier("magnitude") &&
@@ -638,10 +676,12 @@ public:
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
+                        "sos_tdf2(...), goertzel(...), "
                         "convolution(...), correlation(...), butterfly(...), cfft(...), or "
                         "icfft(...), rfft(...), irfft(...), magnitude(...), phase(...), dct(...), "
                         "moving_average(...), gain(...), rms(...), sine(...), cosine(...), "
-                        "matmul(...), lms(...), cic_decimate(...), lowpass(...), or an "
+                        "matmul(...), lms(...), cic_decimate(...), a lowpass/hamming/hann/"
+                        "blackman/kaiser design, or an "
                         "elementwise add/sub/mult/abs/negate/offset/shift builtin expression");
       return std::nullopt;
     }
@@ -659,6 +699,18 @@ public:
       call.kind = ReductionKind::FirStream;
     else if (isIdentifier("sos_df2_fixed"))
       call.kind = ReductionKind::SosDf2Fixed;
+    else if (isIdentifier("sos_tdf2"))
+      call.kind = ReductionKind::SosTdf2;
+    else if (isIdentifier("goertzel"))
+      call.kind = ReductionKind::Goertzel;
+    else if (isIdentifier("hamming"))
+      call.kind = ReductionKind::Hamming;
+    else if (isIdentifier("hann"))
+      call.kind = ReductionKind::Hann;
+    else if (isIdentifier("blackman"))
+      call.kind = ReductionKind::Blackman;
+    else if (isIdentifier("kaiser"))
+      call.kind = ReductionKind::Kaiser;
     else if (isIdentifier("convolution"))
       call.kind = ReductionKind::Convolution;
     else if (isIdentifier("correlation"))
@@ -733,6 +785,27 @@ public:
           !expect(TokenKind::RightParen, "expected ')' after lowpass expression"))
         return std::nullopt;
       call.taps = *taps;
+      return call;
+    }
+    if (isWindowDesignKind(call.kind)) {
+      // Same shape as lowpass: the design is fully named by its attributes and
+      // the tap count also names the coefficient extent.
+      if (!expectIdentifier("taps", "expected window tap count") ||
+          !expect(TokenKind::Equal, "expected '=' after taps"))
+        return std::nullopt;
+      auto taps = parseSignedInteger("expected window tap count");
+      if (!taps)
+        return std::nullopt;
+      call.taps = *taps;
+      if (call.kind == ReductionKind::Kaiser) {
+        if (!expect(TokenKind::Comma, "expected ',' before kaiser beta") ||
+            !expectIdentifier("beta", "expected kaiser beta") ||
+            !expect(TokenKind::Equal, "expected '=' after beta") ||
+            !parseRationalConstant("beta", call.betaNum, call.betaDen))
+          return std::nullopt;
+      }
+      if (!expect(TokenKind::RightParen, "expected ')' after window design expression"))
+        return std::nullopt;
       return call;
     }
     if (isFftKind(call.kind)) {
@@ -848,6 +921,42 @@ public:
       }
       if (!expect(TokenKind::RightParen, "expected ')' after sos_df2_fixed expression"))
         return std::nullopt;
+      return call;
+    }
+    if (call.kind == ReductionKind::SosTdf2) {
+      if (!expect(TokenKind::Comma, "expected ',' after sos_tdf2 input operand"))
+        return std::nullopt;
+      auto coefficients = parseIdentifier("expected sos_tdf2 coefficients operand");
+      if (!coefficients || !expect(TokenKind::Comma, "expected ',' after sos_tdf2 coefficients "
+                                                     "operand"))
+        return std::nullopt;
+      auto scales = parseIdentifier("expected sos_tdf2 scales operand");
+      if (!scales || !expect(TokenKind::Comma, "expected ',' after sos_tdf2 scales operand"))
+        return std::nullopt;
+      auto state = parseIdentifier("expected sos_tdf2 state operand");
+      if (!state || !expect(TokenKind::Comma, "expected ',' before sos_tdf2 contract policy") ||
+          !expectIdentifier("contract", "expected floating-point contract policy") ||
+          !expect(TokenKind::Equal, "expected '=' after contract"))
+        return std::nullopt;
+      auto contract = parseIdentifier("expected floating-point contract mode");
+      if (!contract || !expect(TokenKind::RightParen, "expected ')' after sos_tdf2 expression"))
+        return std::nullopt;
+      call.operands.push_back(resolveOperand(*coefficients));
+      call.operands.push_back(resolveOperand(*scales));
+      call.operands.push_back(resolveOperand(*state));
+      call.fpContract = contract->spelling.str();
+      return call;
+    }
+    if (call.kind == ReductionKind::Goertzel) {
+      if (!parseNamedInteger("bin", call.bin) ||
+          !expect(TokenKind::Comma, "expected ',' before goertzel contract policy") ||
+          !expectIdentifier("contract", "expected floating-point contract policy") ||
+          !expect(TokenKind::Equal, "expected '=' after contract"))
+        return std::nullopt;
+      auto contract = parseIdentifier("expected floating-point contract mode");
+      if (!contract || !expect(TokenKind::RightParen, "expected ')' after goertzel expression"))
+        return std::nullopt;
+      call.fpContract = contract->spelling.str();
       return call;
     }
     if (call.kind == ReductionKind::Lms) {
@@ -1549,19 +1658,16 @@ private:
     bool consumed = false;
   };
 
-  // A local binding is consumed by moving its bound call into the use site;
-  // anything else stays a parameter reference for sema to judge.
+  // Every reference to a local instantiates a fresh deep copy of the bound
+  // call tree. The Ondrix tensor operations the copies produce are Pure, so
+  // the pipeline's canonicalize/cse collapses them back to one evaluation.
   ExpressionAst resolveOperand(const Token &token) {
     auto binding = bindingsByName.find(token.spelling);
     if (binding == bindingsByName.end())
       return ExpressionAst(token.spelling.str(), token.position);
     Binding &bound = bindings[binding->second];
-    if (bound.consumed)
-      diagnostics.error(token.position,
-                        llvm::Twine("local '") + token.spelling +
-                            "' is already consumed; each local binds exactly one use");
     bound.consumed = true;
-    return std::move(bound.expression);
+    return ExpressionAst(bound.expression);
   }
 
   Lexer &lexer;
@@ -1639,15 +1745,17 @@ static std::optional<llvm::StringRef> getParameterOperand(const BuiltinCallAst &
 }
 
 static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diagnostics) {
-  if (ast.result.kind == ReductionKind::Lowpass) {
+  if (isDesignKind(ast.result.kind)) {
     diagnostics.error(ast.result.position,
-                      "lowpass is a design expression; it is consumed by fir_filter coefficients");
+                      llvm::Twine(describeDesignKind(ast.result.kind)) +
+                          " is a design expression; it is consumed by fir_filter coefficients");
     return std::nullopt;
   }
   bool hasThreeOperands = ast.result.kind == ReductionKind::Butterfly ||
                           ast.result.kind == ReductionKind::FirStream ||
                           ast.result.kind == ReductionKind::Lms;
-  bool hasFourOperands = ast.result.kind == ReductionKind::SosDf2Fixed;
+  bool hasFourOperands =
+      ast.result.kind == ReductionKind::SosDf2Fixed || ast.result.kind == ReductionKind::SosTdf2;
   size_t expectedOperandCount = isUnaryKind(ast.result.kind) ? 1
                                 : hasFourOperands            ? 4
                                 : hasThreeOperands           ? 3
@@ -1674,7 +1782,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     diagnostics.error(ast.position,
                       isUnaryKind(ast.result.kind)
                           ? "unary DSP kernels require exactly one parameter"
-                      : hasFourOperands  ? "sos_df2_fixed kernels require exactly four parameters"
+                      : hasFourOperands  ? "second-order-section kernels require exactly four "
+                                           "parameters"
                       : hasThreeOperands ? "butterfly, fir_stream, and lms kernels require exactly "
                                            "three parameters"
                                          : "binary DSP kernels require exactly two parameters");
@@ -1745,7 +1854,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   }
   if (hasFourOperands && (!thirdName || !fourthName || !parameterNames.contains(*thirdName) ||
                           !parameterNames.contains(*fourthName))) {
-    diagnostics.error(ast.result.position, "unknown sos_df2_fixed builtin operand");
+    diagnostics.error(ast.result.position, "unknown second-order-section builtin operand");
     return std::nullopt;
   }
 
@@ -1878,6 +1987,59 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     }
     return CheckedKernel{std::move(ast), *updateOverflow, *outputRounding, *outputOverflow,
                          std::nullopt,   *stateRounding,  *stateOverflow};
+  }
+  if (ast.result.kind == ReductionKind::SosTdf2) {
+    if (ast.results.size() != 2 || !ast.primaryResult().tensor || !ast.results[1].tensor ||
+        ast.primaryResult().type != SourceType::F32 || !lhsParameter || !rhsParameter ||
+        !thirdParameter || !fourthParameter ||
+        llvm::any_of(ast.parameters,
+                     [](const ParameterAst &parameter) { return !parameter.isTensor(); })) {
+      diagnostics.error(ast.result.position,
+                        "sos_tdf2 requires four f32 tensor parameters and two f32 tensor results");
+      return std::nullopt;
+    }
+    if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 2) ||
+        !hasRank(thirdParameter->shape, 1) || !hasRank(fourthParameter->shape, 2) ||
+        !hasRank(ast.primaryResult().shape, 1) || !hasRank(ast.results[1].shape, 2)) {
+      diagnostics.error(ast.result.position, "sos_tdf2 requires input/output rank 1, "
+                                             "coefficients/state rank 2, and scales rank 1");
+      return std::nullopt;
+    }
+    const std::optional<int64_t> &inputExtent = lhsParameter->shape[0];
+    const std::optional<int64_t> &outputExtent = ast.primaryResult().shape[0];
+    if (inputExtent.has_value() != outputExtent.has_value() ||
+        (inputExtent && *inputExtent != *outputExtent)) {
+      diagnostics.error(ast.result.position, "sos_tdf2 input and output chunk extents must match");
+      return std::nullopt;
+    }
+    const std::optional<int64_t> &sections = rhsParameter->shape[0];
+    if (!sections || *sections < 1) {
+      diagnostics.error(ast.result.position,
+                        "sos_tdf2 requires a static coefficient section count of at least one");
+      return std::nullopt;
+    }
+    if (rhsParameter->shape[1] != std::optional<int64_t>(5) ||
+        thirdParameter->shape[0] != sections || fourthParameter->shape[0] != sections ||
+        fourthParameter->shape[1] != std::optional<int64_t>(2) ||
+        ast.results[1].shape[0] != sections ||
+        ast.results[1].shape[1] != std::optional<int64_t>(2)) {
+      diagnostics.error(ast.result.position,
+                        "sos_tdf2 requires coefficients [S,5], scales [S], and state [S,2]");
+      return std::nullopt;
+    }
+    auto contract = parseFpContract(ast.result.fpContract);
+    if (!contract) {
+      diagnostics.error(ast.result.position, llvm::Twine("unsupported floating-point contract '") +
+                                                 ast.result.fpContract + "'");
+      return std::nullopt;
+    }
+    // The biquad event graph has no realization gate for `fast`, so the
+    // operation contract admits only the two exact modes.
+    if (*contract == ondsp::FpContractMode::Fast) {
+      diagnostics.error(ast.result.position, "sos_tdf2 admits only contract=off or contract=fma");
+      return std::nullopt;
+    }
+    return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, *contract};
   }
   if (ast.result.kind == ReductionKind::Matmul) {
     bool isFloat = ast.primaryResult().type == SourceType::F32;
@@ -2063,7 +2225,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     };
     // A fir_filter stage may feed the FFT chain: static Q15 tensors, the
     // valid boundary, and the executable Q15 export profile, explicitly
-    // declared. Its coefficients are a tensor parameter or a lowpass design.
+    // declared. Its coefficients are a tensor parameter or a design builtin.
     auto checkNestedFirFilter = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       if (call.operands.size() != 2) {
         diagnostics.error(call.position, "builtin operand count does not match its contract");
@@ -2107,7 +2269,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
             !hasRank(coefficients->shape, 1) || !getRankOneExtent(coefficients->shape)) {
           diagnostics.error(coefficientOperand.position,
                             "composed fir_filter coefficients currently require a static rank-1 "
-                            "Q15 tensor parameter or a lowpass design");
+                            "Q15 tensor parameter or a coefficient design");
           return std::nullopt;
         }
         tapCount = *getRankOneExtent(coefficients->shape);
@@ -2126,10 +2288,27 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           return std::nullopt;
         }
         tapCount = design.taps;
+      } else if (isWindowDesignKind(coefficientOperand.call->kind)) {
+        const BuiltinCallAst &design = *coefficientOperand.call;
+        if (design.taps < 2 || design.taps > 4096) {
+          diagnostics.error(design.position, llvm::Twine(describeDesignKind(design.kind)) +
+                                                 " requires a tap count in [2, 4096]");
+          return std::nullopt;
+        }
+        // 0 < num/den <= 50, compared without overflow: the sign test runs
+        // first so `50 * den` is only formed on a proven-positive denominator.
+        if (design.kind == ReductionKind::Kaiser &&
+            (design.betaNum < 1 || design.betaDen < 1 ||
+             (design.betaDen <= std::numeric_limits<int64_t>::max() / 50 &&
+              design.betaNum > 50 * design.betaDen))) {
+          diagnostics.error(design.position, "kaiser beta must be a positive rational in (0, 50]");
+          return std::nullopt;
+        }
+        tapCount = design.taps;
       } else {
         diagnostics.error(coefficientOperand.position,
                           "composed fir_filter coefficients currently require a static rank-1 "
-                          "Q15 tensor parameter or a lowpass design");
+                          "Q15 tensor parameter or a coefficient design");
         return std::nullopt;
       }
       if (call.boundary != "valid") {
@@ -2562,11 +2741,19 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                               : ast.result.kind == ReductionKind::CicDecimate   ? "cic_decimate"
                               : ast.result.kind == ReductionKind::Log2          ? "log2"
                               : ast.result.kind == ReductionKind::Exp2          ? "exp2"
+                              : ast.result.kind == ReductionKind::Goertzel      ? "goertzel"
                                                                                 : "cosine";
     bool admitsFloat =
         ast.result.kind == ReductionKind::Rms || ast.result.kind == ReductionKind::MovingAverage ||
-        ast.result.kind == ReductionKind::Dct || ast.result.kind == ReductionKind::Gain;
+        ast.result.kind == ReductionKind::Dct || ast.result.kind == ReductionKind::Gain ||
+        ast.result.kind == ReductionKind::Goertzel;
     bool isFloat = ast.primaryResult().type == SourceType::F32;
+    // The Q15 goertzel energy is tensor<1xi64>, a storage width no source
+    // type names, so only the f32 profile has a spelling here.
+    if (ast.result.kind == ReductionKind::Goertzel && !isFloat) {
+      diagnostics.error(ast.result.position, "goertzel currently binds only the f32 profile");
+      return std::nullopt;
+    }
     if (constexprCount != 0 || !ast.primaryResult().tensor || !lhsParameter ||
         !lhsParameter->isTensor() ||
         (ast.primaryResult().type != SourceType::Q15 && !(admitsFloat && isFloat))) {
@@ -2682,6 +2869,20 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       if (*resultExtent != 1) {
         diagnostics.error(ast.result.position, "rms returns a single-element tensor");
+        return std::nullopt;
+      }
+    } else if (ast.result.kind == ReductionKind::Goertzel) {
+      if (*inputExtent < 2 || *inputExtent > 4096) {
+        diagnostics.error(ast.result.position,
+                          "goertzel currently requires an input extent in [2, 4096]");
+        return std::nullopt;
+      }
+      if (*resultExtent != 1) {
+        diagnostics.error(ast.result.position, "goertzel returns a single-element tensor");
+        return std::nullopt;
+      }
+      if (ast.result.bin < 0 || ast.result.bin > *inputExtent / 2) {
+        diagnostics.error(ast.result.position, "goertzel bin must lie in [0, N/2]");
         return std::nullopt;
       }
     } else {
@@ -2970,12 +3171,32 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
           coefficients = arguments.lookup(coefficientOperand.parameter);
         } else {
           const BuiltinCallAst &design = *coefficientOperand.call;
+          Location designLocation = getLocation(context, sourceName, design.position);
           auto designType = RankedTensorType::get({design.taps}, i16);
-          coefficients = builder.create<ir::FirDesignWindowedSincOp>(
-              getLocation(context, sourceName, design.position), designType,
-              ir::FirDesignResponseAttr::get(&context, ir::FirDesignResponse::Lowpass),
-              builder.getI64IntegerAttr(design.cutoffNum),
-              builder.getI64IntegerAttr(design.cutoffDen), numeric);
+          switch (design.kind) {
+          case ReductionKind::Hamming:
+            coefficients = builder.create<ir::WindowHammingOp>(designLocation, designType, numeric);
+            break;
+          case ReductionKind::Hann:
+            coefficients = builder.create<ir::WindowHannOp>(designLocation, designType, numeric);
+            break;
+          case ReductionKind::Blackman:
+            coefficients =
+                builder.create<ir::WindowBlackmanOp>(designLocation, designType, numeric);
+            break;
+          case ReductionKind::Kaiser:
+            coefficients = builder.create<ir::WindowKaiserOp>(
+                designLocation, designType, builder.getI64IntegerAttr(design.betaNum),
+                builder.getI64IntegerAttr(design.betaDen), numeric);
+            break;
+          default:
+            coefficients = builder.create<ir::FirDesignWindowedSincOp>(
+                designLocation, designType,
+                ir::FirDesignResponseAttr::get(&context, ir::FirDesignResponse::Lowpass),
+                builder.getI64IntegerAttr(design.cutoffNum),
+                builder.getI64IntegerAttr(design.cutoffDen), numeric);
+            break;
+          }
         }
         int64_t inputExtent = cast<RankedTensorType>(signal.getType()).getDimSize(0);
         int64_t tapCount = cast<RankedTensorType>(coefficients.getType()).getDimSize(0);
@@ -3130,6 +3351,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       else
         result = builder.create<ir::Exp2Op>(expressionLocation, outputType, lhs, exponent,
                                             magnitude, rounding);
+    } else if (kernel.ast.result.kind == ReductionKind::Goertzel) {
+      // f32 goertzel rounds at no boundary of its own, so the optional
+      // rounding attribute stays absent.
+      result = builder.create<ir::GoertzelOp>(
+          expressionLocation, outputType, lhs, builder.getI64IntegerAttr(kernel.ast.result.bin),
+          ondsp::FpAttr::get(&context, elementType, *kernel.fpContract), ondsp::RoundingModeAttr());
     } else if (kernel.ast.result.kind == ReductionKind::Sine) {
       result = builder.create<ir::SineOp>(expressionLocation, outputType, lhs, numeric, rounding);
     } else if (kernel.ast.result.kind == ReductionKind::Cosine) {
@@ -3183,6 +3410,19 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         expressionLocation, resultTypes, lhs, rhs, scales, state, numeric, product, accumulatorType,
         *kernel.stateRounding, *kernel.stateOverflow, *kernel.rounding,
         *kernel.destinationOverflow);
+    builder.create<func::ReturnOp>(expressionLocation,
+                                   ValueRange{sos.getOutput(), sos.getNextState()});
+    module->push_back(function);
+    if (failed(verify(*module)))
+      return {};
+    return module;
+  }
+  if (kernel.ast.result.kind == ReductionKind::SosTdf2) {
+    Value scales = arguments.lookup(*getParameterOperand(kernel.ast.result, 2));
+    Value state = arguments.lookup(*getParameterOperand(kernel.ast.result, 3));
+    auto sos = builder.create<ir::SosFilterTdf2Op>(
+        expressionLocation, resultTypes, lhs, rhs, scales, state,
+        ondsp::FpAttr::get(&context, elementType, *kernel.fpContract));
     builder.create<func::ReturnOp>(expressionLocation,
                                    ValueRange{sos.getOutput(), sos.getNextState()});
     module->push_back(function);

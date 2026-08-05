@@ -1,7 +1,6 @@
 // RUN: ondrix-compile %S/Inputs/q15_filtered_spectrum.ox | FileCheck %s
 // RUN: ondrix-compile %S/Inputs/q15_taps_spectrum.ox | FileCheck %s --check-prefix=COEFFS
 // RUN: not ondrix-compile %S/Inputs/invalid_local_unused.ox 2>&1 | FileCheck %s --check-prefix=UNUSED
-// RUN: not ondrix-compile %S/Inputs/invalid_local_reused.ox 2>&1 | FileCheck %s --check-prefix=REUSED
 // RUN: not ondrix-compile %S/Inputs/invalid_local_collision.ox 2>&1 | FileCheck %s --check-prefix=COLLISION
 // RUN: not ondrix-compile %S/Inputs/invalid_lowpass_return.ox 2>&1 | FileCheck %s --check-prefix=DESIGN-RETURN
 // RUN: not ondrix-compile %S/Inputs/invalid_composed_boundary.ox 2>&1 | FileCheck %s --check-prefix=BOUNDARY
@@ -11,11 +10,11 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_unused_parameter.ox 2>&1 | FileCheck %s --check-prefix=PARAMETER
 
 // The composed spectral program: local bindings name one builtin call each
-// and are consumed exactly once by a later statement, so the checked kernel
-// is the nested expression tree direct nesting would produce. The design
-// stage is compile-time intent (evaluated later by the fail-closed
-// quantization pass); the filter carries the executable Q15 export profile;
-// the spectrum and magnitude stages keep their frozen packed-Q15 contracts.
+// and every read instantiates it, so the checked kernel is the nested
+// expression tree direct nesting would produce. The design stage is
+// compile-time intent (evaluated later by the fail-closed quantization
+// pass); the filter carries the executable Q15 export profile; the spectrum
+// and magnitude stages keep their frozen packed-Q15 contracts.
 
 // CHECK-LABEL: func.func @q15_filtered_spectrum(
 // CHECK-SAME: %[[SIGNAL:.*]]: tensor<72xi16>) -> tensor<33xi16>
@@ -47,9 +46,8 @@
 // COEFFS-SAME: (tensor<32xi16>) -> tensor<17xi32>
 // COEFFS: ondrix.cx_magnitude %[[SPECTRUM]]
 
-// Every local binds exactly one use, and every parameter feeds the tree.
+// Every local is read at least once, and every parameter feeds the tree.
 // UNUSED: invalid_local_unused.ox:2:3: error: local 'taps' is never consumed by a later statement
-// REUSED: invalid_local_reused.ox:4:20: error: local 'filtered' is already consumed; each local binds exactly one use
 // COLLISION: invalid_local_collision.ox:2:3: error: local 'signal' collides with an existing name
 // PARAMETER: invalid_unused_parameter.ox:1:54: error: parameter 'extra' is never consumed by the kernel expression
 
