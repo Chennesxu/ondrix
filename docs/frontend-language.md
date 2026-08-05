@@ -435,6 +435,12 @@ at the call site, the same projection `dct`'s derived output fraction uses.
 Neither is part of the composable set yet, so like `dct`, `rms`, `sine`, and
 `cosine` they take an operand name rather than a nested expression.
 
+`phase(z)` maps a `complex_q15` tensor to the unsigned turn its elements'
+arguments name, in the same reading `sine` consumes. It composes exactly
+where `magnitude` does — `phase(rfft(x))` is the phase spectrum. Its contract
+admits exactly one tie rule, so unlike `magnitude`'s `root_rounding=` there
+is no rounding parameter to accept, and spelling one is a parse error.
+
 ### Elementwise Builtins
 
 `add`, `sub`, `mult`, `abs`, `negate`, `offset`, and `shift` map static rank-1

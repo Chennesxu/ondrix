@@ -218,6 +218,7 @@ enum class ReductionKind {
   Rfft,
   Irfft,
   Magnitude,
+  Phase,
   Dct,
   MovingAverage,
   Gain,
@@ -261,7 +262,7 @@ static bool isFftKind(ReductionKind kind) {
 }
 
 static bool isFftComposableKind(ReductionKind kind) {
-  return isFftKind(kind) || kind == ReductionKind::Magnitude;
+  return isFftKind(kind) || kind == ReductionKind::Magnitude || kind == ReductionKind::Phase;
 }
 
 // The set whose members may hold one another as operands. Its checker
@@ -653,18 +654,18 @@ public:
         !isIdentifier("convolution") && !isIdentifier("correlation") &&
         !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft") &&
         !isIdentifier("rfft") && !isIdentifier("irfft") && !isIdentifier("magnitude") &&
-        !isIdentifier("dct") && !isIdentifier("moving_average") && !isIdentifier("gain") &&
-        !isIdentifier("rms") && !isIdentifier("sine") && !isIdentifier("cosine") &&
-        !isIdentifier("matmul") && !isIdentifier("lms") && !isIdentifier("lowpass") &&
-        !isIdentifier("cic_decimate") && !isIdentifier("add") && !isIdentifier("sub") &&
-        !isIdentifier("mult") && !isIdentifier("abs") && !isIdentifier("negate") &&
-        !isIdentifier("offset") && !isIdentifier("shift") && !isIdentifier("log2") &&
-        !isIdentifier("exp2")) {
+        !isIdentifier("phase") && !isIdentifier("dct") && !isIdentifier("moving_average") &&
+        !isIdentifier("gain") && !isIdentifier("rms") && !isIdentifier("sine") &&
+        !isIdentifier("cosine") && !isIdentifier("matmul") && !isIdentifier("lms") &&
+        !isIdentifier("lowpass") && !isIdentifier("cic_decimate") && !isIdentifier("add") &&
+        !isIdentifier("sub") && !isIdentifier("mult") && !isIdentifier("abs") &&
+        !isIdentifier("negate") && !isIdentifier("offset") && !isIdentifier("shift") &&
+        !isIdentifier("log2") && !isIdentifier("exp2")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
                         "convolution(...), correlation(...), butterfly(...), cfft(...), or "
-                        "icfft(...), rfft(...), irfft(...), magnitude(...), dct(...), "
+                        "icfft(...), rfft(...), irfft(...), magnitude(...), phase(...), dct(...), "
                         "moving_average(...), gain(...), rms(...), sine(...), cosine(...), "
                         "matmul(...), lms(...), cic_decimate(...), lowpass(...), or an "
                         "elementwise add/sub/mult/abs/negate/offset/shift builtin expression");
@@ -700,6 +701,8 @@ public:
       call.kind = ReductionKind::Irfft;
     else if (isIdentifier("magnitude"))
       call.kind = ReductionKind::Magnitude;
+    else if (isIdentifier("phase"))
+      call.kind = ReductionKind::Phase;
     else if (isIdentifier("dct"))
       call.kind = ReductionKind::Dct;
     else if (isIdentifier("moving_average"))
@@ -764,6 +767,17 @@ public:
         return std::nullopt;
       call.operands.push_back(std::move(*operand));
       if (!expect(TokenKind::RightParen, "expected ')' after FFT operand"))
+        return std::nullopt;
+      return call;
+    }
+    if (call.kind == ReductionKind::Phase) {
+      // The phase contract admits exactly one tie rule, so unlike magnitude
+      // there is no rounding choice to expose at the call site.
+      std::optional<ExpressionAst> operand = parseComposedOperand();
+      if (!operand)
+        return std::nullopt;
+      call.operands.push_back(std::move(*operand));
+      if (!expect(TokenKind::RightParen, "expected ')' after phase operand"))
         return std::nullopt;
       return call;
     }
@@ -2252,6 +2266,18 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       if (!input)
         return std::nullopt;
 
+      if (call.kind == ReductionKind::Phase) {
+        if (input->elementType != SourceType::ComplexQ15) {
+          diagnostics.error(call.position, "phase requires complex_q15 operand elements");
+          return std::nullopt;
+        }
+        if (input->extent < 1 || input->extent > 4096) {
+          diagnostics.error(call.position,
+                            "phase currently requires an operand extent in [1, 4096]");
+          return std::nullopt;
+        }
+        return ComposedType{SourceType::Q15, input->extent};
+      }
       if (call.kind == ReductionKind::Magnitude) {
         if (input->elementType != SourceType::ComplexQ15) {
           diagnostics.error(call.position, "magnitude requires complex_q15 operand elements");
@@ -3025,6 +3051,17 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                                            rounding, overflow);
       }
       Location callLocation = getLocation(context, sourceName, call.position);
+      if (call.kind == ReductionKind::Phase) {
+        // The result reading is the unsigned Q0.16 turn; the source type
+        // system names only the i16 storage, so the binding supplies it —
+        // the same projection log2/exp2 use.
+        auto outputType = RankedTensorType::get({inputType.getDimSize(0)}, builder.getI16Type());
+        auto turn =
+            ondsp::FixedAttr::get(&context, ondsp::Signedness::Unsigned, builder.getI16Type(), 16);
+        return builder.create<ir::CxPhaseOp>(
+            callLocation, outputType, input, layout, numeric, turn,
+            ondsp::RoundingModeAttr::get(&context, ondsp::RoundingMode::NearestEven));
+      }
       if (call.kind == ReductionKind::Magnitude) {
         auto outputType = RankedTensorType::get({inputType.getDimSize(0)}, builder.getI16Type());
         // The declared root rounding was validated in sema; omission keeps

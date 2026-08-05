@@ -1340,6 +1340,53 @@ def Ondrix_CxMagnitudeOp : Ondrix_Op<"cx_magnitude", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_CxPhaseOp : Ondrix_Op<"cx_phase", [Pure]> {
+  let summary = "Fixed-point phase of a packed Q15 complex tensor, as a turn";
+  let description = [{
+    `ondrix.cx_phase` maps each packed signed-Q1.15 complex element to its
+    argument, expressed in the SAME unsigned turn `ondrix.sine` reads:
+    the result is `atan2(im, re) / (2*pi) * 2^16` taken modulo `2^16`, so
+    `sine(cx_phase(z))` is a well-formed program and phase arithmetic stays
+    exact under two's-complement wraparound. The result reading is the
+    unsigned `Q0.16` turn and is declared in its own attribute.
+
+    ```text
+    (re, im) == (0, 0)  ->  0                the declared value at the origin
+    a, b   = |re|, |im|                      exact in i32
+    hi, lo = max(a,b), min(a,b)
+    r      = round(lo * 2^16 / hi)           in [0, 65536]
+    i      = min(r >> 9, 127)                129-entry table index
+    f      = r - i * 512                     Q9 interpolation fraction
+    t[k]   = q16(atan(k/128) / (2*pi))       tie-guarded, t[128] = 8192 exactly
+    base   = t[i] + round((t[i+1] - t[i]) * f / 2^9)
+    q      = b > a ? 16384 - base : base     the octant fold, exact
+    turn   = re >= 0 ? (im >= 0 ? q : -q) : (im >= 0 ? 32768 - q : 32768 + q)
+    ```
+
+    Two rounding boundaries per element, the ratio and the interpolation,
+    both under the one declared tie rule. Everything else — the absolute
+    values, the octant fold, and the quadrant unfold — is exact index
+    arithmetic on the turn, which is why the eight octants meet exactly at
+    their boundaries instead of nearly: the axes give `0`, `16384`, `32768`
+    and `49152`, and the diagonals give the odd multiples of `8192`.
+
+    The input domain is `2^32` pairs, so unlike `ondrix.sine` and
+    `ondrix.log2` this contract is NOT gated exhaustively, and the gate says
+    which structure it covers instead: every value of one component against
+    fixed values of the other, all four axes and all four diagonals over
+    their whole range, the rails, and a deterministic sweep. That is a
+    weaker evidence class than an exhaustive one and is recorded as such.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_CxLayoutAttr:$layout,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_FixedAttr:$output_numeric,
+                   Ondsp_RoundingModeAttr:$rounding);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_WindowHammingOp : Ondrix_Op<"window_hamming", [Pure]> {
   let summary = "Compile-time symmetric Hamming window coefficients";
   let description = [{

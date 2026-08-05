@@ -1505,6 +1505,32 @@ LogicalResult CxMagnitudeOp::verify() {
   return success();
 }
 
+LogicalResult CxPhaseOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+  ondrix::ondsp::FixedAttr output = getOutputNumeric();
+  if (output.getSignedness() != ondrix::ondsp::Signedness::Unsigned ||
+      !output.getStorage().isSignlessInteger(16) || output.getFrac() != 16)
+    return emitOpError("cx_phase returns the unsigned Q0.16 turn and must declare that reading");
+  if (getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
+    return emitOpError("executable phase requires packed_i16_imag_hi_real_lo layout");
+  if (getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
+    return emitOpError("cx_phase requires nearest_even rounding");
+  RankedTensorType inputType = getInput().getType();
+  RankedTensorType resultType = getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
+    return failure();
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if (inputExtent == ShapedType::kDynamic || inputExtent < 1 || inputExtent > 4096 ||
+      resultExtent != inputExtent || !inputType.getElementType().isSignlessInteger(32) ||
+      !resultType.getElementType().isSignlessInteger(16))
+    return emitOpError("executable phase requires tensor<Nxi32> to tensor<Nxi16> "
+                       "with static N in [1, 4096]");
+  return success();
+}
+
 LogicalResult WindowHammingOp::verify() {
   if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
     return failure();

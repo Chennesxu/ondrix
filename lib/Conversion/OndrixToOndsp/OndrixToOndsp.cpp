@@ -2031,6 +2031,154 @@ static std::optional<SmallVector<int32_t>> buildExp2Table() {
   return table;
 }
 
+static std::optional<SmallVector<int32_t>> buildArctangentTable() {
+  SmallVector<int32_t> table;
+  table.reserve(129);
+  constexpr double kTwoPi = 6.28318530717958647692528676655900577;
+  for (int64_t k = 0; k <= 128; ++k) {
+    // The eighth-turn endpoint is exact by definition, not by rounding: it
+    // is what makes the diagonals of the octant fold meet.
+    if (k == 128) {
+      table.push_back(8192);
+      break;
+    }
+    double exact = std::atan(double(k) / 128.0) / kTwoPi * 65536.0;
+    double rounded = std::nearbyint(exact);
+    if (std::abs(exact - rounded) > 0.5 - 9.5367431640625e-07)
+      return std::nullopt;
+    table.push_back(int32_t(rounded));
+  }
+  return table;
+}
+
+class CxPhaseOpLowering final : public OpConversionPattern<ondrix::ir::CxPhaseOp> {
+public:
+  using OpConversionPattern<ondrix::ir::CxPhaseOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::CxPhaseOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    std::optional<SmallVector<int32_t>> table = buildArctangentTable();
+    if (!table)
+      return rewriter.notifyMatchFailure(op, "arctangent table entry is not tie-guard admissible");
+
+    Location loc = op.getLoc();
+    MLIRContext *context = rewriter.getContext();
+    IntegerType i16 = rewriter.getI16Type();
+    IntegerType i32 = rewriter.getIntegerType(32);
+    IntegerType i64 = rewriter.getIntegerType(64);
+    RankedTensorType resultType = op.getResult().getType();
+    int64_t extent = resultType.getDimSize(0);
+    auto interpolation =
+        ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, /*postShiftRight=*/9,
+                                      op.getRounding(), ondrix::ondsp::OverflowMode::Saturate, i32);
+
+    Value tableConstant = rewriter.create<arith::ConstantOp>(
+        loc,
+        DenseElementsAttr::get(RankedTensorType::get({129}, i32), llvm::ArrayRef<int32_t>(*table)));
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+    Value empty = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), i16);
+
+    auto loop = rewriter.create<scf::ForOp>(
+        loc, zero, extentValue, one, ValueRange{empty},
+        [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+          auto constant = [&](int64_t value, IntegerType type) -> Value {
+            return builder.create<arith::ConstantIntOp>(loc, value, type);
+          };
+          Value packed = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+          Value real = builder.create<arith::ExtSIOp>(
+              loc, i32, builder.create<arith::TruncIOp>(loc, i16, packed));
+          Value imaginary = builder.create<arith::ExtSIOp>(
+              loc, i32,
+              builder.create<arith::TruncIOp>(
+                  loc, i16, builder.create<arith::ShRSIOp>(loc, packed, constant(16, i32))));
+          Value zero32 = constant(0, i32);
+          Value one32 = constant(1, i32);
+          Value absReal = builder.create<arith::MaxSIOp>(
+              loc, real, builder.create<arith::SubIOp>(loc, zero32, real));
+          Value absImaginary = builder.create<arith::MaxSIOp>(
+              loc, imaginary, builder.create<arith::SubIOp>(loc, zero32, imaginary));
+          Value swapped =
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, absImaginary, absReal);
+          Value high = builder.create<arith::MaxSIOp>(loc, absReal, absImaginary);
+          Value low = builder.create<arith::MinSIOp>(loc, absReal, absImaginary);
+          // The origin has no argument; the divisor is forced to one so the
+          // division is defined, and the declared value replaces the result.
+          Value atOrigin =
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, high, zero32);
+          Value divisor = builder.create<arith::SelectOp>(loc, atOrigin, one32, high);
+
+          // The ratio, rounded once. Both operands are non-negative, so the
+          // truncating division is the floor and the remainder is the
+          // Euclidean one; the tie test compares 2*remainder against the
+          // divisor rather than forming a half that may not be an integer.
+          Value numerator = builder.create<arith::ShLIOp>(
+              loc, builder.create<arith::ExtSIOp>(loc, i64, low), constant(16, i64));
+          Value wideDivisor = builder.create<arith::ExtSIOp>(loc, i64, divisor);
+          Value quotient = builder.create<arith::DivSIOp>(loc, numerator, wideDivisor);
+          Value remainder = builder.create<arith::SubIOp>(
+              loc, numerator, builder.create<arith::MulIOp>(loc, quotient, wideDivisor));
+          Value doubled = builder.create<arith::AddIOp>(loc, remainder, remainder);
+          Value aboveHalf =
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, doubled, wideDivisor);
+          Value atHalf =
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, doubled, wideDivisor);
+          Value odd = builder.create<arith::CmpIOp>(
+              loc, arith::CmpIPredicate::ne,
+              builder.create<arith::AndIOp>(loc, quotient, constant(1, i64)), constant(0, i64));
+          Value stepUp = builder.create<arith::OrIOp>(
+              loc, aboveHalf, builder.create<arith::AndIOp>(loc, atHalf, odd));
+          Value ratio = builder.create<arith::TruncIOp>(
+              loc, i32,
+              builder.create<arith::AddIOp>(loc, quotient,
+                                            builder.create<arith::SelectOp>(
+                                                loc, stepUp, constant(1, i64), constant(0, i64))));
+
+          Value rawIndex = builder.create<arith::ShRUIOp>(loc, ratio, constant(9, i32));
+          Value tableIndex = builder.create<arith::MinSIOp>(loc, rawIndex, constant(127, i32));
+          Value fraction = builder.create<arith::SubIOp>(
+              loc, ratio, builder.create<arith::ShLIOp>(loc, tableIndex, constant(9, i32)));
+          Value lowerIdx =
+              builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), tableIndex);
+          Value upperIdx = builder.create<arith::IndexCastOp>(
+              loc, builder.getIndexType(), builder.create<arith::AddIOp>(loc, tableIndex, one32));
+          Value lower = builder.create<tensor::ExtractOp>(loc, tableConstant, lowerIdx);
+          Value upper = builder.create<tensor::ExtractOp>(loc, tableConstant, upperIdx);
+          Value interpolated = builder.create<ondrix::ondsp::RoundShiftOp>(
+              loc, i32,
+              builder.create<arith::MulIOp>(loc, builder.create<arith::SubIOp>(loc, upper, lower),
+                                            fraction),
+              interpolation);
+          Value base = builder.create<arith::AddIOp>(loc, lower, interpolated);
+
+          // From here everything is exact turn arithmetic, which is what
+          // makes the octant boundaries meet rather than nearly meet.
+          Value folded = builder.create<arith::SelectOp>(
+              loc, swapped, builder.create<arith::SubIOp>(loc, constant(16384, i32), base), base);
+          Value nonNegativeReal =
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, real, zero32);
+          Value nonNegativeImaginary =
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, imaginary, zero32);
+          Value half = constant(32768, i32);
+          Value right =
+              builder.create<arith::SelectOp>(loc, nonNegativeImaginary, folded,
+                                              builder.create<arith::SubIOp>(loc, zero32, folded));
+          Value left = builder.create<arith::SelectOp>(
+              loc, nonNegativeImaginary, builder.create<arith::SubIOp>(loc, half, folded),
+              builder.create<arith::AddIOp>(loc, half, folded));
+          Value turn = builder.create<arith::SelectOp>(loc, nonNegativeReal, right, left);
+          Value selected = builder.create<arith::SelectOp>(loc, atOrigin, zero32, turn);
+          Value narrowed = builder.create<arith::TruncIOp>(loc, i16, selected);
+          Value inserted =
+              builder.create<tensor::InsertOp>(loc, narrowed, iterArgs.front(), position);
+          builder.create<scf::YieldOp>(loc, inserted);
+        });
+    rewriter.replaceOp(op, loop.getResult(0));
+    return success();
+  }
+};
+
 class Log2OpLowering final : public OpConversionPattern<ondrix::ir::Log2Op> {
 public:
   using OpConversionPattern<ondrix::ir::Log2Op>::OpConversionPattern;
@@ -2920,11 +3068,11 @@ public:
         DotOpLowering, ButterflyOpLowering, QuantizeOpLowering, RfftRadix4SplitOpLowering,
         CxMagnitudeOpLowering, DctOpLowering, GainOpLowering, LmsOpLowering, RmsOpLowering,
         MatmulOpLowering, GoertzelOpLowering, SineOpLowering, CosineOpLowering, Log2OpLowering,
-        Exp2OpLowering, CicDecimateOpLowering, ElementwiseOpLowering<ondrix::ir::AddOp>,
-        ElementwiseOpLowering<ondrix::ir::SubOp>, ElementwiseOpLowering<ondrix::ir::MultOp>,
-        ElementwiseOpLowering<ondrix::ir::AbsOp>, ElementwiseOpLowering<ondrix::ir::NegateOp>,
-        ElementwiseOpLowering<ondrix::ir::OffsetOp>, ElementwiseOpLowering<ondrix::ir::ShiftOp>>(
-        &getContext());
+        CxPhaseOpLowering, Exp2OpLowering, CicDecimateOpLowering,
+        ElementwiseOpLowering<ondrix::ir::AddOp>, ElementwiseOpLowering<ondrix::ir::SubOp>,
+        ElementwiseOpLowering<ondrix::ir::MultOp>, ElementwiseOpLowering<ondrix::ir::AbsOp>,
+        ElementwiseOpLowering<ondrix::ir::NegateOp>, ElementwiseOpLowering<ondrix::ir::OffsetOp>,
+        ElementwiseOpLowering<ondrix::ir::ShiftOp>>(&getContext());
     if (vectorizeStaticCfft && fftLoops) {
       module.emitError("vectorize-static-cfft and fft-loops are mutually exclusive alternative "
                        "FFT lowerings; select at most one");
