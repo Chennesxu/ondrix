@@ -62,28 +62,6 @@ func.func @rejects_fixed_policy_on_f32(
 
 // -----
 
-// A newly declared dialect rounding mode does not silently widen this
-// contract: the admissible tie rules are per operation, and nearest_ties_
-// positive has no lowering or differential evidence here.
-
-func.func @rejects_unestablished_rounding(
-    %input: tensor<8xi16>, %kernel: tensor<3xi16>, %init: tensor<6xi16>) {
-  // expected-error @+1 {{fixed conv1d supports toward_negative, toward_zero, or nearest_even rounding}}
-  %0 = ondrix.conv1d %input, %kernel, %init {
-    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
-                              update_overflow = saturate>,
-    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
-    mode = #ondrix.conv1d_mode<correlation>,
-    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
-    overflow = #ondsp.overflow<saturate>,
-    product = #ondsp.product<full>,
-    rounding = #ondsp.rounding<nearest_ties_positive>
-  } : (tensor<8xi16>, tensor<3xi16>, tensor<6xi16>) -> tensor<6xi16>
-  return
-}
-
-// -----
-
 func.func @conv1d_rejects_f64(
     %input: tensor<8xf64>, %kernel: tensor<3xf64>, %init: tensor<6xf64>) -> tensor<6xf64> {
   // expected-error@+1 {{executable conv1d supports the f32 floating-point format}}

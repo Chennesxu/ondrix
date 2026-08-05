@@ -33,3 +33,22 @@ func.func @f32_correlation(
   } : (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
   return %result : tensor<?xf32>
 }
+
+// CHECK-LABEL: func.func @q15_correlation_ties_positive_export
+// CHECK: ondrix.conv1d
+// CHECK-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
+func.func @q15_correlation_ties_positive_export(
+    %input: tensor<8xi16>, %kernel: tensor<3xi16>, %init: tensor<6xi16>)
+    -> tensor<6xi16> {
+  %result = ondrix.conv1d %input, %kernel, %init {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    mode = #ondrix.conv1d_mode<correlation>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<8xi16>, tensor<3xi16>, tensor<6xi16>) -> tensor<6xi16>
+  return %result : tensor<6xi16>
+}

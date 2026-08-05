@@ -1711,14 +1711,16 @@ static std::optional<ondsp::RoundingMode> parseRounding(llvm::StringRef value) {
   return std::nullopt;
 }
 
-// The three established rounding modes (two directed, one tie-breaking)
-// every export-policy contract in the language already
-// covers. A newly declared dialect mode is opted into per builtin, together
-// with the operation contract and its differential evidence; it never
-// reaches a binding just because the enum grew a case.
-static bool isEstablishedRounding(ondsp::RoundingMode mode) {
+// The rounding modes every accumulator-export contract in the language covers
+// (dot/FIR-family export and the SOS state/output boundaries carry per-op
+// discriminating object evidence for all four). A newly declared dialect mode
+// is opted into per builtin, together with the operation contract and its
+// differential evidence; it never reaches a binding just because the enum
+// grew a case.
+static bool isDeclaredExportRounding(ondsp::RoundingMode mode) {
   return mode == ondsp::RoundingMode::TowardNegative || mode == ondsp::RoundingMode::TowardZero ||
-         mode == ondsp::RoundingMode::NearestEven;
+         mode == ondsp::RoundingMode::NearestEven ||
+         mode == ondsp::RoundingMode::NearestTiesPositive;
 }
 
 static std::optional<ondsp::FpContractMode> parseFpContract(llvm::StringRef value) {
@@ -1973,16 +1975,17 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         "sos_df2_fixed contains an unsupported numeric policy");
       return std::nullopt;
     }
-    if (!isEstablishedRounding(*stateRounding)) {
-      diagnostics.error(
-          ast.result.position,
-          "sos_df2_fixed state_rounding must be nearest_even, toward_negative, or toward_zero");
+    if (!isDeclaredExportRounding(*stateRounding)) {
+      diagnostics.error(ast.result.position,
+                        "sos_df2_fixed state_rounding must be nearest_even, nearest_ties_positive, "
+                        "toward_negative, or toward_zero");
       return std::nullopt;
     }
-    if (!isEstablishedRounding(*outputRounding)) {
+    if (!isDeclaredExportRounding(*outputRounding)) {
       diagnostics.error(
           ast.result.position,
-          "sos_df2_fixed output_rounding must be nearest_even, toward_negative, or toward_zero");
+          "sos_df2_fixed output_rounding must be nearest_even, nearest_ties_positive, "
+          "toward_negative, or toward_zero");
       return std::nullopt;
     }
     return CheckedKernel{std::move(ast), *updateOverflow, *outputRounding, *outputOverflow,
@@ -2341,9 +2344,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                           llvm::Twine("unsupported rounding mode '") + call.rounding + "'");
         return std::nullopt;
       }
-      if (!isEstablishedRounding(*rounding)) {
-        diagnostics.error(call.position,
-                          "export rounding must be nearest_even, toward_negative, or toward_zero");
+      if (!isDeclaredExportRounding(*rounding)) {
+        diagnostics.error(
+            call.position,
+            "export rounding must be nearest_even, nearest_ties_positive, toward_negative, or "
+            "toward_zero");
         return std::nullopt;
       }
       if (!parseOverflow(call.destinationOverflow)) {
@@ -3039,9 +3044,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                       llvm::Twine("unsupported rounding mode '") + ast.result.rounding + "'");
     return std::nullopt;
   }
-  if (!isEstablishedRounding(*rounding)) {
-    diagnostics.error(ast.result.position,
-                      "export rounding must be nearest_even, toward_negative, or toward_zero");
+  if (!isDeclaredExportRounding(*rounding)) {
+    diagnostics.error(
+        ast.result.position,
+        "export rounding must be nearest_even, nearest_ties_positive, toward_negative, or "
+        "toward_zero");
     return std::nullopt;
   }
   auto destinationOverflow = parseOverflow(ast.result.destinationOverflow);

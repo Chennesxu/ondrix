@@ -2,7 +2,7 @@
 // RUN: FileCheck %s --check-prefix=LOWERED < %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
-// RUN: cc %S/Inputs/fir_decimate_q15_aot.c %t.o -o %t
+// RUN: cc -DFIR_DECIMATE_TIES_POSITIVE_SYMBOL=_mlir_ciface_fir_decimate_q15_ties_positive %S/Inputs/fir_decimate_q15_aot.c %t.o -o %t
 // RUN: %t
 
 // LOWERED-LABEL: llvm.func @fir_decimate_q15
@@ -23,6 +23,23 @@ func.func @fir_decimate_q15(
     overflow = #ondsp.overflow<saturate>,
     product = #ondsp.product<full>,
     rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<12xi16>, tensor<5xi16>, tensor<4xi16>) -> tensor<4xi16>
+  return %result : tensor<4xi16>
+}
+
+func.func @fir_decimate_q15_ties_positive(
+    %input: tensor<12xi16>, %coeffs: tensor<5xi16>) -> tensor<4xi16>
+    attributes {llvm.emit_c_interface} {
+  %init = tensor.empty() : tensor<4xi16>
+  %result = ondrix.fir_decimate %input, %coeffs, %init {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    factor = 2,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
   } : (tensor<12xi16>, tensor<5xi16>, tensor<4xi16>) -> tensor<4xi16>
   return %result : tensor<4xi16>
 }

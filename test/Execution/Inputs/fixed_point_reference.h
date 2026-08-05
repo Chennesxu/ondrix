@@ -6,7 +6,7 @@
 // Share only fixed-width integer primitives. Each execution test retains an
 // independent recurrence implementation and independent hard-coded goldens.
 enum OverflowMode { WRAP, SATURATE };
-enum RoundingMode { TOWARD_NEGATIVE, NEAREST_EVEN, TOWARD_ZERO };
+enum RoundingMode { TOWARD_NEGATIVE, NEAREST_EVEN, TOWARD_ZERO, NEAREST_TIES_POSITIVE };
 
 struct Policy {
   unsigned width;
@@ -68,6 +68,10 @@ static int64_t export_reference(int64_t accumulator, enum RoundingMode rounding,
     if (remainder > half || (remainder == half && quotient % 2 != 0))
       ++quotient;
   }
+  // ITU-style add-half-then-floor-shift, total in __int128 — deliberately not
+  // the compiler's quotient/remainder form.
+  if (rounding == NEAREST_TIES_POSITIVE)
+    quotient = floor_divide_by_power_of_two((__int128)accumulator + divisor / 2, shift);
   return overflow == WRAP ? wrap_signed(quotient, policy->width)
                           : clamp_signed(quotient, policy->width);
 }

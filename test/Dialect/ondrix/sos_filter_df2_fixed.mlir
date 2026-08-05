@@ -46,3 +46,23 @@ func.func @q31_static(
       -> (tensor<8xi32>, tensor<2x2xi32>)
   return %output, %next : tensor<8xi32>, tensor<2x2xi32>
 }
+
+// CHECK-LABEL: func.func @q15_sos_df2_ties_positive_boundaries
+// CHECK: ondrix.sos_filter_df2_fixed
+// CHECK-SAME: output_rounding = #ondsp.rounding<nearest_ties_positive>
+// CHECK-SAME: state_rounding = #ondsp.rounding<nearest_ties_positive>
+func.func @q15_sos_df2_ties_positive_boundaries(
+    %input: tensor<4xi16>, %coeffs: tensor<1x5xi16>,
+    %scales: tensor<1xi16>, %state: tensor<1x2xi16>)
+    -> (tensor<4xi16>, tensor<1x2xi16>) {
+  %output, %next = ondrix.sos_filter_df2_fixed %input, %coeffs, %scales, %state {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_overflow = #ondsp.overflow<saturate>,
+    output_rounding = #ondsp.rounding<nearest_ties_positive>,
+    product = #ondsp.product<full>, state_overflow = #ondsp.overflow<saturate>,
+    state_rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<4xi16>, tensor<1x5xi16>, tensor<1xi16>, tensor<1x2xi16>)
+      -> (tensor<4xi16>, tensor<1x2xi16>)
+  return %output, %next : tensor<4xi16>, tensor<1x2xi16>
+}

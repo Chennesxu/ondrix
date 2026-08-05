@@ -1,4 +1,4 @@
-def invalid_sos_state_ties_positive(
+def q15_sos_ties_positive(
     input: tensor[q15],
     coefficients: tensor[q15,1,5],
     scales: tensor[q15,1],
@@ -9,5 +9,5 @@ def invalid_sos_state_ties_positive(
       accumulator=exact[40,saturate],
       state_rounding=nearest_ties_positive,
       state_overflow=saturate,
-      output_rounding=toward_zero,
-      output_overflow=wrap)
+      output_rounding=nearest_ties_positive,
+      output_overflow=saturate)

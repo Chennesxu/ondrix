@@ -201,3 +201,20 @@ func.func @q15_stream_static_state_value(
   %value = tensor.extract %next[%index] : tensor<2xi16>
   return %value : i16
 }
+
+func.func @q15_stream_output_value_ties_positive(
+    %input: tensor<?xi16>, %coeffs: tensor<?xi16>, %state: tensor<?xi16>,
+    %index: index) -> i16 {
+  %output, %next = ondrix.fir_stream %input, %coeffs, %state {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<?xi16>, tensor<?xi16>, tensor<?xi16>)
+      -> (tensor<?xi16>, tensor<?xi16>)
+  %value = tensor.extract %output[%index] : tensor<?xi16>
+  return %value : i16
+}

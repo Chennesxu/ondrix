@@ -74,3 +74,22 @@ func.func @q15_full_output_tile(
   } : (tensor<8xi16>, tensor<5xi16>, tensor<4xi16>, index) -> tensor<4xi16>
   return %result : tensor<4xi16>
 }
+
+// CHECK-LABEL: func.func @q15_fir_filter_ties_positive_export
+// CHECK: ondrix.fir_filter
+// CHECK-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
+func.func @q15_fir_filter_ties_positive_export(
+    %input: tensor<8xi16>, %coeffs: tensor<3xi16>, %init: tensor<6xi16>)
+    -> tensor<6xi16> {
+  %result = ondrix.fir_filter %input, %coeffs, %init {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    boundary = #ondrix.fir_boundary<valid>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<8xi16>, tensor<3xi16>, tensor<6xi16>) -> tensor<6xi16>
+  return %result : tensor<6xi16>
+}

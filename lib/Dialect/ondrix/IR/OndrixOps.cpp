@@ -173,24 +173,24 @@ static LogicalResult verifySignedFixedFormat(Operation *op, Attribute numeric, u
 }
 
 // Rounding is a per-operation declared contract, never a mode that a new
-// dialect enum case silently extends. Operations that already pin their own
-// admissible tie rules keep doing so; this helper is the shared floor for
-// the remaining rounding-bearing operations, whose contracts, lowerings, and
-// differential evidence cover only the three established modes. A newly
-// declared mode has to be admitted deliberately, per operation, together
-// with its lowering and evidence.
-static LogicalResult verifyEstablishedRounding(Operation *op, ondrix::ondsp::RoundingMode rounding,
-                                               StringRef name) {
+// dialect enum case silently extends. Operations that pin a narrower rule
+// set keep doing so; this helper is the shared floor for elementwise
+// requantization and accumulator-export boundaries, where all four declared
+// modes carry a round_shift/acc_export lowering and per-operation
+// discriminating object evidence. A future enum case falls through to the
+// diagnostic (and -Wswitch) until it is admitted with its own evidence.
+static LogicalResult verifyDeclaredRounding(Operation *op, ondrix::ondsp::RoundingMode rounding,
+                                            StringRef name) {
   switch (rounding) {
   case ondrix::ondsp::RoundingMode::TowardNegative:
   case ondrix::ondsp::RoundingMode::TowardZero:
   case ondrix::ondsp::RoundingMode::NearestEven:
-    return success();
   case ondrix::ondsp::RoundingMode::NearestTiesPositive:
-    break;
+    return success();
   }
   return op->emitOpError() << name
-                           << " supports toward_negative, toward_zero, or nearest_even rounding";
+                           << " supports toward_negative, toward_zero, nearest_even, or "
+                              "nearest_ties_positive rounding";
 }
 
 static LogicalResult verifyRfftRadix4SplitValueDomain(RfftRadix4SplitOp op) {
@@ -336,7 +336,7 @@ static LogicalResult verifyFirFilterDomain(FirFilterOp op) {
     if (!op.getAccumulator() || !op.getDst() || !op.getRounding() || !op.getOverflow())
       return op.emitOpError(
           "fixed FIR filter requires accumulator, dst, rounding, and overflow attributes");
-    if (failed(verifyEstablishedRounding(op, *op.getRounding(), "fixed FIR filter")))
+    if (failed(verifyDeclaredRounding(op, *op.getRounding(), "fixed FIR filter")))
       return failure();
     if (failed(verifyFixedReductionResult(op, *op.getAccumulator(), fixed, *op.getProduct())))
       return failure();
@@ -365,7 +365,7 @@ verifyQ15ResamplingProfile(Operation *op, RankedTensorType inputType, RankedTens
                            ondrix::ondsp::FixedAttr numeric, ondrix::ondsp::ProductAttr product,
                            ondrix::ondsp::AccType accumulator, ondrix::ondsp::FixedAttr destination,
                            ondrix::ondsp::RoundingMode rounding) {
-  if (failed(verifyEstablishedRounding(op, rounding, "Q15 resampling")))
+  if (failed(verifyDeclaredRounding(op, rounding, "Q15 resampling")))
     return failure();
   auto accumulatorStorage = dyn_cast<IntegerType>(accumulator.getStorage());
   if (!ondrix::ondsp::isSignedQ15(numeric) || !ondrix::ondsp::isFullProduct(product) ||
@@ -506,7 +506,7 @@ static LogicalResult verifyConv1DDomain(Conv1DOp op) {
     if (!op.getAccumulator() || !op.getDst() || !op.getRounding() || !op.getOverflow())
       return op.emitOpError(
           "fixed conv1d requires accumulator, dst, rounding, and overflow attributes");
-    if (failed(verifyEstablishedRounding(op, *op.getRounding(), "fixed conv1d")))
+    if (failed(verifyDeclaredRounding(op, *op.getRounding(), "fixed conv1d")))
       return failure();
     if (failed(verifyFixedReductionResult(op, *op.getAccumulator(), fixed, *op.getProduct())))
       return failure();
@@ -577,7 +577,7 @@ static LogicalResult verifyFirStreamDomain(FirStreamOp op) {
     if (!op.getAccumulator() || !op.getDst() || !op.getRounding() || !op.getOverflow())
       return op.emitOpError(
           "fixed FIR stream requires accumulator, dst, rounding, and overflow attributes");
-    if (failed(verifyEstablishedRounding(op, *op.getRounding(), "fixed FIR stream")))
+    if (failed(verifyDeclaredRounding(op, *op.getRounding(), "fixed FIR stream")))
       return failure();
     if (failed(verifyFixedReductionResult(op, *op.getAccumulator(), fixed, *op.getProduct())))
       return failure();
@@ -683,8 +683,8 @@ static LogicalResult verifySosFilterDf2FixedDomain(SosFilterDf2FixedOp op) {
     return op.emitOpError(
         "supports only signed Q15/full with i40/frac30 accumulator or signed Q31/full with "
         "i64/frac62 accumulator");
-  if (failed(verifyEstablishedRounding(op, op.getStateRounding(), "state_rounding")) ||
-      failed(verifyEstablishedRounding(op, op.getOutputRounding(), "output_rounding")))
+  if (failed(verifyDeclaredRounding(op, op.getStateRounding(), "state_rounding")) ||
+      failed(verifyDeclaredRounding(op, op.getOutputRounding(), "output_rounding")))
     return failure();
   return success();
 }
@@ -851,21 +851,6 @@ static LogicalResult verifyElementwiseQ15Domain(Operation *op, Attribute numeric
   return success();
 }
 
-// The four declared tie rules are all admissible at an elementwise
-// requantization: round_shift implements each of them and the object gate
-// runs all four.
-static LogicalResult verifyElementwiseRounding(Operation *op,
-                                               ondrix::ondsp::RoundingMode rounding) {
-  switch (rounding) {
-  case ondrix::ondsp::RoundingMode::TowardNegative:
-  case ondrix::ondsp::RoundingMode::TowardZero:
-  case ondrix::ondsp::RoundingMode::NearestEven:
-  case ondrix::ondsp::RoundingMode::NearestTiesPositive:
-    return success();
-  }
-  return op->emitOpError("unsupported rounding mode");
-}
-
 LogicalResult AddOp::verify() {
   return verifyElementwiseQ15Domain(
       getOperation(), getNumeric(),
@@ -879,7 +864,7 @@ LogicalResult SubOp::verify() {
 }
 
 LogicalResult MultOp::verify() {
-  if (failed(verifyElementwiseRounding(getOperation(), getRounding())))
+  if (failed(verifyDeclaredRounding(getOperation(), getRounding(), "mult")))
     return failure();
   return verifyElementwiseQ15Domain(
       getOperation(), getNumeric(),
@@ -908,7 +893,7 @@ LogicalResult ShiftOp::verify() {
   int64_t amount = getAmountAttr().getInt();
   if (amount < -15 || amount > 15)
     return emitOpError("shift amount must lie in [-15, 15]");
-  if (failed(verifyElementwiseRounding(getOperation(), getRounding())))
+  if (failed(verifyDeclaredRounding(getOperation(), getRounding(), "shift")))
     return failure();
   return verifyElementwiseQ15Domain(getOperation(), getNumeric(),
                                     {getInput().getType(), getResult().getType()});

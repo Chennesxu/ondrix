@@ -31,6 +31,12 @@ extern int32_t sos_fixed_q15_wrap_output_value(MEMREF1(int16_t), MEMREF2(int16_t
                                                MEMREF2(int16_t), int64_t);
 extern int32_t sos_fixed_q15_wrap_state_value(MEMREF1(int16_t), MEMREF2(int16_t), MEMREF1(int16_t),
                                               MEMREF2(int16_t), int64_t, int64_t);
+extern int32_t sos_fixed_q15_ties_positive_output_value(MEMREF1(int16_t), MEMREF2(int16_t),
+                                                        MEMREF1(int16_t), MEMREF2(int16_t),
+                                                        int64_t);
+extern int32_t sos_fixed_q15_ties_positive_state_value(MEMREF1(int16_t), MEMREF2(int16_t),
+                                                       MEMREF1(int16_t), MEMREF2(int16_t), int64_t,
+                                                       int64_t);
 extern int32_t sos_fixed_q31_saturate_output_value(MEMREF1(int32_t), MEMREF2(int32_t),
                                                    MEMREF1(int32_t), MEMREF2(int32_t), int64_t);
 extern int32_t sos_fixed_q31_saturate_state_value(MEMREF1(int32_t), MEMREF2(int32_t),
@@ -352,6 +358,72 @@ static int check_complementary_policies(void) {
   return failed;
 }
 
+// Ties-positive witnesses on both export boundaries of one feedback-free
+// section (scale 0.5, b0 0.25): x=1 puts the STATE export on an even-quotient
+// half tie (d1 diverges 0 vs 1), x=3 puts the state tie on an odd quotient
+// (d1 agrees at 2) while the OUTPUT export lands its own even-quotient tie
+// (y diverges 0 vs 1), so each boundary discriminates independently.
+static int check_q15_ties_positive(void) {
+  int16_t input[] = {1, 3};
+  int16_t coefficients[] = {8192, 0, 0, 0, 0};
+  int16_t scales[] = {16384};
+  int16_t initial_state[] = {0, 0};
+  int64_t wide_input[2] = {1, 3};
+  int64_t wide_coefficients[5] = {8192, 0, 0, 0, 0};
+  int64_t wide_scales[1] = {16384};
+  int64_t wide_state[2] = {0, 0};
+  const struct Policy ties_policy = {
+      16, 15, 40, 30, SATURATE, NEAREST_TIES_POSITIVE, SATURATE, NEAREST_TIES_POSITIVE, SATURATE};
+  const struct Policy even_policy = {16,           15,       40,           30,      SATURATE,
+                                     NEAREST_EVEN, SATURATE, NEAREST_EVEN, SATURATE};
+  int64_t expected_output[2], expected_state[2];
+  int64_t even_output[2], even_state[2];
+  sos_reference(wide_input, 2, wide_coefficients, 1, wide_scales, wide_state, expected_output,
+                expected_state, &ties_policy);
+  sos_reference(wide_input, 2, wide_coefficients, 1, wide_scales, wide_state, even_output,
+                even_state, &even_policy);
+
+  int failed = 0;
+  int divergent = 0;
+  for (int64_t i = 0; i < 2; ++i) {
+    int16_t state_copy[2];
+    memcpy(state_copy, initial_state, sizeof(state_copy));
+    int32_t actual = sos_fixed_q15_ties_positive_output_value(
+        MEMREF1_ARGS(input, 2), MEMREF2_ARGS(coefficients, 1, 5), MEMREF1_ARGS(scales, 1),
+        MEMREF2_ARGS(state_copy, 1, 2), i);
+    if (actual != (int32_t)expected_output[i]) {
+      fprintf(stderr, "ties-positive output %lld: expected %lld, got %d\n", (long long)i,
+              (long long)expected_output[i], actual);
+      failed = 1;
+    }
+    if (expected_output[i] != even_output[i])
+      ++divergent;
+  }
+  for (int64_t slot = 0; slot < 2; ++slot) {
+    int16_t state_copy[2];
+    memcpy(state_copy, initial_state, sizeof(state_copy));
+    int32_t actual = sos_fixed_q15_ties_positive_state_value(
+        MEMREF1_ARGS(input, 2), MEMREF2_ARGS(coefficients, 1, 5), MEMREF1_ARGS(scales, 1),
+        MEMREF2_ARGS(state_copy, 1, 2), 0, slot);
+    if (actual != (int32_t)expected_state[slot]) {
+      fprintf(stderr, "ties-positive state slot %lld: expected %lld, got %d\n", (long long)slot,
+              (long long)expected_state[slot], actual);
+      failed = 1;
+    }
+    if (expected_state[slot] != even_state[slot])
+      ++divergent;
+  }
+  if (divergent != 2) {
+    fprintf(stderr,
+            "ties-positive witness must diverge from nearest_even on exactly the second "
+            "output and the d2 slot, diverged on %d probes\n",
+            divergent);
+    failed = 1;
+  }
+  return failed;
+}
+
 int main(void) {
-  return check_q15() | check_q31() | check_q15_impulse_golden() | check_complementary_policies();
+  return check_q15() | check_q31() | check_q15_impulse_golden() | check_complementary_policies() |
+         check_q15_ties_positive();
 }

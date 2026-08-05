@@ -8,6 +8,8 @@ extern int16_t q15_convolution_value(int16_t, int16_t, int16_t, int16_t, int16_t
                                      int16_t, int16_t, int64_t);
 extern int16_t q15_correlation_value(int16_t, int16_t, int16_t, int16_t, int16_t, int16_t, int16_t,
                                      int16_t, int16_t, int64_t);
+extern int16_t q15_correlation_value_ties_positive(int16_t, int16_t, int16_t, int16_t, int16_t,
+                                                   int16_t, int16_t, int16_t, int16_t, unsigned);
 extern float f32_convolution_value(float, float, float, float, float, float, float, float, float,
                                    int64_t);
 extern float f32_correlation_value(float, float, float, float, float, float, float, float, float,
@@ -45,15 +47,30 @@ static int16_t exportQ15(int64_t accumulator) {
   return (int16_t)quotient;
 }
 
+// Independent ties-positive formulation: ITU-style add-half-then-floor-shift,
+// total in __int128, deliberately not the compiler's quotient/remainder form.
+static int16_t exportQ15TiesPositive(int64_t accumulator) {
+  const __int128 divisor = (__int128)1 << 15;
+  __int128 shifted = (__int128)accumulator + (divisor >> 1);
+  __int128 quotient = shifted / divisor;
+  if (shifted % divisor < 0)
+    --quotient;
+  if (quotient < INT16_MIN)
+    return INT16_MIN;
+  if (quotient > INT16_MAX)
+    return INT16_MAX;
+  return (int16_t)quotient;
+}
+
 static int16_t q15Reference(const int16_t input[6], const int16_t kernel[3], unsigned output,
-                            int convolution) {
+                            int convolution, int16_t (*exporter)(int64_t)) {
   int64_t accumulator = 0;
   for (unsigned k = 0; k < 3; ++k) {
     unsigned kernelIndex = convolution ? 2 - k : k;
     accumulator =
         clampI40((__int128)accumulator + (__int128)input[output + k] * kernel[kernelIndex]);
   }
-  return exportQ15(accumulator);
+  return exporter(accumulator);
 }
 
 static float f32Reference(const float input[6], const float kernel[3], unsigned output,
@@ -125,14 +142,42 @@ int main(void) {
           q15_convolution_value(x[0], x[1], x[2], x[3], x[4], x[5], k[0], k[1], k[2], output);
       int16_t correlation =
           q15_correlation_value(x[0], x[1], x[2], x[3], x[4], x[5], k[0], k[1], k[2], output);
-      int16_t expectedConvolution = q15Reference(x, k, output, 1);
-      int16_t expectedCorrelation = q15Reference(x, k, output, 0);
+      int16_t expectedConvolution = q15Reference(x, k, output, 1, exportQ15);
+      int16_t expectedCorrelation = q15Reference(x, k, output, 0, exportQ15);
       if (convolution != expectedConvolution || correlation != expectedCorrelation) {
         fprintf(stderr, "Q15 case %u output %u: convolution %d/%d, correlation %d/%d\n", caseIndex,
                 output, convolution, expectedConvolution, correlation, expectedCorrelation);
         return 1;
       }
     }
+  }
+
+  // Ties-positive export witnesses: taps +-0.5 make the accumulator
+  // 16384*(a-b), so every odd window difference is an exact half tie; even
+  // floor quotients diverge from nearest_even at both signs, and difference
+  // 65533 lands the ties-positive increment exactly on +32767.
+  static const int16_t ntpInput[6] = {1, 0, 3, 32767, -32766, 0};
+  static const int16_t ntpKernel[3] = {16384, -16384, 0};
+  unsigned ntpDivergent = 0;
+  for (unsigned output = 0; output < 4; ++output) {
+    int16_t actual = q15_correlation_value_ties_positive(
+        ntpInput[0], ntpInput[1], ntpInput[2], ntpInput[3], ntpInput[4], ntpInput[5], ntpKernel[0],
+        ntpKernel[1], ntpKernel[2], output);
+    int16_t expected = q15Reference(ntpInput, ntpKernel, output, 0, exportQ15TiesPositive);
+    if (actual != expected) {
+      fprintf(stderr, "Q15 ties-positive output %u: expected %d, got %d\n", output, expected,
+              actual);
+      return 1;
+    }
+    if (expected != q15Reference(ntpInput, ntpKernel, output, 0, exportQ15))
+      ++ntpDivergent;
+  }
+  if (ntpDivergent != 3) {
+    fprintf(stderr,
+            "Q15 ties-positive corpus must diverge from nearest_even on 3 of 4 outputs, "
+            "diverged on %u\n",
+            ntpDivergent);
+    return 1;
   }
 
   for (unsigned caseIndex = 0; caseIndex < sizeof(f32Cases) / sizeof(f32Cases[0]); ++caseIndex) {

@@ -24,6 +24,14 @@ extern float f32_fir_filter_value_off(float *, float *, int64_t, int64_t, int64_
 extern int16_t q15_proven_fir_filter_value(int16_t *, int16_t *, int64_t, int64_t, int64_t,
                                            int16_t *, int16_t *, int64_t, int64_t, int64_t,
                                            int64_t);
+extern int16_t q15_fir_filter_value_ties_positive(int16_t *, int16_t *, int64_t, int64_t, int64_t,
+                                                  int16_t *, int16_t *, int64_t, int64_t, int64_t,
+                                                  int16_t *, int16_t *, int64_t, int64_t, int64_t,
+                                                  int64_t);
+extern int32_t q31_fir_filter_value_ties_positive(int32_t *, int32_t *, int64_t, int64_t, int64_t,
+                                                  int32_t *, int32_t *, int64_t, int64_t, int64_t,
+                                                  int32_t *, int32_t *, int64_t, int64_t, int64_t,
+                                                  int64_t);
 extern int32_t q31_proven_fir_filter_value(int32_t *, int32_t *, int64_t, int64_t, int64_t,
                                            int32_t *, int32_t *, int64_t, int64_t, int64_t,
                                            int64_t);
@@ -46,6 +54,17 @@ static int64_t clamp_i64(__int128 value) {
   return (int64_t)value;
 }
 
+// Independent ties-positive formulation: ITU-style add-half-then-floor-shift,
+// total in __int128, deliberately not the compiler's quotient/remainder form.
+static __int128 round_ties_positive(__int128 value, unsigned shift) {
+  __int128 divisor = (__int128)1 << shift;
+  __int128 shifted = value + (divisor >> 1);
+  __int128 quotient = shifted / divisor;
+  if (shifted % divisor < 0)
+    --quotient;
+  return quotient;
+}
+
 static __int128 round_nearest_even(__int128 value, unsigned shift) {
   __int128 divisor = (__int128)1 << shift;
   __int128 quotient = value / divisor;
@@ -61,12 +80,12 @@ static __int128 round_nearest_even(__int128 value, unsigned shift) {
 }
 
 static int16_t q15_reference(const int16_t *input, const int16_t *coeffs, int64_t output_index,
-                             int64_t tap_count) {
+                             int64_t tap_count, __int128 (*rounder)(__int128, unsigned)) {
   int64_t accumulator = 0;
   for (int64_t tap = 0; tap < tap_count; ++tap)
     accumulator =
         clamp_i40((__int128)accumulator + (__int128)input[output_index + tap] * coeffs[tap]);
-  __int128 result = round_nearest_even(accumulator, 15);
+  __int128 result = rounder(accumulator, 15);
   if (result < INT16_MIN)
     return INT16_MIN;
   if (result > INT16_MAX)
@@ -75,12 +94,12 @@ static int16_t q15_reference(const int16_t *input, const int16_t *coeffs, int64_
 }
 
 static int32_t q31_reference(const int32_t *input, const int32_t *coeffs, int64_t output_index,
-                             int64_t tap_count) {
+                             int64_t tap_count, __int128 (*rounder)(__int128, unsigned)) {
   int64_t accumulator = 0;
   for (int64_t tap = 0; tap < tap_count; ++tap)
     accumulator =
         clamp_i64((__int128)accumulator + (__int128)input[output_index + tap] * coeffs[tap]);
-  __int128 result = round_nearest_even(accumulator, 31);
+  __int128 result = rounder(accumulator, 31);
   if (result < INT32_MIN)
     return INT32_MIN;
   if (result > INT32_MAX)
@@ -119,7 +138,7 @@ int main(void) {
   for (int64_t index = 0; index < 6; ++index) {
     int16_t actual = q15_fir_filter_value(MEMREF_ARGS(q15_input, 10), MEMREF_ARGS(q15_coeffs, 5),
                                           MEMREF_ARGS(q15_init, 6), index);
-    int16_t expected = q15_reference(q15_input, q15_coeffs, index, 5);
+    int16_t expected = q15_reference(q15_input, q15_coeffs, index, 5, round_nearest_even);
     if (actual != expected) {
       fprintf(stderr, "Q15 output %lld: expected %d, got %d\n", (long long)index, expected, actual);
       failed = 1;
@@ -132,7 +151,7 @@ int main(void) {
   for (int64_t index = 0; index < 5; ++index) {
     int16_t actual = q15_fir_filter_shared_coeff_init(
         MEMREF_ARGS(q15_input, 9), MEMREF_ARGS(shared_coeffs_and_init, 5), index);
-    int16_t expected = q15_reference(q15_input, shared_original, index, 5);
+    int16_t expected = q15_reference(q15_input, shared_original, index, 5, round_nearest_even);
     if (actual != expected) {
       fprintf(stderr, "Q15 shared operand %lld: expected %d, got %d\n", (long long)index, expected,
               actual);
@@ -147,7 +166,7 @@ int main(void) {
   for (int64_t index = 0; index < 3; ++index) {
     int32_t actual = q31_fir_filter_value(MEMREF_ARGS(q31_input, 7), MEMREF_ARGS(q31_coeffs, 5),
                                           MEMREF_ARGS(q31_init, 3), index);
-    int32_t expected = q31_reference(q31_input, q31_coeffs, index, 5);
+    int32_t expected = q31_reference(q31_input, q31_coeffs, index, 5, round_nearest_even);
     if (actual != expected) {
       fprintf(stderr, "Q31 output %lld: expected %d, got %d\n", (long long)index, expected, actual);
       failed = 1;
@@ -189,7 +208,8 @@ int main(void) {
   for (int64_t index = 0; index < 5; ++index) {
     int16_t actual = q15_proven_fir_filter_value(MEMREF_ARGS(q15_proven_input, 12),
                                                  MEMREF_ARGS(q15_proven_init, 5), index);
-    int16_t expected = q15_reference(q15_proven_input, q15_proven_coefficients, index, 8);
+    int16_t expected =
+        q15_reference(q15_proven_input, q15_proven_coefficients, index, 8, round_nearest_even);
     if (actual != expected) {
       fprintf(stderr, "Q15 proven output %lld: expected %d, got %d\n", (long long)index, expected,
               actual);
@@ -205,12 +225,67 @@ int main(void) {
   for (int64_t index = 0; index < 4; ++index) {
     int32_t actual = q31_proven_fir_filter_value(MEMREF_ARGS(q31_proven_input, 7),
                                                  MEMREF_ARGS(q31_proven_init, 4), index);
-    int32_t expected = q31_reference(q31_proven_input, q31_proven_coefficients, index, 4);
+    int32_t expected =
+        q31_reference(q31_proven_input, q31_proven_coefficients, index, 4, round_nearest_even);
     if (actual != expected) {
       fprintf(stderr, "Q31 proven output %lld: expected %d, got %d\n", (long long)index, expected,
               actual);
       failed = 1;
     }
+  }
+
+  // Ties-positive export witnesses: taps +-0.5 make the accumulator
+  // 16384*(a-b), so every odd window difference is an exact half tie; even
+  // floor quotients are where the two nearest rules diverge, at both signs,
+  // and difference 65533 lands the ties-positive increment exactly on +32767.
+  int16_t ntp_q15_input[] = {1, 0, 3, 32767, -32766};
+  int16_t ntp_q15_coeffs[] = {16384, -16384};
+  int16_t ntp_q15_init[4] = {0};
+  int ntp_q15_divergent = 0;
+  for (int64_t index = 0; index < 4; ++index) {
+    int16_t actual = q15_fir_filter_value_ties_positive(MEMREF_ARGS(ntp_q15_input, 5),
+                                                        MEMREF_ARGS(ntp_q15_coeffs, 2),
+                                                        MEMREF_ARGS(ntp_q15_init, 4), index);
+    int16_t expected = q15_reference(ntp_q15_input, ntp_q15_coeffs, index, 2, round_ties_positive);
+    if (actual != expected) {
+      fprintf(stderr, "Q15 ties-positive output %lld: expected %d, got %d\n", (long long)index,
+              expected, actual);
+      failed = 1;
+    }
+    if (expected != q15_reference(ntp_q15_input, ntp_q15_coeffs, index, 2, round_nearest_even))
+      ++ntp_q15_divergent;
+  }
+  if (ntp_q15_divergent != 3) {
+    fprintf(stderr,
+            "Q15 ties-positive corpus must diverge from nearest_even on 3 of 4 outputs, "
+            "diverged on %d\n",
+            ntp_q15_divergent);
+    failed = 1;
+  }
+
+  int32_t ntp_q31_input[] = {1, 0, 3};
+  int32_t ntp_q31_coeffs[] = {INT32_C(1) << 30, -(INT32_C(1) << 30)};
+  int32_t ntp_q31_init[2] = {0};
+  int ntp_q31_divergent = 0;
+  for (int64_t index = 0; index < 2; ++index) {
+    int32_t actual = q31_fir_filter_value_ties_positive(MEMREF_ARGS(ntp_q31_input, 3),
+                                                        MEMREF_ARGS(ntp_q31_coeffs, 2),
+                                                        MEMREF_ARGS(ntp_q31_init, 2), index);
+    int32_t expected = q31_reference(ntp_q31_input, ntp_q31_coeffs, index, 2, round_ties_positive);
+    if (actual != expected) {
+      fprintf(stderr, "Q31 ties-positive output %lld: expected %d, got %d\n", (long long)index,
+              expected, actual);
+      failed = 1;
+    }
+    if (expected != q31_reference(ntp_q31_input, ntp_q31_coeffs, index, 2, round_nearest_even))
+      ++ntp_q31_divergent;
+  }
+  if (ntp_q31_divergent != 2) {
+    fprintf(stderr,
+            "Q31 ties-positive corpus must diverge from nearest_even on both outputs, "
+            "diverged on %d\n",
+            ntp_q31_divergent);
+    failed = 1;
   }
 
   return failed;

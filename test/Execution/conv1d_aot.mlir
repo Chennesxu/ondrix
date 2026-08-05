@@ -122,3 +122,24 @@ func.func @f32_correlation_value_off(
   %value = tensor.extract %result[%index] : tensor<4xf32>
   return %value : f32
 }
+
+func.func @q15_correlation_value_ties_positive(
+    %x0: i16, %x1: i16, %x2: i16, %x3: i16, %x4: i16, %x5: i16,
+    %k0: i16, %k1: i16, %k2: i16, %index: index) -> i16 {
+  %input = tensor.from_elements %x0, %x1, %x2, %x3, %x4, %x5
+      : tensor<6xi16>
+  %kernel = tensor.from_elements %k0, %k1, %k2 : tensor<3xi16>
+  %init = tensor.empty() : tensor<4xi16>
+  %result = ondrix.conv1d %input, %kernel, %init {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    mode = #ondrix.conv1d_mode<correlation>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<6xi16>, tensor<3xi16>, tensor<4xi16>) -> tensor<4xi16>
+  %value = tensor.extract %result[%index] : tensor<4xi16>
+  return %value : i16
+}

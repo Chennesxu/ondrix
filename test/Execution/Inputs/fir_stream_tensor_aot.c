@@ -9,6 +9,10 @@
   function(MEMREF_ARGS(input, input_size), MEMREF_ARGS(coeffs, coeff_size),                        \
            MEMREF_ARGS(state, state_size), index)
 
+extern int16_t q15_stream_output_value_ties_positive(int16_t *, int16_t *, int64_t, int64_t,
+                                                     int64_t, int16_t *, int16_t *, int64_t,
+                                                     int64_t, int64_t, int16_t *, int16_t *,
+                                                     int64_t, int64_t, int64_t, int64_t);
 extern int16_t q15_stream_output_value(int16_t *, int16_t *, int64_t, int64_t, int64_t, int16_t *,
                                        int16_t *, int64_t, int64_t, int64_t, int16_t *, int16_t *,
                                        int64_t, int64_t, int64_t, int64_t);
@@ -49,6 +53,17 @@ static int64_t clamp_i64(__int128 value) {
   return (int64_t)value;
 }
 
+// Independent ties-positive formulation: ITU-style add-half-then-floor-shift,
+// total in __int128, deliberately not the compiler's quotient/remainder form.
+static __int128 round_ties_positive(__int128 value, unsigned shift) {
+  __int128 divisor = (__int128)1 << shift;
+  __int128 shifted = value + (divisor >> 1);
+  __int128 quotient = shifted / divisor;
+  if (shifted % divisor < 0)
+    --quotient;
+  return quotient;
+}
+
 static __int128 round_nearest_even(__int128 value, unsigned shift) {
   const __int128 divisor = (__int128)1 << shift;
   __int128 quotient = value / divisor;
@@ -65,7 +80,7 @@ static __int128 round_nearest_even(__int128 value, unsigned shift) {
 
 static void q15_reference(const int16_t *input, int64_t input_length, const int16_t *coefficients,
                           int64_t coefficient_length, const int16_t *state, int16_t *output,
-                          int16_t *next_state) {
+                          int16_t *next_state, __int128 (*rounder)(__int128, unsigned)) {
   const int64_t history_length = coefficient_length - 1;
   for (int64_t sample = 0; sample < input_length; ++sample) {
     int64_t accumulator = 0;
@@ -75,7 +90,7 @@ static void q15_reference(const int16_t *input, int64_t input_length, const int1
                                                       : input[extended_index - history_length];
       accumulator = clamp_i40((__int128)accumulator + (__int128)value * coefficients[tap]);
     }
-    __int128 result = round_nearest_even(accumulator, 15);
+    __int128 result = rounder(accumulator, 15);
     if (result < INT16_MIN)
       result = INT16_MIN;
     if (result > INT16_MAX)
@@ -164,7 +179,8 @@ static int check_q15(void) {
   int16_t coefficients[] = {-32768, 16384, 8192, -4096, 2048};
   int16_t initial_state[] = {1000, -2000, 3000, -4000};
   int16_t expected_output[9], expected_state[4];
-  q15_reference(input, 9, coefficients, 5, initial_state, expected_output, expected_state);
+  q15_reference(input, 9, coefficients, 5, initial_state, expected_output, expected_state,
+                round_nearest_even);
 
   for (int64_t index = 0; index < 9; ++index) {
     int16_t actual =
@@ -186,7 +202,8 @@ static int check_q15(void) {
   }
 
   int16_t first_output[2], split_state[4];
-  q15_reference(input, 2, coefficients, 5, initial_state, first_output, split_state);
+  q15_reference(input, 2, coefficients, 5, initial_state, first_output, split_state,
+                round_nearest_even);
   for (int64_t index = 0; index < 2; ++index) {
     int16_t actual =
         CALL_STREAM(q15_stream_output_value, input, 2, coefficients, 5, initial_state, 4, index);
@@ -228,6 +245,38 @@ static int check_q15(void) {
     int16_t direct = (int16_t)round_nearest_even(accumulator, 15);
     if (actual != direct)
       failed = 1;
+  }
+
+  // Ties-positive export witnesses: taps +-0.5 make each accumulator
+  // 16384*(e[s]-e[s+1]) over the state-extended sequence, so odd differences
+  // are exact half ties; even floor quotients diverge from nearest_even at
+  // both signs, and difference 65533 lands the increment exactly on +32767.
+  int16_t ntp_input[] = {1, 0, 3, 32767, -32766, 0, 0, 0};
+  int16_t ntp_coefficients[] = {16384, -16384, 0, 0, 0};
+  int16_t ntp_state[] = {0, 0, 0, 0};
+  int16_t ntp_expected[8], ntp_even[8], ntp_next[4];
+  q15_reference(ntp_input, 8, ntp_coefficients, 5, ntp_state, ntp_expected, ntp_next,
+                round_ties_positive);
+  q15_reference(ntp_input, 8, ntp_coefficients, 5, ntp_state, ntp_even, ntp_next,
+                round_nearest_even);
+  int ntp_divergent = 0;
+  for (int64_t index = 0; index < 8; ++index) {
+    int16_t actual = CALL_STREAM(q15_stream_output_value_ties_positive, ntp_input, 8,
+                                 ntp_coefficients, 5, ntp_state, 4, index);
+    if (actual != ntp_expected[index]) {
+      fprintf(stderr, "Q15 ties-positive output %lld: expected %d, got %d\n", (long long)index,
+              ntp_expected[index], actual);
+      failed = 1;
+    }
+    if (ntp_expected[index] != ntp_even[index])
+      ++ntp_divergent;
+  }
+  if (ntp_divergent != 3) {
+    fprintf(stderr,
+            "Q15 ties-positive corpus must diverge from nearest_even on 3 of 8 outputs, "
+            "diverged on %d\n",
+            ntp_divergent);
+    failed = 1;
   }
   return failed;
 }

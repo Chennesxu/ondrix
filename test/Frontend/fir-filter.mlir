@@ -6,8 +6,16 @@
 // RUN: ondrix-compile %S/Inputs/q15_fir_filter_full.ox | FileCheck %s --check-prefix=FULL-Q15
 // RUN: ondrix-compile %S/Inputs/q31_fir_filter_full.ox | FileCheck %s --check-prefix=FULL-Q31
 // RUN: ondrix-compile %S/Inputs/f32_fir_filter_full.ox | FileCheck %s --check-prefix=FULL-F32
+// RUN: ondrix-compile %S/Inputs/q15_fir_filter_ties_positive.ox | FileCheck %s --check-prefix=TIES
 // RUN: ondrix-compile %S/Inputs/q15_fir_filter_default_contract.ox | FileCheck %s --check-prefix=DEFAULT
 // RUN: not ondrix-compile %S/Inputs/invalid_fir_filter_dynamic_default.ox 2>&1 | FileCheck %s --check-prefix=DYNDEFAULT
+
+// The composed-call export policy admits every declared tie rule the
+// fir_filter contract carries evidence for.
+// TIES-LABEL: func.func @q15_fir_filter_ties_positive
+// TIES: ondrix.fir_filter
+// TIES-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
+
 
 // Stopping at the boundary takes the default contract: an accumulator wide
 // enough that no update wraps (8 taps bound the sum by 2^33), so wrap is

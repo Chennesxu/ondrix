@@ -129,28 +129,6 @@ func.func @rejects_encoded_result(
 
 // -----
 
-// A newly declared dialect rounding mode does not silently widen this
-// contract: the admissible tie rules are per operation, and nearest_ties_
-// positive has no lowering or differential evidence here.
-
-func.func @rejects_unestablished_rounding(
-    %input: tensor<4xi16>, %coeffs: tensor<3xi16>, %state: tensor<2xi16>) {
-  // expected-error @+1 {{fixed FIR stream supports toward_negative, toward_zero, or nearest_even rounding}}
-  %output, %next = ondrix.fir_stream %input, %coeffs, %state {
-    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
-                              update_overflow = saturate>,
-    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
-    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
-    overflow = #ondsp.overflow<saturate>,
-    product = #ondsp.product<full>,
-    rounding = #ondsp.rounding<nearest_ties_positive>
-  } : (tensor<4xi16>, tensor<3xi16>, tensor<2xi16>)
-      -> (tensor<4xi16>, tensor<2xi16>)
-  return
-}
-
-// -----
-
 func.func @fir_stream_rejects_f64(
     %input: tensor<4xf64>, %coeffs: tensor<3xf64>, %state: tensor<2xf64>) {
   // expected-error @+1 {{executable FIR stream supports the f32 floating-point format}}

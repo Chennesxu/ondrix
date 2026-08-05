@@ -32,3 +32,22 @@ func.func @f32_stream(
       -> (tensor<4xf32>, tensor<2xf32>)
   return %output, %next : tensor<4xf32>, tensor<2xf32>
 }
+
+// CHECK-LABEL: func.func @q15_fir_stream_ties_positive_export
+// CHECK: ondrix.fir_stream
+// CHECK-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
+func.func @q15_fir_stream_ties_positive_export(
+    %input: tensor<4xi16>, %coeffs: tensor<3xi16>, %state: tensor<2xi16>)
+    -> (tensor<4xi16>, tensor<2xi16>) {
+  %output, %next = ondrix.fir_stream %input, %coeffs, %state {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<4xi16>, tensor<3xi16>, tensor<2xi16>)
+      -> (tensor<4xi16>, tensor<2xi16>)
+  return %output, %next : tensor<4xi16>, tensor<2xi16>
+}

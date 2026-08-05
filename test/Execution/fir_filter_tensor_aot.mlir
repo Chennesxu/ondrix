@@ -86,6 +86,8 @@
 // TILED-VECTOR: ondsp.acc_add_term {{.*}}, %[[Q31_SUM]]
 // TILED-VECTOR-NOT: vector.extract
 // TILED-VECTOR-NOT: ondsp.reduce_mac
+// TILED-VECTOR-LABEL: func.func @q15_fir_filter_value_ties_positive
+// TILED-VECTOR-LABEL: func.func @q31_fir_filter_value_ties_positive
 
 // TILED-LOWERED-NOT: ondrix.
 // TILED-LOWERED-NOT: ondsp.
@@ -201,6 +203,40 @@ func.func @q31_proven_fir_filter_value(
     product = #ondsp.product<full>,
     rounding = #ondsp.rounding<nearest_even>
   } : (tensor<?xi32>, tensor<4xi32>, tensor<?xi32>) -> tensor<?xi32>
+  %value = tensor.extract %result[%index] : tensor<?xi32>
+  return %value : i32
+}
+
+func.func @q15_fir_filter_value_ties_positive(
+    %input: tensor<?xi16>, %coeffs: tensor<?xi16>, %init: tensor<?xi16>,
+    %index: index) -> i16 {
+  %result = ondrix.fir_filter %input, %coeffs, %init {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
+                              update_overflow = saturate>,
+    boundary = #ondrix.fir_boundary<valid>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<?xi16>, tensor<?xi16>, tensor<?xi16>) -> tensor<?xi16>
+  %value = tensor.extract %result[%index] : tensor<?xi16>
+  return %value : i16
+}
+
+func.func @q31_fir_filter_value_ties_positive(
+    %input: tensor<?xi32>, %coeffs: tensor<?xi32>, %init: tensor<?xi32>,
+    %index: index) -> i32 {
+  %result = ondrix.fir_filter %input, %coeffs, %init {
+    accumulator = !ondsp.acc<storage = i64, frac = 62, signed,
+                              update_overflow = saturate>,
+    boundary = #ondrix.fir_boundary<valid>,
+    dst = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<?xi32>, tensor<?xi32>, tensor<?xi32>) -> tensor<?xi32>
   %value = tensor.extract %result[%index] : tensor<?xi32>
   return %value : i32
 }

@@ -161,3 +161,38 @@ func.func @sos_fixed_q31_saturate_state_value(
   %value = tensor.extract %next[%section, %slot] : tensor<?x2xi32>
   return %value : i32
 }
+
+func.func @sos_fixed_q15_ties_positive_output_value(
+    %input: tensor<?xi16>, %coeffs: tensor<?x5xi16>,
+    %scales: tensor<?xi16>, %state: tensor<?x2xi16>, %index: index) -> i32 {
+  %output, %next = ondrix.sos_filter_df2_fixed %input, %coeffs, %scales, %state {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_overflow = #ondsp.overflow<saturate>,
+    output_rounding = #ondsp.rounding<nearest_ties_positive>,
+    product = #ondsp.product<full>, state_overflow = #ondsp.overflow<saturate>,
+    state_rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<?xi16>, tensor<?x5xi16>, tensor<?xi16>, tensor<?x2xi16>)
+      -> (tensor<?xi16>, tensor<?x2xi16>)
+  %value = tensor.extract %output[%index] : tensor<?xi16>
+  %extended = arith.extsi %value : i16 to i32
+  return %extended : i32
+}
+
+func.func @sos_fixed_q15_ties_positive_state_value(
+    %input: tensor<?xi16>, %coeffs: tensor<?x5xi16>,
+    %scales: tensor<?xi16>, %state: tensor<?x2xi16>,
+    %section: index, %slot: index) -> i32 {
+  %output, %next = ondrix.sos_filter_df2_fixed %input, %coeffs, %scales, %state {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_overflow = #ondsp.overflow<saturate>,
+    output_rounding = #ondsp.rounding<nearest_ties_positive>,
+    product = #ondsp.product<full>, state_overflow = #ondsp.overflow<saturate>,
+    state_rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<?xi16>, tensor<?x5xi16>, tensor<?xi16>, tensor<?x2xi16>)
+      -> (tensor<?xi16>, tensor<?x2xi16>)
+  %value = tensor.extract %next[%section, %slot] : tensor<?x2xi16>
+  %extended = arith.extsi %value : i16 to i32
+  return %extended : i32
+}
