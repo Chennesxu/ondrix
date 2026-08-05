@@ -76,19 +76,12 @@ static bool isSupportedExport(ondrix::ondsp::AccType accumulator,
     return ondrix::ondsp::isSignedQ31(destination);
   if (!isSupportedAccumulator(accumulator) || accumulator.getFrac() != 30)
     return false;
-  // The lowering body is already width and shift generic: it derives
-  // `shift = acc.frac - dst.frac` and routes it through
-  // `roundSignedRightShift` and `narrowSignedValue`. This gate used to be
-  // narrower than the body and admitted only frac 30 for an i32 destination,
-  // so any signed i32 destination whose fractional position the verifier
-  // already admits (`dst.frac <= acc.frac`) now lowers as well. Every
-  // export is a value-preserving format conversion — the destination frac
-  // is the reading of the result, never an unrelated shift selector; a
-  // boundary that changes the VALUE (such as a mean by a power of two)
-  // belongs to `round_shift`, whose scale is declared as arithmetic. The
-  // signed i64 frac-30 destination is the identity materialization of a
-  // frac-30 accumulator's raw value for exactly such downstream arithmetic
-  // boundaries. Every other destination stays refused.
+  // Every export is a value-preserving format conversion: the destination
+  // frac is the reading of the result, never a shift selector, so any i32
+  // destination the verifier admits (`dst.frac <= acc.frac`) lowers through
+  // the width-generic body. A boundary that changes the value belongs to
+  // `round_shift`; the i64 frac-30 destination is the identity
+  // materialization feeding exactly those. Every other destination is refused.
   return ondrix::ondsp::isSignedQ15(destination) || isSignedFixedStorage(destination, 32) ||
          (isSignedFixedStorage(destination, 64) && destination.getFrac() == 30);
 }
@@ -588,21 +581,9 @@ public:
       }
     }
     if (!specialized) {
-      // Exact carrier for both cross sums. The binding one is the imaginary
-      // term br*wi + bi*wr, which reaches 2^63 at b = w = (-2^31, -2^31);
-      // the real term br*wr - bi*wi only spans +-(2^63 - 2^31). Q15 therefore
-      // needs 33 bits and Q31 needs 65 for exactness. The closest natural
-      // width the whole backend chain already handles is i128
-      // (arbitrary-width in MLIR, native in LLVM), so the Q31 profile
-      // declares i128 rather than a minimal odd width. A CFFT never reaches
-      // that corner, because its twiddles lie on the unit circle; an
-      // arbitrary SSA twiddle does, which is why the requirement belongs to
-      // the operation contract. The operation-level rail gate refutes a
-      // WRAPPING i64 carrier at that corner; it does not make i128 the only
-      // legal choice — 2^63 is the single value past i64 and the shift-31
-      // nearest-even boundary saturates its i32 result either way, so an
-      // overflow-aware saturating-i64 sum is observably equivalent under
-      // this profile and would be admissible with its own equivalence proof.
+      // Exact carrier for both cross sums: the binding imaginary term reaches
+      // 2^63, so Q15 needs 33 bits and Q31 needs 65. i128 is the generic
+      // choice the backend chain already handles, not a minimality claim.
       Type productType =
           getIntegerTypeLike(bReal.getType(), storageWidth == 16 ? 33 : 128, rewriter);
       auto extendProductOperand = [&](Value value) {
@@ -1015,20 +996,12 @@ public:
     Value input = rewriter.create<arith::MaxSIOp>(loc, adaptor.getInput(), zero);
     Value root;
     if (sqrtEstimate) {
-      // Bit-exact over the whole clamped i64 domain, in two cases. Below
-      // 2^32 the conversion to binary64 is exact and IEEE 754 requires a
-      // correctly rounded square root, so the truncated estimate is within
-      // one of the exact integer floor; two branchless correction steps in
-      // each direction give double that margin. At or above 2^32 the exact
-      // root is at least 2^16, the correctly rounded estimate is too, and
-      // the ceiling below pins the candidate at exactly 2^16 (its square,
-      // 2^32, never exceeds the input, so the downward corrections cannot
-      // fire); every final candidate then stays above the i16 maximum and
-      // the observable result is the saturated 32767 in both definitions.
-      // The inexact binary64 conversion of large inputs never reaches the
-      // output, so no exact-representability precondition is required. The
-      // opt-in pass option assumes the target provides an IEEE 754
-      // correctly rounded binary64 square root.
+      // The correction argument is the sqrt-estimate paragraph of this pass's
+      // description; it covers inputs below 2^32, where the binary64
+      // conversion is exact. At or above 2^32 the ceiling below pins the
+      // candidate at 2^16, whose square never exceeds the input, so the
+      // downward corrections cannot fire and the export saturates to 32767
+      // under either definition — an inexact conversion never reaches output.
       Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
       Value asFloat = rewriter.create<arith::SIToFPOp>(loc, rewriter.getF64Type(), input);
       Value estimate = rewriter.create<math::SqrtOp>(loc, asFloat);

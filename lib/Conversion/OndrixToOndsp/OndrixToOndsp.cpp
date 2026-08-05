@@ -1990,20 +1990,21 @@ static LogicalResult lowerQ15Trig(Operation *op, Value input, Value result, Attr
   return success();
 }
 
-// The two exponential tables, generated under the same guarded quantizer the
-// trigonometric table uses. Each has 129 entries so the interpolation's upper
-// neighbour is a real entry rather than a wrapped one: the endpoints are the
-// exact 2048 and 65536, which is what makes the top of each binade land on
-// the next one instead of a rounded approximation of it.
-static std::optional<SmallVector<int32_t>> buildLog2Table() {
+// The declared transcendental tables, generated under the same guarded
+// quantizer the trigonometric table uses. Each has 129 entries so the
+// interpolation's upper neighbour is a real entry rather than a wrapped one,
+// and entry 128 is the exact declared endpoint (2048, 65536, or the eighth
+// turn 8192), never a rounded approximation of it.
+static std::optional<SmallVector<int32_t>>
+buildDeclaredTable(int32_t exactEndpoint, llvm::function_ref<double(double)> exactValue) {
   SmallVector<int32_t> table;
   table.reserve(129);
   for (int64_t k = 0; k <= 128; ++k) {
     if (k == 128) {
-      table.push_back(2048);
+      table.push_back(exactEndpoint);
       break;
     }
-    double exact = std::log2(1.0 + double(k) / 128.0) * 2048.0;
+    double exact = exactValue(double(k) / 128.0);
     double rounded = std::nearbyint(exact);
     // The same tie guard the design tables use: an entry within 2^-20 of a
     // halfway point is not admissible evidence of which integer it is.
@@ -2014,41 +2015,17 @@ static std::optional<SmallVector<int32_t>> buildLog2Table() {
   return table;
 }
 
+static std::optional<SmallVector<int32_t>> buildLog2Table() {
+  return buildDeclaredTable(2048, [](double t) { return std::log2(1.0 + t) * 2048.0; });
+}
+
 static std::optional<SmallVector<int32_t>> buildExp2Table() {
-  SmallVector<int32_t> table;
-  table.reserve(129);
-  for (int64_t k = 0; k <= 128; ++k) {
-    if (k == 128) {
-      table.push_back(65536);
-      break;
-    }
-    double exact = std::exp2(double(k) / 128.0) * 32768.0;
-    double rounded = std::nearbyint(exact);
-    if (std::abs(exact - rounded) > 0.5 - 9.5367431640625e-07)
-      return std::nullopt;
-    table.push_back(int32_t(rounded));
-  }
-  return table;
+  return buildDeclaredTable(65536, [](double t) { return std::exp2(t) * 32768.0; });
 }
 
 static std::optional<SmallVector<int32_t>> buildArctangentTable() {
-  SmallVector<int32_t> table;
-  table.reserve(129);
   constexpr double kTwoPi = 6.28318530717958647692528676655900577;
-  for (int64_t k = 0; k <= 128; ++k) {
-    // The eighth-turn endpoint is exact by definition, not by rounding: it
-    // is what makes the diagonals of the octant fold meet.
-    if (k == 128) {
-      table.push_back(8192);
-      break;
-    }
-    double exact = std::atan(double(k) / 128.0) / kTwoPi * 65536.0;
-    double rounded = std::nearbyint(exact);
-    if (std::abs(exact - rounded) > 0.5 - 9.5367431640625e-07)
-      return std::nullopt;
-    table.push_back(int32_t(rounded));
-  }
-  return table;
+  return buildDeclaredTable(8192, [](double t) { return std::atan(t) / kTwoPi * 65536.0; });
 }
 
 class CxPhaseOpLowering final : public OpConversionPattern<ondrix::ir::CxPhaseOp> {

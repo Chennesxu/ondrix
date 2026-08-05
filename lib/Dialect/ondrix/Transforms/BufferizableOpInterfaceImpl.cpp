@@ -745,23 +745,10 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
     IntegerType i64 = rewriter.getIntegerType(64);
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getInputNumeric());
     auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
-    // Unlike matmul and rms, both operands of a DCT row product are NOT
-    // runtime values: the right operand is a compile-time constant table.
-    // That is why this reduction declares a SATURATING accumulator instead of
-    // the wrapping one. Two independent arguments meet here.
-    //
-    // (a) Value: every ordered prefix of a row is bounded by
-    //     sum_n |c[k][n]| * 32768 <= 64 * 32767 * 32768 < 2^39, so no prefix
-    //     can reach the i40 bounds, saturation is unreachable, and the
-    //     saturating fold equals the exact i64 contract sum of the tensor
-    //     lowering.
-    // (b) Legality: Saturate is chosen deliberately. Saturating updates are
-    //     not exact-modulo, so the horizontal Vector consumer cannot take the
-    //     wrap shortcut and must instead route through the
-    //     constant-coefficient prefix-range proof
-    //     (`planConstantSaturatingReduction`), which re-derives (a) from the
-    //     materialized table. Demonstrating that second legality route on a
-    //     real algorithm is the point of this consumer.
+    // The right operand is a constant table, so this reduction declares a
+    // SATURATING i40 accumulator: every prefix is bounded by
+    // 64 * 32767 * 32768 < 2^39, and saturating updates are not exact-modulo,
+    // so the Vector consumer must route through planConstantSaturatingReduction.
     ondrix::ondsp::AccType accumulatorType = getSaturatingAccumulator(context, /*width=*/40);
     // Identity materialization of the raw frac-30 accumulator. This is a
     // WIDENING export (i40 -> i64 at the same frac), the exact

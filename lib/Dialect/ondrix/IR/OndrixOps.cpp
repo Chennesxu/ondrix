@@ -1531,26 +1531,29 @@ LogicalResult CxPhaseOp::verify() {
   return success();
 }
 
-LogicalResult WindowHammingOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+// The one design-window contract every window op shares: Q1.15 coefficients
+// at a static extent in [2, 4096].
+static LogicalResult verifyWindowDesign(Operation *op, Attribute numeric,
+                                        RankedTensorType coefficientsType) {
+  if (failed(verifySignedFixedFormat(op, numeric, 16, 15, "numeric")))
     return failure();
-  return verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 2, 4096);
+  return verifyDesignCoefficientTensor(op, coefficientsType, 2, 4096);
+}
+
+LogicalResult WindowHammingOp::verify() {
+  return verifyWindowDesign(getOperation(), getNumeric(), getCoefficients().getType());
 }
 
 LogicalResult WindowHannOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-    return failure();
-  return verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 2, 4096);
+  return verifyWindowDesign(getOperation(), getNumeric(), getCoefficients().getType());
 }
 
 LogicalResult WindowBlackmanOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-    return failure();
-  return verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 2, 4096);
+  return verifyWindowDesign(getOperation(), getNumeric(), getCoefficients().getType());
 }
 
 LogicalResult WindowKaiserOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+  if (failed(verifyWindowDesign(getOperation(), getNumeric(), getCoefficients().getType())))
     return failure();
   int64_t num = getBetaNum();
   int64_t den = getBetaDen();
@@ -1567,7 +1570,7 @@ LogicalResult WindowKaiserOp::verify() {
   bool aboveFifty = den <= std::numeric_limits<int64_t>::max() / 50 && num > 50 * den;
   if (aboveFifty)
     return emitOpError("kaiser beta must be a positive rational in (0, 50]");
-  return verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 2, 4096);
+  return success();
 }
 
 LogicalResult FirDesignWindowedSincOp::verify() {

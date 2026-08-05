@@ -1,78 +1,11 @@
 // RUN: ondrix-opt %s --fuse-ondrix-gain-into-fir | FileCheck %s
 // RUN: ondrix-opt %s --fuse-ondrix-gain-into-fir="record-refusals=1" | FileCheck %s --check-prefix=REFUSAL
 
-// Fusing a constant gain into constant FIR taps is a textbook
-// real-arithmetic identity: scaling the samples and scaling the taps are the
-// same linear map. Under the contract they are not, because the gain rounds
-// and saturates every sample at its own Q1.15 boundary before the taps see
-// it. The rewrite is therefore authorized per tap by an exhaustive
-// certificate over all 65536 i16 inputs:
-//
-//   for every tap i, for every i16 x:
-//     applyGainQ15(x, g, rule) * h[i] == x * h'[i]
-//
-// Both sides are the exact products that enter the accumulator, so a
-// certified filter pushes the identical ordered term sequence and the fusion
-// is bit-exact for any accumulator width, update overflow policy, export
-// policy, and product selection. One failing tap refuses the whole filter.
-//
-// ---------------------------------------------------------------------
-// CENSUS. The candidate set below was swept offline with exactly the
-// integer contract this pass implements. Proposals per tap: the quantized
-// q15(g*h/2^15) under the declared rule, and the exact g*h/2^15 when that
-// division is exact and representable.
-//
-//   gains  0, +-2^k (k = 0..14), -32768, +-32767, and the gain-cascade
-//          witnesses 3125, 32764, 22938, 19661            (38 distinct)
-//   taps   0, +-1, +-2, +-3, 4, 8192, +-16384, 2621, 9025,
-//          -747, 32767, -32768                            (16 distinct)
-//   rules  nearest_even, nearest_ties_positive
-//
-//   1216 (gain, tap, rule) combinations evaluated
-//    106 certified = every combination with tap == 0 (38 gains x 2 rules)
-//                    plus every combination with gain == 0 (15 nonzero
-//                    taps x 2 rules)
-//      0 certified with both the gain and the tap nonzero
-//
-// A wider sweep confirms the emptiness is structural, not an artifact of
-// the candidate list: for h in {1, -1, 2, 9025, -32768} and ALL 65535
-// nonzero gains, under both rules, no gain certifies. A nonzero tap forces
-// applyGainQ15(x, g, rule) = x * h'/h for every x, an exact linear identity
-// that no representable gain satisfies — the unit gain 2^15 is outside the
-// declared range [-32768, 32767].
-//
-// Divergence census for the natural quantized proposal (rule: NE =
-// nearest_even, NP = nearest_ties_positive; witness is the first input):
-//
-//   g       h      h'     rule  diverging inputs  first witness terms
-//   -32768      1     -1  both      1 / 65536  x=-32768:  32767 vs  32768
-//   -32768     -1      1  both      1 / 65536  x=-32768: -32767 vs -32768
-//   -32768   9025  -9025  both      1 / 65536  x=-32768: 295722175 vs 295731200
-//    16384      1      0  NE    65533 / 65536  x=-32768: -16384 vs 0
-//    16384      1      1  NP    65534 / 65536  x=-32768: -16384 vs -32768
-//    16384      2      1  NE    32768 / 65536  x=-32767: -32768 vs -32767
-//    16384      2      1  NP    32768 / 65536  x=-32767: -32766 vs -32767
-//    32767      1      1  NE    32767 / 65536  x=-32768: -32767 vs -32768
-//    32767      1      1  NP    32768 / 65536  x=-32768: -32767 vs -32768
-//    22938      1      1  both  65533 / 65536  x=-32768: -22938 vs -32768
-//     3125   9025    861  both  65533 / 65536  x=-32768: -28203125 vs -28213248
-//
-// Plain negation is the sharpest entry: g = -32768 with h' = -h agrees on
-// 65535 of 65536 inputs and is still illegal, because the gain saturates
-// -32768 to 32767 instead of 32768.
-//
-// Unlike the gain-cascade merge, whose certified constant pairs genuinely
-// differ between the two tie rules, legality here does NOT depend on the
-// rule: the certified set is characterized by gain == 0 or tap == 0, and
-// both conditions are rule-independent. The sweep found no (g, h) pair whose
-// verdict differs between nearest_even and nearest_ties_positive. The pair
-// (16384, 2) below is stated under both rules to pin that: same refusal,
-// different divergent term.
-// ---------------------------------------------------------------------
+// Per-tap certificate over all 65536 i16 inputs; the authorization argument
+// is the fuse-ondrix-gain-into-fir description.
 
-// A muted signal path certifies for arbitrary taps: every unfused term is
-// applyGainQ15(x, 0) * h[i] = 0 and every fused term is x * 0 = 0. The
-// requantization boundary disappears and the tap table becomes all zeros.
+// A muted signal path certifies for arbitrary taps: every term is zero on
+// both sides, so the requantization boundary disappears.
 // CHECK-LABEL: func.func @certified_zero_gain
 // CHECK-NOT: ondrix.gain
 // CHECK: %[[TAPS:.*]] = arith.constant dense<0> : tensor<3xi16>
@@ -203,10 +136,8 @@ func.func @refused_generic_pair(%input: tensor<8xi16>, %init: tensor<6xi16>) -> 
   return %result : tensor<6xi16>
 }
 
-// The certificate is per tap and the filter is all-or-nothing: two certified
-// zero taps do not buy the third one. The rewrite would have to delete the
-// gain for every tap at once, so a single uncertified tap keeps the whole
-// filter unfused.
+// Per-tap certificate, all-or-nothing filter: two certified zero taps do not
+// buy the third, whose term diverges -16384 against 0 at x = -32768.
 // CHECK-LABEL: func.func @refused_single_nonzero_tap
 // CHECK: ondrix.gain
 // CHECK-SAME: gain = 16384

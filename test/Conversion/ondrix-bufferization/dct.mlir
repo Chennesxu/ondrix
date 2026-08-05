@@ -101,12 +101,9 @@ func.func @dct4_q15(%input: tensor<4xi16>) -> tensor<4xi16> {
 // TRACE-DAG: "accumulator_storage_width":{{ *}}40
 // TRACE-DAG: "subject_ordinal":{{ *}}19
 
-// Unit stride is a precondition of the Vector path, not a property of the
-// interface: the coefficient tables stay unit-stride globals, but under the
-// default fully dynamic function-boundary layout the input buffer becomes
-// strided<[?], offset: ?>, the legality gate refuses the reduction, and the
-// memref-form ondsp.reduce_mac survives untouched. That is an ordered scalar
-// fallback, never a semantic change.
+// The unit-stride precondition of vectorize-ondsp-fixed-memref-reduce: the
+// coefficient tables stay unit-stride globals, but a dynamically laid out
+// input buffer alone keeps the reduction an ordered scalar fallback.
 // DYNAMIC-LAYOUT-LABEL: func.func @dct8_q15(
 // DYNAMIC-LAYOUT-SAME: memref<8xi16, strided<[?], offset: ?>>
 // DYNAMIC-LAYOUT: ondsp.reduce_mac

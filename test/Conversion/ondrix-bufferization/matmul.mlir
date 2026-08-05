@@ -65,12 +65,9 @@ func.func @matmul4x16x3_q15(%a: tensor<4x16xi16>, %b: tensor<16x3xi16>) -> tenso
 // FULL-VECTOR-LABEL: func.func @matmul4x16x3_q15
 // FULL-VECTOR: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
 
-// Unit-stride views are a precondition of the Vector path, not a property of
-// the interface: the A-row view inherits the layout of the incoming buffer,
-// so under the default fully dynamic function-boundary layout it becomes
-// strided<[?], offset: ?>, the legality gate refuses the reduction, and the
-// memref-form ondsp.reduce_mac survives all three Vector passes untouched.
-// That is an ordered scalar fallback, never a semantic change.
+// The unit-stride precondition of vectorize-ondsp-fixed-memref-reduce: the
+// A-row view inherits the dynamic layout of the incoming buffer, so the
+// reduction stays an ordered scalar fallback.
 // DYNAMIC-LAYOUT-LABEL: func.func @matmul8x8x8_q15(
 // DYNAMIC-LAYOUT-SAME: memref<8x8xi16, strided<[?, ?], offset: ?>>
 // DYNAMIC-LAYOUT: memref.subview %{{.*}}[%{{.*}}, 0] [1, 8] [1, 1] : memref<8x8xi16, strided<[?, ?], offset: ?>> to memref<8xi16, strided<[?], offset: ?>>

@@ -73,12 +73,9 @@ func.func @rms2_q15(%input: tensor<2xi16>) -> tensor<1xi16> {
 // FULL-VECTOR: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
 // FULL-VECTOR-LABEL: func.func @rms2_q15
 
-// Unit stride is a precondition of the Vector path, not a property of the
-// interface: under the default fully dynamic function-boundary layout the
-// input buffer becomes strided<[?], offset: ?>, the legality gate refuses the
-// reduction, and the memref-form ondsp.reduce_mac survives all three Vector
-// passes untouched. That is an ordered scalar fallback, never a semantic
-// change.
+// The unit-stride precondition of vectorize-ondsp-fixed-memref-reduce, here
+// on a dynamically laid out input buffer: ordered scalar fallback, not a
+// semantic change.
 // DYNAMIC-LAYOUT-LABEL: func.func @rms64_q15(
 // DYNAMIC-LAYOUT-SAME: memref<64xi16, strided<[?], offset: ?>>
 // DYNAMIC-LAYOUT: ondsp.reduce_mac
