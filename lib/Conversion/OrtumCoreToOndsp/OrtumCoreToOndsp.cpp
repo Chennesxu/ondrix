@@ -191,6 +191,29 @@ public:
 using MacAddOpLowering = MacLikeOpLowering<ondrix::ortumcore::MacAddOp, ondrix::ondsp::MacOp>;
 using MacSubOpLowering = MacLikeOpLowering<ondrix::ortumcore::MacSubOp, ondrix::ondsp::MacSubOp>;
 
+class AccOutOpLowering final : public OpConversionPattern<ondrix::ortumcore::AccOutOp> {
+public:
+  using OpConversionPattern<ondrix::ortumcore::AccOutOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ortumcore::AccOutOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto accumulator = dyn_cast<ondrix::ondsp::AccType>(adaptor.getAcc().getType());
+    if (!accumulator)
+      return op.emitOpError("emulation requires a converted Ondsp accumulator operand");
+    // acc_export with an i32 destination realizes the readout equation
+    // exactly: floor division by 2^shift, then saturation at the i32 storage.
+    ondrix::ortumcore::ExportDomain domain =
+        ondrix::ortumcore::getShiftedSaturatingI32ExportDomain();
+    auto destination =
+        ondrix::ondsp::FixedAttr::get(rewriter.getContext(), accumulator.getSignedness(),
+                                      IntegerType::get(rewriter.getContext(), domain.storageWidth),
+                                      accumulator.getFrac() - unsigned(op.getShift()));
+    rewriter.replaceOpWithNewOp<ondrix::ondsp::AccExportOp>(
+        op, rewriter.getI32Type(), adaptor.getAcc(), destination, domain.rounding, domain.overflow);
+    return success();
+  }
+};
+
 class ConvertOrtumCoreToOndspEmulationPass final
     : public ondrix::impl::ConvertOrtumCoreToOndspEmulationBase<
           ConvertOrtumCoreToOndspEmulationPass> {
@@ -212,8 +235,8 @@ public:
 
     OrtumCoreToOndspTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
-    patterns.add<AccInitOpLowering, MacAddOpLowering, MacSubOpLowering>(typeConverter,
-                                                                        &getContext());
+    patterns.add<AccInitOpLowering, MacAddOpLowering, MacSubOpLowering, AccOutOpLowering>(
+        typeConverter, &getContext());
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);

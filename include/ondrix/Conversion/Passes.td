@@ -67,9 +67,20 @@ def ConvertOndspToOrtumCore
   let summary = "Lower ondsp semantic ops to ortumcore target semantic ops";
   let description = [{
     Lower ondsp semantic ops to ortumcore target semantic ops.
+
+    Accumulator export selects the target readout capability only for the
+    policy the readout provably realizes: `toward_negative` rounding with a
+    saturating signed i32 or i16 destination and a fractional shift in
+    [0, 15]. The readout itself shifts arithmetically and saturates at the
+    32-bit storage; an i16 destination appends an explicit clamp, which is
+    exact because clamping to the wider range first cannot change the result
+    of the narrower clamp (for any x, both compose to the i16 clamp of the
+    shifted value), and for shifts of at least 8 a 40-bit accumulator cannot
+    reach the 32-bit bound at all. Every other export policy fails closed.
   }];
   let constructor = "ondrix::createConvertOndspToOrtumCorePass()";
   let dependentDialects = [
+    "mlir::arith::ArithDialect",
     "ondrix::ondsp::OndspDialect",
     "ondrix::ortumcore::OrtumCoreDialect",
     "mlir::func::FuncDialect",
@@ -82,7 +93,9 @@ def ConvertOrtumCoreToOndspEmulation
   let description = [{
     Fully expand the public OrtumCore accumulator subset to equivalent Ondsp
     operations. The supported subset is the signed i40/frac30 saturating
-    accumulator, zero initialization, and signed Q15 full-product MAC add/sub.
+    accumulator, zero initialization, signed Q15 full-product MAC add/sub,
+    and the shifted saturating readout (one acc_export at the i32 storage
+    with toward_negative rounding).
     Other OrtumCore operations fail closed. Run `convert-ondsp-fixed-to-scalar`
     afterwards to obtain generic executable scalar IR.
   }];

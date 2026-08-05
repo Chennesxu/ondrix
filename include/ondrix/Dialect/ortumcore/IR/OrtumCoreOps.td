@@ -45,6 +45,26 @@ def OrtumCore_MacSubOp
     requantization behavior is not part of this operation.
   }];
 }
+def OrtumCore_AccOutOp : OrtumCore_Op<"acc_out", [Pure]> {
+  let summary = "Shifted saturating accumulator readout";
+  let description = [{
+    Reads the abstract signed 40-bit accumulator through the target's
+    architectural output path: the value is arithmetically shifted right by
+    the static `shift` amount and then saturated to the signed 32-bit range.
+
+    The realized rounding is exactly `toward_negative`, and the saturation
+    boundary is the 32-bit result storage, never a narrower destination
+    format: a narrower destination composes this operation with an explicit
+    saturating cast, which is exact because clamping to a wider range first
+    cannot change a subsequent narrower clamp. `shift` models the target's
+    output shift register and must lie in [0, 15].
+  }];
+  let arguments = (ins OrtumCore_AccumType:$acc, I64Attr:$shift);
+  let results = (outs I32:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 class OrtumCore_BinaryOp<string mnemonic, string opSummary>
     : OrtumCore_Op<mnemonic, [Pure]> {
   let summary = opSummary;

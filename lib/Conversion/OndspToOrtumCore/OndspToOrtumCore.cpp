@@ -12,6 +12,7 @@
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreTypes.h"
 #include "ondrix/Target/OrtumCore/OrtumCoreTargetProfile.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/IR/AttrTypeSubElements.h"
@@ -202,11 +203,43 @@ class AccExportOpLowering final : public OpConversionPattern<ondrix::ondsp::AccE
 public:
   using OpConversionPattern<ondrix::ondsp::AccExportOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(ondrix::ondsp::AccExportOp op, OpAdaptor,
-                                ConversionPatternRewriter &) const override {
-    return op.emitOpError(
-        "policy-bearing accumulator export is unsupported by ortumcore lowering until target "
-        "export semantics are proven equivalent");
+  LogicalResult matchAndRewrite(ondrix::ondsp::AccExportOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    ondrix::ondsp::AccType accumulator = op.getAcc().getType();
+    ondrix::ondsp::FixedAttr destination = op.getDst();
+    auto storage = dyn_cast<IntegerType>(destination.getStorage());
+    int64_t shift = int64_t(accumulator.getFrac()) - int64_t(destination.getFrac());
+    if (!storage || !isa<IntegerType>(op.getResult().getType()) ||
+        !ondrix::ortumcore::OrtumCoreTargetProfile().supportsExport(
+            getAccumulatorDomain(accumulator), op.getRounding(), op.getOverflow(), shift) ||
+        (storage.getWidth() != 32 && storage.getWidth() != 16))
+      return op.emitOpError(
+          "accumulator export is outside the proven readout capability (toward_negative "
+          "rounding, saturating i32 or i16 destination, fractional shift in [0, 15])");
+
+    if (!isa<ondrix::ortumcore::AccumType>(adaptor.getAcc().getType()))
+      return op.emitOpError("export lowering requires a converted target accumulator operand");
+
+    Location loc = op.getLoc();
+    Value out = rewriter.create<ondrix::ortumcore::AccOutOp>(loc, rewriter.getI32Type(),
+                                                             adaptor.getAcc(), shift);
+    if (storage.getWidth() == 32) {
+      rewriter.replaceOp(op, out);
+      return success();
+    }
+    // The i16 destination clamp composes exactly: the readout's wider i32
+    // saturation cannot change a subsequent narrower clamp (Passes.td carries
+    // the argument).
+    Value minimum = rewriter.create<arith::ConstantIntOp>(loc, -32768, 32);
+    Value maximum = rewriter.create<arith::ConstantIntOp>(loc, 32767, 32);
+    Value belowMinimum =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, out, minimum);
+    Value lowerClamped = rewriter.create<arith::SelectOp>(loc, belowMinimum, minimum, out);
+    Value aboveMaximum =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, lowerClamped, maximum);
+    Value clamped = rewriter.create<arith::SelectOp>(loc, aboveMaximum, maximum, lowerClamped);
+    rewriter.replaceOpWithNewOp<arith::TruncIOp>(op, rewriter.getI16Type(), clamped);
+    return success();
   }
 };
 

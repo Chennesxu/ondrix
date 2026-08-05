@@ -11,4 +11,8 @@ ProductDomain getSignedQ15FullProductDomain() {
           ondsp::ProductSemantics{32, 30, ondsp::ProductSelection::Full}};
 }
 
+ExportDomain getShiftedSaturatingI32ExportDomain() {
+  return {32, 15, ondsp::RoundingMode::TowardNegative, ondsp::OverflowMode::Saturate};
+}
+
 } // namespace ondrix::ortumcore

@@ -25,4 +25,12 @@ bool OrtumCoreTargetProfile::supportsMac(const ProductDomain &product,
   return supportsAccumulator(accumulator) && matches(product, getSignedQ15FullProductDomain());
 }
 
+bool OrtumCoreTargetProfile::supportsExport(const AccumulatorDomain &accumulator,
+                                            ondsp::RoundingMode rounding,
+                                            ondsp::OverflowMode overflow, int64_t shift) const {
+  ExportDomain domain = getShiftedSaturatingI32ExportDomain();
+  return supportsAccumulator(accumulator) && rounding == domain.rounding &&
+         overflow == domain.overflow && shift >= 0 && shift <= int64_t(domain.maxShift);
+}
+
 } // namespace ondrix::ortumcore

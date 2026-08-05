@@ -33,3 +33,29 @@ func.func @ortumcore_repeat_mac_sub(%lhs: i16, %rhs: i16, %count: index) -> i64 
   %result = arith.extsi %bits : i40 to i64
   return %result : i64
 }
+
+func.func @ortumcore_repeat_mac_out_q15(%lhs: i16, %rhs: i16, %count: index) -> i32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %zero = ortumcore.acc_init : !ortumcore.acc
+  %acc = scf.for %i = %c0 to %count step %c1
+      iter_args(%current = %zero) -> (!ortumcore.acc) {
+    %next = ortumcore.mac_add %current, %lhs, %rhs : (!ortumcore.acc, i16, i16) -> !ortumcore.acc
+    scf.yield %next : !ortumcore.acc
+  }
+  %out = ortumcore.acc_out %acc {shift = 15 : i64} : (!ortumcore.acc) -> i32
+  return %out : i32
+}
+
+func.func @ortumcore_repeat_mac_out_raw(%lhs: i16, %rhs: i16, %count: index) -> i32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %zero = ortumcore.acc_init : !ortumcore.acc
+  %acc = scf.for %i = %c0 to %count step %c1
+      iter_args(%current = %zero) -> (!ortumcore.acc) {
+    %next = ortumcore.mac_add %current, %lhs, %rhs : (!ortumcore.acc, i16, i16) -> !ortumcore.acc
+    scf.yield %next : !ortumcore.acc
+  }
+  %out = ortumcore.acc_out %acc {shift = 0 : i64} : (!ortumcore.acc) -> i32
+  return %out : i32
+}
