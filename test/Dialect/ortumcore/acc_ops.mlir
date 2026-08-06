@@ -20,3 +20,12 @@ func.func @acc_out(%acc: !ortumcore.acc) -> (i32, i32) {
   %scaled = ortumcore.acc_out %acc {shift = 15 : i64} : (!ortumcore.acc) -> i32
   return %raw, %scaled : i32, i32
 }
+
+// CHECK-LABEL: func.func @bitrev_ops(
+// CHECK: ortumcore.bitrev_add %{{.*}}, %{{.*}} : (i32, i32) -> i32
+// CHECK: ortumcore.bitrev_sub %{{.*}}, %{{.*}} : (i32, i32) -> i32
+func.func @bitrev_ops(%address: i32, %step: i32) -> i32 {
+  %up = ortumcore.bitrev_add %address, %step : (i32, i32) -> i32
+  %down = ortumcore.bitrev_sub %up, %step : (i32, i32) -> i32
+  return %down : i32
+}

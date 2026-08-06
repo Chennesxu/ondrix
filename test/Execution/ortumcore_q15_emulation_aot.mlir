@@ -59,3 +59,25 @@ func.func @ortumcore_repeat_mac_out_raw(%lhs: i16, %rhs: i16, %count: index) -> 
   %out = ortumcore.acc_out %acc {shift = 0 : i64} : (!ortumcore.acc) -> i32
   return %out : i32
 }
+
+func.func @ortumcore_bitrev_add_walk(%start: i32, %step: i32, %count: index) -> i32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %result = scf.for %i = %c0 to %count step %c1
+      iter_args(%address = %start) -> (i32) {
+    %next = ortumcore.bitrev_add %address, %step : (i32, i32) -> i32
+    scf.yield %next : i32
+  }
+  return %result : i32
+}
+
+func.func @ortumcore_bitrev_sub_walk(%start: i32, %step: i32, %count: index) -> i32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %result = scf.for %i = %c0 to %count step %c1
+      iter_args(%address = %start) -> (i32) {
+    %next = ortumcore.bitrev_sub %address, %step : (i32, i32) -> i32
+    scf.yield %next : i32
+  }
+  return %result : i32
+}

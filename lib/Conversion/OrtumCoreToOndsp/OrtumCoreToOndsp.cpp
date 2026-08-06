@@ -214,6 +214,49 @@ public:
   }
 };
 
+// rev32 as the standard five-step masked butterfly swap; kept in plain
+// arith so every downstream generic path can execute it.
+static Value emitReverse32(OpBuilder &builder, Location loc, Value value) {
+  auto swapStep = [&](Value input, int32_t mask, int32_t amount) -> Value {
+    Value maskValue = builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(mask));
+    Value amountValue = builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(amount));
+    Value right = builder.create<arith::ShRUIOp>(loc, input, amountValue);
+    right = builder.create<arith::AndIOp>(loc, right, maskValue);
+    Value left = builder.create<arith::AndIOp>(loc, input, maskValue);
+    left = builder.create<arith::ShLIOp>(loc, left, amountValue);
+    return builder.create<arith::OrIOp>(loc, right, left);
+  };
+  value = swapStep(value, 0x55555555, 1);
+  value = swapStep(value, 0x33333333, 2);
+  value = swapStep(value, 0x0F0F0F0F, 4);
+  value = swapStep(value, 0x00FF00FF, 8);
+  Value sixteen = builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(16));
+  Value high = builder.create<arith::ShRUIOp>(loc, value, sixteen);
+  Value low = builder.create<arith::ShLIOp>(loc, value, sixteen);
+  return builder.create<arith::OrIOp>(loc, high, low);
+}
+
+template <typename SourceOp, bool Subtract>
+class BitrevLikeOpLowering final : public OpConversionPattern<SourceOp> {
+public:
+  using OpConversionPattern<SourceOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(SourceOp op,
+                                typename OpConversionPattern<SourceOp>::OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value lhs = emitReverse32(rewriter, loc, adaptor.getLhs());
+    Value rhs = emitReverse32(rewriter, loc, adaptor.getRhs());
+    Value raw = Subtract ? rewriter.create<arith::SubIOp>(loc, lhs, rhs).getResult()
+                         : rewriter.create<arith::AddIOp>(loc, lhs, rhs).getResult();
+    rewriter.replaceOp(op, emitReverse32(rewriter, loc, raw));
+    return success();
+  }
+};
+
+using BitrevAddOpLowering = BitrevLikeOpLowering<ondrix::ortumcore::BitrevAddOp, false>;
+using BitrevSubOpLowering = BitrevLikeOpLowering<ondrix::ortumcore::BitrevSubOp, true>;
+
 class ConvertOrtumCoreToOndspEmulationPass final
     : public ondrix::impl::ConvertOrtumCoreToOndspEmulationBase<
           ConvertOrtumCoreToOndspEmulationPass> {
@@ -235,8 +278,8 @@ public:
 
     OrtumCoreToOndspTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
-    patterns.add<AccInitOpLowering, MacAddOpLowering, MacSubOpLowering, AccOutOpLowering>(
-        typeConverter, &getContext());
+    patterns.add<AccInitOpLowering, MacAddOpLowering, MacSubOpLowering, AccOutOpLowering,
+                 BitrevAddOpLowering, BitrevSubOpLowering>(typeConverter, &getContext());
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);

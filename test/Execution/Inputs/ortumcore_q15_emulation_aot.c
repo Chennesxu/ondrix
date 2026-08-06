@@ -5,6 +5,8 @@ extern int64_t ortumcore_repeat_mac(int16_t lhs, int16_t rhs, int64_t count);
 extern int64_t ortumcore_repeat_mac_sub(int16_t lhs, int16_t rhs, int64_t count);
 extern int32_t ortumcore_repeat_mac_out_q15(int16_t lhs, int16_t rhs, int64_t count);
 extern int32_t ortumcore_repeat_mac_out_raw(int16_t lhs, int16_t rhs, int64_t count);
+extern int32_t ortumcore_bitrev_add_walk(int32_t start, int32_t step, int64_t count);
+extern int32_t ortumcore_bitrev_sub_walk(int32_t start, int32_t step, int64_t count);
 
 static int64_t update_reference(int64_t accumulator, int16_t lhs, int16_t rhs, int subtract) {
   const __int128 minimum = -((__int128)1 << 39);
@@ -27,6 +29,25 @@ static int64_t repeat_reference(int16_t lhs, int16_t rhs, int64_t count, int sub
 
 // Independent readout formulation: floor division (not >>), then the i32
 // clamp, mirroring the manual equation rather than the compiler's lowering.
+// Independent bit-order formulation: digit walk, not the butterfly swaps
+// the emulation lowering uses.
+static uint32_t reverse_reference(uint32_t value) {
+  uint32_t reversed = 0;
+  for (int bit = 0; bit < 32; ++bit)
+    reversed |= ((value >> bit) & 1u) << (31 - bit);
+  return reversed;
+}
+
+static int32_t bitrev_walk_reference(int32_t start, int32_t step, int64_t count, int subtract) {
+  uint32_t address = (uint32_t)start;
+  for (int64_t i = 0; i < count; ++i) {
+    uint32_t raw = subtract ? reverse_reference(address) - reverse_reference((uint32_t)step)
+                            : reverse_reference(address) + reverse_reference((uint32_t)step);
+    address = reverse_reference(raw);
+  }
+  return (int32_t)address;
+}
+
 static int32_t readout_reference(int64_t accumulator, unsigned shift) {
   __int128 divisor = (__int128)1 << shift;
   __int128 quotient = (__int128)accumulator / divisor;
@@ -94,6 +115,35 @@ int main(void) {
   // at shift 15 yields 0, floor yields -1.
   if (readout_reference(-1, 15) != -1) {
     fprintf(stderr, "readout reference lost the floor semantics\n");
+    failed = 1;
+  }
+  struct BitrevCase {
+    const char *name;
+    int32_t start;
+    int32_t step;
+    int64_t count;
+    int subtract;
+  } bitrev_cases[] = {
+      {"reversed counter walk", 0, INT32_MIN, 63, 0},
+      {"reversed counter wrap down", 0, INT32_MIN, 1, 1},
+      {"reversed long walk", 0, INT32_MIN, 1024, 0},
+      {"reversed mixed operands", 0x12345678, 0x00010000, 17, 0},
+      {"reversed mixed subtract", 0x12345678, (int32_t)0xAAAAAAAA, 9, 1},
+  };
+  for (unsigned i = 0; i < sizeof(bitrev_cases) / sizeof(bitrev_cases[0]); ++i) {
+    const struct BitrevCase *c = &bitrev_cases[i];
+    int32_t expected = bitrev_walk_reference(c->start, c->step, c->count, c->subtract);
+    int32_t actual = c->subtract ? ortumcore_bitrev_sub_walk(c->start, c->step, c->count)
+                                 : ortumcore_bitrev_add_walk(c->start, c->step, c->count);
+    if (actual != expected) {
+      fprintf(stderr, "%s: expected %d, got %d\n", c->name, expected, actual);
+      failed = 1;
+    }
+  }
+  // The reversed-counter walk must discriminate ordinary addition: after one
+  // +rev32(1) step the address is 1 << 31, not 1.
+  if (bitrev_walk_reference(0, INT32_MIN, 1, 0) != INT32_MIN) {
+    fprintf(stderr, "bitrev reference lost the reversed-domain semantics\n");
     failed = 1;
   }
   return failed;

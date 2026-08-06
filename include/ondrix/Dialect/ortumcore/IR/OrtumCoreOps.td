@@ -133,7 +133,24 @@ def OrtumCore_FftTrivialStageOp
     : OrtumCore_PackedFftOp<"fft_trivial_stage",
                             "Experimental trivial-twiddle FFT stage semantic op">;
 
-def OrtumCore_BitrevAddOp : OrtumCore_BinaryOp<"bitrev_add", "Bit-reversed add addressing semantic op">;
-def OrtumCore_BitrevSubOp : OrtumCore_BinaryOp<"bitrev_sub", "Bit-reversed subtract addressing semantic op">;
+class OrtumCore_BitrevAddressOp<string mnemonic, string opSummary, string op>
+    : OrtumCore_Op<mnemonic, [Pure]> {
+  let summary = opSummary;
+  let description = [{
+    Computes `rev32(rev32(lhs) }] # op # [{ rev32(rhs))` where `rev32`
+    reverses all 32 bits: carries propagate from the most significant bit
+    toward the least significant bit, and the arithmetic wraps around in
+    the reversed domain. Integer-exact with no rounding or hidden state;
+    this is the address progression of a bit-reversed (FFT reorder) walk.
+  }];
+  let arguments = (ins I32:$lhs, I32:$rhs);
+  let results = (outs I32:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def OrtumCore_BitrevAddOp
+    : OrtumCore_BitrevAddressOp<"bitrev_add", "Bit-reversed add addressing", "+">;
+def OrtumCore_BitrevSubOp
+    : OrtumCore_BitrevAddressOp<"bitrev_sub", "Bit-reversed subtract addressing", "-">;
 
 #endif
