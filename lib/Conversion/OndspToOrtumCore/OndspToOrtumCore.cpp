@@ -15,6 +15,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
+#include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -347,6 +348,9 @@ public:
           isLegalForReturnOpTypeConversionPattern(op, typeConverter);
       return hasLegalControlFlow && hasLegalConvertedTypes(op, typeConverter);
     });
+    // Accumulator values flow through structured control flow in whole
+    // kernels; convert scf region signatures with the same type converter.
+    mlir::scf::populateSCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);
 
     if (failed(applyFullConversion(getOperation(), target, std::move(patterns))))
       signalPassFailure();

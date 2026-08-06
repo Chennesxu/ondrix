@@ -9,6 +9,7 @@ add_ondrix_library(OndspToOrtumCore
   MLIRFuncTransforms
   MLIRIR
   MLIRPass
+  MLIRSCFTransforms
   MLIRSupport
   MLIRTransformUtils
   OndrixConversionUtils

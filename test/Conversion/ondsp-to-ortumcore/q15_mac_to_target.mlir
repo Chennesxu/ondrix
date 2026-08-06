@@ -51,3 +51,24 @@ func.func @i32_export(
   %0 = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i32, frac = 30>, rounding = #ondsp.rounding<toward_negative>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i32
   return %0 : i32
 }
+
+// Discriminates the scf structural conversion: without it this whole-kernel
+// loop shape fails to legalize at the scf.for carrying the accumulator.
+// CHECK-LABEL: func.func @q15_loop_chain(
+// CHECK: %[[ZERO:.*]] = ortumcore.acc_init : !ortumcore.acc
+// CHECK: %[[LOOP:.*]] = scf.for %{{.*}} iter_args(%[[CUR:.*]] = %[[ZERO]]) -> (!ortumcore.acc)
+// CHECK: %[[NEXT:.*]] = ortumcore.mac_add %[[CUR]], %{{.*}}, %{{.*}} : (!ortumcore.acc, i16, i16) -> !ortumcore.acc
+// CHECK: scf.yield %[[NEXT]] : !ortumcore.acc
+// CHECK: %[[OUT:.*]] = ortumcore.acc_out %[[LOOP]] {shift = 15 : i64} : (!ortumcore.acc) -> i32
+func.func @q15_loop_chain(%lhs: i16, %rhs: i16, %count: index) -> i32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %zero = ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = saturate>
+  %acc = scf.for %i = %c0 to %count step %c1
+      iter_args(%current = %zero) -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) {
+    %next = ondsp.mac %current, %lhs, %rhs {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    scf.yield %next : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  }
+  %out = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i32, frac = 15>, rounding = #ondsp.rounding<toward_negative>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i32
+  return %out : i32
+}
