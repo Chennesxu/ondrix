@@ -9,7 +9,7 @@
 // CHECK-SAME: %[[INPUT:.*]]: tensor<32xi16>) -> tensor<8xi16>
 // CHECK: %[[RESULT:.*]] = ondrix.cic_decimate %[[INPUT]]
 // CHECK-SAME: overflow = #ondsp.overflow<wrap>
-// CHECK-SAME: rounding = #ondsp.rounding<nearest_even>
+// CHECK-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
 // CHECK: return %[[RESULT]] : tensor<8xi16>
 
 // SAT-LABEL: func.func @q15_cic_decimate_saturate(

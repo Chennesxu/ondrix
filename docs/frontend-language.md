@@ -360,15 +360,18 @@ inferred exact Q15 accumulator or the declared i40/frac30 or i64/frac62
 accumulator policy, and emits an explicit export.
 Supported update and destination overflow modes are `wrap` and `saturate`.
 Supported rounding modes for this dot/FIR export policy are
-`toward_negative`, `toward_zero`, and `nearest_even`; other declared modes
-are rejected here until the corresponding contracts opt in. Individual
+`toward_negative`, `toward_zero`, `nearest_even`, and
+`nearest_ties_positive`; a newly declared mode stays rejected here until
+the corresponding contract opts in with its own object evidence. Individual
 catalog builtins expose their own admissible choices at the call site
 (for example `gain(..., rounding=...)` and the `root_rounding=` parameter
 of `rms` and `magnitude`).
 
 A fixed-point call site that names no contract past its algorithm parameters
 takes the default: an accumulator inferred wide enough that no update can
-wrap (so the update mode is vacuous), the unbiased `nearest_even` tie rule,
+wrap (so the update mode is vacuous), the `nearest_ties_positive` tie rule
+that fixed-point export hardware realizes natively (add half, then shift;
+`nearest_even` remains one declaration away for unbiased accumulation),
 and saturation at the one boundary that does lose information. This covers
 `dot`, `fir`, `fir_filter`, `fir_decimate`, `fir_interpolate`, `convolution`,
 `correlation`, `fir_stream`, and `sos_df2_fixed`. Inference needs a static
@@ -459,7 +462,7 @@ def q15_envelope(x: tensor[q15,32], y: tensor[q15,32]) -> tensor[q15,32]:
 ```
 
 Both boundary parameters are optional and both take the language default,
-`rounding=nearest_even` and `overflow=saturate`. `offset` names a raw Q1.15
+`rounding=nearest_ties_positive` and `overflow=saturate`. `offset` names a raw Q1.15
 `bias` and `shift` a signed `amount` in `[-15, 15]`; a left shift declares a
 tie rule too, even though the amount makes it vacuous, so changing the amount
 never silently changes which rule applies.

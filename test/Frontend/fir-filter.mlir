@@ -19,14 +19,14 @@
 
 // Stopping at the boundary takes the default contract: an accumulator wide
 // enough that no update wraps (8 taps bound the sum by 2^33), so wrap is
-// vacuous, and the unbiased tie rule with saturation at the one boundary
-// that does lose information. Inference needs a static tap count, so the
+// vacuous, and the export-default tie rule (nearest_ties_positive, the
+// add-half hardware convention) with saturation at the one lossy boundary. Inference needs a static tap count, so the
 // dynamic spelling stays fail-closed rather than picking a width.
 // DEFAULT-LABEL: func.func @q15_fir_filter_default_contract(
 // DEFAULT: ondrix.fir_filter
 // DEFAULT-SAME: accumulator = !ondsp.acc<storage = i35, frac = 30, signed, update_overflow = wrap>
 // DEFAULT-SAME: overflow = #ondsp.overflow<saturate>
-// DEFAULT-SAME: rounding = #ondsp.rounding<nearest_even>
+// DEFAULT-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
 // DYNDEFAULT: error: automatic accumulation requires a static coefficient extent
 
 // Q15-LABEL: func.func @q15_fir_filter_valid(

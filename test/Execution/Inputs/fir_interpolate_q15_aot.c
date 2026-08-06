@@ -24,6 +24,12 @@ typedef struct {
 #define FIR_INTERPOLATE_UPDATE_OVERFLOW SATURATE
 #endif
 
+// The default .ox contract exports with the language's export default;
+// the hand-written profile spells nearest_even. Both pin their own golden.
+#ifndef FIR_INTERPOLATE_OUTPUT_ROUNDING
+#define FIR_INTERPOLATE_OUTPUT_ROUNDING NEAREST_EVEN
+#endif
+
 extern void FIR_INTERPOLATE_SYMBOL(MemRefI16 *result, MemRefI16 *input, MemRefI16 *coefficients);
 
 #ifdef FIR_INTERPOLATE_TIES_POSITIVE_SYMBOL
@@ -39,7 +45,7 @@ static const struct Policy policy = {
     .update_overflow = FIR_INTERPOLATE_UPDATE_OVERFLOW,
     .state_rounding = NEAREST_EVEN,
     .state_overflow = SATURATE,
-    .output_rounding = NEAREST_EVEN,
+    .output_rounding = FIR_INTERPOLATE_OUTPUT_ROUNDING,
     .output_overflow = SATURATE,
 };
 
@@ -66,7 +72,11 @@ static void reference(const int16_t input[4], const int16_t coefficients[3], int
 int main(void) {
   int16_t input[4] = {INT16_MIN, INT16_MAX, 16384, -8192};
   int16_t coefficients[3] = {INT16_MAX, -16384, 8192};
-  const int16_t golden[9] = {-32767, 16384, 24574, -16384, 24575, -8192, -4096, 4096, -2048};
+  // The corpus discriminates the two nearest rules at index 3, a negative
+  // half tie: nearest_even keeps -16384, ties-positive gives -16383.
+  const int16_t golden[9] = {
+      -32767, 16384, 24574, policy.output_rounding == NEAREST_EVEN ? -16384 : -16383, 24575, -8192,
+      -4096,  4096,  -2048};
   int16_t expected[9];
   reference(input, coefficients, expected, policy.output_rounding);
 

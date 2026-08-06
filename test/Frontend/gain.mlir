@@ -12,11 +12,11 @@
 // CHECK: %[[RESULT:.*]] = ondrix.gain %[[INPUT]]
 // CHECK-SAME: gain = 19661 : i64
 // CHECK-SAME: numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
-// CHECK-SAME: rounding = #ondsp.rounding<nearest_even>
+// CHECK-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
 // CHECK: return %[[RESULT]] : tensor<64xi16>
 
 // The binding exposes every tie rule the gain contract admits; omission
-// above keeps the nearest_even default.
+// above takes the export default (nearest_ties_positive).
 // TIES-LABEL: func.func @q15_gain_ties_positive(
 // TIES: ondrix.gain
 // TIES-SAME: gain = 19661 : i64

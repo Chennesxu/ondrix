@@ -44,11 +44,18 @@ static int64_t combine(int64_t value, int width, int wrapping) {
   return wrapping ? wrapTo(value, width) : saturateTo(value, width);
 }
 
+/* The hand-written profiles spell nearest_even; the .ox chain leg carries
+ * the language's export default and selects ties-positive here. */
+#ifndef CIC_EXPORT_TIES_POSITIVE
+#define CIC_EXPORT_TIES_POSITIVE 0
+#endif
+
 static int16_t exportSample(int64_t value, int shift) {
   int64_t quotient = value >> shift;
   int64_t remainder = value - (quotient << shift);
   int64_t half = (int64_t)1 << (shift - 1);
-  if (remainder > half || (remainder == half && (quotient & 1)))
+  if (CIC_EXPORT_TIES_POSITIVE ? remainder >= half
+                               : (remainder > half || (remainder == half && (quotient & 1))))
     ++quotient;
   if (quotient > 32767)
     quotient = 32767;

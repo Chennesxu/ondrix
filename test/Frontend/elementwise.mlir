@@ -5,10 +5,10 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_elementwise_f32.ox 2>&1 | FileCheck %s --check-prefix=FLOAT
 
 // Seven members nest freely and each keeps the boundary its call site named;
-// omission takes the language's default, unbiased and non-wrapping.
+// omission takes the language's export default, add-half and non-wrapping.
 // CHAIN-LABEL: func.func @q15_elementwise_chain(
 // CHAIN: ondrix.mult
-// CHAIN-SAME: rounding = #ondsp.rounding<nearest_even>
+// CHAIN-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
 // CHAIN: ondrix.sub
 // CHAIN-SAME: overflow = #ondsp.overflow<saturate>
 // CHAIN: ondrix.offset

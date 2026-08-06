@@ -1130,9 +1130,9 @@ public:
       }
       if (isGain && current.kind == TokenKind::Comma) {
         // The gain contract admits two tie rules at its single
-        // requantization boundary; omission keeps the nearest_even default.
-        // gain has exactly one boundary, so the parameter is the plain
-        // `rounding=` rather than a boundary-qualified spelling.
+        // requantization boundary; omission takes the export default
+        // (nearest_ties_positive). gain has exactly one boundary, so the
+        // parameter is the plain `rounding=`, not boundary-qualified.
         if (!expect(TokenKind::Comma, "expected ',' before rounding policy") ||
             !expectIdentifier("rounding", "expected rounding policy") ||
             !expect(TokenKind::Equal, "expected '=' after rounding"))
@@ -1558,23 +1558,25 @@ private:
 
   // The default fixed contract: exact where it can be exact (an inferred
   // accumulator wide enough that no update wraps, so the mode is vacuous),
-  // unbiased and non-wrapping where information must be lost.
+  // non-wrapping where information must be lost. Export boundaries default
+  // to nearest_ties_positive, the tie rule fixed-point DSP export hardware
+  // realizes natively; nearest_even stays available per call site.
   static void applyDefaultFixedPolicy(BuiltinCallAst &result) {
     result.accumulatorAuto = true;
-    result.rounding = "nearest_even";
+    result.rounding = "nearest_ties_positive";
     result.destinationOverflow = "saturate";
     result.updateOverflow = "wrap";
   }
 
   // The same rule at a fixed accumulator width. Three Q15 products bound the
   // section sum by 3*2^30 < 2^39, so wrap is vacuous at i40 here too; both
-  // export boundaries do lose information and take the unbiased tie rule.
+  // export boundaries lose information and take the export-default tie rule.
   static void applyDefaultSosPolicy(BuiltinCallAst &result) {
     result.accumulatorWidth = 40;
     result.updateOverflow = "wrap";
-    result.stateRounding = "nearest_even";
+    result.stateRounding = "nearest_ties_positive";
     result.stateOverflow = "saturate";
-    result.rounding = "nearest_even";
+    result.rounding = "nearest_ties_positive";
     result.destinationOverflow = "saturate";
   }
 
@@ -2394,7 +2396,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       }
       if (call.rounding.empty())
-        call.rounding = "nearest_even";
+        call.rounding = "nearest_ties_positive";
       if (call.destinationOverflow.empty())
         call.destinationOverflow = "saturate";
       if (!parseRounding(call.rounding)) {
@@ -2904,11 +2906,14 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
     }
     // Each surface admits exactly its contract's modes (parsed above);
-    // omission keeps the contract default.
-    ondsp::RoundingMode rounding = ondsp::RoundingMode::NearestEven;
+    // omission keeps the contract default: requantization boundaries (gain,
+    // cic_decimate) take the export default, algorithm-internal roots stay
+    // nearest_even.
+    bool isGain = ast.result.kind == ReductionKind::Gain;
+    bool isCic = ast.result.kind == ReductionKind::CicDecimate;
+    ondsp::RoundingMode rounding = isGain || isCic ? ondsp::RoundingMode::NearestTiesPositive
+                                                   : ondsp::RoundingMode::NearestEven;
     if (!ast.result.rounding.empty()) {
-      bool isGain = ast.result.kind == ReductionKind::Gain;
-      bool isCic = ast.result.kind == ReductionKind::CicDecimate;
       ondsp::RoundingMode alternative = isGain || isCic ? ondsp::RoundingMode::NearestTiesPositive
                                                         : ondsp::RoundingMode::TowardNegative;
       std::optional<ondsp::RoundingMode> parsed = parseRounding(ast.result.rounding);

@@ -4,14 +4,14 @@
 
 // Omitting the whole policy takes the same rule the feed-forward default
 // takes: three Q15 products bound a section sum by 3*2^30 < 2^39, so wrap
-// is vacuous at i40, and both exports lose information and round unbiased.
+// is vacuous at i40, and both lossy exports take the export-default rule.
 // DEFAULT-LABEL: func.func @q15_sos_df2_fixed_default_contract(
 // DEFAULT: ondrix.sos_filter_df2_fixed
 // DEFAULT-SAME: update_overflow = wrap>
 // DEFAULT-SAME: output_overflow = #ondsp.overflow<saturate>
-// DEFAULT-SAME: output_rounding = #ondsp.rounding<nearest_even>
+// DEFAULT-SAME: output_rounding = #ondsp.rounding<nearest_ties_positive>
 // DEFAULT-SAME: state_overflow = #ondsp.overflow<saturate>
-// DEFAULT-SAME: state_rounding = #ondsp.rounding<nearest_even>
+// DEFAULT-SAME: state_rounding = #ondsp.rounding<nearest_ties_positive>
 
 // Both recurrence boundaries expose every declared tie rule they carry
 // evidence for, independently.

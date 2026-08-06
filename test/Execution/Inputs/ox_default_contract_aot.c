@@ -18,7 +18,8 @@ enum { kInput = 64, kTaps = 8, kOutput = 57, kTrialCount = 6 };
 /* The default picks an inferred i35 wrapping accumulator and the explicit
  * spelling an i40 saturating one. Eight Q15 products bound the window sum by
  * 8 * 2^30 = 2^33, so neither mode is reachable and both programs are the
- * exact sum followed by one nearest-even saturating export. This reference
+ * exact sum followed by one ties-positive saturating export (the language's
+ * export default, which the explicit twin spells out). This reference
  * computes that exact sum in i64 and is what both must equal. */
 static int16_t referenceOutput(const int16_t *input, const int16_t *taps, int64_t index) {
   int64_t sum = 0;
@@ -27,7 +28,7 @@ static int16_t referenceOutput(const int16_t *input, const int16_t *taps, int64_
   int64_t quotient = sum >> 15;
   int64_t remainder = sum - (quotient << 15);
   int64_t half = (int64_t)1 << 14;
-  if (remainder > half || (remainder == half && (quotient & 1)))
+  if (remainder >= half)
     ++quotient;
   if (quotient > 32767)
     quotient = 32767;
