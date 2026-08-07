@@ -69,14 +69,29 @@ def ConvertOndspToOrtumCore
     Lower ondsp semantic ops to ortumcore target semantic ops.
 
     Accumulator export selects the target readout capability only for the
-    policy the readout provably realizes: `toward_negative` rounding with a
-    saturating signed i32 or i16 destination and a fractional shift in
-    [0, 15]. The readout itself shifts arithmetically and saturates at the
-    32-bit storage; an i16 destination appends an explicit clamp, which is
-    exact because clamping to the wider range first cannot change the result
-    of the narrower clamp (for any x, both compose to the i16 clamp of the
-    shifted value), and for shifts of at least 8 a 40-bit accumulator cannot
-    reach the 32-bit bound at all. Every other export policy fails closed.
+    policies the readout provably realizes, with a saturating signed i32 or
+    i16 destination. `toward_negative` maps to one readout at fractional
+    shifts in [0, 15]. The readout itself shifts arithmetically and saturates
+    at the 32-bit storage; an i16 destination appends an explicit clamp,
+    which is exact because clamping to the wider range first cannot change
+    the result of the narrower clamp (for any x, both compose to the i16
+    clamp of the shifted value), and for shifts of at least 8 a 40-bit
+    accumulator cannot reach the 32-bit bound at all.
+
+    `nearest_ties_positive` at shift s is realized as the floor readout at
+    s-1 followed by one increment and halve, by the nested-floor identity
+    floor((acc + 2^(s-1)) / 2^s) == floor((floor(acc / 2^(s-1)) + 1) / 2).
+    The identity requires the s-1 readout to be exact, so the policy is
+    admitted only where an accumulator of width W cannot clip the i32
+    readout: s - 1 >= W - 32, i.e. s >= 9 at W = 40 (s = 0 is admitted as
+    rounding-vacuous). This deliberately does NOT add half into the
+    accumulator: a mac-borne 2^(s-1) saturates at the 40-bit rail, so an
+    accumulator within 2^(s-1) of the positive rail would export one below
+    the true value, whereas the post-readout increment sees the saturated
+    accumulator exactly as the ondsp reference does. The increment and
+    halve run at i64 because the readout can be exactly INT32_MAX (s = 9,
+    accumulator at the rail), where an i32 increment would wrap. Every
+    other export policy fails closed.
   }];
   let constructor = "ondrix::createConvertOndspToOrtumCorePass()";
   let dependentDialects = [

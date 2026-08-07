@@ -29,8 +29,18 @@ bool OrtumCoreTargetProfile::supportsExport(const AccumulatorDomain &accumulator
                                             ondsp::RoundingMode rounding,
                                             ondsp::OverflowMode overflow, int64_t shift) const {
   ExportDomain domain = getShiftedSaturatingI32ExportDomain();
-  return supportsAccumulator(accumulator) && rounding == domain.rounding &&
-         overflow == domain.overflow && shift >= 0 && shift <= int64_t(domain.maxShift);
+  if (!supportsAccumulator(accumulator) || overflow != domain.overflow)
+    return false;
+  if (rounding == domain.rounding)
+    return shift >= 0 && shift <= int64_t(domain.maxShift);
+  // Ties-positive is realized as the floor readout at shift-1 followed by
+  // one increment-and-halve; exact only when the narrower readout provably
+  // cannot clip (shift >= width - 32 + 1), vacuous at shift 0.
+  if (rounding == ondsp::RoundingMode::NearestTiesPositive)
+    return shift == 0 ||
+           (shift >= int64_t(accumulator.storageWidth) - int64_t(domain.storageWidth) + 1 &&
+            shift <= int64_t(domain.maxShift));
+  return false;
 }
 
 } // namespace ondrix::ortumcore

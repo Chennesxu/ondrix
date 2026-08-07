@@ -215,15 +215,30 @@ public:
             getAccumulatorDomain(accumulator), op.getRounding(), op.getOverflow(), shift) ||
         (storage.getWidth() != 32 && storage.getWidth() != 16))
       return op.emitOpError(
-          "accumulator export is outside the proven readout capability (toward_negative "
-          "rounding, saturating i32 or i16 destination, fractional shift in [0, 15])");
+          "accumulator export is outside the proven readout capability (saturating i32 or "
+          "i16 destination; toward_negative at shifts [0, 15], or nearest_ties_positive at "
+          "shift 0 or shifts where the narrower readout cannot clip)");
 
     if (!isa<ondrix::ortumcore::AccumType>(adaptor.getAcc().getType()))
       return op.emitOpError("export lowering requires a converted target accumulator operand");
 
     Location loc = op.getLoc();
-    Value out = rewriter.create<ondrix::ortumcore::AccOutOp>(loc, rewriter.getI32Type(),
-                                                             adaptor.getAcc(), shift);
+    Value out;
+    if (op.getRounding() == ondrix::ondsp::RoundingMode::NearestTiesPositive && shift > 0) {
+      // floor((acc + 2^(s-1)) / 2^s) == ((acc >> (s-1)) + 1) >> 1, and in the
+      // admitted range the narrower readout cannot clip (Passes.td carries
+      // the argument), so the composition is exact for every accumulator.
+      Value narrower = rewriter.create<ondrix::ortumcore::AccOutOp>(loc, rewriter.getI32Type(),
+                                                                    adaptor.getAcc(), shift - 1);
+      Value wide = rewriter.create<arith::ExtSIOp>(loc, rewriter.getI64Type(), narrower);
+      Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
+      Value incremented = rewriter.create<arith::AddIOp>(loc, wide, one);
+      Value halved = rewriter.create<arith::ShRSIOp>(loc, incremented, one);
+      out = rewriter.create<arith::TruncIOp>(loc, rewriter.getI32Type(), halved);
+    } else {
+      out = rewriter.create<ondrix::ortumcore::AccOutOp>(loc, rewriter.getI32Type(),
+                                                         adaptor.getAcc(), shift);
+    }
     if (storage.getWidth() == 32) {
       rewriter.replaceOp(op, out);
       return success();
