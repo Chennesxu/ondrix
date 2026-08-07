@@ -274,4 +274,33 @@ def ForwardOndrixInsertExtract
   ];
 }
 
+def WidenOndspExactAccumulators
+    : Pass<"widen-ondsp-exact-accumulators", "::mlir::ModuleOp"> {
+  let summary = "Retype provably exact wrap accumulators to the saturating target domain";
+  let description = [{
+    Retypes signed frac-30 wrapping accumulators of width at most 40 to the
+    i40 saturating target domain when the pass itself re-proves that no
+    update can overflow. Nothing is trusted: the proof is rebuilt from the
+    static structure of the accumulator web, so a hand-written web earns the
+    same widening the frontend's inferred default does.
+
+    The provable shape is one acc_zero flowing through full signed-Q15 macs,
+    directly or as the iteration argument of scf.for loops with compile-time
+    trip counts, into one acc_export. Every full Q15 product is bounded by
+    2^30 in magnitude, so every partial sum is bounded by U * 2^30 for U the
+    largest possible number of updates; when that bound stays below
+    2^(W-1) - 1 the declared wrap provably never fires, the same bound keeps
+    the 40-bit saturation unreachable, and both declarations denote the exact
+    sum. Any escape from the shape (multiple uses, a dynamic trip count, a
+    non-Q15 product, acc_import, more than one lane) leaves the web
+    untouched; the downstream ondsp-to-ortumcore conversion then fails closed
+    exactly as before, so this pass can only widen, never weaken.
+  }];
+  let constructor = "ondrix::createWidenOndspExactAccumulatorsPass()";
+  let dependentDialects = [
+    "mlir::scf::SCFDialect",
+    "ondrix::ondsp::OndspDialect",
+  ];
+}
+
 #endif // ONDRIX_TRANSFORMS_PASSES
