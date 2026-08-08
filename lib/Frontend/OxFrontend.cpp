@@ -1129,10 +1129,9 @@ public:
         call.fpContract = contract->spelling.str();
       }
       if (isGain && current.kind == TokenKind::Comma) {
-        // The gain contract admits two tie rules at its single
-        // requantization boundary; omission takes the export default
-        // (nearest_ties_positive). gain has exactly one boundary, so the
-        // parameter is the plain `rounding=`, not boundary-qualified.
+        // gain has a single requantization boundary, so the parameter is the
+        // plain `rounding=`, not boundary-qualified; omission takes the
+        // export default (nearest_ties_positive).
         if (!expect(TokenKind::Comma, "expected ',' before rounding policy") ||
             !expectIdentifier("rounding", "expected rounding policy") ||
             !expect(TokenKind::Equal, "expected '=' after rounding"))
@@ -2905,8 +2904,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       }
     }
-    // Each surface admits exactly its contract's modes (parsed above);
-    // omission keeps the contract default: requantization boundaries (gain,
+    // Omission keeps the contract default: requantization boundaries (gain,
     // cic_decimate) take the export default, algorithm-internal roots stay
     // nearest_even.
     bool isGain = ast.result.kind == ReductionKind::Gain;
