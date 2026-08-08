@@ -102,6 +102,39 @@ def ConvertOndspToOrtumCore
   ];
 }
 
+def ConvertOndspLanePairsToOrtumCore
+    : Pass<"convert-ondsp-lane-pairs-to-ortumcore", "::mlir::ModuleOp"> {
+  let summary = "Pair lanes = 2 ondsp accumulator webs onto the ortumcore dual-lane MAC";
+  let description = [{
+    Rewrite `lanes = 2` ondsp accumulator webs into pairs of ortumcore
+    accumulators advanced by `ortumcore.dmac`: `acc_zero` becomes two
+    `acc_init`, each broadcast-coefficient `mac` becomes one dual-lane step
+    whose value halves are the extracted lanes and whose multiplier halves
+    both carry the shared coefficient, and `acc_export` becomes one proven
+    readout composition per lane reassembled into the vector result. The
+    per-lane readout is the same composition `convert-ondsp-to-ortumcore`
+    realizes for single-lane webs, and that pass carries its exactness
+    argument.
+
+    This is an opportunity pass, not a legality wall. A function is rewritten
+    only when a scan proves every operation touching a qualifying pair value
+    convertible: the signed i40/frac30 saturating lane domain, signed Q15
+    full-product mac policies, admitted export policies, scf control flow,
+    and no pair type in the function signature. Functions that fail the scan
+    are left untouched so `convert-ondsp-to-ortumcore` still fails closed on
+    them. The scan is load-bearing: the underlying 1:N conversion driver
+    cannot convert part of a web without leaving unresolvable casts behind.
+  }];
+  let constructor = "ondrix::createConvertOndspLanePairsToOrtumCorePass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+    "ondrix::ondsp::OndspDialect",
+    "ondrix::ortumcore::OrtumCoreDialect",
+  ];
+}
+
 def ConvertOrtumCoreToOndspEmulation
     : Pass<"convert-ortumcore-to-ondsp-emulation", "::mlir::ModuleOp"> {
   let summary = "Expand supported OrtumCore capabilities to public Ondsp semantics";

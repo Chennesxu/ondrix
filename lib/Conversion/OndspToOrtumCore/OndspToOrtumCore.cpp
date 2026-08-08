@@ -1,4 +1,5 @@
 #include "ondrix/Conversion/OndspToOrtumCore/OndspToOrtumCore.h"
+#include "OrtumCoreLoweringSupport.h"
 #include "ondrix/Conversion/Utils/ConversionLegality.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
@@ -33,12 +34,6 @@ using namespace mlir;
 
 namespace {
 
-static ondrix::ortumcore::AccumulatorDomain
-getAccumulatorDomain(ondrix::ondsp::AccType accumulator) {
-  return {cast<IntegerType>(accumulator.getStorage()).getWidth(), accumulator.getFrac(),
-          accumulator.getSignedness(), accumulator.getUpdateOverflow()};
-}
-
 static FailureOr<ondrix::ortumcore::ProductDomain>
 getProductDomain(Operation *op, ondrix::ondsp::FixedAttr numeric,
                  ondrix::ondsp::ProductAttr product) {
@@ -56,10 +51,8 @@ static bool isSupportedOrtumCoreAccumulator(ondrix::ondsp::AccType accumulator) 
   // The target accumulator domain has no lane count, so a lane count greater
   // than one would be silently dropped on the way to the parameterless target
   // type. Refuse it before the domain comparison rather than after.
-  if (!ondrix::ondsp::isSingleLaneAccumulator(accumulator))
-    return false;
-  return ondrix::ortumcore::OrtumCoreTargetProfile().supportsAccumulator(
-      getAccumulatorDomain(accumulator));
+  return ondrix::ondsp::isSingleLaneAccumulator(accumulator) &&
+         ondrix::conversion::isOrtumCoreLaneDomain(accumulator);
 }
 
 class OndspToOrtumCoreTypeConverter final : public TypeConverter {
@@ -102,8 +95,8 @@ static LogicalResult verifySupportedMacPolicy(Operation *op, ondrix::ondsp::AccT
       getProductDomain(op, numeric, product);
   if (failed(productDomain))
     return failure();
-  if (ondrix::ortumcore::OrtumCoreTargetProfile().supportsMac(*productDomain,
-                                                              getAccumulatorDomain(accumulator)))
+  if (ondrix::ortumcore::OrtumCoreTargetProfile().supportsMac(
+          *productDomain, ondrix::conversion::getOrtumCoreAccumulatorDomain(accumulator)))
     return success();
 
   if (ondrix::ondsp::isSignedQ31(numeric) && ondrix::ondsp::isRawHighProduct(product))
@@ -143,7 +136,8 @@ static LogicalResult verifySupportedAccumulatorTypes(Operation *root) {
       op->emitOpError() << "unsupported accumulator type " << unsupported
                         << "; ortumcore lowering currently requires "
                            "!ondsp.acc<storage = i40, frac = 30, signed, "
-                           "update_overflow = saturate>";
+                           "update_overflow = saturate>, with lanes = 2 webs lowered by "
+                           "convert-ondsp-lane-pairs-to-ortumcore first";
       return WalkResult::interrupt();
     }
 
@@ -206,14 +200,9 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::AccExportOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    ondrix::ondsp::AccType accumulator = op.getAcc().getType();
-    ondrix::ondsp::FixedAttr destination = op.getDst();
-    auto storage = dyn_cast<IntegerType>(destination.getStorage());
-    int64_t shift = int64_t(accumulator.getFrac()) - int64_t(destination.getFrac());
-    if (!storage || !isa<IntegerType>(op.getResult().getType()) ||
-        !ondrix::ortumcore::OrtumCoreTargetProfile().supportsExport(
-            getAccumulatorDomain(accumulator), op.getRounding(), op.getOverflow(), shift) ||
-        (storage.getWidth() != 32 && storage.getWidth() != 16))
+    std::optional<ondrix::conversion::OrtumCoreExportPolicy> policy =
+        ondrix::conversion::classifyOrtumCoreExport(op);
+    if (!policy || !isa<IntegerType>(op.getResult().getType()))
       return op.emitOpError(
           "accumulator export is outside the proven readout capability (saturating i32 or "
           "i16 destination; toward_negative at shifts [0, 15], or nearest_ties_positive at "
@@ -222,39 +211,8 @@ public:
     if (!isa<ondrix::ortumcore::AccumType>(adaptor.getAcc().getType()))
       return op.emitOpError("export lowering requires a converted target accumulator operand");
 
-    Location loc = op.getLoc();
-    Value out;
-    if (op.getRounding() == ondrix::ondsp::RoundingMode::NearestTiesPositive && shift > 0) {
-      // floor((acc + 2^(s-1)) / 2^s) == ((acc >> (s-1)) + 1) >> 1, and in the
-      // admitted range the narrower readout cannot clip (Passes.td carries
-      // the argument), so the composition is exact for every accumulator.
-      Value narrower = rewriter.create<ondrix::ortumcore::AccOutOp>(loc, rewriter.getI32Type(),
-                                                                    adaptor.getAcc(), shift - 1);
-      Value wide = rewriter.create<arith::ExtSIOp>(loc, rewriter.getI64Type(), narrower);
-      Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
-      Value incremented = rewriter.create<arith::AddIOp>(loc, wide, one);
-      Value halved = rewriter.create<arith::ShRSIOp>(loc, incremented, one);
-      out = rewriter.create<arith::TruncIOp>(loc, rewriter.getI32Type(), halved);
-    } else {
-      out = rewriter.create<ondrix::ortumcore::AccOutOp>(loc, rewriter.getI32Type(),
-                                                         adaptor.getAcc(), shift);
-    }
-    if (storage.getWidth() == 32) {
-      rewriter.replaceOp(op, out);
-      return success();
-    }
-    // The i16 destination clamp composes exactly: the readout's wider i32
-    // saturation cannot change a subsequent narrower clamp (Passes.td carries
-    // the argument).
-    Value minimum = rewriter.create<arith::ConstantIntOp>(loc, -32768, 32);
-    Value maximum = rewriter.create<arith::ConstantIntOp>(loc, 32767, 32);
-    Value belowMinimum =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, out, minimum);
-    Value lowerClamped = rewriter.create<arith::SelectOp>(loc, belowMinimum, minimum, out);
-    Value aboveMaximum =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, lowerClamped, maximum);
-    Value clamped = rewriter.create<arith::SelectOp>(loc, aboveMaximum, maximum, lowerClamped);
-    rewriter.replaceOpWithNewOp<arith::TruncIOp>(op, rewriter.getI16Type(), clamped);
+    rewriter.replaceOp(op, ondrix::conversion::emitOrtumCoreReadout(rewriter, op.getLoc(),
+                                                                    adaptor.getAcc(), *policy));
     return success();
   }
 };
