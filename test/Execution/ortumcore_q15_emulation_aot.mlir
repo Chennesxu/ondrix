@@ -81,3 +81,22 @@ func.func @ortumcore_bitrev_sub_walk(%start: i32, %step: i32, %count: index) -> 
   }
   return %result : i32
 }
+
+func.func @ortumcore_dmac_walk(%lhs0: i16, %rhs0: i16, %lhs1: i16, %rhs1: i16,
+                               %count: index, %lane: i32) -> i32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c0_i32 = arith.constant 0 : i32
+  %z0 = ortumcore.acc_init : !ortumcore.acc
+  %z1 = ortumcore.acc_init : !ortumcore.acc
+  %lanes:2 = scf.for %i = %c0 to %count step %c1
+      iter_args(%lo = %z0, %hi = %z1) -> (!ortumcore.acc, !ortumcore.acc) {
+    %nlo, %nhi = ortumcore.dmac %lo, %hi, %lhs0, %rhs0, %lhs1, %rhs1 : (!ortumcore.acc, !ortumcore.acc, i16, i16, i16, i16) -> (!ortumcore.acc, !ortumcore.acc)
+    scf.yield %nlo, %nhi : !ortumcore.acc, !ortumcore.acc
+  }
+  %out0 = ortumcore.acc_out %lanes#0 {shift = 15 : i64} : (!ortumcore.acc) -> i32
+  %out1 = ortumcore.acc_out %lanes#1 {shift = 15 : i64} : (!ortumcore.acc) -> i32
+  %pick = arith.cmpi eq, %lane, %c0_i32 : i32
+  %out = arith.select %pick, %out0, %out1 : i32
+  return %out : i32
+}

@@ -7,6 +7,8 @@ extern int32_t ortumcore_repeat_mac_out_q15(int16_t lhs, int16_t rhs, int64_t co
 extern int32_t ortumcore_repeat_mac_out_raw(int16_t lhs, int16_t rhs, int64_t count);
 extern int32_t ortumcore_bitrev_add_walk(int32_t start, int32_t step, int64_t count);
 extern int32_t ortumcore_bitrev_sub_walk(int32_t start, int32_t step, int64_t count);
+extern int32_t ortumcore_dmac_walk(int16_t lhs0, int16_t rhs0, int16_t lhs1, int16_t rhs1,
+                                   int64_t count, int32_t lane);
 
 static int64_t update_reference(int64_t accumulator, int16_t lhs, int16_t rhs, int subtract) {
   const __int128 minimum = -((__int128)1 << 39);
@@ -144,6 +146,43 @@ int main(void) {
   // +rev32(1) step the address is 1 << 31, not 1.
   if (bitrev_walk_reference(0, INT32_MIN, 1, 0) != INT32_MIN) {
     fprintf(stderr, "bitrev reference lost the reversed-domain semantics\n");
+    failed = 1;
+  }
+
+  // Dual-lane walks: each lane is exactly the scalar repeat reference on its
+  // own pair, so lane independence is the whole claim being checked.
+  struct DmacCase {
+    const char *name;
+    int16_t lhs0;
+    int16_t rhs0;
+    int16_t lhs1;
+    int16_t rhs1;
+    int64_t count;
+  } dmac_cases[] = {
+      {"lanes with opposite signs", INT16_MIN, INT16_MIN, INT16_MIN, INT16_MAX, 19},
+      {"lane0 at the high rail", INT16_MIN, INT16_MIN, 1, -1, 513},
+      {"lane1 at the low rail", 12345, -23456, INT16_MIN, INT16_MAX, 512},
+      {"zero against walk", 0, 0, 23170, 23170, 40},
+      {"single step", 32767, 32767, -32768, 32767, 1},
+  };
+  for (unsigned i = 0; i < sizeof(dmac_cases) / sizeof(dmac_cases[0]); ++i) {
+    const struct DmacCase *c = &dmac_cases[i];
+    for (int lane = 0; lane < 2; ++lane) {
+      int64_t accumulator = lane == 0 ? repeat_reference(c->lhs0, c->rhs0, c->count, 0)
+                                      : repeat_reference(c->lhs1, c->rhs1, c->count, 0);
+      int32_t expected = readout_reference(accumulator, 15);
+      int32_t actual = ortumcore_dmac_walk(c->lhs0, c->rhs0, c->lhs1, c->rhs1, c->count, lane);
+      if (actual != expected) {
+        fprintf(stderr, "%s lane %d: expected %d, got %d\n", c->name, lane, expected, actual);
+        failed = 1;
+      }
+    }
+  }
+  // The opposite-signs case must discriminate lane crosstalk: the two lane
+  // readouts differ, so a swapped or shared accumulator cannot pass.
+  if (readout_reference(repeat_reference(INT16_MIN, INT16_MIN, 19, 0), 15) ==
+      readout_reference(repeat_reference(INT16_MIN, INT16_MAX, 19, 0), 15)) {
+    fprintf(stderr, "dmac corpus cannot discriminate the lanes\n");
     failed = 1;
   }
   return failed;

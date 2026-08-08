@@ -109,8 +109,9 @@ def ConvertOrtumCoreToOndspEmulation
     Fully expand the public OrtumCore accumulator subset to equivalent Ondsp
     operations. The supported subset is the signed i40/frac30 saturating
     accumulator, zero initialization, signed Q15 full-product MAC add/sub,
-    and the shifted saturating readout (one acc_export at the i32 storage
-    with toward_negative rounding).
+    the dual-lane step (two independent mac_add updates, expanded to
+    exactly two ondsp.mac operations), and the shifted saturating readout
+    (one acc_export at the i32 storage with toward_negative rounding).
     Other OrtumCore operations fail closed. Run `convert-ondsp-fixed-to-scalar`
     afterwards to obtain generic executable scalar IR.
   }];

@@ -45,6 +45,27 @@ def OrtumCore_MacSubOp
     requantization behavior is not part of this operation.
   }];
 }
+def OrtumCore_DmacOp
+    : OrtumCore_Op<"dmac", [Pure, AllTypesMatch<["lane0", "lane1",
+                                                 "out0", "out1"]>]> {
+  let summary = "Dual-lane saturating signed Q15 multiply-add step";
+  let description = [{
+    Advances two independent target accumulators by one full signed Q15
+    product each: lane 0 by `lhs0 * rhs0` and lane 1 by `lhs1 * rhs1`, each
+    update saturated to the signed 40-bit accumulator range exactly as one
+    `mac_add` would be. The pairing is the capability: a target may realize
+    both updates with a single dual instruction whose operand halves carry
+    the two pairs, but the lanes never interact — the operation denotes
+    precisely two independent mac_add updates. Export or requantization
+    behavior is not part of this operation; each lane exports through its
+    own readout.
+  }];
+  let arguments = (ins OrtumCore_AccumType:$lane0, OrtumCore_AccumType:$lane1,
+                   I16:$lhs0, I16:$rhs0, I16:$lhs1, I16:$rhs1);
+  let results = (outs OrtumCore_AccumType:$out0, OrtumCore_AccumType:$out1);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def OrtumCore_AccOutOp : OrtumCore_Op<"acc_out", [Pure]> {
   let summary = "Shifted saturating accumulator readout";
   let description = [{

@@ -191,6 +191,38 @@ public:
 using MacAddOpLowering = MacLikeOpLowering<ondrix::ortumcore::MacAddOp, ondrix::ondsp::MacOp>;
 using MacSubOpLowering = MacLikeOpLowering<ondrix::ortumcore::MacSubOp, ondrix::ondsp::MacSubOp>;
 
+class DmacOpLowering final : public OpConversionPattern<ondrix::ortumcore::DmacOp> {
+public:
+  using OpConversionPattern<ondrix::ortumcore::DmacOp>::OpConversionPattern;
+
+  // The dual step denotes exactly two independent mac_add updates, so the
+  // emulation is literally two ondsp.mac operations, one per lane.
+  LogicalResult matchAndRewrite(ondrix::ortumcore::DmacOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type lane0Type = this->getTypeConverter()->convertType(op.getOut0().getType());
+    Type lane1Type = this->getTypeConverter()->convertType(op.getOut1().getType());
+    if (!isa_and_nonnull<ondrix::ondsp::AccType>(lane0Type) ||
+        !isa_and_nonnull<ondrix::ondsp::AccType>(lane1Type) ||
+        !isa<ondrix::ondsp::AccType>(adaptor.getLane0().getType()) ||
+        !isa<ondrix::ondsp::AccType>(adaptor.getLane1().getType()))
+      return op.emitOpError("emulation requires converted Ondsp accumulator types");
+
+    ondrix::ortumcore::ProductDomain domain = ondrix::ortumcore::getSignedQ15FullProductDomain();
+    auto numeric = ondrix::ondsp::FixedAttr::get(
+        rewriter.getContext(), domain.signedness,
+        IntegerType::get(rewriter.getContext(), domain.operandWidth), domain.operandFrac);
+    auto product = ondrix::ondsp::ProductAttr::get(rewriter.getContext(), domain.product.selection);
+    Value lane0 = rewriter.create<ondrix::ondsp::MacOp>(op.getLoc(), lane0Type, adaptor.getLane0(),
+                                                        adaptor.getLhs0(), adaptor.getRhs0(),
+                                                        numeric, product);
+    Value lane1 = rewriter.create<ondrix::ondsp::MacOp>(op.getLoc(), lane1Type, adaptor.getLane1(),
+                                                        adaptor.getLhs1(), adaptor.getRhs1(),
+                                                        numeric, product);
+    rewriter.replaceOp(op, {lane0, lane1});
+    return success();
+  }
+};
+
 class AccOutOpLowering final : public OpConversionPattern<ondrix::ortumcore::AccOutOp> {
 public:
   using OpConversionPattern<ondrix::ortumcore::AccOutOp>::OpConversionPattern;
@@ -278,8 +310,9 @@ public:
 
     OrtumCoreToOndspTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
-    patterns.add<AccInitOpLowering, MacAddOpLowering, MacSubOpLowering, AccOutOpLowering,
-                 BitrevAddOpLowering, BitrevSubOpLowering>(typeConverter, &getContext());
+    patterns.add<AccInitOpLowering, MacAddOpLowering, MacSubOpLowering, DmacOpLowering,
+                 AccOutOpLowering, BitrevAddOpLowering, BitrevSubOpLowering>(typeConverter,
+                                                                             &getContext());
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);

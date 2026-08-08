@@ -30,3 +30,17 @@ func.func @readout(%acc: !ortumcore.acc) -> i32 {
   %0 = ortumcore.acc_out %acc {shift = 15 : i64} : (!ortumcore.acc) -> i32
   return %0 : i32
 }
+
+// The dual step is exactly two independent mac updates, one per lane.
+// CHECK-LABEL: func.func @dmac_expansion(
+// CHECK: %[[L0:.*]] = ondsp.mac %{{.*}}, %[[A:[^,]*]], %[[B:[^,]*]] {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>}
+// CHECK: %[[L1:.*]] = ondsp.mac %{{.*}}, %[[C:[^,]*]], %[[D:[^,]*]] {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>}
+// CHECK-NOT: ortumcore.
+func.func @dmac_expansion(%a: i16, %b: i16, %c: i16, %d: i16) -> (i32, i32) {
+  %z0 = ortumcore.acc_init : !ortumcore.acc
+  %z1 = ortumcore.acc_init : !ortumcore.acc
+  %lo, %hi = ortumcore.dmac %z0, %z1, %a, %b, %c, %d : (!ortumcore.acc, !ortumcore.acc, i16, i16, i16, i16) -> (!ortumcore.acc, !ortumcore.acc)
+  %out0 = ortumcore.acc_out %lo {shift = 15 : i64} : (!ortumcore.acc) -> i32
+  %out1 = ortumcore.acc_out %hi {shift = 15 : i64} : (!ortumcore.acc) -> i32
+  return %out0, %out1 : i32, i32
+}

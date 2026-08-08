@@ -29,3 +29,13 @@ func.func @bitrev_ops(%address: i32, %step: i32) -> i32 {
   %down = ortumcore.bitrev_sub %up, %step : (i32, i32) -> i32
   return %down : i32
 }
+
+// CHECK-LABEL: func.func @dmac_step(
+// CHECK: ortumcore.dmac %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : (!ortumcore.acc, !ortumcore.acc, i16, i16, i16, i16) -> (!ortumcore.acc, !ortumcore.acc)
+func.func @dmac_step(%a: i16, %b: i16, %c: i16, %d: i16)
+    -> (!ortumcore.acc, !ortumcore.acc) {
+  %z0 = ortumcore.acc_init : !ortumcore.acc
+  %z1 = ortumcore.acc_init : !ortumcore.acc
+  %lo, %hi = ortumcore.dmac %z0, %z1, %a, %b, %c, %d : (!ortumcore.acc, !ortumcore.acc, i16, i16, i16, i16) -> (!ortumcore.acc, !ortumcore.acc)
+  return %lo, %hi : !ortumcore.acc, !ortumcore.acc
+}
