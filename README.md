@@ -37,7 +37,10 @@ active development.
 
 ## Documentation
 
-See the [documentation index](docs/README.md) for language usage, numeric
+Start with [what Ondrix claims, and how to check it](docs/research-claims.md)
+— the central claim, a running example through the three IR layers, and the
+evidence levels behind every statement in the capability matrix. The
+[documentation index](docs/README.md) covers language usage, numeric
 semantics, implementation status, and experimental feature notes.
 
 ## Build

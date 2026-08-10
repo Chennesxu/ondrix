@@ -4,6 +4,9 @@ This directory contains public documentation for implemented or
 stable-candidate Ondrix behavior, organized along the architecture axes
 rather than per operation:
 
+- [What Ondrix claims, and how to check it](research-claims.md) — **start
+  here**: the central claim, a running example through all three IR layers,
+  and the evidence levels the rest of the documentation is read against.
 - [Current implementation status](status.md) — the capability matrix; one
   row per algorithm family with its evidence state.
 - [Fixed-point semantics](fixed-point-semantics.md) — the target-independent
@@ -14,6 +17,9 @@ rather than per operation:
   declarations have no executed evidence behind them.
 - [Experimental `.ox` frontend](frontend-language.md) — the source language
   reference and the frontend semantic boundary and design rules.
+- [Adding a target capability](adding-a-capability.md) — the proof
+  obligations a capability must discharge before it may participate in
+  compilation.
 
 The authoritative contract for each individual operation is its description
 in the dialect definition (`include/ondrix/Dialect/*/IR/*.td`), which lives

@@ -7,13 +7,23 @@ Bindings expose every declared choice their contract admits; a binding never
 narrows a contract silently. Dialect and source contracts may change while
 the numeric model is stabilized.
 
+Rows in this matrix are backed at different evidence strengths, and the
+wording marks which: *exhaustive* means every input of a finite domain was
+executed (E1); *differential* / *object+C gate* means discriminating
+witnesses across independent implementations (E2); *certified* /
+*proof-gated* means a static sufficient condition consumed fail-closed with
+counterexamples for the refused side (E3); explicitly sampled rows with an
+error bound are bounded-empirical (E4). The levels are defined in
+[research-claims.md](research-claims.md) and are deliberately not
+interchangeable.
+
 | Capability | Status |
 | --- | --- |
 | `ondrix`, `ondsp`, and `ortumcore` dialects | Implemented; contracts remain experimental |
 | Typed conversion patterns and accumulator type conversion | Implemented |
 | Generic scalar lowering | Signed-Q15 full product with signed frac30 accumulator widths of at least 32 bits and signed-Q31 full/raw-high accumulator operations implemented; ordered rank-1 Q15/Q31 memref reductions implemented; from a supported signed frac30 accumulator the export boundary lowers a signed Q15 destination, any signed i32 destination fraction the verifier admits, and the identity signed i64/frac30 reading, while the i64/frac62 profile remains restricted to signed Q31 export; every export is a value-preserving format conversion, and value-changing scalings belong to the declared arithmetic `round_shift`; rank-1 f32 reduction is partial |
 | Floating-point contract policy | Every f32 call site names one of three declared evaluation policies. `off` and `fma` are exact contracts, pinned bit-for-bit against independent references; `fast` names a set of two permitted rewrites and is spent by the compiler rather than handed on, so the emitted operations carry no fast-math flags at all. One transform exploits it, `vectorize-ondsp-fp-fast-memref-reduce`, and its schedule is gated at the object level. `docs/f32-contract-evidence.md` is the normative statement of the permissions, the admission rule, and what each route spends; this row reports maturity only and is deliberately not a second copy of it. |
-| Canonical pipeline and automatic scheduling | `-ondrix-default-pipeline` (and `ondrix-compile --emit=llvm` from `.ox` source) runs the whole flow with one flag: compile-time design evaluation (the fail-closed quantization tie guard aborts the compile rather than ship a misquantized table), contract conversion (operations whose reductions bufferize directly stay in contract form), proof-gated constant-index forwarding before bufferization (`forward-ondrix-insert-extract`, described under Spectral magnitude), boundary bufferization, an automatic schedule stage, and lowering to the LLVM dialect; inside the schedule stage every candidate transform is filtered by its own legality analysis and applied in a documented priority order (order-preserving vertical batchings first, then saturating-certified and wrap horizontal reductions on the sites batching cannot serve), so an unauthorized site keeps its ordered scalar schedule and the user's only inputs are the numeric contracts in the source; the target vector width is a pipeline and driver parameter in register bits from which each transform's lane count is derived (the same module compiles at any width; zero is both the all-ordered program and the default, so an undeclared target gets the schedule that is legal everywhere rather than a guess, and 128 is the NEON/Helium lane count against 256 for AVX2); the individual pass flags remain available for ablation, testing, and oracle runs; cost selection is the fixed priority order plus each pass's own profitability guards — a measured regret evaluation against the best legal candidate is planned for the frozen-revision evaluation; the composed four-stage `.ox` program (windowed-sinc design, valid FIR, RFFT64, magnitude) compiles through this pipeline with no hand-picked passes — the evaluated design constants feed the certified saturating horizontal reduction — and its default-width and ordered width-zero objects are both gated bit-exactly against one independent C reference, so schedule invariance of the exact contracts is a checked fact |
+| Canonical pipeline and automatic scheduling | `-ondrix-default-pipeline` (and `ondrix-compile --emit=llvm` from `.ox` source) runs the whole flow with one flag; the stage list, the schedule-selection rules, and the width parameter are in [Canonical pipeline and scheduling](#canonical-pipeline-and-scheduling) below |
 | Generic Vector CPU lowering | Automatic unit-stride Q15/Q31 chunking, ordered saturating updates, and exact-modulo wrapping reduction implemented; the horizontal wrapping path admits signed frac30 Q15 accumulators wider than i40 up to i64, since exact-modulo reassociation legality is width-independent up to the i64 lane carrier; a genuinely wrapping i48 reduction object gate pins horizontal, ordered, and an exact mod-2^48 reference bit-identical on cases whose ordered prefixes leave the accumulator range, including an exact full-turn return to zero |
 | Algorithm transforms | Opt-in specialization for static rank-1 FIR samples using immutable constant memref globals or proven complete unit-stride views: zero-tap elimination, exact-modulo symmetric full-product pairing, and symmetric saturating pairing when complete prefix-range analysis proves both schedules safe |
 | Proof audit | Experimental optional JSON traces record constant saturating chunk-reassociation evidence; a read-only replay pass rederives immutable coefficient facts and the subject-bound prefix plan from the original IR, and rejects changes to proof-relevant semantics or trace data; traces are audit artifacts, not legality authority, an independent validator, or a stable certificate format |
@@ -49,6 +59,41 @@ the numeric model is stabilized.
 | Target export realization | The `ondsp-to-ortumcore` export accepts `toward_negative` directly and `nearest_ties_positive` as a proven composition — the floor readout at shift-1 plus one increment-and-halve, admitted only where the narrower readout provably cannot clip (the nested-floor identity and the saturated-rail argument live in the pass description); a three-way execution gate pins the rail carry and the negative half tie against the scalar authority and the shared independent reference. Opt-in `widen-ondsp-exact-accumulators` re-proves from static loop structure that a wrapping accumulator web can never overflow (updates x 2^30 within the declared width) and retypes it to the i40 saturating target domain, trusting nothing carried by the declaration, so a default-contract program reaches the target path unchanged; the default-contract object gate compiles both twins through this path against the same exact reference. Opt-in `convert-ondsp-lane-pairs-to-ortumcore` rewrites function-local `lanes = 2` accumulator webs onto pairs of target accumulators advanced by the dual-lane MAC with per-lane readout compositions, converting a function only after proving every touchpoint convertible so anything else still fails closed downstream; a two-leg execution gate pins both lanes and both rounding compositions against the scalar authority and the shared reference |
 | Experimental `.ox` frontend | Standalone Lexer/Parser/AST/Sema/MLIRGen pipeline. A file declares one or more functions, the last of which the module exports; an earlier one is a named body a later function calls, instantiated at the call with its declared contracts copied unchanged, checked once against its own signature, and matched to its arguments there — recursion is unwritable because a callee is visible only after it is declared, and no source-level calling convention is implied. Coverage is rank-1 Q15/Q31/f32 dot, FIR-sample, tensor-value valid/full FIR, static factor-two Q15 and f32 FIR decimation/interpolation, valid convolution/correlation, static four-/eight-point packed-Q15 CFFT/ICFFT, static power-of-two 8..64-point packed-Q15 RFFT (five-/nine-bin IRFFT), one packed-Q15 butterfly, dynamic-chunk/static-tap Q15 streaming FIR, one rank-2 static-section Q15 fixed DF-II SOS profile, and one Q15 CIC decimation profile whose state overflow the call site must declare because the language has no defensible default for it; one f32 TDF-II SOS cascade profile admitting only the two exact contracts its operation admits, and the f32 single-bin `goertzel` energy (the Q15 profile has no source spelling because its `tensor<1xi64>` energy names a storage width no source type has); statically bounded Q15 feed-forward reductions may infer a sufficient exact accumulator width, while recursive SOS retains explicit i40 update and separate state/output export policies; fixed accumulator/export policies, ordered f32 contraction, convolution kernel orientation, chronological streaming state, and the closed `complex_q15` stage-scaling profiles are explicit; a bounded expression AST permits typed unary FFT-family nesting without fusing quantization boundaries; local bindings name intermediate stages and may be read any number of times — each read instantiates a fresh copy of the bound call tree, which the pipeline's canonicalize/cse collapses because the operations are `Pure`, so a reused intermediate such as `add(mult(t, t), t)` is writable while a local no statement reads is a compile error — a `fir_filter` stage may feed the FFT chain under the valid boundary and the explicit executable Q15 profile, and its coefficients may come from a tensor parameter or from a compile-time design expression (`lowpass`, with odd taps and a strictly proper rational cutoff, or the `hamming`/`hann`/`blackman`/`kaiser` windows with taps in [2, 4096] and Kaiser's rational beta in (0, 50]), legal only in the coefficient slot; source locations reach MLIR, diagnostics are source-aware, and object+C execution is covered; general expression composition, dynamic full boundary/FFT planning, broader resampling, convolution padding/stride/dilation, indexing, loops, multiple kernels, mutable output buffers, broader stateful profiles, and stable source/ABI contracts remain planned |
 | Stable public kernel ABI | Planned |
+
+## Canonical Pipeline and Scheduling
+
+`-ondrix-default-pipeline` (and `ondrix-compile --emit=llvm` from `.ox`
+source) runs, in order: compile-time design evaluation (the fail-closed
+quantization tie guard aborts the compile rather than ship a misquantized
+table); contract conversion (operations whose reductions bufferize directly
+stay in contract form); proof-gated constant-index forwarding before
+bufferization (`forward-ondrix-insert-extract`, described under Spectral
+magnitude); boundary bufferization; the automatic schedule stage; and
+lowering to the LLVM dialect.
+
+- **Schedule selection.** Inside the schedule stage every candidate
+  transform is filtered by its own legality analysis and applied in a
+  documented priority order: order-preserving vertical batchings first,
+  then saturating-certified and wrap horizontal reductions on the sites
+  batching cannot serve. An unauthorized site keeps its ordered scalar
+  schedule; the user's only inputs are the numeric contracts in the source.
+- **Target vector width.** A pipeline and driver parameter in register bits
+  from which each transform's lane count is derived; the same module
+  compiles at any width. **Zero is both the all-ordered program and the
+  default**, so an undeclared target gets the schedule that is legal
+  everywhere rather than a guess; 128 is the NEON/Helium lane count against
+  256 for AVX2.
+- **Cost model.** The fixed priority order plus each pass's own
+  profitability guards. A measured regret evaluation against the best legal
+  candidate is planned for the frozen-revision evaluation. The individual
+  pass flags remain available for ablation, testing, and oracle runs.
+- **Composition witness.** The composed four-stage `.ox` program
+  (windowed-sinc design, valid FIR, RFFT64, magnitude) compiles through
+  this pipeline with no hand-picked passes — the evaluated design constants
+  feed the certified saturating horizontal reduction — and its
+  default-width and ordered width-zero objects are both gated bit-exactly
+  against one independent C reference, so schedule invariance of the exact
+  contracts is a checked fact.
 
 ## Compilation Interfaces
 
