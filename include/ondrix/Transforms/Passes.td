@@ -274,6 +274,35 @@ def ForwardOndrixInsertExtract
   ];
 }
 
+def ScalarizeOndspFixedReduceMac
+    : Pass<"scalarize-ondsp-fixed-reduce-mac", "::mlir::ModuleOp"> {
+  let summary = "Expand ordered fixed reduce_mac into its definitional mac loop";
+  let description = [{
+    Expands each rank-1 memref `ondsp.reduce_mac` with a fixed numeric policy
+    into the scf.for loop of explicit `ondsp.mac` updates that the
+    operation's ordered left-fold contract denotes: one full declared update
+    per index, in increasing index order, from the same initial accumulator.
+    The expansion is exact by definition — it is the contract, not a
+    reordering — and dynamic lengths get the same runtime equal-length proof
+    the fixed scalar lowering inserts.
+
+    The purpose is the target path: `convert-ondsp-to-ortumcore` admits
+    explicit accumulator updates but deliberately rejects the fused
+    reduction form, so a contract-form program runs this pass to reach
+    target capability selection. Floating-point, vector-operand, and
+    multi-lane reductions are left untouched for their own consumers, and
+    anything this pass does not expand still fails closed downstream.
+  }];
+  let constructor = "ondrix::createScalarizeOndspFixedReduceMacPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "ondrix::ondsp::OndspDialect",
+  ];
+}
+
 def WidenOndspExactAccumulators
     : Pass<"widen-ondsp-exact-accumulators", "::mlir::ModuleOp"> {
   let summary = "Retype provably exact wrap accumulators to the saturating target domain";
@@ -284,9 +313,11 @@ def WidenOndspExactAccumulators
     static structure of the accumulator web, so a hand-written web earns the
     same widening the frontend's inferred default does.
 
-    The provable shape is one acc_zero flowing through full signed-Q15 macs,
-    directly or as the iteration argument of scf.for loops with compile-time
-    trip counts, into one acc_export. Every full Q15 product is bounded by
+    The provable shape is one acc_zero flowing through full signed-Q15 macs
+    — individually, as the iteration argument of scf.for loops with
+    compile-time trip counts, or as one ordered reduce_mac whose rank-1
+    element count is static — into one acc_export. Every full Q15 product is
+    bounded by
     2^30 in magnitude, so every partial sum is bounded by U * 2^30 for U the
     largest possible number of updates; when that bound stays below
     2^(W-1) - 1 the declared wrap provably never fires, the same bound keeps

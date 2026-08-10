@@ -24,6 +24,12 @@ typedef struct {
 #define FIR_DECIMATE_UPDATE_OVERFLOW SATURATE
 #endif
 
+// The compiled program's declared export tie rule; the main corpus is
+// tie-free, so the ties-positive witness corpus below is what discriminates.
+#ifndef FIR_DECIMATE_OUTPUT_ROUNDING
+#define FIR_DECIMATE_OUTPUT_ROUNDING NEAREST_EVEN
+#endif
+
 extern void FIR_DECIMATE_SYMBOL(MemRefI16 *result, MemRefI16 *input, MemRefI16 *coefficients);
 
 #ifdef FIR_DECIMATE_TIES_POSITIVE_SYMBOL
@@ -39,7 +45,7 @@ static const struct Policy policy = {
     .update_overflow = FIR_DECIMATE_UPDATE_OVERFLOW,
     .state_rounding = NEAREST_EVEN,
     .state_overflow = SATURATE,
-    .output_rounding = NEAREST_EVEN,
+    .output_rounding = FIR_DECIMATE_OUTPUT_ROUNDING,
     .output_overflow = SATURATE,
 };
 

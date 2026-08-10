@@ -29,6 +29,7 @@ std::unique_ptr<mlir::Pass>
 createFuseOndrixGainIntoFirPass(const FuseOndrixGainIntoFirOptions &options);
 
 std::unique_ptr<mlir::Pass> createForwardOndrixInsertExtractPass();
+std::unique_ptr<mlir::Pass> createScalarizeOndspFixedReduceMacPass();
 std::unique_ptr<mlir::Pass> createWidenOndspExactAccumulatorsPass();
 
 #define GEN_PASS_REGISTRATION

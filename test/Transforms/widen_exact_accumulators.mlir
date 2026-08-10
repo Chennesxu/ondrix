@@ -75,3 +75,38 @@ func.func @keeps_multi_use(%a: i16, %b: i16) -> (i16, i32) {
   %o2 = ondsp.acc_export %s0 {dst = #ondsp.fixed<signed, storage = i32, frac = 30>, rounding = #ondsp.rounding<toward_negative>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i35, frac = 30, signed, update_overflow = wrap>) -> i32
   return %o1, %o2 : i16, i32
 }
+
+// An ordered reduce_mac with a static element count behind the
+// layout-erasing cast is exactly that many full-Q15 updates: 5 * 2^30 fits
+// the i34 bound, so the web widens.
+// CHECK-LABEL: func.func @widens_static_reduce(
+// CHECK: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = saturate>
+// CHECK: ondsp.reduce_mac {{.*}} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+func.func @widens_static_reduce(%window: memref<5xi16, strided<[1], offset: ?>>, %coefficients: memref<5xi16>) -> i16 {
+  %cast = memref.cast %window : memref<5xi16, strided<[1], offset: ?>> to memref<?xi16, strided<[1], offset: ?>>
+  %z = ondsp.acc_zero : !ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>
+  %acc = ondsp.reduce_mac %z, %cast, %coefficients {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>, memref<?xi16, strided<[1], offset: ?>>, memref<5xi16>) -> !ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>
+  %out = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>) -> i16
+  return %out : i16
+}
+
+// A dynamic element count admits no bound; the reduce web stays untouched.
+// CHECK-LABEL: func.func @keeps_dynamic_reduce(
+// CHECK: ondsp.acc_zero : <storage = i34, frac = 30, signed, update_overflow = wrap>
+func.func @keeps_dynamic_reduce(%window: memref<?xi16>, %coefficients: memref<?xi16>) -> i16 {
+  %z = ondsp.acc_zero : !ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>
+  %acc = ondsp.reduce_mac %z, %window, %coefficients {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>, memref<?xi16>, memref<?xi16>) -> !ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>
+  %out = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i34, frac = 30, signed, update_overflow = wrap>) -> i16
+  return %out : i16
+}
+
+// Eight updates exceed the i33 bound (8 * 2^30 > 2^32 - 1): reachable wrap
+// is a different program, so the reduce web stays untouched.
+// CHECK-LABEL: func.func @keeps_reachable_wrap_reduce(
+// CHECK: ondsp.acc_zero : <storage = i33, frac = 30, signed, update_overflow = wrap>
+func.func @keeps_reachable_wrap_reduce(%window: memref<8xi16>, %coefficients: memref<8xi16>) -> i16 {
+  %z = ondsp.acc_zero : !ondsp.acc<storage = i33, frac = 30, signed, update_overflow = wrap>
+  %acc = ondsp.reduce_mac %z, %window, %coefficients {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i33, frac = 30, signed, update_overflow = wrap>, memref<8xi16>, memref<8xi16>) -> !ondsp.acc<storage = i33, frac = 30, signed, update_overflow = wrap>
+  %out = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i33, frac = 30, signed, update_overflow = wrap>) -> i16
+  return %out : i16
+}

@@ -2,6 +2,7 @@
 
 #include "llvm/ADT/SmallVector.h"
 
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
@@ -81,8 +82,31 @@ std::optional<int64_t> traceLoopBody(scf::ForOp forOp, unsigned position,
   return std::nullopt;
 }
 
-// Traces acc_zero -> (macs | one static-trip-count loop)* -> acc_export and
-// returns the web, or nothing when any step leaves the provable shape.
+// A full-Q15 ordered reduce_mac whose element count is statically known: it
+// performs exactly `length` full-product updates. Layout-erasing memref
+// casts preserve the element sequence, so the static length behind one is
+// still this reduction's count.
+std::optional<int64_t> staticReduceMacUpdates(ReduceMacOp reduce) {
+  auto numeric = llvm::dyn_cast<FixedAttr>(reduce.getNumeric());
+  auto storage = numeric ? llvm::dyn_cast<IntegerType>(numeric.getStorage()) : nullptr;
+  if (!storage || storage.getWidth() != 16 || numeric.getFrac() != 15 ||
+      numeric.getSignedness() != Signedness::Signed || !reduce.getProduct() ||
+      reduce.getProduct()->getSelection() != ProductSelection::Full)
+    return std::nullopt;
+  Value elements = reduce.getLhs();
+  while (auto cast = elements.getDefiningOp<memref::CastOp>())
+    elements = cast.getSource();
+  if (auto memref = llvm::dyn_cast<MemRefType>(elements.getType());
+      memref && memref.getRank() == 1 && !memref.isDynamicDim(0))
+    return memref.getDimSize(0);
+  if (auto vector = llvm::dyn_cast<VectorType>(elements.getType()); vector && vector.getRank() == 1)
+    return vector.getDimSize(0);
+  return std::nullopt;
+}
+
+// Traces acc_zero -> (macs | one reduce_mac | one static-trip-count loop)* ->
+// acc_export and returns the web, or nothing when any step leaves the
+// provable shape.
 std::optional<AccumulatorWeb> traceWeb(AccZeroOp zero) {
   AccumulatorWeb web;
   Value current = zero.getAcc();
@@ -92,6 +116,15 @@ std::optional<AccumulatorWeb> traceWeb(AccZeroOp zero) {
       current = user->getResult(0);
       web.values.push_back(current);
       web.maxUpdates += 1;
+      continue;
+    }
+    if (auto reduce = llvm::dyn_cast<ReduceMacOp>(user)) {
+      std::optional<int64_t> updates = staticReduceMacUpdates(reduce);
+      if (!updates || reduce.getInitial() != current)
+        return std::nullopt;
+      web.maxUpdates += *updates;
+      current = reduce.getResult();
+      web.values.push_back(current);
       continue;
     }
     if (auto forOp = llvm::dyn_cast<scf::ForOp>(user)) {

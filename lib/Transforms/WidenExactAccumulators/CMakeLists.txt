@@ -6,6 +6,7 @@ add_ondrix_library(OndrixWidenExactAccumulators
 
   LINK_LIBS PUBLIC
   MLIRIR
+  MLIRMemRefDialect
   MLIRPass
   MLIRSCFDialect
   MLIRTensorDialect

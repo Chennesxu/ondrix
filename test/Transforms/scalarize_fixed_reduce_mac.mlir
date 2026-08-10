@@ -1,0 +1,44 @@
+// RUN: ondrix-opt %s --scalarize-ondsp-fixed-reduce-mac --split-input-file | FileCheck %s
+
+// The static fixed reduction becomes its definitional ordered mac loop.
+// CHECK-LABEL: func.func @expands_static(
+// CHECK: %[[LOOP:.*]] = scf.for %[[I:.*]] = %{{.*}} iter_args(%[[ACC:.*]] = %{{.*}}) -> (!ondsp.acc
+// CHECK: %[[X:.*]] = memref.load %{{.*}}[%[[I]]] : memref<5xi16>
+// CHECK: %[[C:.*]] = memref.load %{{.*}}[%[[I]]] : memref<5xi16>
+// CHECK: %[[NEXT:.*]] = ondsp.mac %[[ACC]], %[[X]], %[[C]] {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>}
+// CHECK: scf.yield %[[NEXT]]
+// CHECK: ondsp.acc_export %[[LOOP]]
+// CHECK-NOT: ondsp.reduce_mac
+func.func @expands_static(%window: memref<5xi16>, %coefficients: memref<5xi16>) -> i16 {
+  %z = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %acc = ondsp.reduce_mac %z, %window, %coefficients {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<5xi16>, memref<5xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %out = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %out : i16
+}
+
+// -----
+
+// Dynamic lengths keep the same runtime equal-length proof the fixed scalar
+// lowering inserts, then fold identically.
+// CHECK-LABEL: func.func @expands_dynamic(
+// CHECK: cf.assert %{{.*}}equal operand lengths
+// CHECK: scf.for
+// CHECK: ondsp.mac
+// CHECK-NOT: ondsp.reduce_mac
+func.func @expands_dynamic(%window: memref<?xi16>, %coefficients: memref<?xi16>) -> i16 {
+  %z = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %acc = ondsp.reduce_mac %z, %window, %coefficients {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<?xi16>, memref<?xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %out = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %out : i16
+}
+
+// -----
+
+// Floating-point reductions belong to their own lowerings and stay.
+// CHECK-LABEL: func.func @keeps_fp(
+// CHECK: ondsp.reduce_mac
+func.func @keeps_fp(%lhs: memref<8xf32>, %rhs: memref<8xf32>) -> f32 {
+  %zero = arith.constant 0.0 : f32
+  %r = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, memref<8xf32>, memref<8xf32>) -> f32
+  return %r : f32
+}
