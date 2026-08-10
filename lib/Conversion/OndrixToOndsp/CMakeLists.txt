@@ -1,5 +1,10 @@
 add_ondrix_library(OndrixToOndsp
+  OndrixElementwiseLowering.cpp
+  OndrixFirFamilyLowering.cpp
+  OndrixSpectralLowering.cpp
+  OndrixStatefulLowering.cpp
   OndrixToOndsp.cpp
+  OndrixToOndspCommon.cpp
 
   DEPENDS
   MLIROndrixPassesIncGen
