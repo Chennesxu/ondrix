@@ -154,6 +154,63 @@ def OrtumCore_FftTrivialStageOp
     : OrtumCore_PackedFftOp<"fft_trivial_stage",
                             "Experimental trivial-twiddle FFT stage semantic op">;
 
+def OrtumCore_CxMulConjOp : OrtumCore_Op<"cx_mul_conj", [Pure]> {
+  let summary = "Packed complex multiply by the conjugated twiddle";
+  let description = [{
+    Interprets `value` and `twiddle` as packed complex signed Q15 values
+    (imaginary in bits 31:16, real in bits 15:0) and computes
+    `value * conj(twiddle)` with exact signed cross products:
+
+    ```
+    real = vr*wr + vi*wi     imag = vi*wr - vr*wi     (exact signed i33)
+    component(x) = narrow(round(x >> shift))
+    ```
+
+    The rounding acts on the exact wide value, so its increment cannot
+    overflow, and a `shift` of zero is the identity that bypasses rounding
+    entirely; `overflow` then selects two's-complement wrap or i16
+    saturation per component. `layout` assigns the components to the
+    result halves: `imag_hi` is the standard packing, and `real_hi` swaps
+    the halves, which composes with the `cross` butterfly variant to
+    realize multiplication by -+j without a separate operation. `shift`
+    models the target's product shift and must lie in [0, 31].
+  }];
+  let arguments = (ins I32:$value, I32:$twiddle, I64Attr:$shift,
+                   OrtumCore_CxRoundingAttr:$rounding,
+                   OrtumCore_CxOverflowAttr:$overflow,
+                   OrtumCore_CxLayoutAttr:$layout);
+  let results = (outs I32:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def OrtumCore_CxBflyOp : OrtumCore_Op<"cx_bfly", [Pure]> {
+  let summary = "Packed complex butterfly with per-component scaling";
+  let description = [{
+    Forms the exact per-component sums and differences of two packed
+    complex signed Q15 values (`lhs` = a, `rhs` = b, exact signed i17
+    intermediates), then narrows every component through the same
+    `shift`/`rounding`/`overflow` pipeline as `cx_mul_conj`. `variant`
+    selects the sign pattern:
+
+    ```
+    plain: out0 = [ai+bi : ar+br]    out1 = [ai-bi : ar-br]
+    cross: out0 = [ai-bi : ar+br]    out1 = [ai+bi : ar-br]
+    ```
+
+    With `rhs` holding a `real_hi` product P, the cross variant computes
+    exactly `a - j*P` and `a + j*P` under the shared narrowing pipeline.
+    `shift` models the target's butterfly scaling and must lie in [0, 1].
+  }];
+  let arguments = (ins I32:$lhs, I32:$rhs, I64Attr:$shift,
+                   OrtumCore_CxRoundingAttr:$rounding,
+                   OrtumCore_CxOverflowAttr:$overflow,
+                   OrtumCore_CxBflyVariantAttr:$variant);
+  let results = (outs I32:$out0, I32:$out1);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 class OrtumCore_BitrevAddressOp<string mnemonic, string opSummary, string op>
     : OrtumCore_Op<mnemonic, [Pure]> {
   let summary = opSummary;

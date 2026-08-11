@@ -106,6 +106,11 @@ static LogicalResult verifySourceArtifactUsage(Operation *root) {
           return WalkResult::interrupt();
         }
 
+    // An OrtumCore operation's own attributes are contract operands the
+    // conversion consumes; the metadata guard is for every other op.
+    if (isa_and_nonnull<ondrix::ortumcore::OrtumCoreDialect>(op->getDialect()))
+      return WalkResult::advance();
+
     auto function = dyn_cast<func::FuncOp>(op);
     for (NamedAttribute namedAttribute : op->getAttrs()) {
       if (function && namedAttribute.getName() == function.getFunctionTypeAttrName())
@@ -246,6 +251,103 @@ public:
   }
 };
 
+// Packed-complex emulation helpers: extract signed Q15 halves, compute
+// exactly wide, and narrow every component through ondsp.round_shift so the
+// packed pipeline inherits the proven rounding machinery.
+static Value extractComponent(OpBuilder &builder, Location loc, Value packed, bool high,
+                              Type carrier) {
+  Value component = packed;
+  if (high) {
+    Value sixteen = builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(16));
+    component = builder.create<arith::ShRSIOp>(loc, packed, sixteen);
+  }
+  Value half = builder.create<arith::TruncIOp>(loc, builder.getI16Type(), component);
+  return builder.create<arith::ExtSIOp>(loc, carrier, half);
+}
+
+static Value narrowComponent(OpBuilder &builder, Location loc, Value wide, int64_t shift,
+                             ondrix::ortumcore::CxRounding rounding,
+                             ondrix::ortumcore::CxOverflow overflow) {
+  auto mode = rounding == ondrix::ortumcore::CxRounding::TowardNegative
+                  ? ondrix::ondsp::RoundingMode::TowardNegative
+                  : ondrix::ondsp::RoundingMode::NearestTiesPositive;
+  auto narrowing = overflow == ondrix::ortumcore::CxOverflow::Wrap
+                       ? ondrix::ondsp::OverflowMode::Wrap
+                       : ondrix::ondsp::OverflowMode::Saturate;
+  auto scale = ondrix::ondsp::ScaleAttr::get(builder.getContext(), 0, unsigned(shift), mode,
+                                             narrowing, builder.getI16Type());
+  return builder.create<ondrix::ondsp::RoundShiftOp>(loc, builder.getI16Type(), wide, scale);
+}
+
+static Value packComponents(OpBuilder &builder, Location loc, Value hiComponent,
+                            Value loComponent) {
+  Value hi = builder.create<arith::ExtSIOp>(loc, builder.getI32Type(), hiComponent);
+  Value lo = builder.create<arith::ExtUIOp>(loc, builder.getI32Type(), loComponent);
+  Value sixteen = builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(16));
+  Value shifted = builder.create<arith::ShLIOp>(loc, hi, sixteen);
+  return builder.create<arith::OrIOp>(loc, shifted, lo);
+}
+
+class CxMulConjOpLowering final : public OpConversionPattern<ondrix::ortumcore::CxMulConjOp> {
+public:
+  using OpConversionPattern<ondrix::ortumcore::CxMulConjOp>::OpConversionPattern;
+
+  // The imaginary cross sum reaches +2^31 at value = twiddle = (-1, -1), so
+  // the exact products live in an i64 carrier.
+  LogicalResult matchAndRewrite(ondrix::ortumcore::CxMulConjOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type carrier = rewriter.getI64Type();
+    Value vr = extractComponent(rewriter, loc, adaptor.getValue(), false, carrier);
+    Value vi = extractComponent(rewriter, loc, adaptor.getValue(), true, carrier);
+    Value wr = extractComponent(rewriter, loc, adaptor.getTwiddle(), false, carrier);
+    Value wi = extractComponent(rewriter, loc, adaptor.getTwiddle(), true, carrier);
+    Value real = rewriter.create<arith::AddIOp>(loc, rewriter.create<arith::MulIOp>(loc, vr, wr),
+                                                rewriter.create<arith::MulIOp>(loc, vi, wi));
+    Value imag = rewriter.create<arith::SubIOp>(loc, rewriter.create<arith::MulIOp>(loc, vi, wr),
+                                                rewriter.create<arith::MulIOp>(loc, vr, wi));
+    Value realNarrow =
+        narrowComponent(rewriter, loc, real, op.getShift(), op.getRounding(), op.getOverflow());
+    Value imagNarrow =
+        narrowComponent(rewriter, loc, imag, op.getShift(), op.getRounding(), op.getOverflow());
+    bool imagHigh = op.getLayout() == ondrix::ortumcore::CxLayout::ImagHi;
+    rewriter.replaceOp(op, packComponents(rewriter, loc, imagHigh ? imagNarrow : realNarrow,
+                                          imagHigh ? realNarrow : imagNarrow));
+    return success();
+  }
+};
+
+class CxBflyOpLowering final : public OpConversionPattern<ondrix::ortumcore::CxBflyOp> {
+public:
+  using OpConversionPattern<ondrix::ortumcore::CxBflyOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ortumcore::CxBflyOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type carrier = rewriter.getI32Type();
+    Value ar = extractComponent(rewriter, loc, adaptor.getLhs(), false, carrier);
+    Value ai = extractComponent(rewriter, loc, adaptor.getLhs(), true, carrier);
+    Value br = extractComponent(rewriter, loc, adaptor.getRhs(), false, carrier);
+    Value bi = extractComponent(rewriter, loc, adaptor.getRhs(), true, carrier);
+    Value sumReal = rewriter.create<arith::AddIOp>(loc, ar, br);
+    Value diffReal = rewriter.create<arith::SubIOp>(loc, ar, br);
+    Value sumImag = rewriter.create<arith::AddIOp>(loc, ai, bi);
+    Value diffImag = rewriter.create<arith::SubIOp>(loc, ai, bi);
+    // Both variants keep sum-of-reals in out0 and difference-of-reals in
+    // out1; cross swaps only the imaginary halves.
+    bool cross = op.getVariant() == ondrix::ortumcore::CxBflyVariant::Cross;
+    auto narrow = [&](Value component) {
+      return narrowComponent(rewriter, loc, component, op.getShift(), op.getRounding(),
+                             op.getOverflow());
+    };
+    Value out0 = packComponents(rewriter, loc, narrow(cross ? diffImag : sumImag), narrow(sumReal));
+    Value out1 =
+        packComponents(rewriter, loc, narrow(cross ? sumImag : diffImag), narrow(diffReal));
+    rewriter.replaceOp(op, {out0, out1});
+    return success();
+  }
+};
+
 // rev32 as the standard five-step masked butterfly swap; kept in plain
 // arith so every downstream generic path can execute it.
 static Value emitReverse32(OpBuilder &builder, Location loc, Value value) {
@@ -311,8 +413,8 @@ public:
     OrtumCoreToOndspTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
     patterns.add<AccInitOpLowering, MacAddOpLowering, MacSubOpLowering, DmacOpLowering,
-                 AccOutOpLowering, BitrevAddOpLowering, BitrevSubOpLowering>(typeConverter,
-                                                                             &getContext());
+                 AccOutOpLowering, CxMulConjOpLowering, CxBflyOpLowering, BitrevAddOpLowering,
+                 BitrevSubOpLowering>(typeConverter, &getContext());
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);

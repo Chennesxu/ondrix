@@ -9,4 +9,13 @@ include "ondrix/Dialect/ortumcore/IR/OrtumCoreEnums.td"
 def OrtumCore_FftStageKindAttr
     : EnumAttr<OrtumCore_Dialect, OrtumCore_FftStageKind, "fft_stage_kind">;
 
+def OrtumCore_CxRoundingAttr
+    : EnumAttr<OrtumCore_Dialect, OrtumCore_CxRounding, "cx_rounding">;
+def OrtumCore_CxOverflowAttr
+    : EnumAttr<OrtumCore_Dialect, OrtumCore_CxOverflow, "cx_overflow">;
+def OrtumCore_CxLayoutAttr
+    : EnumAttr<OrtumCore_Dialect, OrtumCore_CxLayout, "cx_layout">;
+def OrtumCore_CxBflyVariantAttr
+    : EnumAttr<OrtumCore_Dialect, OrtumCore_CxBflyVariant, "cx_bfly_variant">;
+
 #endif

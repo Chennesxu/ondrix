@@ -12,5 +12,19 @@ LogicalResult AccOutOp::verify() {
   return success();
 }
 
+LogicalResult CxMulConjOp::verify() {
+  int64_t shift = getShift();
+  if (shift < 0 || shift > 31)
+    return emitOpError("packed complex product shift must lie in [0, 31]");
+  return success();
+}
+
+LogicalResult CxBflyOp::verify() {
+  int64_t shift = getShift();
+  if (shift < 0 || shift > 1)
+    return emitOpError("packed complex butterfly shift must lie in [0, 1]");
+  return success();
+}
+
 #define GET_OP_CLASSES
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreOps.cpp.inc"
