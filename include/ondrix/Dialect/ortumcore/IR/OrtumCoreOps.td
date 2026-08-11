@@ -97,63 +97,6 @@ class OrtumCore_BinaryOp<string mnemonic, string opSummary>
 def OrtumCore_SatAddOp : OrtumCore_BinaryOp<"sat_add", "Saturating add semantic op">;
 def OrtumCore_SatSubOp : OrtumCore_BinaryOp<"sat_sub", "Saturating subtract semantic op">;
 
-def OrtumCore_VecStateInitOp : OrtumCore_Op<"vec_state_init", [Pure]> {
-  let summary = "Experimental packed-vector mode state initialization";
-  let results = (outs OrtumCore_VecStateType:$state);
-  let assemblyFormat = "attr-dict `:` type($state)";
-}
-
-def OrtumCore_VecSetModeOp : OrtumCore_Op<"vec_set_mode", [Pure]> {
-  let summary = "Experimental packed-vector mode state transition";
-  let arguments = (ins OrtumCore_VecStateType:$state,
-                       BoolAttr:$saturation,
-                       BoolAttr:$round_to_nearest,
-                       BoolAttr:$packed_complex,
-                       I64Attr:$shift_right,
-                       I64Attr:$shift_left);
-  let results = (outs OrtumCore_VecStateType:$result);
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
-class OrtumCore_VecUnaryOp<string mnemonic, string opSummary>
-    : OrtumCore_Op<mnemonic, [Pure]> {
-  let summary = opSummary;
-  let arguments = (ins OrtumCore_VecStateType:$state, I32:$input);
-  let results = (outs OrtumCore_VecStateType:$nextState, I32:$result);
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
-class OrtumCore_VecBinaryOp<string mnemonic, string opSummary>
-    : OrtumCore_Op<mnemonic, [Pure]> {
-  let summary = opSummary;
-  let arguments = (ins OrtumCore_VecStateType:$state, I32:$lhs, I32:$rhs);
-  let results = (outs OrtumCore_VecStateType:$nextState, I32:$result);
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
-class OrtumCore_PackedFftOp<string mnemonic, string opSummary>
-    : OrtumCore_Op<mnemonic, [Pure]> {
-  let summary = opSummary;
-  let arguments = (ins OrtumCore_VecStateType:$state, Variadic<I32>:$inputs,
-                   OrtumCore_FftStageKindAttr:$stage_kind);
-  let results = (outs OrtumCore_VecStateType:$nextState, Variadic<I32>:$outputs);
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
-def OrtumCore_CxMulOp
-    : OrtumCore_VecBinaryOp<"cx_mul", "Experimental packed complex multiply semantic op">;
-def OrtumCore_CxAddOp
-    : OrtumCore_VecBinaryOp<"cx_add", "Experimental packed complex add semantic op">;
-def OrtumCore_CxSubOp
-    : OrtumCore_VecBinaryOp<"cx_sub", "Experimental packed complex subtract semantic op">;
-def OrtumCore_CxDualAddOp
-    : OrtumCore_VecBinaryOp<"cx_dual_add", "Experimental packed dual add semantic op">;
-def OrtumCore_CxDualSubOp
-    : OrtumCore_VecBinaryOp<"cx_dual_sub", "Experimental packed dual subtract semantic op">;
-def OrtumCore_FftTrivialStageOp
-    : OrtumCore_PackedFftOp<"fft_trivial_stage",
-                            "Experimental trivial-twiddle FFT stage semantic op">;
-
 def OrtumCore_CxMulConjOp : OrtumCore_Op<"cx_mul_conj", [Pure]> {
   let summary = "Packed complex multiply by the conjugated twiddle";
   let description = [{

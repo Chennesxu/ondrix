@@ -6,9 +6,6 @@ include "mlir/IR/EnumAttr.td"
 include "ondrix/Dialect/ortumcore/IR/OrtumCoreDialect.td"
 include "ondrix/Dialect/ortumcore/IR/OrtumCoreEnums.td"
 
-def OrtumCore_FftStageKindAttr
-    : EnumAttr<OrtumCore_Dialect, OrtumCore_FftStageKind, "fft_stage_kind">;
-
 def OrtumCore_CxRoundingAttr
     : EnumAttr<OrtumCore_Dialect, OrtumCore_CxRounding, "cx_rounding">;
 def OrtumCore_CxOverflowAttr

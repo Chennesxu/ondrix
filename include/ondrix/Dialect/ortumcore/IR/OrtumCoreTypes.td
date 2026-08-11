@@ -19,13 +19,4 @@ def OrtumCore_AccumType : OrtumCore_Type<"Accum", "acc"> {
   }];
 }
 
-def OrtumCore_VecStateType : OrtumCore_Type<"VecState", "vec.state"> {
-  let summary = "Packed-vector mode/state token";
-  let description = [{
-    Experimental contract. Ordering token for packed-vector mode changes and
-    dependent packed-vector operations. It is target semantic state, not a
-    public physical register.
-  }];
-}
-
 #endif

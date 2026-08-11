@@ -3,16 +3,6 @@
 
 include "mlir/IR/EnumAttr.td"
 
-def OrtumCore_FftStageRadix2 : I32EnumAttrCase<"Radix2", 0, "radix2">;
-def OrtumCore_FftStageRadix2Combined
-    : I32EnumAttrCase<"Radix2Combined", 1, "radix2_combined">;
-def OrtumCore_FftStageKind : I32EnumAttr<"FftStageKind",
-    "trivial-twiddle FFT stage kind",
-    [OrtumCore_FftStageRadix2, OrtumCore_FftStageRadix2Combined]> {
-  let cppNamespace = "::ondrix::ortumcore";
-  let genSpecializedAttr = 0;
-}
-
 // The packed complex capability admits exactly the two rounding modes the
 // target realizes; other ondsp rounding modes are not target capabilities
 // and fail closed by not existing here.
