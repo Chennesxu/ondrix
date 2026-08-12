@@ -143,12 +143,16 @@ std::optional<PackedComplexProfile> getPackedComplexProfile(ComplexLayout layout
 
 /// Verifies the executable packed radix-2 butterfly profile the layout
 /// selects: signed Q(storageWidth-1) numeric in matching storage, an exact
-/// full product, one product requantization by storageWidth - 1, and one
-/// output scale by 1, both nearest-even and saturating to the component
-/// storage. Fails closed on any layout without an executable profile.
+/// full product and one product requantization by storageWidth - 1. The
+/// default profile pins nearest_even saturating scales with output shift 1;
+/// `targetInventory` additionally admits toward_negative and
+/// nearest_ties_positive rounding, wrap narrowing, and output shift 0 (the
+/// packed target inventory). Fails closed on any layout without an
+/// executable profile.
 mlir::LogicalResult verifyPackedButterflyPolicy(mlir::Operation *op, CxLayoutAttr layout,
                                                 mlir::Attribute numeric, ProductAttr product,
-                                                ScaleAttr productScale, ScaleAttr outputScale);
+                                                ScaleAttr productScale, ScaleAttr outputScale,
+                                                bool targetInventory = false);
 
 /// Returns the raw product width, fractional position, and exact bit selection
 /// without applying target-specific arithmetic behavior.

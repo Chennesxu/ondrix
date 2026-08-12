@@ -505,7 +505,8 @@ LogicalResult CxButterflyOp::verify() {
     return emitOpError() << "executable butterfly requires scalar or fixed Vector signless i"
                          << containerWidth << " packed values";
   return verifyPackedButterflyPolicy(*this, getLayout(), getNumeric(), getProduct(),
-                                     getProductScale(), getOutputScale());
+                                     getProductScale(), getOutputScale(),
+                                     /*targetInventory=*/true);
 }
 
 LogicalResult FftStageOp::verify() { return verifyValueOnlyTypes(*this); }

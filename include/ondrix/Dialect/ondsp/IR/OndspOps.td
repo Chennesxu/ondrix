@@ -349,10 +349,13 @@ def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
     Both scaling boundaries explicitly apply left shift, signed right-shift
     rounding, then destination wrap or saturation. Each profile is
     deliberately closed to scalar or matching fixed Vector packed container
-    values, full products, a nearest-even saturating product shift of
-    `storage width - 1`, and a nearest-even saturating output shift of 1.
-    Vector lanes are independent butterflies; the operation does not reorder
-    FFT stages or move either requantization boundary.
+    values, full products, a product shift of `storage width - 1`, and an
+    output shift of 0 or 1; each boundary independently declares
+    `nearest_even`, `toward_negative`, or `nearest_ties_positive` rounding
+    and wrap or saturating narrowing (the non-default modes are the packed
+    target inventory, so a target-directed stage is writable as the same
+    contract). Vector lanes are independent butterflies; the operation does
+    not reorder FFT stages or move either requantization boundary.
   }];
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
                    Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric,

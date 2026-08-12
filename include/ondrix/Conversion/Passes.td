@@ -135,6 +135,34 @@ def ConvertOndspLanePairsToOrtumCore
   ];
 }
 
+def ConvertOndspCxButterflyToOrtumCore
+    : Pass<"convert-ondsp-cx-butterfly-to-ortumcore", "::mlir::ModuleOp"> {
+  let summary = "Select packed-target butterflies onto the ortumcore complex pair";
+  let description = [{
+    Rewrite each `ondsp.cx_butterfly` whose declared policies fall inside the
+    packed target inventory into `ortumcore.cx_mul_conj` plus a plain
+    `ortumcore.cx_bfly`: scalar i32 packed-Q15 layout, full product, product
+    scale of exactly shift 15 and output scale of shift 0 or 1, both
+    boundaries rounding `toward_negative` or `nearest_ties_positive` with
+    wrap or saturating narrowing. The default `nearest_even` profile is not a
+    target capability and is deliberately not converted.
+
+    The target multiplies by the conjugated twiddle, so the rewrite requires
+    the twiddle to be an `arith.constant` and materializes its exact
+    conjugate as a new constant; a twiddle whose imaginary component is
+    -32768 has no representable exact conjugate and the operation stays
+    untouched. This is an opportunity pass, not a legality wall: every
+    unconverted butterfly remains a generic ondsp operation with unchanged
+    semantics.
+  }];
+  let constructor = "ondrix::createConvertOndspCxButterflyToOrtumCorePass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "ondrix::ondsp::OndspDialect",
+    "ondrix::ortumcore::OrtumCoreDialect",
+  ];
+}
+
 def ConvertOrtumCoreToOndspEmulation
     : Pass<"convert-ortumcore-to-ondsp-emulation", "::mlir::ModuleOp"> {
   let summary = "Expand supported OrtumCore capabilities to public Ondsp semantics";

@@ -74,26 +74,12 @@ func.func @rejects_product_shift(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
 // -----
 
 func.func @rejects_product_rounding(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
-  // expected-error@+1 {{product_scale requires nearest_even rounding}}
+  // expected-error@+1 {{product_scale admits nearest_even, toward_negative, or nearest_ties_positive rounding}}
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
     layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
     product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
-  } : (i32, i32, i32) -> (i32, i32)
-  return %0, %1 : i32, i32
-}
-
-// -----
-
-func.func @rejects_product_overflow(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
-  // expected-error@+1 {{product_scale requires saturating overflow}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
-    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
-    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = wrap, saturate_to = i16>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_zero, overflow = saturate, saturate_to = i16>,
     output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
   } : (i32, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
@@ -102,13 +88,13 @@ func.func @rejects_product_overflow(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
 // -----
 
 func.func @rejects_output_shift(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
-  // expected-error@+1 {{output_scale requires pre_shift_left=0 and post_shift_right=1}}
+  // expected-error@+1 {{output_scale requires pre_shift_left=0 and post_shift_right=0 or 1}}
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
     layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
     product = #ondsp.product<full>,
     product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 0, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 2, rounding = nearest_even, overflow = saturate, saturate_to = i16>
   } : (i32, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
 }
@@ -116,27 +102,13 @@ func.func @rejects_output_shift(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
 // -----
 
 func.func @rejects_output_rounding(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
-  // expected-error@+1 {{output_scale requires nearest_even rounding}}
+  // expected-error@+1 {{output_scale admits nearest_even, toward_negative, or nearest_ties_positive rounding}}
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
     layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
     product = #ondsp.product<full>,
     product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
     output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_zero, overflow = saturate, saturate_to = i16>
-  } : (i32, i32, i32) -> (i32, i32)
-  return %0, %1 : i32, i32
-}
-
-// -----
-
-func.func @rejects_output_overflow(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
-  // expected-error@+1 {{output_scale requires saturating overflow}}
-  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
-    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
-    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = wrap, saturate_to = i16>
   } : (i32, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
 }

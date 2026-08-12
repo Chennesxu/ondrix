@@ -1,4 +1,5 @@
 add_ondrix_library(OndspToOrtumCore
+  OndspCxButterflyToOrtumCore.cpp
   OndspLanePairsToOrtumCore.cpp
   OndspToOrtumCore.cpp
   OrtumCoreLoweringSupport.cpp

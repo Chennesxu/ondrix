@@ -74,15 +74,31 @@ LogicalResult verifyExecutableFpFormat(Operation *op, FpAttr numeric, StringRef 
   return success();
 }
 
-static LogicalResult verifyButterflyScale(Operation *op, ScaleAttr scale, unsigned rightShift,
-                                          unsigned storageWidth, StringRef name) {
-  if (scale.getPreShiftLeft() != 0 || scale.getPostShiftRight() != rightShift)
-    return op->emitOpError() << name
-                             << " requires pre_shift_left=0 and post_shift_right=" << rightShift;
-  if (scale.getRounding() != RoundingMode::NearestEven)
-    return op->emitOpError() << name << " requires nearest_even rounding";
-  if (scale.getOverflow() != OverflowMode::Saturate)
-    return op->emitOpError() << name << " requires saturating overflow";
+static LogicalResult verifyButterflyScale(Operation *op, ScaleAttr scale, unsigned minRightShift,
+                                          unsigned maxRightShift, unsigned storageWidth,
+                                          StringRef name, bool targetInventory) {
+  if (scale.getPreShiftLeft() != 0 || scale.getPostShiftRight() < minRightShift ||
+      scale.getPostShiftRight() > maxRightShift) {
+    auto diagnostic = op->emitOpError()
+                      << name
+                      << " requires pre_shift_left=0 and post_shift_right=" << minRightShift;
+    if (maxRightShift != minRightShift)
+      diagnostic << " or " << maxRightShift;
+    return diagnostic;
+  }
+  RoundingMode rounding = scale.getRounding();
+  if (targetInventory) {
+    if (rounding != RoundingMode::NearestEven && rounding != RoundingMode::TowardNegative &&
+        rounding != RoundingMode::NearestTiesPositive)
+      return op->emitOpError() << name
+                               << " admits nearest_even, toward_negative, or "
+                                  "nearest_ties_positive rounding";
+  } else {
+    if (rounding != RoundingMode::NearestEven)
+      return op->emitOpError() << name << " requires nearest_even rounding";
+    if (scale.getOverflow() != OverflowMode::Saturate)
+      return op->emitOpError() << name << " requires saturating overflow";
+  }
   auto destination = dyn_cast<IntegerType>(scale.getSaturateTo());
   if (!destination || !destination.isSignless() || destination.getWidth() != storageWidth)
     return op->emitOpError() << name << " requires signless i" << storageWidth
@@ -106,7 +122,7 @@ std::optional<PackedComplexProfile> getPackedComplexProfile(ComplexLayout layout
 
 LogicalResult verifyPackedButterflyPolicy(Operation *op, CxLayoutAttr layout, Attribute numeric,
                                           ProductAttr product, ScaleAttr productScale,
-                                          ScaleAttr outputScale) {
+                                          ScaleAttr outputScale, bool targetInventory) {
   std::optional<PackedComplexProfile> profile = getPackedComplexProfile(layout.getLayout());
   if (!profile)
     return op->emitOpError("executable butterfly requires packed_i16_imag_hi_real_lo or "
@@ -121,11 +137,15 @@ LogicalResult verifyPackedButterflyPolicy(Operation *op, CxLayoutAttr layout, At
   if (!isFullProduct(product))
     return op->emitOpError("packed butterfly requires product = #ondsp.product<full>");
   // One product requantization per product term and one output scale per
-  // stage: both boundaries are declared, never folded into each other.
-  if (failed(
-          verifyButterflyScale(op, productScale, storageWidth - 1, storageWidth, "product_scale")))
+  // stage: both boundaries are declared, never folded into each other. The
+  // widened rounding/overflow/shift inventory is admitted only where the
+  // caller opted into target-inventory profiles.
+  unsigned minOutputShift = targetInventory ? 0 : 1;
+  if (failed(verifyButterflyScale(op, productScale, storageWidth - 1, storageWidth - 1,
+                                  storageWidth, "product_scale", targetInventory)))
     return failure();
-  return verifyButterflyScale(op, outputScale, 1, storageWidth, "output_scale");
+  return verifyButterflyScale(op, outputScale, minOutputShift, 1, storageWidth, "output_scale",
+                              targetInventory);
 }
 
 FailureOr<ProductSemantics> inferProductSemantics(Operation *op, FixedAttr numeric,
