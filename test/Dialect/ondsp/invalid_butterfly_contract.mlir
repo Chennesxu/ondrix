@@ -154,3 +154,17 @@ func.func @q31_rejects_q15_numeric(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
   } : (i64, i64, i64) -> (i64, i64)
   return %0, %1 : i64, i64
 }
+
+// -----
+
+func.func @q31_rejects_target_inventory(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
+  // expected-error@+1 {{product_scale requires nearest_even rounding}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = toward_negative, overflow = wrap, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+  } : (i64, i64, i64) -> (i64, i64)
+  return %0, %1 : i64, i64
+}

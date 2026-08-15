@@ -139,13 +139,15 @@ LogicalResult verifyPackedButterflyPolicy(Operation *op, CxLayoutAttr layout, At
   // One product requantization per product term and one output scale per
   // stage: both boundaries are declared, never folded into each other. The
   // widened rounding/overflow/shift inventory is admitted only where the
-  // caller opted into target-inventory profiles.
-  unsigned minOutputShift = targetInventory ? 0 : 1;
+  // caller opted in AND the profile is the 16-bit packed target's; the Q31
+  // profile has no packed target and keeps the closed policies.
+  bool widened = targetInventory && storageWidth == 16;
+  unsigned minOutputShift = widened ? 0 : 1;
   if (failed(verifyButterflyScale(op, productScale, storageWidth - 1, storageWidth - 1,
-                                  storageWidth, "product_scale", targetInventory)))
+                                  storageWidth, "product_scale", widened)))
     return failure();
   return verifyButterflyScale(op, outputScale, minOutputShift, 1, storageWidth, "output_scale",
-                              targetInventory);
+                              widened);
 }
 
 FailureOr<ProductSemantics> inferProductSemantics(Operation *op, FixedAttr numeric,

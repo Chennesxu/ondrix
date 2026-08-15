@@ -1094,7 +1094,8 @@ LogicalResult CfftOp::verify() {
   if (failed(verifyCfftValueDomain(*this)))
     return failure();
   return ondrix::ondsp::verifyPackedButterflyPolicy(*this, getLayout(), getNumeric(), getProduct(),
-                                                    getProductScale(), getOutputScale());
+                                                    getProductScale(), getOutputScale(),
+                                                    /*targetInventory=*/true);
 }
 
 LogicalResult RfftOp::verify() {
