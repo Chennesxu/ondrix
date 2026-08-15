@@ -5,6 +5,10 @@ extern int32_t cfft8_floor_wrap(int32_t, int32_t, int32_t, int32_t, int32_t, int
                                 int32_t, int64_t);
 extern int32_t cfft8_ntp_sat(int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t,
                              int64_t);
+extern int32_t cfft8_floor_sat(int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t,
+                               int32_t, int64_t);
+extern int32_t cfft8_ntp_wrap(int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t,
+                              int32_t, int64_t);
 
 static int64_t lo16(uint32_t v) { return (int16_t)(v & 0xFFFF); }
 static int64_t hi16(uint32_t v) { return (int16_t)((v >> 16) & 0xFFFF); }
@@ -71,28 +75,32 @@ static int failures = 0;
 static int checks = 0;
 
 int main(void) {
+  struct Config {
+    const char *name;
+    int32_t (*fn)(int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int64_t);
+    int rnd;
+    int sat;
+  } configs[] = {
+      {"floor_wrap", cfft8_floor_wrap, 0, 0},
+      {"ntp_sat", cfft8_ntp_sat, 1, 1},
+      {"floor_sat", cfft8_floor_sat, 0, 1},
+      {"ntp_wrap", cfft8_ntp_wrap, 1, 0},
+  };
   for (int v = 0; v < 3; ++v) {
-    uint32_t want_floor[8], want_ntp[8];
-    ref_cfft(8, VECTORS[v], want_floor, 0, 0);
-    ref_cfft(8, VECTORS[v], want_ntp, 1, 1);
     const uint32_t *x = VECTORS[v];
-    for (int k = 0; k < 8; ++k) {
-      uint32_t got_floor =
-          (uint32_t)cfft8_floor_wrap((int32_t)x[0], (int32_t)x[1], (int32_t)x[2], (int32_t)x[3],
-                                     (int32_t)x[4], (int32_t)x[5], (int32_t)x[6], (int32_t)x[7], k);
-      uint32_t got_ntp =
-          (uint32_t)cfft8_ntp_sat((int32_t)x[0], (int32_t)x[1], (int32_t)x[2], (int32_t)x[3],
-                                  (int32_t)x[4], (int32_t)x[5], (int32_t)x[6], (int32_t)x[7], k);
-      ++checks;
-      if (got_floor != want_floor[k]) {
-        ++failures;
-        fprintf(stderr, "FAIL floor v%d[%d]: got 0x%08x want 0x%08x\n", v, k, got_floor,
-                want_floor[k]);
-      }
-      ++checks;
-      if (got_ntp != want_ntp[k]) {
-        ++failures;
-        fprintf(stderr, "FAIL ntp v%d[%d]: got 0x%08x want 0x%08x\n", v, k, got_ntp, want_ntp[k]);
+    for (unsigned c = 0; c < sizeof(configs) / sizeof(configs[0]); ++c) {
+      uint32_t want[8];
+      ref_cfft(8, x, want, configs[c].rnd, configs[c].sat);
+      for (int k = 0; k < 8; ++k) {
+        uint32_t got =
+            (uint32_t)configs[c].fn((int32_t)x[0], (int32_t)x[1], (int32_t)x[2], (int32_t)x[3],
+                                    (int32_t)x[4], (int32_t)x[5], (int32_t)x[6], (int32_t)x[7], k);
+        ++checks;
+        if (got != want[k]) {
+          ++failures;
+          fprintf(stderr, "FAIL %s v%d[%d]: got 0x%08x want 0x%08x\n", configs[c].name, v, k, got,
+                  want[k]);
+        }
       }
     }
   }
@@ -100,8 +108,8 @@ int main(void) {
     fprintf(stderr, "cfft8 target profile differential: %d/%d FAILED\n", failures, checks);
     return 1;
   }
-  printf("cfft8 target profile differential: PASS (%d checks; floor/wrap and "
-         "NTP/sat whole-transform profiles)\n",
+  printf("cfft8 target profile differential: PASS (%d checks; all four "
+         "inventory whole-transform profiles)\n",
          checks);
   return 0;
 }

@@ -813,6 +813,31 @@ public:
       if (!operand)
         return std::nullopt;
       call.operands.push_back(std::move(*operand));
+      // Only the CFFT profile admits a declared stage policy; one pair names
+      // both scale boundaries, matching the gated combinations and the
+      // packed target's single mode register. Omission keeps the
+      // nearest_even saturating default.
+      if (isCfftKind(call.kind) && current.kind == TokenKind::Comma &&
+          next.spelling == "rounding") {
+        if (!expect(TokenKind::Comma, "expected ',' before rounding policy") ||
+            !expectIdentifier("rounding", "expected rounding policy") ||
+            !expect(TokenKind::Equal, "expected '=' after rounding"))
+          return std::nullopt;
+        auto rounding = parseIdentifier("expected rounding mode");
+        if (!rounding)
+          return std::nullopt;
+        call.rounding = rounding->spelling.str();
+      }
+      if (isCfftKind(call.kind) && current.kind == TokenKind::Comma) {
+        if (!expect(TokenKind::Comma, "expected ',' before overflow policy") ||
+            !expectIdentifier("overflow", "expected overflow policy") ||
+            !expect(TokenKind::Equal, "expected '=' after overflow"))
+          return std::nullopt;
+        auto overflow = parseIdentifier("expected overflow mode");
+        if (!overflow)
+          return std::nullopt;
+        call.destinationOverflow = overflow->spelling.str();
+      }
       if (!expect(TokenKind::RightParen, "expected ')' after FFT operand"))
         return std::nullopt;
       return call;
@@ -2467,6 +2492,26 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           diagnostics.error(call.position, "cfft currently supports only four or eight points");
           return std::nullopt;
         }
+        std::optional<ondsp::RoundingMode> stageRounding =
+            call.rounding.empty() ? std::optional(ondsp::RoundingMode::NearestEven)
+                                  : parseRounding(call.rounding);
+        std::optional<ondsp::OverflowMode> stageOverflow =
+            call.destinationOverflow.empty() ? std::optional(ondsp::OverflowMode::Saturate)
+                                             : parseOverflow(call.destinationOverflow);
+        if (!stageRounding || *stageRounding == ondsp::RoundingMode::TowardZero) {
+          diagnostics.error(call.position, "cfft rounding must be nearest_even, toward_negative, "
+                                           "or nearest_ties_positive");
+          return std::nullopt;
+        }
+        if (!stageOverflow) {
+          diagnostics.error(call.position, "cfft overflow must be wrap or saturate");
+          return std::nullopt;
+        }
+        if (*stageRounding == ondsp::RoundingMode::NearestEven &&
+            *stageOverflow == ondsp::OverflowMode::Wrap) {
+          diagnostics.error(call.position, "a nearest_even cfft requires saturating overflow");
+          return std::nullopt;
+        }
         return *input;
       }
       if (call.kind == ReductionKind::Rfft) {
@@ -3282,8 +3327,17 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         auto direction = ir::CfftDirectionAttr::get(&context, call.kind == ReductionKind::Cfft
                                                                   ? ir::CfftDirection::Forward
                                                                   : ir::CfftDirection::Inverse);
+        ondsp::RoundingMode stageRounding = call.rounding.empty() ? ondsp::RoundingMode::NearestEven
+                                                                  : *parseRounding(call.rounding);
+        ondsp::OverflowMode stageOverflow = call.destinationOverflow.empty()
+                                                ? ondsp::OverflowMode::Saturate
+                                                : *parseOverflow(call.destinationOverflow);
+        auto stageProduct = ondsp::ScaleAttr::get(&context, 0, 15, stageRounding, stageOverflow,
+                                                  builder.getI16Type());
+        auto stageOutput = ondsp::ScaleAttr::get(&context, 0, 1, stageRounding, stageOverflow,
+                                                 builder.getI16Type());
         return builder.create<ir::CfftOp>(callLocation, inputType, input, direction, layout,
-                                          numeric, product, productScale, outputScale);
+                                          numeric, product, stageProduct, stageOutput);
       }
       if (call.kind == ReductionKind::Rfft) {
         int64_t realExtent = inputType.getDimSize(0);

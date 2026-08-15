@@ -43,3 +43,25 @@
 
 // DYNAMIC: invalid_cfft_dynamic.ox:2:15: error: composable builtins currently require static operand extents
 // EXTENT: invalid_cfft_extent.ox:2:10: error: cfft currently supports only four or eight points
+
+// RUN: ondrix-compile %S/Inputs/q15_cfft8_target_profile.ox | FileCheck %s --check-prefix=TARGET
+// RUN: ondrix-compile %S/Inputs/q15_icfft8_ntp.ox | FileCheck %s --check-prefix=NTP
+// RUN: not ondrix-compile %S/Inputs/invalid_cfft_ne_wrap.ox 2>&1 | FileCheck %s --check-prefix=NEWRAP
+// RUN: not ondrix-compile %S/Inputs/invalid_cfft_rounding.ox 2>&1 | FileCheck %s --check-prefix=BADROUND
+
+// One declared pair names both scale boundaries: the gated inventory shape
+// and the packed target's single mode register.
+// TARGET-LABEL: func.func @q15_cfft8_floor(
+// TARGET: ondrix.cfft
+// TARGET-SAME: output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = wrap, saturate_to = i16>
+// TARGET-SAME: product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = wrap, saturate_to = i16>
+
+// NTP-LABEL: func.func @q15_icfft8_ntp(
+// NTP: ondrix.cfft
+// NTP-SAME: direction = #ondrix.cfft_direction<inverse>
+// NTP-SAME: output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_ties_positive, overflow = saturate, saturate_to = i16>
+// NTP-SAME: product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_ties_positive, overflow = saturate, saturate_to = i16>
+
+// NEWRAP: a nearest_even cfft requires saturating overflow
+
+// BADROUND: cfft rounding must be nearest_even, toward_negative, or nearest_ties_positive

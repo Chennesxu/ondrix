@@ -15,9 +15,9 @@
 // twiddles and reach the packed pair, the 3 whose twiddle is exactly -j
 // (imaginary -32768, no representable conjugate) stay generic - the mixed
 // path is the witness that per-op fail-closed composes inside one FFT.
-// MUL-COUNT-18: ortumcore.cx_mul_conj
+// MUL-COUNT-36: ortumcore.cx_mul_conj
 // MUL-NOT: ortumcore.cx_mul_conj
-// GEN-COUNT-6: ondsp.cx_butterfly
+// GEN-COUNT-12: ondsp.cx_butterfly
 // GEN-NOT: ondsp.cx_butterfly
 
 func.func @cfft8_floor_wrap(%x0: i32, %x1: i32, %x2: i32, %x3: i32,
@@ -49,6 +49,40 @@ func.func @cfft8_ntp_sat(%x0: i32, %x1: i32, %x2: i32, %x3: i32,
     product = #ondsp.product<full>,
     product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_ties_positive, overflow = saturate, saturate_to = i16>,
     output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_ties_positive, overflow = saturate, saturate_to = i16>
+  } : (tensor<8xi32>) -> tensor<8xi32>
+  %value = tensor.extract %result[%index] : tensor<8xi32>
+  return %value : i32
+}
+
+func.func @cfft8_floor_sat(%x0: i32, %x1: i32, %x2: i32, %x3: i32,
+                           %x4: i32, %x5: i32, %x6: i32, %x7: i32,
+                           %index: index) -> i32 {
+  %input = tensor.from_elements %x0, %x1, %x2, %x3, %x4, %x5, %x6, %x7
+      : tensor<8xi32>
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>
+  } : (tensor<8xi32>) -> tensor<8xi32>
+  %value = tensor.extract %result[%index] : tensor<8xi32>
+  return %value : i32
+}
+
+func.func @cfft8_ntp_wrap(%x0: i32, %x1: i32, %x2: i32, %x3: i32,
+                          %x4: i32, %x5: i32, %x6: i32, %x7: i32,
+                          %index: index) -> i32 {
+  %input = tensor.from_elements %x0, %x1, %x2, %x3, %x4, %x5, %x6, %x7
+      : tensor<8xi32>
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_ties_positive, overflow = wrap, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_ties_positive, overflow = wrap, saturate_to = i16>
   } : (tensor<8xi32>) -> tensor<8xi32>
   %value = tensor.extract %result[%index] : tensor<8xi32>
   return %value : i32
