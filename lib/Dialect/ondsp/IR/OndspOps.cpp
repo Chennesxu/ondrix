@@ -521,3 +521,9 @@ LogicalResult CxButterflyOp::verify() {
 }
 
 LogicalResult FftStageOp::verify() { return verifyValueOnlyTypes(*this); }
+
+LogicalResult BitrevAddOp::verify() {
+  if (getWidth() < 1 || getWidth() > 32)
+    return emitOpError("requires a reversal width between 1 and 32");
+  return success();
+}

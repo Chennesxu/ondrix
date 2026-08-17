@@ -401,8 +401,18 @@ def Ondsp_BitrevIndexOp : Ondsp_Op<"bitrev_index", [Pure]> {
 }
 
 def Ondsp_BitrevAddOp : Ondsp_Op<"bitrev_add", [Pure]> {
+  let summary = "Reversed-carry index addition for bit-reversed walks";
+  let description = [{
+    Computes `rev(rev(base) + rev(step) mod 2^width)` where `rev` reverses
+    the low `width` bits and both operands are interpreted modulo
+    `2^width`. Integer-exact with no rounding or hidden state. With
+    `step = 2^(width-1)` (the reversed image of +1), iterating from zero
+    yields the bit-reversed permutation sequence `rev(0), rev(1), ...`,
+    the index progression of an FFT reorder walk.
+  }];
   let arguments = (ins Index:$base, Index:$step, I64Attr:$width);
   let results = (outs Index:$result);
+  let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 

@@ -72,9 +72,17 @@ public:
   void runOnOperation() override {
     conjugatedTables.clear();
     SmallVector<ondrix::ondsp::CxButterflyOp> candidates;
-    getOperation()->walk([&](ondrix::ondsp::CxButterflyOp op) { candidates.push_back(op); });
+    SmallVector<ondrix::ondsp::BitrevAddOp> walks;
+    getOperation()->walk([&](Operation *op) {
+      if (auto butterfly = dyn_cast<ondrix::ondsp::CxButterflyOp>(op))
+        candidates.push_back(butterfly);
+      else if (auto walk = dyn_cast<ondrix::ondsp::BitrevAddOp>(op))
+        walks.push_back(walk);
+    });
     for (ondrix::ondsp::CxButterflyOp op : candidates)
       rewriteButterfly(op);
+    for (ondrix::ondsp::BitrevAddOp op : walks)
+      rewriteBitrevAdd(op);
   }
 
 private:
@@ -120,6 +128,27 @@ private:
     }
     OpBuilder builder(op);
     return builder.create<tensor::ExtractOp>(loc, conjugatedTable, extract.getIndices());
+  }
+
+  // Top-aligned rev32 composition: shifting the low `width` bits to the top
+  // makes the 32-bit reversed-carry add compute the width-bit one exactly -
+  // the sum's carry out of the window lands below the extracted bits.
+  void rewriteBitrevAdd(ondrix::ondsp::BitrevAddOp op) {
+    OpBuilder builder(op);
+    Location loc = op.getLoc();
+    IntegerType i32 = builder.getI32Type();
+    Value amount = builder.create<arith::ConstantOp>(
+        loc, builder.getI32IntegerAttr(static_cast<int32_t>(32 - op.getWidth())));
+    auto scaled = [&](Value value) {
+      Value narrowed = builder.create<arith::IndexCastUIOp>(loc, i32, value);
+      return builder.create<arith::ShLIOp>(loc, narrowed, amount).getResult();
+    };
+    Value walked = builder.create<ondrix::ortumcore::BitrevAddOp>(loc, i32, scaled(op.getBase()),
+                                                                  scaled(op.getStep()));
+    Value extracted = builder.create<arith::ShRUIOp>(loc, walked, amount);
+    Value result = builder.create<arith::IndexCastUIOp>(loc, builder.getIndexType(), extracted);
+    op.getResult().replaceAllUsesWith(result);
+    op.erase();
   }
 
   void rewriteButterfly(ondrix::ondsp::CxButterflyOp op) {

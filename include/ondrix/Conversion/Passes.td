@@ -154,6 +154,12 @@ def ConvertOndspCxButterflyToOrtumCore
     untouched. This is an opportunity pass, not a legality wall: every
     unconverted butterfly remains a generic ondsp operation with unchanged
     semantics.
+
+    The pass also selects every `ondsp.bitrev_add` index walk onto the
+    32-bit `ortumcore.bitrev_add` progression. The composition is exact for
+    any verified width: shifting both operands' low `width` bits to the top
+    of an i32 makes the 32-bit reversed-carry add compute the width-bit one,
+    and the modular carry out of the window lands below the extracted bits.
   }];
   let constructor = "ondrix::createConvertOndspCxButterflyToOrtumCorePass()";
   let dependentDialects = [

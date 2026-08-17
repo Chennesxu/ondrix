@@ -1,4 +1,5 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp="fft-loops" | FileCheck %s
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="fft-loops" | FileCheck %s --check-prefix=PAIRED
 
 // The opt-in loop-form FFT lowering: one bit-reversal permutation loop over
 // a constant index table, then a stage loop with an inner butterfly loop
@@ -80,4 +81,26 @@ func.func @irfft16_q15(%input: tensor<9xi32>) -> tensor<16xi16> {
     output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
   } : (tensor<9xi32>) -> tensor<16xi16>
   return %result : tensor<16xi16>
+}
+
+// The paired inventory form materializes no reversal table: the group loop
+// carries a reversed-carry cursor (step N/2 = the reversed +1) and reads the
+// input through it, one walk step after each of its four loads.
+
+// PAIRED-LABEL: func.func @cfft8_paired_floor
+// PAIRED-NOT: tensor<8xi64>
+// PAIRED: scf.for
+// PAIRED-COUNT-4: ondsp.bitrev_add
+// PAIRED-NOT: ondsp.bitrev_add
+// PAIRED-NOT: tensor<8xi64>
+func.func @cfft8_paired_floor(%input: tensor<8xi32>) -> tensor<8xi32> {
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = wrap, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = wrap, saturate_to = i16>
+  } : (tensor<8xi32>) -> tensor<8xi32>
+  return %result : tensor<8xi32>
 }

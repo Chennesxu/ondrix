@@ -285,20 +285,10 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
           static_cast<int32_t>(static_cast<uint32_t>(*bits));
     }
   }
-  SmallVector<int64_t> bitReversed(extent);
-  for (int64_t index = 0; index < extent; ++index) {
-    int64_t reversed = 0;
-    for (int64_t bit = 0; bit < stageCount; ++bit)
-      reversed |= ((index >> bit) & 1) << (stageCount - 1 - bit);
-    bitReversed[index] = reversed;
-  }
   Value twiddleTable = rewriter.create<arith::ConstantOp>(
       loc,
       DenseElementsAttr::get(RankedTensorType::get({static_cast<int64_t>(twiddleBits.size())}, i32),
                              llvm::ArrayRef<int32_t>(twiddleBits)));
-  Value reversalTable = rewriter.create<arith::ConstantOp>(
-      loc, DenseElementsAttr::get(RankedTensorType::get({extent}, i64),
-                                  llvm::ArrayRef<int64_t>(bitReversed)));
 
   Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
   Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
@@ -307,11 +297,22 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
   Value stages = rewriter.create<arith::ConstantIndexOp>(loc, stageCount);
 
   Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{extent}, i32);
-  // The paired form needs no separate permute loop: the fused group loop
-  // below reads the input through the reversal table directly. The generic
-  // form keeps the gather as its own loop.
+  // The paired form needs no separate permute loop or reversal table: the
+  // fused group loop below reads the input through a loop-carried
+  // reversed-carry cursor. The generic form keeps the table gather as its
+  // own loop.
   Value permuted = empty;
   if (!inventoryPaired) {
+    SmallVector<int64_t> bitReversed(extent);
+    for (int64_t index = 0; index < extent; ++index) {
+      int64_t reversed = 0;
+      for (int64_t bit = 0; bit < stageCount; ++bit)
+        reversed |= ((index >> bit) & 1) << (stageCount - 1 - bit);
+      bitReversed[index] = reversed;
+    }
+    Value reversalTable = rewriter.create<arith::ConstantOp>(
+        loc, DenseElementsAttr::get(RankedTensorType::get({extent}, i64),
+                                    llvm::ArrayRef<int64_t>(bitReversed)));
     auto permuteLoop = rewriter.create<scf::ForOp>(
         loc, zero, extentValue, one, ValueRange{empty},
         [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
@@ -358,23 +359,27 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
     Value four = rewriter.create<arith::ConstantIndexOp>(loc, 4);
     Value quarter = rewriter.create<arith::ConstantIndexOp>(loc, extent / 4);
     auto groupLoop = rewriter.create<scf::ForOp>(
-        loc, zero, quarter, one, ValueRange{current},
+        loc, zero, quarter, one, ValueRange{current, zero},
         [&](OpBuilder &builder, Location loc, Value group, ValueRange groupArgs) {
           Value base = builder.create<arith::MulIOp>(loc, group, four);
           Value at1 = builder.create<arith::AddIOp>(loc, base, one);
           Value at2 = builder.create<arith::AddIOp>(loc, base, two);
           Value at3 = builder.create<arith::AddIOp>(loc, base, three);
           Value data = groupArgs.front();
-          auto reversedLoad = [&](Value position) {
-            Value source64 = builder.create<tensor::ExtractOp>(loc, reversalTable, position);
-            Value source =
-                builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), source64);
-            return builder.create<tensor::ExtractOp>(loc, input, source);
+          // The carried cursor walks rev(0), rev(1), ... across the whole
+          // loop, so group g reads input[rev(4g + i)] - the same values the
+          // dropped reversal-table gather produced.
+          Value cursor = groupArgs.back();
+          auto walkLoad = [&]() {
+            Value value = builder.create<tensor::ExtractOp>(loc, input, cursor);
+            cursor = builder.create<ondrix::ondsp::BitrevAddOp>(loc, builder.getIndexType(), cursor,
+                                                                halfExtent, uint64_t(stageCount));
+            return value;
           };
-          Value x0 = reversedLoad(base);
-          Value x1 = reversedLoad(at1);
-          Value x2 = reversedLoad(at2);
-          Value x3 = reversedLoad(at3);
+          Value x0 = walkLoad();
+          Value x1 = walkLoad();
+          Value x2 = walkLoad();
+          Value x3 = walkLoad();
           Value unitWord =
               builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(0x7FFF));
           auto unitButterfly = [&](Value a, Value b, ondrix::ondsp::CxButterflyVariant variant) {
@@ -392,7 +397,7 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
           out = builder.create<tensor::InsertOp>(loc, crossLeg.getOut0(), out, at1);
           out = builder.create<tensor::InsertOp>(loc, plusLeg.getOut1(), out, at2);
           out = builder.create<tensor::InsertOp>(loc, crossLeg.getOut1(), out, at3);
-          builder.create<scf::YieldOp>(loc, out);
+          builder.create<scf::YieldOp>(loc, ValueRange{out, cursor});
         });
     current = groupLoop.getResult(0);
     lowerStage = two;

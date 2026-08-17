@@ -5,6 +5,8 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp=fft-loops --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=LOOPBFLY
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp=fft-loops --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=LOOP
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp=fft-loops --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=LOOPGEN
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp=fft-loops --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=LOOPWALK
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp=fft-loops --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=LOOPTABLE
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --buffer-deallocation --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.scalar.mlir
 // RUN: ondrix-translate %t.scalar.mlir --mlir-to-llvmir > %t.scalar.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.scalar.ll -o %t.scalar.o
@@ -44,6 +46,13 @@
 // LOOPBFLY-COUNT-24: ortumcore.cx_bfly
 // LOOPBFLY-NOT: ortumcore.cx_bfly
 // LOOPGEN-NOT: ondsp.cx_butterfly
+
+// The paired group loop reads the input through a reversed-carry cursor
+// walk instead of a reversal table: four selected walk steps per function
+// and no i64 index table anywhere in the paired output.
+// LOOPWALK-COUNT-16: ortumcore.bitrev_add
+// LOOPWALK-NOT: ortumcore.bitrev_add
+// LOOPTABLE-NOT: tensor<8xi64>
 
 func.func @cfft8_floor_wrap(%x0: i32, %x1: i32, %x2: i32, %x3: i32,
                             %x4: i32, %x5: i32, %x6: i32, %x7: i32,

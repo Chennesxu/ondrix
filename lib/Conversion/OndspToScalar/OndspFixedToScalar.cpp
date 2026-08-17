@@ -854,6 +854,36 @@ public:
 using AddShiftOpLowering = BinaryShiftOpLowering<ondrix::ondsp::AddShiftOp, arith::AddIOp>;
 using SubShiftOpLowering = BinaryShiftOpLowering<ondrix::ondsp::SubShiftOp, arith::SubIOp>;
 
+class BitrevAddOpLowering final : public OpConversionPattern<ondrix::ondsp::BitrevAddOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::BitrevAddOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::BitrevAddOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    int64_t width = op.getWidth();
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    auto reverseLowBits = [&](Value value) {
+      Value reversed = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      for (int64_t bit = 0; bit < width; ++bit) {
+        Value amount = rewriter.create<arith::ConstantIndexOp>(loc, bit);
+        Value extracted = rewriter.create<arith::ShRUIOp>(loc, value, amount);
+        Value masked = rewriter.create<arith::AndIOp>(loc, extracted, one);
+        Value place = rewriter.create<arith::ConstantIndexOp>(loc, width - 1 - bit);
+        Value placed = rewriter.create<arith::ShLIOp>(loc, masked, place);
+        reversed = rewriter.create<arith::OrIOp>(loc, reversed, placed);
+      }
+      return reversed;
+    };
+    Value sum = rewriter.create<arith::AddIOp>(loc, reverseLowBits(adaptor.getBase()),
+                                               reverseLowBits(adaptor.getStep()));
+    // The reversal reads only the low `width` bits, so the sum's carry out of
+    // that window is discarded exactly as the modular contract requires.
+    rewriter.replaceOp(op, reverseLowBits(sum));
+    return success();
+  }
+};
+
 class RoundDivOpLowering final : public OpConversionPattern<ondrix::ondsp::RoundDivOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::RoundDivOp>::OpConversionPattern;
@@ -1098,9 +1128,9 @@ public:
     OndspFixedToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
-                 AddShiftOpLowering, MacOpLowering, MacSubOpLowering, ReduceMacOpLowering,
-                 RoundDivOpLowering, RoundShiftOpLowering, SatCastOpLowering, SubShiftOpLowering>(
-        typeConverter, &getContext());
+                 AddShiftOpLowering, BitrevAddOpLowering, MacOpLowering, MacSubOpLowering,
+                 ReduceMacOpLowering, RoundDivOpLowering, RoundShiftOpLowering, SatCastOpLowering,
+                 SubShiftOpLowering>(typeConverter, &getContext());
     patterns.add<SqrtFixedOpLowering>(typeConverter, &getContext(), sqrtEstimate);
     patterns.add<CxButterflyOpLowering>(typeConverter, &getContext(), specializeCanonicalTwiddles);
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);

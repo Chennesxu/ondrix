@@ -223,3 +223,24 @@ func.func @selects_unit_cross_swaps_halves(%a: i32, %b: i32) -> (i32, i32) {
 // CHECK-SAME: variant = #ortumcore<cx_bfly_variant cross>
 // CHECK-NOT: ortumcore.cx_mul_conj
 // CHECK: return %[[O0]], %[[O1]]
+
+// The reversed-carry index walk selects onto the 32-bit target progression
+// through the top-aligned composition: shift both operands to the top,
+// walk, and extract the width-bit result from the top.
+func.func @selects_bitrev_walk(%cursor: index, %step: index) -> index {
+  %next = ondsp.bitrev_add %cursor, %step {width = 5 : i64} : (index, index) -> index
+  return %next : index
+}
+
+// CHECK-LABEL: func.func @selects_bitrev_walk(
+// CHECK-SAME: %[[CUR:.*]]: index, %[[STEP:.*]]: index)
+// CHECK-DAG: %[[AMT:.*]] = arith.constant 27 : i32
+// CHECK-DAG: %[[CUR32:.*]] = arith.index_castui %[[CUR]] : index to i32
+// CHECK-DAG: %[[STEP32:.*]] = arith.index_castui %[[STEP]] : index to i32
+// CHECK-DAG: %[[CURTOP:.*]] = arith.shli %[[CUR32]], %[[AMT]] : i32
+// CHECK-DAG: %[[STEPTOP:.*]] = arith.shli %[[STEP32]], %[[AMT]] : i32
+// CHECK: %[[WALK:.*]] = ortumcore.bitrev_add %[[CURTOP]], %[[STEPTOP]]
+// CHECK: %[[OUT:.*]] = arith.shrui %[[WALK]], %[[AMT]] : i32
+// CHECK: %[[RES:.*]] = arith.index_castui %[[OUT]] : i32 to index
+// CHECK-NOT: ondsp.bitrev_add
+// CHECK: return %[[RES]]
