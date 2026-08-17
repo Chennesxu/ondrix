@@ -18,6 +18,10 @@ def Ondsp_OverflowModeAttr
     : EnumAttr<Ondsp_Dialect, Ondsp_OverflowMode, "overflow"> {
   let assemblyFormat = "`<` $value `>`";
 }
+def Ondsp_CxButterflyVariantAttr
+    : EnumAttr<Ondsp_Dialect, Ondsp_CxButterflyVariant, "cx_butterfly_variant"> {
+  let assemblyFormat = "`<` $value `>`";
+}
 
 def Ondsp_FixedAttr : Ondsp_Attr<"Fixed", "fixed"> {
   let summary = "Fixed-point numeric interpretation for an integer storage type";

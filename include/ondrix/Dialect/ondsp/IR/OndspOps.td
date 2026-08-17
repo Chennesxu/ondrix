@@ -356,12 +356,23 @@ def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
     target inventory, so a target-directed stage is writable as the same
     contract). Vector lanes are independent butterflies; the operation does
     not reorder FFT stages or move either requantization boundary.
+
+    The optional `variant` selects the combine structure over the SAME
+    requantized product `t`: `plain` (absent) forms `a +- t`; `cross` forms
+    `a -+ j*t`, that is `out0 = (ar + ti, ai - tr)` and
+    `out1 = (ar - ti, ai + tr)`. The cross form is the packed target
+    inventory's free `-j` leg. It is not equivalent to a plain butterfly
+    with twiddle `-j*w` because the product requantization applies before
+    the sign structure; it is therefore admitted only on the scalar Q15
+    target-inventory profile (`toward_negative` or `nearest_ties_positive`
+    rounding) and fails closed elsewhere.
   }];
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
                    Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric,
                    Ondsp_ProductAttr:$product,
                    Ondsp_ScaleAttr:$product_scale,
-                   Ondsp_ScaleAttr:$output_scale);
+                   Ondsp_ScaleAttr:$output_scale,
+                   OptionalAttr<Ondsp_CxButterflyVariantAttr>:$variant);
   let results = (outs AnyType:$out0, AnyType:$out1);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

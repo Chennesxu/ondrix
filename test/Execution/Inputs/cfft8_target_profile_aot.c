@@ -49,7 +49,11 @@ static void ref_cfft(int size, const uint32_t *in, uint32_t *out, int rnd, int s
   }
   ref_cfft(size / 2, evens_in, evens, rnd, sat);
   ref_cfft(size / 2, odds_in, odds, rnd, sat);
-  for (int k = 0; k < size / 2; ++k) {
+  /* Inventory pairing (decision 2026-08-17): legs k and k + size/4 share
+     the twiddle W(size, k); the second leg is the cross combine a -+ j*t
+     over its own requantized product, so -j never multiplies. */
+  int plainLegs = size == 2 ? 1 : size / 4;
+  for (int k = 0; k < plainLegs; ++k) {
     int64_t wr = TW_RE[levelOf(size)][k], wi = TW_IM[levelOf(size)][k];
     int64_t pr = lo16(odds[k]) * wr - hi16(odds[k]) * wi;
     int64_t pi = lo16(odds[k]) * wi + hi16(odds[k]) * wr;
@@ -59,6 +63,17 @@ static void ref_cfft(int size, const uint32_t *in, uint32_t *out, int rnd, int s
              scale16(lo16(evens[k]) + tr, 1, rnd, sat);
     out[k + size / 2] = (scale16(hi16(evens[k]) - ti, 1, rnd, sat) << 16) |
                         scale16(lo16(evens[k]) - tr, 1, rnd, sat);
+    if (size == 2)
+      continue;
+    int kc = k + size / 4;
+    int64_t cr = lo16(odds[kc]) * wr - hi16(odds[kc]) * wi;
+    int64_t ci = lo16(odds[kc]) * wi + hi16(odds[kc]) * wr;
+    int64_t ur = (int16_t)scale16(cr, 15, rnd, sat);
+    int64_t ui = (int16_t)scale16(ci, 15, rnd, sat);
+    out[kc] = (scale16(hi16(evens[kc]) - ur, 1, rnd, sat) << 16) |
+              scale16(lo16(evens[kc]) + ui, 1, rnd, sat);
+    out[kc + size / 2] = (scale16(hi16(evens[kc]) + ur, 1, rnd, sat) << 16) |
+                         scale16(lo16(evens[kc]) - ui, 1, rnd, sat);
   }
 }
 

@@ -639,10 +639,19 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
     includes the packed target inventory (toward_negative or
     nearest_ties_positive rounding, wrap or saturating narrowing, output
     shift 0 or 1), which the unrolled lowering propagates unchanged into
-    every stage butterfly. Dynamic planning, other sizes, and other numeric
-    profiles require separate extensions. The opt-in loop-form and
-    Vector-batched CFFT lowerings remain Q15-only and reject the Q31
-    profile.
+    every stage butterfly. Under the inventory profile the transform
+    equation pairs the butterflies of every stage half-size H >= 2: legs j
+    and j + H/2 share the requantized product of the single twiddle
+    W(2H, j), the first through the plain combine and the second through
+    the cross combine (a -+ j*t). The quarter-turn twiddle -j therefore
+    never appears as a multiplier, and every leg passes through the same
+    product quantization; this pairing IS the inventory equation, not an
+    optimization of the nearest-even one, whose unpaired equation is
+    unchanged. The Vector-batched mode applies only to the nearest-even
+    profile; inventory-profile conversion is always the paired scalar
+    form. Dynamic planning, other sizes, and other numeric profiles
+    require separate extensions. The opt-in loop-form and Vector-batched
+    CFFT lowerings remain Q15-only and reject the Q31 profile.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondrix_CfftDirectionAttr:$direction,

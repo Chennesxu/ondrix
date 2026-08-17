@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Pass/Pass.h"
 
 namespace ondrix {
@@ -64,49 +65,96 @@ static std::optional<uint32_t> conjugatePackedQ15(uint32_t bits) {
   return (uint32_t(uint16_t(-imaginary)) << 16) | (bits & 0xFFFF);
 }
 
-static void rewriteButterfly(ondrix::ondsp::CxButterflyOp op) {
-  if (!op.getA().getType().isSignlessInteger(32) ||
-      op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
-    return;
-  std::optional<TargetScale> product = classifyTargetScale(op.getProductScale());
-  std::optional<TargetScale> output = classifyTargetScale(op.getOutputScale());
-  if (!product || product->shift != 15 || !output || output->shift > 1)
-    return;
-
-  auto constant = op.getTwiddle().getDefiningOp<arith::ConstantOp>();
-  auto twiddle = constant ? dyn_cast<IntegerAttr>(constant.getValue()) : IntegerAttr();
-  if (!twiddle)
-    return;
-  std::optional<uint32_t> conjugated =
-      conjugatePackedQ15(uint32_t(twiddle.getValue().getZExtValue()));
-  if (!conjugated)
-    return;
-
-  OpBuilder builder(op);
-  Location loc = op.getLoc();
-  Value conjugate =
-      builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(int32_t(*conjugated)));
-  Value rotated = builder.create<ondrix::ortumcore::CxMulConjOp>(
-      loc, builder.getI32Type(), op.getB(), conjugate, uint64_t(product->shift), product->rounding,
-      product->overflow, ondrix::ortumcore::CxLayout::ImagHi);
-  auto pair = builder.create<ondrix::ortumcore::CxBflyOp>(
-      loc, builder.getI32Type(), builder.getI32Type(), op.getA(), rotated, uint64_t(output->shift),
-      output->rounding, output->overflow, ondrix::ortumcore::CxBflyVariant::Plain);
-  op.getOut0().replaceAllUsesWith(pair.getOut0());
-  op.getOut1().replaceAllUsesWith(pair.getOut1());
-  op.erase();
-}
-
 class ConvertOndspCxButterflyToOrtumCorePass final
     : public ondrix::impl::ConvertOndspCxButterflyToOrtumCoreBase<
           ConvertOndspCxButterflyToOrtumCorePass> {
 public:
   void runOnOperation() override {
+    conjugatedTables.clear();
     SmallVector<ondrix::ondsp::CxButterflyOp> candidates;
     getOperation()->walk([&](ondrix::ondsp::CxButterflyOp op) { candidates.push_back(op); });
     for (ondrix::ondsp::CxButterflyOp op : candidates)
       rewriteButterfly(op);
   }
+
+private:
+  // The twiddle operand as an exactly conjugated value: a scalar constant is
+  // conjugated in place; a load from a compile-time table is redirected to a
+  // once-materialized elementwise-conjugated table. Nullptr fails closed,
+  // including at any table entry with imaginary -32768.
+  Value materializeConjugatedTwiddle(ondrix::ondsp::CxButterflyOp op) {
+    Location loc = op.getLoc();
+    if (auto constant = op.getTwiddle().getDefiningOp<arith::ConstantOp>()) {
+      auto twiddle = dyn_cast<IntegerAttr>(constant.getValue());
+      if (!twiddle)
+        return Value();
+      std::optional<uint32_t> conjugated =
+          conjugatePackedQ15(uint32_t(twiddle.getValue().getZExtValue()));
+      if (!conjugated)
+        return Value();
+      OpBuilder builder(op);
+      return builder.create<arith::ConstantOp>(loc,
+                                               builder.getI32IntegerAttr(int32_t(*conjugated)));
+    }
+    auto extract = op.getTwiddle().getDefiningOp<tensor::ExtractOp>();
+    auto table =
+        extract ? extract.getTensor().getDefiningOp<arith::ConstantOp>() : arith::ConstantOp();
+    auto elements = table ? dyn_cast<DenseIntElementsAttr>(table.getValue()) : nullptr;
+    if (!elements || !elements.getElementType().isSignlessInteger(32))
+      return Value();
+    Value conjugatedTable = conjugatedTables.lookup(table);
+    if (!conjugatedTable) {
+      SmallVector<int32_t> values;
+      values.reserve(elements.getNumElements());
+      for (APInt element : elements) {
+        std::optional<uint32_t> conjugated = conjugatePackedQ15(uint32_t(element.getZExtValue()));
+        if (!conjugated)
+          return Value();
+        values.push_back(int32_t(*conjugated));
+      }
+      OpBuilder builder(table);
+      conjugatedTable = builder.create<arith::ConstantOp>(
+          table.getLoc(), DenseElementsAttr::get(cast<ShapedType>(elements.getType()),
+                                                 llvm::ArrayRef<int32_t>(values)));
+      conjugatedTables[table] = conjugatedTable;
+    }
+    OpBuilder builder(op);
+    return builder.create<tensor::ExtractOp>(loc, conjugatedTable, extract.getIndices());
+  }
+
+  void rewriteButterfly(ondrix::ondsp::CxButterflyOp op) {
+    if (!op.getA().getType().isSignlessInteger(32) ||
+        op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
+      return;
+    std::optional<TargetScale> product = classifyTargetScale(op.getProductScale());
+    std::optional<TargetScale> output = classifyTargetScale(op.getOutputScale());
+    if (!product || product->shift != 15 || !output || output->shift > 1)
+      return;
+
+    Value conjugate = materializeConjugatedTwiddle(op);
+    if (!conjugate)
+      return;
+
+    // The cross combine consumes the pair's shared product through the
+    // swapped (real-high) packing, which is exactly what makes a -+ j*t
+    // free on the target.
+    bool cross = op.getVariant() == ondrix::ondsp::CxButterflyVariant::Cross;
+    OpBuilder builder(op);
+    Location loc = op.getLoc();
+    Value rotated = builder.create<ondrix::ortumcore::CxMulConjOp>(
+        loc, builder.getI32Type(), op.getB(), conjugate, uint64_t(product->shift),
+        product->rounding, product->overflow,
+        cross ? ondrix::ortumcore::CxLayout::RealHi : ondrix::ortumcore::CxLayout::ImagHi);
+    auto pair = builder.create<ondrix::ortumcore::CxBflyOp>(
+        loc, builder.getI32Type(), builder.getI32Type(), op.getA(), rotated,
+        uint64_t(output->shift), output->rounding, output->overflow,
+        cross ? ondrix::ortumcore::CxBflyVariant::Cross : ondrix::ortumcore::CxBflyVariant::Plain);
+    op.getOut0().replaceAllUsesWith(pair.getOut0());
+    op.getOut1().replaceAllUsesWith(pair.getOut1());
+    op.erase();
+  }
+
+  llvm::DenseMap<Operation *, Value> conjugatedTables;
 };
 
 } // namespace

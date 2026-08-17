@@ -69,7 +69,8 @@ struct Fixture {
     mlir::Type i32 = builder.getI32Type();
     return builder.create<ondrix::ondsp::CxButterflyOp>(
         module->getLoc(), mlir::TypeRange{i32, i32}, block->getArgument(0), block->getArgument(1),
-        twiddle, layout, numeric, product, productScale, outputScale);
+        twiddle, layout, numeric, product, productScale, outputScale,
+        ondrix::ondsp::CxButterflyVariantAttr());
   }
 };
 

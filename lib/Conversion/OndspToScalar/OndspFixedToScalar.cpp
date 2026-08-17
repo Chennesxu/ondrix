@@ -558,7 +558,9 @@ public:
     // identities are stated over i16 components and its exhaustive ground
     // truth covers that domain alone. The Q31 profile keeps the general
     // product path rather than reusing an unproven identity.
-    if (specializeCanonicalTwiddles && storageWidth == 16) {
+    bool cross = op.getVariant() == ondrix::ondsp::CxButterflyVariant::Cross;
+    // The canonical-twiddle identities are stated over the plain combine.
+    if (specializeCanonicalTwiddles && storageWidth == 16 && !cross) {
       std::optional<ondrix::analysis::CanonicalPackedQ15TwiddlePlan> plan =
           ondrix::analysis::planCanonicalPackedQ15Twiddle(op);
       if (plan) {
@@ -613,10 +615,13 @@ public:
     Value ai = extendSumOperand(aImaginary);
     Value tr = extendSumOperand(twiddledReal);
     Value ti = extendSumOperand(twiddledImaginary);
-    Value out0Real = rewriter.create<arith::AddIOp>(loc, ar, tr);
-    Value out0Imaginary = rewriter.create<arith::AddIOp>(loc, ai, ti);
-    Value out1Real = rewriter.create<arith::SubIOp>(loc, ar, tr);
-    Value out1Imaginary = rewriter.create<arith::SubIOp>(loc, ai, ti);
+    // The cross combine forms a -+ j*t from the same requantized product.
+    Value out0Real = rewriter.create<arith::AddIOp>(loc, ar, cross ? ti : tr);
+    Value out0Imaginary = cross ? rewriter.create<arith::SubIOp>(loc, ai, tr).getResult()
+                                : rewriter.create<arith::AddIOp>(loc, ai, ti).getResult();
+    Value out1Real = rewriter.create<arith::SubIOp>(loc, ar, cross ? ti : tr);
+    Value out1Imaginary = cross ? rewriter.create<arith::AddIOp>(loc, ai, tr).getResult()
+                                : rewriter.create<arith::SubIOp>(loc, ai, ti).getResult();
 
     out0Real = requantizeSignedValue(loc, out0Real, op.getOutputScale(), rewriter);
     out0Imaginary = requantizeSignedValue(loc, out0Imaginary, op.getOutputScale(), rewriter);

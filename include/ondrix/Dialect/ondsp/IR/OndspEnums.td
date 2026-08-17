@@ -66,6 +66,21 @@ def Ondsp_RoundingMode : I32EnumAttr<
   let genSpecializedAttr = 0;
 }
 
+// Radix-2 butterfly combine selector. `plain` forms a +- t. `cross` forms
+// a -+ j*t from the SAME requantized product t: out0 = (ar + ti, ai - tr),
+// out1 = (ar - ti, ai + tr). It is the packed target inventory's free -j
+// leg and is NOT equivalent to a plain butterfly with twiddle -j*w: the
+// product requantization applies before the sign structure, so tie and
+// rail cases differ.
+def Ondsp_CxButterflyPlain : I32EnumAttrCase<"Plain", 0, "plain">;
+def Ondsp_CxButterflyCross : I32EnumAttrCase<"Cross", 1, "cross">;
+def Ondsp_CxButterflyVariant : I32EnumAttr<
+    "CxButterflyVariant", "radix-2 butterfly combine selector",
+    [Ondsp_CxButterflyPlain, Ondsp_CxButterflyCross]> {
+  let cppNamespace = "::ondrix::ondsp";
+  let genSpecializedAttr = 0;
+}
+
 def Ondsp_OverflowWrap : I32EnumAttrCase<"Wrap", 0, "wrap">;
 def Ondsp_OverflowSaturate : I32EnumAttrCase<"Saturate", 1, "saturate">;
 def Ondsp_OverflowMode : I32EnumAttr<"OverflowMode", "overflow mode",

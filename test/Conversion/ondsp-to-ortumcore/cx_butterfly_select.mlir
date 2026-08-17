@@ -96,3 +96,80 @@ func.func @keeps_unconjugatable_twiddle(%a: i32, %b: i32) -> (i32, i32) {
 // CHECK-LABEL: func.func @keeps_unconjugatable_twiddle(
 // CHECK: ondsp.cx_butterfly
 // CHECK-NOT: ortumcore.
+
+// The cross combine consumes the swapped-layout product: real_hi + cross.
+func.func @selects_cross(%a: i32, %b: i32) -> (i32, i32) {
+  %tw = arith.constant 196610 : i32
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = wrap, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = wrap, saturate_to = i16>,
+    variant = #ondsp.cx_butterfly_variant<cross>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
+}
+
+// CHECK-LABEL: func.func @selects_cross(
+// CHECK: %[[CCONJ:.*]] = arith.constant -196606 : i32
+// CHECK: ortumcore.cx_mul_conj
+// CHECK-SAME: layout = #ortumcore<cx_layout real_hi>
+// CHECK: ortumcore.cx_bfly
+// CHECK-SAME: variant = #ortumcore<cx_bfly_variant cross>
+// CHECK-NOT: ondsp.cx_butterfly
+
+// A twiddle loaded from a compile-time table converts through a
+// once-materialized elementwise-conjugated table shared by both loads.
+func.func @selects_table_twiddle(%a: i32, %b: i32, %i: index, %j: index) -> (i32, i32, i32, i32) {
+  %table = arith.constant dense<[2147418112, 196610]> : tensor<2xi32>  // 0x7FFF0000, imag 3 real 2
+  %tw0 = tensor.extract %table[%i] : tensor<2xi32>
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw0 {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = wrap, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = wrap, saturate_to = i16>
+  } : (i32, i32, i32) -> (i32, i32)
+  %tw1 = tensor.extract %table[%j] : tensor<2xi32>
+  %2, %3 = ondsp.cx_butterfly %a, %b, %tw1 {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = wrap, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = wrap, saturate_to = i16>,
+    variant = #ondsp.cx_butterfly_variant<cross>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1, %2, %3 : i32, i32, i32, i32
+}
+
+// CHECK-LABEL: func.func @selects_table_twiddle(
+// CHECK: %[[CTBL:.*]] = arith.constant dense<[-2147418112, -196606]> : tensor<2xi32>
+// CHECK-NOT: arith.constant dense<[-2147418112, -196606]>
+// CHECK: %[[E0:.*]] = tensor.extract %[[CTBL]]
+// CHECK: ortumcore.cx_mul_conj
+// CHECK: ortumcore.cx_bfly
+// CHECK: %[[E1:.*]] = tensor.extract %[[CTBL]]
+// CHECK: ortumcore.cx_mul_conj
+// CHECK-SAME: layout = #ortumcore<cx_layout real_hi>
+// CHECK: ortumcore.cx_bfly
+// CHECK-SAME: variant = #ortumcore<cx_bfly_variant cross>
+// CHECK-NOT: ondsp.cx_butterfly
+
+// A table holding the -j twiddle has no exact conjugate: untouched.
+func.func @keeps_unconjugatable_table(%a: i32, %b: i32, %i: index) -> (i32, i32) {
+  %table = arith.constant dense<[2147418112, -2147483648]> : tensor<2xi32>
+  %tw = tensor.extract %table[%i] : tensor<2xi32>
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = wrap, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = wrap, saturate_to = i16>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
+}
+
+// CHECK-LABEL: func.func @keeps_unconjugatable_table(
+// CHECK: ondsp.cx_butterfly
+// CHECK-NOT: ortumcore.

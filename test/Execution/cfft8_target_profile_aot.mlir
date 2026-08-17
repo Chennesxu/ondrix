@@ -1,5 +1,8 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=MUL
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=GEN
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=CROSS
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp=fft-loops --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=LOOP
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp=fft-loops --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=LOOPGEN
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --buffer-deallocation --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.scalar.mlir
 // RUN: ondrix-translate %t.scalar.mlir --mlir-to-llvmir > %t.scalar.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.scalar.ll -o %t.scalar.o
@@ -10,15 +13,30 @@
 // RUN: llc -relocation-model=pic -filetype=obj %t.target.ll -o %t.target.o
 // RUN: cc %S/Inputs/cfft8_target_profile_aot.c %t.target.o -o %t.target.bin
 // RUN: %t.target.bin
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp=fft-loops --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --buffer-deallocation --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.loop.mlir
+// RUN: ondrix-translate %t.loop.mlir --mlir-to-llvmir > %t.loop.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.loop.ll -o %t.loop.o
+// RUN: cc %S/Inputs/cfft8_target_profile_aot.c %t.loop.o -o %t.loop.bin
+// RUN: %t.loop.bin
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp=fft-loops --convert-ondsp-cx-butterfly-to-ortumcore --convert-ortumcore-to-ondsp-emulation --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --buffer-deallocation --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.looptarget.mlir
+// RUN: ondrix-translate %t.looptarget.mlir --mlir-to-llvmir > %t.looptarget.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.looptarget.ll -o %t.looptarget.o
+// RUN: cc %S/Inputs/cfft8_target_profile_aot.c %t.looptarget.o -o %t.looptarget.bin
+// RUN: %t.looptarget.bin
 
-// Per function: 12 stage butterflies; 9 carry conjugatable constant
-// twiddles and reach the packed pair, the 3 whose twiddle is exactly -j
-// (imaginary -32768, no representable conjugate) stay generic - the mixed
-// path is the witness that per-op fail-closed composes inside one FFT.
-// MUL-COUNT-36: ortumcore.cx_mul_conj
+// Per function: 12 stage butterflies in the paired inventory equation
+// (8 plain and 4 cross legs), every one reaching the packed pair - the -j
+// twiddle never appears, so nothing stays generic. The loop form carries
+// the same equation through its quarter twiddle table: statically one
+// plain and one cross butterfly per function body.
+// MUL-COUNT-48: ortumcore.cx_mul_conj
 // MUL-NOT: ortumcore.cx_mul_conj
-// GEN-COUNT-12: ondsp.cx_butterfly
 // GEN-NOT: ondsp.cx_butterfly
+// CROSS-COUNT-16: #ortumcore<cx_bfly_variant cross>
+// CROSS-NOT: #ortumcore<cx_bfly_variant cross>
+// LOOP-COUNT-8: ortumcore.cx_mul_conj
+// LOOP-NOT: ortumcore.cx_mul_conj
+// LOOPGEN-NOT: ondsp.cx_butterfly
 
 func.func @cfft8_floor_wrap(%x0: i32, %x1: i32, %x2: i32, %x3: i32,
                             %x4: i32, %x5: i32, %x6: i32, %x7: i32,

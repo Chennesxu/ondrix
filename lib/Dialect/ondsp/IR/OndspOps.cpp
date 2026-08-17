@@ -504,6 +504,15 @@ LogicalResult CxButterflyOp::verify() {
       }))
     return emitOpError() << "executable butterfly requires scalar or fixed Vector signless i"
                          << containerWidth << " packed values";
+  if (getVariant() == CxButterflyVariant::Cross) {
+    if (profile->storageWidth != 16 || isa<VectorType>(getA().getType()))
+      return emitOpError("the cross combine is admitted only on scalar packed Q15 values");
+    for (ScaleAttr scale : {getProductScale(), getOutputScale()})
+      if (scale.getRounding() != RoundingMode::TowardNegative &&
+          scale.getRounding() != RoundingMode::NearestTiesPositive)
+        return emitOpError("the cross combine is admitted only under target-inventory "
+                           "toward_negative or nearest_ties_positive rounding");
+  }
   return verifyPackedButterflyPolicy(*this, getLayout(), getNumeric(), getProduct(),
                                      getProductScale(), getOutputScale(),
                                      /*targetInventory=*/true);
