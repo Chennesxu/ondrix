@@ -307,15 +307,22 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
   Value stages = rewriter.create<arith::ConstantIndexOp>(loc, stageCount);
 
   Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{extent}, i32);
-  auto permuteLoop = rewriter.create<scf::ForOp>(
-      loc, zero, extentValue, one, ValueRange{empty},
-      [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
-        Value source64 = builder.create<tensor::ExtractOp>(loc, reversalTable, position);
-        Value source = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), source64);
-        Value value = builder.create<tensor::ExtractOp>(loc, input, source);
-        Value inserted = builder.create<tensor::InsertOp>(loc, value, iterArgs.front(), position);
-        builder.create<scf::YieldOp>(loc, inserted);
-      });
+  // The paired form needs no separate permute loop: the fused group loop
+  // below reads the input through the reversal table directly. The generic
+  // form keeps the gather as its own loop.
+  Value permuted = empty;
+  if (!inventoryPaired) {
+    auto permuteLoop = rewriter.create<scf::ForOp>(
+        loc, zero, extentValue, one, ValueRange{empty},
+        [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+          Value source64 = builder.create<tensor::ExtractOp>(loc, reversalTable, position);
+          Value source = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), source64);
+          Value value = builder.create<tensor::ExtractOp>(loc, input, source);
+          Value inserted = builder.create<tensor::InsertOp>(loc, value, iterArgs.front(), position);
+          builder.create<scf::YieldOp>(loc, inserted);
+        });
+    permuted = permuteLoop.getResult(0);
+  }
 
   // One leg: extract the pair at (upper, upper + half), butterfly it with
   // twiddles[twiddleIndex], and insert both outputs back. The exact unit
@@ -343,7 +350,7 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
   // of the dynamic stage loop (decision 2026-08-17): each group of four
   // elements passes both exact stages in registers, so the body reads no
   // twiddle table, carries only fixed variants, and stays branch-free.
-  Value current = permuteLoop.getResult(0);
+  Value current = permuted;
   Value lowerStage = zero;
   if (inventoryPaired) {
     Value two = rewriter.create<arith::ConstantIndexOp>(loc, 2);
@@ -358,10 +365,16 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
           Value at2 = builder.create<arith::AddIOp>(loc, base, two);
           Value at3 = builder.create<arith::AddIOp>(loc, base, three);
           Value data = groupArgs.front();
-          Value x0 = builder.create<tensor::ExtractOp>(loc, data, base);
-          Value x1 = builder.create<tensor::ExtractOp>(loc, data, at1);
-          Value x2 = builder.create<tensor::ExtractOp>(loc, data, at2);
-          Value x3 = builder.create<tensor::ExtractOp>(loc, data, at3);
+          auto reversedLoad = [&](Value position) {
+            Value source64 = builder.create<tensor::ExtractOp>(loc, reversalTable, position);
+            Value source =
+                builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), source64);
+            return builder.create<tensor::ExtractOp>(loc, input, source);
+          };
+          Value x0 = reversedLoad(base);
+          Value x1 = reversedLoad(at1);
+          Value x2 = reversedLoad(at2);
+          Value x3 = reversedLoad(at3);
           Value unitWord =
               builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(0x7FFF));
           auto unitButterfly = [&](Value a, Value b, ondrix::ondsp::CxButterflyVariant variant) {
