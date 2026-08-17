@@ -339,42 +339,49 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
     return builder.create<tensor::InsertOp>(loc, butterfly.getOut1(), insertUpper, lower);
   };
 
-  // The exact unit stages H = 1 and H = 2 are peeled ahead of the dynamic
-  // stage loop (decision 2026-08-17): their bodies read no twiddle table and
-  // carry the unit variants, so peeling keeps every loop body branch-free
-  // with one fixed variant.
+  // The exact unit stages H = 1 and H = 2 fuse into one group loop ahead
+  // of the dynamic stage loop (decision 2026-08-17): each group of four
+  // elements passes both exact stages in registers, so the body reads no
+  // twiddle table, carries only fixed variants, and stays branch-free.
   Value current = permuteLoop.getResult(0);
   Value lowerStage = zero;
   if (inventoryPaired) {
     Value two = rewriter.create<arith::ConstantIndexOp>(loc, 2);
+    Value three = rewriter.create<arith::ConstantIndexOp>(loc, 3);
     Value four = rewriter.create<arith::ConstantIndexOp>(loc, 4);
     Value quarter = rewriter.create<arith::ConstantIndexOp>(loc, extent / 4);
-    auto stage0 = rewriter.create<scf::ForOp>(
-        loc, zero, halfExtent, one, ValueRange{current},
-        [&](OpBuilder &builder, Location loc, Value leg, ValueRange legArgs) {
-          Value upper = builder.create<arith::MulIOp>(loc, leg, two);
-          builder.create<scf::YieldOp>(loc,
-                                       buildLeg(builder, loc, legArgs.front(), one, upper, zero,
-                                                ondrix::ondsp::CxButterflyVariant::Unit));
+    auto groupLoop = rewriter.create<scf::ForOp>(
+        loc, zero, quarter, one, ValueRange{current},
+        [&](OpBuilder &builder, Location loc, Value group, ValueRange groupArgs) {
+          Value base = builder.create<arith::MulIOp>(loc, group, four);
+          Value at1 = builder.create<arith::AddIOp>(loc, base, one);
+          Value at2 = builder.create<arith::AddIOp>(loc, base, two);
+          Value at3 = builder.create<arith::AddIOp>(loc, base, three);
+          Value data = groupArgs.front();
+          Value x0 = builder.create<tensor::ExtractOp>(loc, data, base);
+          Value x1 = builder.create<tensor::ExtractOp>(loc, data, at1);
+          Value x2 = builder.create<tensor::ExtractOp>(loc, data, at2);
+          Value x3 = builder.create<tensor::ExtractOp>(loc, data, at3);
+          Value unitWord =
+              builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(0x7FFF));
+          auto unitButterfly = [&](Value a, Value b, ondrix::ondsp::CxButterflyVariant variant) {
+            return builder.create<ondrix::ondsp::CxButterflyOp>(
+                loc, i32, i32, a, b, unitWord, layout, numeric, product, productScale, outputScale,
+                ondrix::ondsp::CxButterflyVariantAttr::get(builder.getContext(), variant));
+          };
+          auto pairA = unitButterfly(x0, x1, ondrix::ondsp::CxButterflyVariant::Unit);
+          auto pairB = unitButterfly(x2, x3, ondrix::ondsp::CxButterflyVariant::Unit);
+          auto plusLeg = unitButterfly(pairA.getOut0(), pairB.getOut0(),
+                                       ondrix::ondsp::CxButterflyVariant::Unit);
+          auto crossLeg = unitButterfly(pairA.getOut1(), pairB.getOut1(),
+                                        ondrix::ondsp::CxButterflyVariant::UnitCross);
+          Value out = builder.create<tensor::InsertOp>(loc, plusLeg.getOut0(), data, base);
+          out = builder.create<tensor::InsertOp>(loc, crossLeg.getOut0(), out, at1);
+          out = builder.create<tensor::InsertOp>(loc, plusLeg.getOut1(), out, at2);
+          out = builder.create<tensor::InsertOp>(loc, crossLeg.getOut1(), out, at3);
+          builder.create<scf::YieldOp>(loc, out);
         });
-    auto stage1Plain = rewriter.create<scf::ForOp>(
-        loc, zero, quarter, one, ValueRange{stage0.getResult(0)},
-        [&](OpBuilder &builder, Location loc, Value leg, ValueRange legArgs) {
-          Value upper = builder.create<arith::MulIOp>(loc, leg, four);
-          builder.create<scf::YieldOp>(loc,
-                                       buildLeg(builder, loc, legArgs.front(), two, upper, zero,
-                                                ondrix::ondsp::CxButterflyVariant::Unit));
-        });
-    auto stage1Cross = rewriter.create<scf::ForOp>(
-        loc, zero, quarter, one, ValueRange{stage1Plain.getResult(0)},
-        [&](OpBuilder &builder, Location loc, Value leg, ValueRange legArgs) {
-          Value scaled = builder.create<arith::MulIOp>(loc, leg, four);
-          Value upper = builder.create<arith::AddIOp>(loc, scaled, one);
-          builder.create<scf::YieldOp>(loc,
-                                       buildLeg(builder, loc, legArgs.front(), two, upper, zero,
-                                                ondrix::ondsp::CxButterflyVariant::UnitCross));
-        });
-    current = stage1Cross.getResult(0);
+    current = groupLoop.getResult(0);
     lowerStage = two;
   }
 

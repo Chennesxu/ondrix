@@ -29,9 +29,9 @@
 // Per function: 12 stage butterflies in the target equation, every one
 // reaching the packed pair and nothing generic. The size-2/4 combines are
 // the exact unit stages (8 butterflies, no rotation at all), so only the
-// size-8 combine's 4 legs carry a requantized product. The loop form peels
-// the exact stages: statically five butterflies per function body (three
-// unit, one plain, one cross), two with rotations.
+// size-8 combine's 4 legs carry a requantized product. The loop form fuses
+// the exact stages into one group loop: statically six butterflies per
+// function body (four unit, one plain, one cross), two with rotations.
 // MUL-COUNT-16: ortumcore.cx_mul_conj
 // MUL-NOT: ortumcore.cx_mul_conj
 // BFLY-COUNT-48: ortumcore.cx_bfly
@@ -41,7 +41,7 @@
 // CROSS-NOT: #ortumcore<cx_bfly_variant cross>
 // LOOP-COUNT-8: ortumcore.cx_mul_conj
 // LOOP-NOT: ortumcore.cx_mul_conj
-// LOOPBFLY-COUNT-20: ortumcore.cx_bfly
+// LOOPBFLY-COUNT-24: ortumcore.cx_bfly
 // LOOPBFLY-NOT: ortumcore.cx_bfly
 // LOOPGEN-NOT: ondsp.cx_butterfly
 
