@@ -173,3 +173,53 @@ func.func @keeps_unconjugatable_table(%a: i32, %b: i32, %i: index) -> (i32, i32)
 // CHECK-LABEL: func.func @keeps_unconjugatable_table(
 // CHECK: ondsp.cx_butterfly
 // CHECK-NOT: ortumcore.
+
+// The exact unit variant has no product stage: b feeds the plain packed
+// butterfly directly and no rotation is emitted at all.
+func.func @selects_unit_without_rotation(%a: i32, %b: i32) -> (i32, i32) {
+  %tw = arith.constant 32767 : i32
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = wrap, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = wrap, saturate_to = i16>,
+    variant = #ondsp.cx_butterfly_variant<unit>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
+}
+
+// CHECK-LABEL: func.func @selects_unit_without_rotation(
+// CHECK-SAME: %[[A:.*]]: i32, %[[B:.*]]: i32)
+// CHECK-NOT: ortumcore.cx_mul_conj
+// CHECK: %[[O0:.*]], %[[O1:.*]] = ortumcore.cx_bfly %[[A]], %[[B]]
+// CHECK-SAME: variant = #ortumcore<cx_bfly_variant plain>
+// CHECK-NOT: ortumcore.cx_mul_conj
+// CHECK: return %[[O0]], %[[O1]]
+
+// The exact unit cross swaps b's halves in plain arithmetic (the cross
+// combine consumes its operand in the swapped packing) and emits no
+// rotation either.
+func.func @selects_unit_cross_swaps_halves(%a: i32, %b: i32) -> (i32, i32) {
+  %tw = arith.constant 32767 : i32
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_ties_positive, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_ties_positive, overflow = saturate, saturate_to = i16>,
+    variant = #ondsp.cx_butterfly_variant<unit_cross>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
+}
+
+// CHECK-LABEL: func.func @selects_unit_cross_swaps_halves(
+// CHECK-SAME: %[[A:.*]]: i32, %[[B:.*]]: i32)
+// CHECK-NOT: ortumcore.cx_mul_conj
+// CHECK-DAG: %[[HI:.*]] = arith.shrui %[[B]], %{{.*}} : i32
+// CHECK-DAG: %[[LO:.*]] = arith.shli %[[B]], %{{.*}} : i32
+// CHECK: %[[SW:.*]] = arith.ori %[[LO]], %[[HI]] : i32
+// CHECK: %[[O0:.*]], %[[O1:.*]] = ortumcore.cx_bfly %[[A]], %[[SW]]
+// CHECK-SAME: variant = #ortumcore<cx_bfly_variant cross>
+// CHECK-NOT: ortumcore.cx_mul_conj
+// CHECK: return %[[O0]], %[[O1]]

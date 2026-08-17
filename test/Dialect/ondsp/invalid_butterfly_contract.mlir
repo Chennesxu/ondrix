@@ -172,7 +172,7 @@ func.func @q31_rejects_target_inventory(%a: i64, %b: i64, %tw: i64) -> (i64, i64
 // -----
 
 func.func @cross_rejects_nearest_even(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
-  // expected-error@+1 {{the cross combine is admitted only under target-inventory toward_negative or nearest_ties_positive rounding}}
+  // expected-error@+1 {{the cross and unit combines are admitted only under target-inventory toward_negative or nearest_ties_positive rounding}}
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
     layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
@@ -187,7 +187,7 @@ func.func @cross_rejects_nearest_even(%a: i32, %b: i32, %tw: i32) -> (i32, i32) 
 // -----
 
 func.func @cross_rejects_vector_shape(%a: vector<4xi32>, %b: vector<4xi32>, %tw: vector<4xi32>) -> (vector<4xi32>, vector<4xi32>) {
-  // expected-error@+1 {{the cross combine is admitted only on scalar packed Q15 values}}
+  // expected-error@+1 {{the cross and unit combines are admitted only on scalar packed Q15 values}}
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
     layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
@@ -202,7 +202,7 @@ func.func @cross_rejects_vector_shape(%a: vector<4xi32>, %b: vector<4xi32>, %tw:
 // -----
 
 func.func @cross_rejects_q31(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
-  // expected-error@+1 {{the cross combine is admitted only on scalar packed Q15 values}}
+  // expected-error@+1 {{the cross and unit combines are admitted only on scalar packed Q15 values}}
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
@@ -212,4 +212,34 @@ func.func @cross_rejects_q31(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
     variant = #ondsp.cx_butterfly_variant<cross>
   } : (i64, i64, i64) -> (i64, i64)
   return %0, %1 : i64, i64
+}
+
+// -----
+
+func.func @unit_rejects_nearest_even(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{the cross and unit combines are admitted only under target-inventory toward_negative or nearest_ties_positive rounding}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>,
+    variant = #ondsp.cx_butterfly_variant<unit>
+  } : (i32, i32, i32) -> (i32, i32)
+  return %0, %1 : i32, i32
+}
+
+// -----
+
+func.func @unit_cross_rejects_vector_shape(%a: vector<4xi32>, %b: vector<4xi32>, %tw: vector<4xi32>) -> (vector<4xi32>, vector<4xi32>) {
+  // expected-error@+1 {{the cross and unit combines are admitted only on scalar packed Q15 values}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = wrap, saturate_to = i16>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = wrap, saturate_to = i16>,
+    variant = #ondsp.cx_butterfly_variant<unit_cross>
+  } : (vector<4xi32>, vector<4xi32>, vector<4xi32>) -> (vector<4xi32>, vector<4xi32>)
+  return %0, %1 : vector<4xi32>, vector<4xi32>
 }

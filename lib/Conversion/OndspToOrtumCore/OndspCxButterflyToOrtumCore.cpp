@@ -126,25 +126,43 @@ private:
     if (!op.getA().getType().isSignlessInteger(32) ||
         op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
       return;
-    std::optional<TargetScale> product = classifyTargetScale(op.getProductScale());
+    ondrix::ondsp::CxButterflyVariant variant =
+        op.getVariant().value_or(ondrix::ondsp::CxButterflyVariant::Plain);
+    bool cross = variant == ondrix::ondsp::CxButterflyVariant::Cross ||
+                 variant == ondrix::ondsp::CxButterflyVariant::UnitCross;
+    bool unit = variant == ondrix::ondsp::CxButterflyVariant::Unit ||
+                variant == ondrix::ondsp::CxButterflyVariant::UnitCross;
     std::optional<TargetScale> output = classifyTargetScale(op.getOutputScale());
-    if (!product || product->shift != 15 || !output || output->shift > 1)
+    if (!output || output->shift > 1)
       return;
 
-    Value conjugate = materializeConjugatedTwiddle(op);
-    if (!conjugate)
-      return;
-
-    // The cross combine consumes the pair's shared product through the
-    // swapped (real-high) packing, which is exactly what makes a -+ j*t
-    // free on the target.
-    bool cross = op.getVariant() == ondrix::ondsp::CxButterflyVariant::Cross;
+    // The unit variants have no product stage: b feeds the packed pair
+    // combine directly and exactly. The cross form consumes its operand in
+    // the swapped packing, so the exact unit cross swaps b's halves first.
+    Value rotated = op.getB();
     OpBuilder builder(op);
     Location loc = op.getLoc();
-    Value rotated = builder.create<ondrix::ortumcore::CxMulConjOp>(
-        loc, builder.getI32Type(), op.getB(), conjugate, uint64_t(product->shift),
-        product->rounding, product->overflow,
-        cross ? ondrix::ortumcore::CxLayout::RealHi : ondrix::ortumcore::CxLayout::ImagHi);
+    if (unit && cross) {
+      Value sixteen = builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(16));
+      Value high = builder.create<arith::ShRUIOp>(loc, rotated, sixteen);
+      Value low = builder.create<arith::ShLIOp>(loc, rotated, sixteen);
+      rotated = builder.create<arith::OrIOp>(loc, low, high);
+    }
+    if (!unit) {
+      std::optional<TargetScale> product = classifyTargetScale(op.getProductScale());
+      if (!product || product->shift != 15)
+        return;
+      Value conjugate = materializeConjugatedTwiddle(op);
+      if (!conjugate)
+        return;
+      // The cross combine consumes the pair's shared product through the
+      // swapped (real-high) packing, which is exactly what makes a -+ j*t
+      // free on the target.
+      rotated = builder.create<ondrix::ortumcore::CxMulConjOp>(
+          loc, builder.getI32Type(), op.getB(), conjugate, uint64_t(product->shift),
+          product->rounding, product->overflow,
+          cross ? ondrix::ortumcore::CxLayout::RealHi : ondrix::ortumcore::CxLayout::ImagHi);
+    }
     auto pair = builder.create<ondrix::ortumcore::CxBflyOp>(
         loc, builder.getI32Type(), builder.getI32Type(), op.getA(), rotated,
         uint64_t(output->shift), output->rounding, output->overflow,

@@ -366,6 +366,13 @@ def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
     the sign structure; it is therefore admitted only on the scalar Q15
     target-inventory profile (`toward_negative` or `nearest_ties_positive`
     rounding) and fails closed elsewhere.
+
+    The `unit` and `unit_cross` variants are the exact early-stage forms:
+    there is no product stage at all, `t` IS `b` bit-for-bit, only the
+    output scaling applies, and the twiddle operand is ignored. `unit`
+    combines through the plain structure (an exact twiddle of one) and
+    `unit_cross` through the cross structure (an exact twiddle of `-j`).
+    Both are gated exactly like `cross`.
   }];
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$twiddle,
                    Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric,

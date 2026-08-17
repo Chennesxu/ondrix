@@ -134,17 +134,20 @@ lowerPackedCfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirection 
         loc, container,
         rewriter.getIntegerAttr(container, llvm::APInt(profile.containerWidth, bits)));
   };
-  auto createButterfly = [&](Value a, Value b, Value twiddle, bool cross = false) {
-    auto variant = cross ? ondrix::ondsp::CxButterflyVariantAttr::get(
-                               rewriter.getContext(), ondrix::ondsp::CxButterflyVariant::Cross)
-                         : ondrix::ondsp::CxButterflyVariantAttr();
+  auto createButterfly = [&](Value a, Value b, Value twiddle,
+                             ondrix::ondsp::CxButterflyVariant variant =
+                                 ondrix::ondsp::CxButterflyVariant::Plain) {
+    auto attr = variant == ondrix::ondsp::CxButterflyVariant::Plain
+                    ? ondrix::ondsp::CxButterflyVariantAttr()
+                    : ondrix::ondsp::CxButterflyVariantAttr::get(rewriter.getContext(), variant);
     return rewriter.create<ondrix::ondsp::CxButterflyOp>(loc, container, container, a, b, twiddle,
                                                          layout, numeric, product, productScale,
-                                                         outputScale, variant);
+                                                         outputScale, attr);
   };
-  // Target-inventory profiles use the target pairing: legs j and j + n/4
-  // share the twiddle W(n, j) and the second leg is the cross combine
-  // (decision 2026-08-17; the -j twiddle never appears).
+  // Target-inventory profiles use the target equation (decisions 2026-08-17):
+  // combines of size 2 and 4 are the exact unit forms with no product stage;
+  // larger combines pair legs j and j + n/4 on the shared twiddle W(n, j)
+  // with the second leg as the cross combine. -j never multiplies.
   bool inventoryPaired = profile.storageWidth == 16 &&
                          isInventoryRounding(productScale.getRounding()) &&
                          isInventoryRounding(outputScale.getRounding());
@@ -174,18 +177,34 @@ lowerPackedCfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirection 
     SmallVector<Value> even = lowerCfft(evenInputs);
     SmallVector<Value> odd = lowerCfft(oddInputs);
     SmallVector<Value> outputs(values.size());
-    if (inventoryPaired && values.size() >= 4) {
+    if (inventoryPaired) {
       int64_t half = values.size() / 2;
+      bool exact = values.size() <= 4;
+      if (values.size() == 2) {
+        auto unitLeg = createButterfly(even[0], odd[0], createPackedTwiddle(0x7FFF),
+                                       ondrix::ondsp::CxButterflyVariant::Unit);
+        outputs[0] = unitLeg.getOut0();
+        outputs[1] = unitLeg.getOut1();
+        return outputs;
+      }
       for (int64_t index = 0; index < half / 2; ++index) {
-        std::optional<uint64_t> twiddleBits =
-            getPackedTwiddleBits(profile.storageWidth, direction, values.size(), index);
-        assert(twiddleBits && "verified CFFT extent must have a static twiddle table");
-        Value twiddle = createPackedTwiddle(*twiddleBits);
-        auto plain = createButterfly(even[index], odd[index], twiddle);
+        Value twiddle;
+        if (exact) {
+          twiddle = createPackedTwiddle(0x7FFF);
+        } else {
+          std::optional<uint64_t> twiddleBits =
+              getPackedTwiddleBits(profile.storageWidth, direction, values.size(), index);
+          assert(twiddleBits && "verified CFFT extent must have a static twiddle table");
+          twiddle = createPackedTwiddle(*twiddleBits);
+        }
+        auto plain = createButterfly(even[index], odd[index], twiddle,
+                                     exact ? ondrix::ondsp::CxButterflyVariant::Unit
+                                           : ondrix::ondsp::CxButterflyVariant::Plain);
         outputs[index] = plain.getOut0();
         outputs[index + half] = plain.getOut1();
-        auto crossLeg =
-            createButterfly(even[index + half / 2], odd[index + half / 2], twiddle, true);
+        auto crossLeg = createButterfly(even[index + half / 2], odd[index + half / 2], twiddle,
+                                        exact ? ondrix::ondsp::CxButterflyVariant::UnitCross
+                                              : ondrix::ondsp::CxButterflyVariant::Cross);
         outputs[index + half / 2] = crossLeg.getOut0();
         outputs[index + half / 2 + half] = crossLeg.getOut1();
       }
@@ -252,12 +271,13 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
                          isInventoryRounding(outputScale.getRounding());
 
   // Generic form: twiddles[H + j] = W(2H, j) for j < H. Paired inventory
-  // form: twiddles[H/2 + j] = W(2H, j) for j < max(H/2, 1) - only the first
+  // form: twiddles[H/2 + j] = W(2H, j) for j < H/2, H >= 4 - only the first
   // quarter turn is stored, the second leg of each pair reuses it through
-  // the cross combine, and the -j twiddle never appears.
+  // the cross combine, -j never appears, and the exact unit stages H = 1, 2
+  // read no table at all (slots 0 and 1 stay zero).
   SmallVector<int32_t> twiddleBits(inventoryPaired ? extent / 2 : extent, 0);
-  for (int64_t half = 1; half < extent; half *= 2) {
-    int64_t count = inventoryPaired ? std::max<int64_t>(half / 2, 1) : half;
+  for (int64_t half = inventoryPaired ? 4 : 1; half < extent; half *= 2) {
+    int64_t count = inventoryPaired ? half / 2 : half;
     for (int64_t index = 0; index < count; ++index) {
       std::optional<uint64_t> bits = getPackedQ15TwiddleBits(direction, 2 * half, index);
       assert(bits && "twiddle admissibility was checked before lowering");
@@ -298,24 +318,68 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
       });
 
   // One leg: extract the pair at (upper, upper + half), butterfly it with
-  // twiddles[twiddleIndex], and insert both outputs back.
+  // twiddles[twiddleIndex], and insert both outputs back. The exact unit
+  // variants read no table; their ignored twiddle operand is the unit word.
   auto buildLeg = [&](OpBuilder &builder, Location loc, Value data, Value half, Value upper,
-                      Value twiddleIndex, bool cross) -> Value {
+                      Value twiddleIndex, ondrix::ondsp::CxButterflyVariant variant) -> Value {
     Value lower = builder.create<arith::AddIOp>(loc, upper, half);
     Value a = builder.create<tensor::ExtractOp>(loc, data, upper);
     Value b = builder.create<tensor::ExtractOp>(loc, data, lower);
-    Value twiddle = builder.create<tensor::ExtractOp>(loc, twiddleTable, twiddleIndex);
-    auto variant = cross ? ondrix::ondsp::CxButterflyVariantAttr::get(
-                               builder.getContext(), ondrix::ondsp::CxButterflyVariant::Cross)
-                         : ondrix::ondsp::CxButterflyVariantAttr();
+    bool unit = variant == ondrix::ondsp::CxButterflyVariant::Unit ||
+                variant == ondrix::ondsp::CxButterflyVariant::UnitCross;
+    Value twiddle =
+        unit ? builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(0x7FFF)).getResult()
+             : builder.create<tensor::ExtractOp>(loc, twiddleTable, twiddleIndex).getResult();
+    auto attr = variant == ondrix::ondsp::CxButterflyVariant::Plain
+                    ? ondrix::ondsp::CxButterflyVariantAttr()
+                    : ondrix::ondsp::CxButterflyVariantAttr::get(builder.getContext(), variant);
     auto butterfly = builder.create<ondrix::ondsp::CxButterflyOp>(
-        loc, i32, i32, a, b, twiddle, layout, numeric, product, productScale, outputScale, variant);
+        loc, i32, i32, a, b, twiddle, layout, numeric, product, productScale, outputScale, attr);
     Value insertUpper = builder.create<tensor::InsertOp>(loc, butterfly.getOut0(), data, upper);
     return builder.create<tensor::InsertOp>(loc, butterfly.getOut1(), insertUpper, lower);
   };
 
+  // The exact unit stages H = 1 and H = 2 are peeled ahead of the dynamic
+  // stage loop (decision 2026-08-17): their bodies read no twiddle table and
+  // carry the unit variants, so peeling keeps every loop body branch-free
+  // with one fixed variant.
+  Value current = permuteLoop.getResult(0);
+  Value lowerStage = zero;
+  if (inventoryPaired) {
+    Value two = rewriter.create<arith::ConstantIndexOp>(loc, 2);
+    Value four = rewriter.create<arith::ConstantIndexOp>(loc, 4);
+    Value quarter = rewriter.create<arith::ConstantIndexOp>(loc, extent / 4);
+    auto stage0 = rewriter.create<scf::ForOp>(
+        loc, zero, halfExtent, one, ValueRange{current},
+        [&](OpBuilder &builder, Location loc, Value leg, ValueRange legArgs) {
+          Value upper = builder.create<arith::MulIOp>(loc, leg, two);
+          builder.create<scf::YieldOp>(loc,
+                                       buildLeg(builder, loc, legArgs.front(), one, upper, zero,
+                                                ondrix::ondsp::CxButterflyVariant::Unit));
+        });
+    auto stage1Plain = rewriter.create<scf::ForOp>(
+        loc, zero, quarter, one, ValueRange{stage0.getResult(0)},
+        [&](OpBuilder &builder, Location loc, Value leg, ValueRange legArgs) {
+          Value upper = builder.create<arith::MulIOp>(loc, leg, four);
+          builder.create<scf::YieldOp>(loc,
+                                       buildLeg(builder, loc, legArgs.front(), two, upper, zero,
+                                                ondrix::ondsp::CxButterflyVariant::Unit));
+        });
+    auto stage1Cross = rewriter.create<scf::ForOp>(
+        loc, zero, quarter, one, ValueRange{stage1Plain.getResult(0)},
+        [&](OpBuilder &builder, Location loc, Value leg, ValueRange legArgs) {
+          Value scaled = builder.create<arith::MulIOp>(loc, leg, four);
+          Value upper = builder.create<arith::AddIOp>(loc, scaled, one);
+          builder.create<scf::YieldOp>(loc,
+                                       buildLeg(builder, loc, legArgs.front(), two, upper, zero,
+                                                ondrix::ondsp::CxButterflyVariant::UnitCross));
+        });
+    current = stage1Cross.getResult(0);
+    lowerStage = two;
+  }
+
   auto stageLoop = rewriter.create<scf::ForOp>(
-      loc, zero, stages, one, ValueRange{permuteLoop.getResult(0)},
+      loc, lowerStage, stages, one, ValueRange{current},
       [&](OpBuilder &builder, Location loc, Value stage, ValueRange stageArgs) {
         Value half = builder.create<arith::ShLIOp>(loc, one, stage);
         Value doubled = builder.create<arith::AddIOp>(loc, half, half);
@@ -328,31 +392,31 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
                 Value base = builder.create<arith::MulIOp>(loc, group, doubled);
                 Value upper = builder.create<arith::AddIOp>(loc, base, phase);
                 Value twiddleIndex = builder.create<arith::AddIOp>(loc, half, phase);
-                builder.create<scf::YieldOp>(loc, buildLeg(builder, loc, pairArgs.front(), half,
-                                                           upper, twiddleIndex, false));
+                builder.create<scf::YieldOp>(
+                    loc, buildLeg(builder, loc, pairArgs.front(), half, upper, twiddleIndex,
+                                  ondrix::ondsp::CxButterflyVariant::Plain));
               });
           builder.create<scf::YieldOp>(loc, butterflyLoop.getResult(0));
           return;
         }
         // Paired form as two half-range loops so each body carries one
         // fixed variant and stays branch-free; both legs of a pair read
-        // twiddles[H/2 + j], and H = 1 leaves the cross range empty.
+        // twiddles[H/2 + j]. Only H >= 4 reaches here, so each range is
+        // exactly half of the stage's legs.
         Value halfHalf = builder.create<arith::ShRUIOp>(loc, half, one);
-        Value roundedUp = builder.create<arith::AddIOp>(loc, half, one);
-        Value plainPer = builder.create<arith::ShRUIOp>(loc, roundedUp, one);
-        Value scaled = builder.create<arith::MulIOp>(loc, halfExtent, plainPer);
-        Value totalPlain = builder.create<arith::DivUIOp>(loc, scaled, half);
-        Value totalCross = builder.create<arith::SubIOp>(loc, halfExtent, totalPlain);
+        Value totalPlain = builder.create<arith::ShRUIOp>(loc, halfExtent, one);
+        Value totalCross = totalPlain;
         auto plainLoop = builder.create<scf::ForOp>(
             loc, zero, totalPlain, one, ValueRange{stageArgs.front()},
             [&](OpBuilder &builder, Location loc, Value leg, ValueRange legArgs) {
-              Value group = builder.create<arith::DivUIOp>(loc, leg, plainPer);
-              Value j = builder.create<arith::RemUIOp>(loc, leg, plainPer);
+              Value group = builder.create<arith::DivUIOp>(loc, leg, halfHalf);
+              Value j = builder.create<arith::RemUIOp>(loc, leg, halfHalf);
               Value base = builder.create<arith::MulIOp>(loc, group, doubled);
               Value upper = builder.create<arith::AddIOp>(loc, base, j);
               Value twiddleIndex = builder.create<arith::AddIOp>(loc, halfHalf, j);
-              builder.create<scf::YieldOp>(
-                  loc, buildLeg(builder, loc, legArgs.front(), half, upper, twiddleIndex, false));
+              builder.create<scf::YieldOp>(loc, buildLeg(builder, loc, legArgs.front(), half, upper,
+                                                         twiddleIndex,
+                                                         ondrix::ondsp::CxButterflyVariant::Plain));
             });
         auto crossLoop = builder.create<scf::ForOp>(
             loc, zero, totalCross, one, ValueRange{plainLoop.getResult(0)},
@@ -363,8 +427,9 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
               Value phase = builder.create<arith::AddIOp>(loc, halfHalf, j);
               Value upper = builder.create<arith::AddIOp>(loc, base, phase);
               Value twiddleIndex = builder.create<arith::AddIOp>(loc, halfHalf, j);
-              builder.create<scf::YieldOp>(
-                  loc, buildLeg(builder, loc, legArgs.front(), half, upper, twiddleIndex, true));
+              builder.create<scf::YieldOp>(loc, buildLeg(builder, loc, legArgs.front(), half, upper,
+                                                         twiddleIndex,
+                                                         ondrix::ondsp::CxButterflyVariant::Cross));
             });
         builder.create<scf::YieldOp>(loc, crossLoop.getResult(0));
       });

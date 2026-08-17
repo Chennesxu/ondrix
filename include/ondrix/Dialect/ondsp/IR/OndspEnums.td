@@ -72,11 +72,19 @@ def Ondsp_RoundingMode : I32EnumAttr<
 // leg and is NOT equivalent to a plain butterfly with twiddle -j*w: the
 // product requantization applies before the sign structure, so tie and
 // rail cases differ.
+// The `unit` and `unit_cross` variants are the exact early-stage forms
+// (decision 2026-08-17): the twiddle is exactly one, so t IS b with no
+// product stage at all and only the output scaling applies; unit_cross
+// combines that exact t through the cross structure. The twiddle operand
+// is ignored by both.
 def Ondsp_CxButterflyPlain : I32EnumAttrCase<"Plain", 0, "plain">;
 def Ondsp_CxButterflyCross : I32EnumAttrCase<"Cross", 1, "cross">;
+def Ondsp_CxButterflyUnit : I32EnumAttrCase<"Unit", 2, "unit">;
+def Ondsp_CxButterflyUnitCross : I32EnumAttrCase<"UnitCross", 3, "unit_cross">;
 def Ondsp_CxButterflyVariant : I32EnumAttr<
     "CxButterflyVariant", "radix-2 butterfly combine selector",
-    [Ondsp_CxButterflyPlain, Ondsp_CxButterflyCross]> {
+    [Ondsp_CxButterflyPlain, Ondsp_CxButterflyCross,
+     Ondsp_CxButterflyUnit, Ondsp_CxButterflyUnitCross]> {
   let cppNamespace = "::ondrix::ondsp";
   let genSpecializedAttr = 0;
 }

@@ -640,13 +640,15 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
     nearest_ties_positive rounding, wrap or saturating narrowing, output
     shift 0 or 1), which the unrolled lowering propagates unchanged into
     every stage butterfly. Under the inventory profile the transform
-    equation pairs the butterflies of every stage half-size H >= 2: legs j
-    and j + H/2 share the requantized product of the single twiddle
-    W(2H, j), the first through the plain combine and the second through
-    the cross combine (a -+ j*t). The quarter-turn twiddle -j therefore
-    never appears as a multiplier, and every leg passes through the same
-    product quantization; this pairing IS the inventory equation, not an
-    optimization of the nearest-even one, whose unpaired equation is
+    equation is the target equation: the combines of size 2 and 4 are the
+    exact unit stages - the twiddle is exactly one or exactly -j, so there
+    is no product stage at all and only the per-stage output scaling
+    applies - and every larger combine pairs legs j and j + H/2 on the
+    shared requantized product of the single twiddle W(2H, j), the first
+    leg through the plain combine and the second through the cross combine
+    (a -+ j*t). -j never appears as a multiplier anywhere; this staged
+    equation IS the inventory equation, not an optimization of the
+    nearest-even one, whose unpaired uniformly-quantized equation is
     unchanged. The Vector-batched mode applies only to the nearest-even
     profile; inventory-profile conversion is always the paired scalar
     form. Dynamic planning, other sizes, and other numeric profiles

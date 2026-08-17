@@ -558,9 +558,21 @@ public:
     // identities are stated over i16 components and its exhaustive ground
     // truth covers that domain alone. The Q31 profile keeps the general
     // product path rather than reusing an unproven identity.
-    bool cross = op.getVariant() == ondrix::ondsp::CxButterflyVariant::Cross;
+    ondrix::ondsp::CxButterflyVariant variant =
+        op.getVariant().value_or(ondrix::ondsp::CxButterflyVariant::Plain);
+    bool cross = variant == ondrix::ondsp::CxButterflyVariant::Cross ||
+                 variant == ondrix::ondsp::CxButterflyVariant::UnitCross;
+    // The unit variants have no product stage at all: t IS b, exactly, and
+    // the twiddle operand is ignored.
+    if (variant == ondrix::ondsp::CxButterflyVariant::Unit ||
+        variant == ondrix::ondsp::CxButterflyVariant::UnitCross) {
+      twiddledReal = bReal;
+      twiddledImaginary = bImaginary;
+      specialized = true;
+    }
     // The canonical-twiddle identities are stated over the plain combine.
-    if (specializeCanonicalTwiddles && storageWidth == 16 && !cross) {
+    if (specializeCanonicalTwiddles && storageWidth == 16 &&
+        variant == ondrix::ondsp::CxButterflyVariant::Plain) {
       std::optional<ondrix::analysis::CanonicalPackedQ15TwiddlePlan> plan =
           ondrix::analysis::planCanonicalPackedQ15Twiddle(op);
       if (plan) {

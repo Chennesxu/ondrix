@@ -1,6 +1,8 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=MUL
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=GEN
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=CROSS
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=BFLY
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp=fft-loops --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=LOOPBFLY
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp=fft-loops --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=LOOP
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp=fft-loops --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=LOOPGEN
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --buffer-deallocation --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.scalar.mlir
@@ -24,18 +26,23 @@
 // RUN: cc %S/Inputs/cfft8_target_profile_aot.c %t.looptarget.o -o %t.looptarget.bin
 // RUN: %t.looptarget.bin
 
-// Per function: 12 stage butterflies in the paired inventory equation
-// (8 plain and 4 cross legs), every one reaching the packed pair - the -j
-// twiddle never appears, so nothing stays generic. The loop form carries
-// the same equation through its quarter twiddle table: statically one
-// plain and one cross butterfly per function body.
-// MUL-COUNT-48: ortumcore.cx_mul_conj
+// Per function: 12 stage butterflies in the target equation, every one
+// reaching the packed pair and nothing generic. The size-2/4 combines are
+// the exact unit stages (8 butterflies, no rotation at all), so only the
+// size-8 combine's 4 legs carry a requantized product. The loop form peels
+// the exact stages: statically five butterflies per function body (three
+// unit, one plain, one cross), two with rotations.
+// MUL-COUNT-16: ortumcore.cx_mul_conj
 // MUL-NOT: ortumcore.cx_mul_conj
+// BFLY-COUNT-48: ortumcore.cx_bfly
+// BFLY-NOT: ortumcore.cx_bfly
 // GEN-NOT: ondsp.cx_butterfly
 // CROSS-COUNT-16: #ortumcore<cx_bfly_variant cross>
 // CROSS-NOT: #ortumcore<cx_bfly_variant cross>
 // LOOP-COUNT-8: ortumcore.cx_mul_conj
 // LOOP-NOT: ortumcore.cx_mul_conj
+// LOOPBFLY-COUNT-20: ortumcore.cx_bfly
+// LOOPBFLY-NOT: ortumcore.cx_bfly
 // LOOPGEN-NOT: ondsp.cx_butterfly
 
 func.func @cfft8_floor_wrap(%x0: i32, %x1: i32, %x2: i32, %x3: i32,
