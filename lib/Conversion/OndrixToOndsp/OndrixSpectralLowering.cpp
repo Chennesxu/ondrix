@@ -297,69 +297,76 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
         builder.create<scf::YieldOp>(loc, inserted);
       });
 
+  // One leg: extract the pair at (upper, upper + half), butterfly it with
+  // twiddles[twiddleIndex], and insert both outputs back.
+  auto buildLeg = [&](OpBuilder &builder, Location loc, Value data, Value half, Value upper,
+                      Value twiddleIndex, bool cross) -> Value {
+    Value lower = builder.create<arith::AddIOp>(loc, upper, half);
+    Value a = builder.create<tensor::ExtractOp>(loc, data, upper);
+    Value b = builder.create<tensor::ExtractOp>(loc, data, lower);
+    Value twiddle = builder.create<tensor::ExtractOp>(loc, twiddleTable, twiddleIndex);
+    auto variant = cross ? ondrix::ondsp::CxButterflyVariantAttr::get(
+                               builder.getContext(), ondrix::ondsp::CxButterflyVariant::Cross)
+                         : ondrix::ondsp::CxButterflyVariantAttr();
+    auto butterfly = builder.create<ondrix::ondsp::CxButterflyOp>(
+        loc, i32, i32, a, b, twiddle, layout, numeric, product, productScale, outputScale, variant);
+    Value insertUpper = builder.create<tensor::InsertOp>(loc, butterfly.getOut0(), data, upper);
+    return builder.create<tensor::InsertOp>(loc, butterfly.getOut1(), insertUpper, lower);
+  };
+
   auto stageLoop = rewriter.create<scf::ForOp>(
       loc, zero, stages, one, ValueRange{permuteLoop.getResult(0)},
       [&](OpBuilder &builder, Location loc, Value stage, ValueRange stageArgs) {
         Value half = builder.create<arith::ShLIOp>(loc, one, stage);
-        auto butterflyLoop = builder.create<scf::ForOp>(
-            loc, zero, halfExtent, one, ValueRange{stageArgs.front()},
-            [&](OpBuilder &builder, Location loc, Value pair, ValueRange pairArgs) {
-              Value group = builder.create<arith::DivUIOp>(loc, pair, half);
-              Value phase = builder.create<arith::RemUIOp>(loc, pair, half);
-              Value doubled = builder.create<arith::AddIOp>(loc, half, half);
-              Value base = builder.create<arith::MulIOp>(loc, group, doubled);
-              Value upper = builder.create<arith::AddIOp>(loc, base, phase);
-              Value lower = builder.create<arith::AddIOp>(loc, upper, half);
-              Value a = builder.create<tensor::ExtractOp>(loc, pairArgs.front(), upper);
-              Value b = builder.create<tensor::ExtractOp>(loc, pairArgs.front(), lower);
-              Value out0;
-              Value out1;
-              if (inventoryPaired) {
-                // Legs with 2*phase >= H are the cross halves of their
-                // pairs and reuse the twiddle of phase - H/2.
-                Value halfHalf = builder.create<arith::ShRUIOp>(loc, half, one);
-                Value twice = builder.create<arith::AddIOp>(loc, phase, phase);
-                Value crossCond =
-                    builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, twice, half);
-                Value jOffset = builder.create<arith::SelectOp>(loc, crossCond, halfHalf, zero);
-                Value j = builder.create<arith::SubIOp>(loc, phase, jOffset);
-                Value twiddleIndex = builder.create<arith::AddIOp>(loc, halfHalf, j);
-                Value twiddle = builder.create<tensor::ExtractOp>(loc, twiddleTable, twiddleIndex);
-                auto variantIf = builder.create<scf::IfOp>(loc, TypeRange{i32, i32}, crossCond,
-                                                           /*withElseRegion=*/true);
-                {
-                  OpBuilder thenBuilder = variantIf.getThenBodyBuilder();
-                  auto crossAttr = ondrix::ondsp::CxButterflyVariantAttr::get(
-                      thenBuilder.getContext(), ondrix::ondsp::CxButterflyVariant::Cross);
-                  auto butterfly = thenBuilder.create<ondrix::ondsp::CxButterflyOp>(
-                      loc, i32, i32, a, b, twiddle, layout, numeric, product, productScale,
-                      outputScale, crossAttr);
-                  thenBuilder.create<scf::YieldOp>(
-                      loc, ValueRange{butterfly.getOut0(), butterfly.getOut1()});
-                  OpBuilder elseBuilder = variantIf.getElseBodyBuilder();
-                  auto plain = elseBuilder.create<ondrix::ondsp::CxButterflyOp>(
-                      loc, i32, i32, a, b, twiddle, layout, numeric, product, productScale,
-                      outputScale, ondrix::ondsp::CxButterflyVariantAttr());
-                  elseBuilder.create<scf::YieldOp>(loc,
-                                                   ValueRange{plain.getOut0(), plain.getOut1()});
-                }
-                out0 = variantIf.getResult(0);
-                out1 = variantIf.getResult(1);
-              } else {
+        Value doubled = builder.create<arith::AddIOp>(loc, half, half);
+        if (!inventoryPaired) {
+          auto butterflyLoop = builder.create<scf::ForOp>(
+              loc, zero, halfExtent, one, ValueRange{stageArgs.front()},
+              [&](OpBuilder &builder, Location loc, Value pair, ValueRange pairArgs) {
+                Value group = builder.create<arith::DivUIOp>(loc, pair, half);
+                Value phase = builder.create<arith::RemUIOp>(loc, pair, half);
+                Value base = builder.create<arith::MulIOp>(loc, group, doubled);
+                Value upper = builder.create<arith::AddIOp>(loc, base, phase);
                 Value twiddleIndex = builder.create<arith::AddIOp>(loc, half, phase);
-                Value twiddle = builder.create<tensor::ExtractOp>(loc, twiddleTable, twiddleIndex);
-                auto butterfly = builder.create<ondrix::ondsp::CxButterflyOp>(
-                    loc, i32, i32, a, b, twiddle, layout, numeric, product, productScale,
-                    outputScale, ondrix::ondsp::CxButterflyVariantAttr());
-                out0 = butterfly.getOut0();
-                out1 = butterfly.getOut1();
-              }
-              Value insertUpper =
-                  builder.create<tensor::InsertOp>(loc, out0, pairArgs.front(), upper);
-              Value insertLower = builder.create<tensor::InsertOp>(loc, out1, insertUpper, lower);
-              builder.create<scf::YieldOp>(loc, insertLower);
+                builder.create<scf::YieldOp>(loc, buildLeg(builder, loc, pairArgs.front(), half,
+                                                           upper, twiddleIndex, false));
+              });
+          builder.create<scf::YieldOp>(loc, butterflyLoop.getResult(0));
+          return;
+        }
+        // Paired form as two half-range loops so each body carries one
+        // fixed variant and stays branch-free; both legs of a pair read
+        // twiddles[H/2 + j], and H = 1 leaves the cross range empty.
+        Value halfHalf = builder.create<arith::ShRUIOp>(loc, half, one);
+        Value roundedUp = builder.create<arith::AddIOp>(loc, half, one);
+        Value plainPer = builder.create<arith::ShRUIOp>(loc, roundedUp, one);
+        Value scaled = builder.create<arith::MulIOp>(loc, halfExtent, plainPer);
+        Value totalPlain = builder.create<arith::DivUIOp>(loc, scaled, half);
+        Value totalCross = builder.create<arith::SubIOp>(loc, halfExtent, totalPlain);
+        auto plainLoop = builder.create<scf::ForOp>(
+            loc, zero, totalPlain, one, ValueRange{stageArgs.front()},
+            [&](OpBuilder &builder, Location loc, Value leg, ValueRange legArgs) {
+              Value group = builder.create<arith::DivUIOp>(loc, leg, plainPer);
+              Value j = builder.create<arith::RemUIOp>(loc, leg, plainPer);
+              Value base = builder.create<arith::MulIOp>(loc, group, doubled);
+              Value upper = builder.create<arith::AddIOp>(loc, base, j);
+              Value twiddleIndex = builder.create<arith::AddIOp>(loc, halfHalf, j);
+              builder.create<scf::YieldOp>(
+                  loc, buildLeg(builder, loc, legArgs.front(), half, upper, twiddleIndex, false));
             });
-        builder.create<scf::YieldOp>(loc, butterflyLoop.getResult(0));
+        auto crossLoop = builder.create<scf::ForOp>(
+            loc, zero, totalCross, one, ValueRange{plainLoop.getResult(0)},
+            [&](OpBuilder &builder, Location loc, Value leg, ValueRange legArgs) {
+              Value group = builder.create<arith::DivUIOp>(loc, leg, halfHalf);
+              Value j = builder.create<arith::RemUIOp>(loc, leg, halfHalf);
+              Value base = builder.create<arith::MulIOp>(loc, group, doubled);
+              Value phase = builder.create<arith::AddIOp>(loc, halfHalf, j);
+              Value upper = builder.create<arith::AddIOp>(loc, base, phase);
+              Value twiddleIndex = builder.create<arith::AddIOp>(loc, halfHalf, j);
+              builder.create<scf::YieldOp>(
+                  loc, buildLeg(builder, loc, legArgs.front(), half, upper, twiddleIndex, true));
+            });
+        builder.create<scf::YieldOp>(loc, crossLoop.getResult(0));
       });
   return stageLoop.getResult(0);
 }
