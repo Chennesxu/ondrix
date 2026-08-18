@@ -5,6 +5,17 @@
 // RUN: cc %S/Inputs/cfft_q31_aot.c %t.o -o %t
 // RUN: %t
 
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="fft-loops" --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.loops.mlir
+// RUN: FileCheck %s --input-file=%t.loops.mlir --check-prefix=CARRIER --implicit-check-not=i128 --implicit-check-not=ondrix. --implicit-check-not=ondsp.
+// RUN: ondrix-translate %t.loops.mlir --mlir-to-llvmir > %t.loops.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.loops.ll -o %t.loops.o
+// RUN: cc %S/Inputs/cfft_q31_aot.c %t.loops.o -o %t.loops
+// RUN: %t.loops
+
+// The .loops pipeline runs the opt-in fft-loops lowering of the same profile
+// against the SAME independent reference: the loop form must be bit-identical
+// to the unrolled recursion, per element and at every extent here.
+
 // Object-level differential gate for the packed-Q31 CFFT profile: extents 4,
 // 8, 16, and the maximum supported 64 in both directions plus the
 // forward/inverse composition, checked against an independent reference over

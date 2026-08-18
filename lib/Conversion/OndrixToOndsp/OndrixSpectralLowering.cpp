@@ -255,40 +255,48 @@ lowerPackedCfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirection 
 // identical sequence of quantization boundaries in an equivalent order and
 // the two lowerings are bit-identical per element; only the code shape
 // changes (loops and constant tables instead of unrolled SSA butterflies).
-// This opt-in mode is packed-Q15 only; the caller rejects the packed-Q31
-// profile before reaching it.
-static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
-                                     ondrix::ir::CfftDirection direction,
-                                     ondrix::ondsp::CxLayoutAttr layout, Attribute numeric,
-                                     ondrix::ondsp::ProductAttr product,
-                                     ondrix::ondsp::ScaleAttr productScale,
-                                     ondrix::ondsp::ScaleAttr outputScale,
-                                     ConversionPatternRewriter &rewriter) {
-  IntegerType i32 = rewriter.getI32Type();
+// Every width follows from the profile: the packed container carries both the
+// values and the twiddle table, and only the 16-bit packed target has the
+// paired inventory form.
+static Value
+lowerPackedCfftLoops(Location loc, Value input, int64_t extent, ondrix::ir::CfftDirection direction,
+                     ondrix::ondsp::PackedComplexProfile profile,
+                     ondrix::ondsp::CxLayoutAttr layout, Attribute numeric,
+                     ondrix::ondsp::ProductAttr product, ondrix::ondsp::ScaleAttr productScale,
+                     ondrix::ondsp::ScaleAttr outputScale, ConversionPatternRewriter &rewriter) {
+  IntegerType container = rewriter.getIntegerType(profile.containerWidth);
   IntegerType i64 = rewriter.getI64Type();
   int64_t stageCount = llvm::Log2_64(extent);
-  bool inventoryPaired = isInventoryRounding(productScale.getRounding()) &&
+  bool inventoryPaired = profile.storageWidth == 16 &&
+                         isInventoryRounding(productScale.getRounding()) &&
                          isInventoryRounding(outputScale.getRounding());
+  // The exact unit twiddle of the profile, the value the unit variants ignore.
+  auto unitTwiddle = [&](OpBuilder &builder) {
+    return builder.create<arith::ConstantOp>(
+        loc, builder.getIntegerAttr(container, (int64_t(1) << (profile.storageWidth - 1)) - 1));
+  };
 
   // Generic form: twiddles[H + j] = W(2H, j) for j < H. Paired inventory
   // form: twiddles[H/2 + j] = W(2H, j) for j < H/2, H >= 4 - only the first
   // quarter turn is stored, the second leg of each pair reuses it through
   // the cross combine, -j never appears, and the exact unit stages H = 1, 2
   // read no table at all (slots 0 and 1 stay zero).
-  SmallVector<int32_t> twiddleBits(inventoryPaired ? extent / 2 : extent, 0);
+  SmallVector<APInt> twiddleWords(inventoryPaired ? extent / 2 : extent,
+                                  APInt::getZero(profile.containerWidth));
   for (int64_t half = inventoryPaired ? 4 : 1; half < extent; half *= 2) {
     int64_t count = inventoryPaired ? half / 2 : half;
     for (int64_t index = 0; index < count; ++index) {
-      std::optional<uint64_t> bits = getPackedQ15TwiddleBits(direction, 2 * half, index);
+      std::optional<uint64_t> bits =
+          getPackedTwiddleBits(profile.storageWidth, direction, 2 * half, index);
       assert(bits && "twiddle admissibility was checked before lowering");
-      twiddleBits[(inventoryPaired ? half / 2 : half) + index] =
-          static_cast<int32_t>(static_cast<uint32_t>(*bits));
+      twiddleWords[(inventoryPaired ? half / 2 : half) + index] =
+          APInt(profile.containerWidth, *bits);
     }
   }
   Value twiddleTable = rewriter.create<arith::ConstantOp>(
-      loc,
-      DenseElementsAttr::get(RankedTensorType::get({static_cast<int64_t>(twiddleBits.size())}, i32),
-                             llvm::ArrayRef<int32_t>(twiddleBits)));
+      loc, DenseElementsAttr::get(
+               RankedTensorType::get({static_cast<int64_t>(twiddleWords.size())}, container),
+               twiddleWords));
 
   Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
   Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
@@ -296,7 +304,7 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
   Value halfExtent = rewriter.create<arith::ConstantIndexOp>(loc, extent / 2);
   Value stages = rewriter.create<arith::ConstantIndexOp>(loc, stageCount);
 
-  Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{extent}, i32);
+  Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{extent}, container);
   // The paired form needs no separate permute loop or reversal table: the
   // fused group loop below reads the input through a loop-carried
   // reversed-carry cursor. The generic form keeps the table gather as its
@@ -336,13 +344,14 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
     bool unit = variant == ondrix::ondsp::CxButterflyVariant::Unit ||
                 variant == ondrix::ondsp::CxButterflyVariant::UnitCross;
     Value twiddle =
-        unit ? builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(0x7FFF)).getResult()
+        unit ? unitTwiddle(builder).getResult()
              : builder.create<tensor::ExtractOp>(loc, twiddleTable, twiddleIndex).getResult();
     auto attr = variant == ondrix::ondsp::CxButterflyVariant::Plain
                     ? ondrix::ondsp::CxButterflyVariantAttr()
                     : ondrix::ondsp::CxButterflyVariantAttr::get(builder.getContext(), variant);
-    auto butterfly = builder.create<ondrix::ondsp::CxButterflyOp>(
-        loc, i32, i32, a, b, twiddle, layout, numeric, product, productScale, outputScale, attr);
+    auto butterfly = builder.create<ondrix::ondsp::CxButterflyOp>(loc, container, container, a, b,
+                                                                  twiddle, layout, numeric, product,
+                                                                  productScale, outputScale, attr);
     Value insertUpper = builder.create<tensor::InsertOp>(loc, butterfly.getOut0(), data, upper);
     return builder.create<tensor::InsertOp>(loc, butterfly.getOut1(), insertUpper, lower);
   };
@@ -380,11 +389,11 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
           Value x1 = walkLoad();
           Value x2 = walkLoad();
           Value x3 = walkLoad();
-          Value unitWord =
-              builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(0x7FFF));
+          Value unitWord = unitTwiddle(builder);
           auto unitButterfly = [&](Value a, Value b, ondrix::ondsp::CxButterflyVariant variant) {
             return builder.create<ondrix::ondsp::CxButterflyOp>(
-                loc, i32, i32, a, b, unitWord, layout, numeric, product, productScale, outputScale,
+                loc, container, container, a, b, unitWord, layout, numeric, product, productScale,
+                outputScale,
                 ondrix::ondsp::CxButterflyVariantAttr::get(builder.getContext(), variant));
           };
           auto pairA = unitButterfly(x0, x1, ondrix::ondsp::CxButterflyVariant::Unit);
@@ -501,22 +510,19 @@ public:
         ondrix::ondsp::getPackedComplexProfile(layout.getLayout());
     if (!profile)
       return rewriter.notifyMatchFailure(op, "layout has no executable packed complex profile");
-    bool isQ15 = profile->storageWidth == 16;
-    // Both opt-in code-shape modes still carry hardcoded Q15 tables and i32
-    // containers, so they fail closed on the packed-Q31 profile rather than
-    // emitting a plausible but unvalidated schedule.
-    if (!isQ15 && fftLoops)
-      return op.emitOpError("loop-form CFFT lowering supports only the packed Q15 profile");
-    if (!isQ15 && vectorizeStaticCfft)
+    // The Vector-batched mode still carries hardcoded Q15 lane arithmetic, so
+    // it fails closed on the packed-Q31 profile rather than emitting a
+    // plausible but unvalidated schedule. The loop form follows the profile.
+    if (profile->storageWidth != 16 && vectorizeStaticCfft)
       return op.emitOpError("Vector-batched CFFT lowering supports only the packed Q15 profile");
 
     int64_t extent = op.getInput().getType().getDimSize(0);
     if (!hasAdmissiblePackedTwiddleTables(profile->storageWidth, op.getDirection(), extent))
       return rewriter.notifyMatchFailure(op, "the stage twiddle table is unavailable");
     if (fftLoops) {
-      Value result = lowerPackedQ15CfftLoops(loc, adaptor.getInput(), extent, op.getDirection(),
-                                             layout, op.getNumeric(), op.getProduct(),
-                                             op.getProductScale(), op.getOutputScale(), rewriter);
+      Value result = lowerPackedCfftLoops(loc, adaptor.getInput(), extent, op.getDirection(),
+                                          *profile, layout, op.getNumeric(), op.getProduct(),
+                                          op.getProductScale(), op.getOutputScale(), rewriter);
       rewriter.replaceOp(op, result);
       return success();
     }
@@ -574,9 +580,10 @@ public:
                 builder.create<tensor::InsertOp>(loc, packed, iterArgs.front(), position);
             builder.create<scf::YieldOp>(loc, inserted);
           });
-      Value spectrum = lowerPackedQ15CfftLoops(
-          loc, packLoop.getResult(0), extent, ondrix::ir::CfftDirection::Forward, op.getLayout(),
-          op.getNumeric(), op.getProduct(), op.getProductScale(), op.getOutputScale(), rewriter);
+      Value spectrum = lowerPackedCfftLoops(
+          loc, packLoop.getResult(0), extent, ondrix::ir::CfftDirection::Forward,
+          ondrix::ondsp::PackedComplexProfile{16, 32}, op.getLayout(), op.getNumeric(),
+          op.getProduct(), op.getProductScale(), op.getOutputScale(), rewriter);
       RankedTensorType resultType = op.getResult().getType();
       int64_t binCount = resultType.getDimSize(0);
       Value compact = rewriter.create<tensor::ExtractSliceOp>(
@@ -661,9 +668,10 @@ public:
             Value full = builder.create<tensor::InsertOp>(loc, conjugated, direct, mirrored);
             builder.create<scf::YieldOp>(loc, full);
           });
-      Value outputs = lowerPackedQ15CfftLoops(
-          loc, mirrorLoop.getResult(0), extent, ondrix::ir::CfftDirection::Inverse, op.getLayout(),
-          op.getNumeric(), op.getProduct(), op.getProductScale(), op.getOutputScale(), rewriter);
+      Value outputs = lowerPackedCfftLoops(
+          loc, mirrorLoop.getResult(0), extent, ondrix::ir::CfftDirection::Inverse,
+          ondrix::ondsp::PackedComplexProfile{16, 32}, op.getLayout(), op.getNumeric(),
+          op.getProduct(), op.getProductScale(), op.getOutputScale(), rewriter);
       RankedTensorType resultType = op.getResult().getType();
       Value resultEmpty =
           rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
