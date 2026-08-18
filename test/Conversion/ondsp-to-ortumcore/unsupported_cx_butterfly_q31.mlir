@@ -1,7 +1,9 @@
 // RUN: not ondrix-opt %s --convert-ondsp-to-ortumcore 2>&1 | FileCheck %s
 
-// The abstract target has no proven packed-complex capability at any width.
-// Adding the packed-Q31 profile must not create one by accident.
+// The abstract target has no proven packed-complex capability at any width, so
+// the general lowering refuses the butterfly at both widths. The opt-in
+// selection pass reaches the raw-high Q31 profile by DECOMPOSING it into scalar
+// capabilities, which is a different statement and a different pass.
 func.func @unsupported_cx_butterfly_q31(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
   // CHECK: failed to legalize operation 'ondsp.cx_butterfly'
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {

@@ -170,7 +170,8 @@ public:
   }
 };
 
-template <typename SourceOp, typename DestinationOp>
+template <typename SourceOp, typename DestinationOp,
+          ondrix::ortumcore::ProductDomain (*getProductDomain)()>
 class MacLikeOpLowering final : public OpConversionPattern<SourceOp> {
 public:
   using OpConversionPattern<SourceOp>::OpConversionPattern;
@@ -182,7 +183,7 @@ public:
         !isa<ondrix::ondsp::AccType>(resultType))
       return op.emitOpError("emulation requires converted Ondsp accumulator types");
 
-    ondrix::ortumcore::ProductDomain domain = ondrix::ortumcore::getSignedQ15FullProductDomain();
+    ondrix::ortumcore::ProductDomain domain = getProductDomain();
     auto numeric = ondrix::ondsp::FixedAttr::get(
         rewriter.getContext(), domain.signedness,
         IntegerType::get(rewriter.getContext(), domain.operandWidth), domain.operandFrac);
@@ -193,8 +194,46 @@ public:
   }
 };
 
-using MacAddOpLowering = MacLikeOpLowering<ondrix::ortumcore::MacAddOp, ondrix::ondsp::MacOp>;
-using MacSubOpLowering = MacLikeOpLowering<ondrix::ortumcore::MacSubOp, ondrix::ondsp::MacSubOp>;
+using MacAddOpLowering = MacLikeOpLowering<ondrix::ortumcore::MacAddOp, ondrix::ondsp::MacOp,
+                                           ondrix::ortumcore::getSignedQ15FullProductDomain>;
+using MacSubOpLowering = MacLikeOpLowering<ondrix::ortumcore::MacSubOp, ondrix::ondsp::MacSubOp,
+                                           ondrix::ortumcore::getSignedQ15FullProductDomain>;
+// The Q31 family differs only in its product domain: the raw high half lands
+// at the accumulator's own fractional position, so the update, the state, and
+// the readout are the Q15 family's unchanged.
+using Q31MacAddOpLowering = MacLikeOpLowering<ondrix::ortumcore::Q31MacAddOp, ondrix::ondsp::MacOp,
+                                              ondrix::ortumcore::getSignedQ31RawHighProductDomain>;
+using Q31MacSubOpLowering =
+    MacLikeOpLowering<ondrix::ortumcore::Q31MacSubOp, ondrix::ondsp::MacSubOp,
+                      ondrix::ortumcore::getSignedQ31RawHighProductDomain>;
+
+// The scaled saturating add/sub is exactly one declared ondsp shift boundary
+// over the exact sum: same widening, same floor, same saturating narrowing.
+template <typename SourceOp, typename DestinationOp>
+class ScaledBinaryOpLowering final : public OpConversionPattern<SourceOp> {
+public:
+  using OpConversionPattern<SourceOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(SourceOp op, typename SourceOp::Adaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    ondrix::ortumcore::ScaledBinaryDomain domain =
+        ondrix::ortumcore::getShiftedSaturatingI32ScaledBinaryDomain();
+    if (op.getShift() < 0 || uint64_t(op.getShift()) > domain.maxShift)
+      return op.emitOpError("emulation requires a shift inside the target's scaling range");
+    auto storage = IntegerType::get(rewriter.getContext(), domain.storageWidth);
+    auto scale = ondrix::ondsp::ScaleAttr::get(rewriter.getContext(), /*preShiftLeft=*/0,
+                                               unsigned(op.getShift()), domain.rounding,
+                                               domain.overflow, storage);
+    rewriter.replaceOpWithNewOp<DestinationOp>(op, storage, adaptor.getLhs(), adaptor.getRhs(),
+                                               scale);
+    return success();
+  }
+};
+
+using SatShiftAddOpLowering =
+    ScaledBinaryOpLowering<ondrix::ortumcore::SatShiftAddOp, ondrix::ondsp::AddShiftOp>;
+using SatShiftSubOpLowering =
+    ScaledBinaryOpLowering<ondrix::ortumcore::SatShiftSubOp, ondrix::ondsp::SubShiftOp>;
 
 class DmacOpLowering final : public OpConversionPattern<ondrix::ortumcore::DmacOp> {
 public:
@@ -412,8 +451,9 @@ public:
 
     OrtumCoreToOndspTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
-    patterns.add<AccInitOpLowering, MacAddOpLowering, MacSubOpLowering, DmacOpLowering,
-                 AccOutOpLowering, CxMulConjOpLowering, CxBflyOpLowering, BitrevAddOpLowering,
+    patterns.add<AccInitOpLowering, MacAddOpLowering, MacSubOpLowering, Q31MacAddOpLowering,
+                 Q31MacSubOpLowering, DmacOpLowering, AccOutOpLowering, SatShiftAddOpLowering,
+                 SatShiftSubOpLowering, CxMulConjOpLowering, CxBflyOpLowering, BitrevAddOpLowering,
                  BitrevSubOpLowering>(typeConverter, &getContext());
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);

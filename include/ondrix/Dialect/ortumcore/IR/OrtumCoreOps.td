@@ -45,6 +45,57 @@ def OrtumCore_MacSubOp
     requantization behavior is not part of this operation.
   }];
 }
+class OrtumCore_Q31MacOp<string mnemonic, string opSummary>
+    : OrtumCore_Op<mnemonic, [Pure, AllTypesMatch<["acc", "result"]>]> {
+  let summary = opSummary;
+  let arguments = (ins OrtumCore_AccumType:$acc, I32:$lhs, I32:$rhs);
+  let results = (outs OrtumCore_AccumType:$result);
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def OrtumCore_Q31MacAddOp
+    : OrtumCore_Q31MacOp<"q31_mac_add", "Saturating signed Q31 raw-high multiply-add"> {
+  let description = [{
+    Interprets `lhs` and `rhs` as signed i32 raw values with 31 fractional
+    bits, selects the arithmetic HIGH 32 bits of their exact signed product -
+    a floor at 32, which leaves a term with 30 fractional bits - and adds that
+    term to the signed accumulator, saturating the update to the signed 40-bit
+    range. The term's fractional position is the accumulator's own, so this
+    family shares one accumulator and one readout path with the Q15
+    full-product family rather than declaring its own.
+  }];
+}
+def OrtumCore_Q31MacSubOp
+    : OrtumCore_Q31MacOp<"q31_mac_sub", "Saturating signed Q31 raw-high multiply-subtract"> {
+  let description = [{
+    The `q31_mac_add` term subtracted from the accumulator instead of added,
+    with the same raw-high selection and the same saturating update.
+  }];
+}
+
+class OrtumCore_ScaledBinaryOp<string mnemonic, string opSummary, string noun, string symbol>
+    : OrtumCore_Op<mnemonic, [Pure, AllTypesMatch<["lhs", "rhs", "result"]>]> {
+  let summary = opSummary;
+  let description = [{
+    Forms the }] # noun # [{ `lhs `}] # symbol # [{` rhs` exactly - one bit
+    wider than the operands, so it never wraps - then shifts it arithmetically
+    right by the static `shift` and saturates to the signed 32-bit range. The
+    realized rounding is exactly `toward_negative`; there is no rounding
+    variant, and at `shift = 0` the operation is a pure saturating }]
+    # noun # [{. `shift` models the instruction's scaling immediate and must
+    lie in [0, 3].
+  }];
+  let arguments = (ins I32:$lhs, I32:$rhs, I64Attr:$shift);
+  let results = (outs I32:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def OrtumCore_SatShiftAddOp
+    : OrtumCore_ScaledBinaryOp<"sat_shift_add", "Saturating scaled add", "sum", "+">;
+def OrtumCore_SatShiftSubOp
+    : OrtumCore_ScaledBinaryOp<"sat_shift_sub", "Saturating scaled subtract", "difference", "-">;
+
 def OrtumCore_DmacOp
     : OrtumCore_Op<"dmac", [Pure, AllTypesMatch<["lane0", "lane1",
                                                  "out0", "out1"]>]> {

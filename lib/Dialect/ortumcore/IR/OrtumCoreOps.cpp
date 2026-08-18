@@ -12,6 +12,17 @@ LogicalResult AccOutOp::verify() {
   return success();
 }
 
+template <typename OpTy> static LogicalResult verifyScaledBinaryShift(OpTy op) {
+  int64_t shift = op.getShift();
+  if (shift < 0 || shift > 3)
+    return op.emitOpError("scaled saturating add/sub shift must lie in [0, 3]");
+  return success();
+}
+
+LogicalResult SatShiftAddOp::verify() { return verifyScaledBinaryShift(*this); }
+
+LogicalResult SatShiftSubOp::verify() { return verifyScaledBinaryShift(*this); }
+
 LogicalResult CxMulConjOp::verify() {
   int64_t shift = getShift();
   if (shift < 0 || shift > 31)

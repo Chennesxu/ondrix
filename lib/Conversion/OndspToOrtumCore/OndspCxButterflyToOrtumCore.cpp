@@ -5,6 +5,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreDialect.h"
 #include "ondrix/Dialect/ortumcore/IR/OrtumCoreOps.h"
+#include "ondrix/Target/OrtumCore/OrtumCoreCapabilities.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -151,7 +152,93 @@ private:
     op.erase();
   }
 
+  // The scalar Q31 target has no packed complex instruction, and it needs
+  // none: the i64 container is a GPR pair, so taking the halves apart and
+  // putting them back costs nothing, and the butterfly is the raw-high MAC
+  // chains plus the scaled saturating stage arithmetic.
+  bool rewriteRawHighQ31Butterfly(ondrix::ondsp::CxButterflyOp op) {
+    if (!op.getA().getType().isSignlessInteger(64) ||
+        op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI32ImagHiRealLo ||
+        op.getProduct().getSelection() != ondrix::ondsp::ProductSelection::HighRaw ||
+        op.getVariant().value_or(ondrix::ondsp::CxButterflyVariant::Plain) !=
+            ondrix::ondsp::CxButterflyVariant::Plain)
+      return false;
+    // The raw-high profile's boundaries are fixed by the operation's own
+    // verifier - product scale (left one, floor, saturating) and an output
+    // shift of 0 or 1 - so only the shift is read here.
+    int64_t outputShift = op.getOutputScale().getPostShiftRight();
+    if (uint64_t(outputShift) >
+        ondrix::ortumcore::getShiftedSaturatingI32ScaledBinaryDomain().maxShift)
+      return false;
+
+    OpBuilder builder(op);
+    Location loc = op.getLoc();
+    IntegerType i32 = builder.getI32Type();
+    IntegerType i64 = builder.getI64Type();
+    Type accumulator = ondrix::ortumcore::AccumType::get(builder.getContext());
+    Value halfWidth = builder.create<arith::ConstantOp>(loc, builder.getI64IntegerAttr(32));
+    auto real = [&](Value packed) {
+      return builder.create<arith::TruncIOp>(loc, i32, packed).getResult();
+    };
+    auto imaginary = [&](Value packed) {
+      Value high = builder.create<arith::ShRUIOp>(loc, packed, halfWidth);
+      return builder.create<arith::TruncIOp>(loc, i32, high).getResult();
+    };
+    Value ar = real(op.getA());
+    Value ai = imaginary(op.getA());
+    Value br = real(op.getB());
+    Value bi = imaginary(op.getB());
+    Value wr = real(op.getTwiddle());
+    Value wi = imaginary(op.getTwiddle());
+
+    // One cross-term pair per accumulator web. Each raw-high term is bounded by
+    // 2^30, so the pair stays far inside the 40-bit range and the saturating
+    // updates are exact. Reading out at shift 0 and doubling through the
+    // saturating add realizes the product scale's left shift exactly: clamping
+    // before a monotone doubling that clamps again agrees with clamping after.
+    auto crossTerm = [&](Value lhs, Value rhs, Value subLhs, Value subRhs, bool subtract) {
+      Value web = builder.create<ondrix::ortumcore::AccInitOp>(loc, accumulator);
+      web = builder.create<ondrix::ortumcore::Q31MacAddOp>(loc, accumulator, web, lhs, rhs);
+      web = subtract
+                ? builder
+                      .create<ondrix::ortumcore::Q31MacSubOp>(loc, accumulator, web, subLhs, subRhs)
+                      .getResult()
+                : builder
+                      .create<ondrix::ortumcore::Q31MacAddOp>(loc, accumulator, web, subLhs, subRhs)
+                      .getResult();
+      Value read = builder.create<ondrix::ortumcore::AccOutOp>(loc, i32, web, uint64_t(0));
+      return builder.create<ondrix::ortumcore::SatShiftAddOp>(loc, i32, read, read, uint64_t(0))
+          .getResult();
+    };
+    Value tr = crossTerm(br, wr, bi, wi, /*subtract=*/true);
+    Value ti = crossTerm(br, wi, bi, wr, /*subtract=*/false);
+
+    auto pack = [&](Value component, Value high) {
+      Value low = builder.create<arith::ExtUIOp>(loc, i64, component);
+      Value shifted = builder.create<arith::ShLIOp>(
+          loc, builder.create<arith::ExtUIOp>(loc, i64, high), halfWidth);
+      return builder.create<arith::OrIOp>(loc, shifted, low).getResult();
+    };
+    auto stage = [&](Value component, Value term, bool subtract) {
+      if (subtract)
+        return builder
+            .create<ondrix::ortumcore::SatShiftSubOp>(loc, i32, component, term,
+                                                      uint64_t(outputShift))
+            .getResult();
+      return builder
+          .create<ondrix::ortumcore::SatShiftAddOp>(loc, i32, component, term,
+                                                    uint64_t(outputShift))
+          .getResult();
+    };
+    op.getOut0().replaceAllUsesWith(pack(stage(ar, tr, false), stage(ai, ti, false)));
+    op.getOut1().replaceAllUsesWith(pack(stage(ar, tr, true), stage(ai, ti, true)));
+    op.erase();
+    return true;
+  }
+
   void rewriteButterfly(ondrix::ondsp::CxButterflyOp op) {
+    if (rewriteRawHighQ31Butterfly(op))
+      return;
     if (!op.getA().getType().isSignlessInteger(32) ||
         op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
       return;

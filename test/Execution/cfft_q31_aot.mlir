@@ -12,9 +12,31 @@
 // RUN: cc %S/Inputs/cfft_q31_aot.c %t.loops.o -o %t.loops
 // RUN: %t.loops
 
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-cx-butterfly-to-ortumcore --convert-ortumcore-to-ondsp-emulation --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.target.mlir
+// RUN: ondrix-translate %t.target.mlir --mlir-to-llvmir > %t.target.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.target.ll -o %t.target.o
+// RUN: cc %S/Inputs/cfft_q31_aot.c %t.target.o -o %t.target.bin
+// RUN: %t.target.bin
+
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=SELECT
+
 // The .loops pipeline runs the opt-in fft-loops lowering of the same profile
 // against the SAME independent reference: the loop form must be bit-identical
-// to the unrolled recursion, per element and at every extent here.
+// to the unrolled recursion, per element and at every extent here. The .target
+// pipeline selects every stage butterfly onto the Q31 scalar target's
+// capabilities and executes their emulation against that same reference, so the
+// selection is gated by execution rather than by inspection alone.
+
+// Nothing generic survives the selection: each butterfly becomes two
+// accumulator webs of raw-high MAC steps and four scaled saturating stage
+// operations, and the container halves come apart with plain arithmetic
+// because the container is a register pair on the target.
+// SELECT: ortumcore.q31_mac_add
+// SELECT: ortumcore.q31_mac_sub
+// SELECT: ortumcore.acc_out
+// SELECT: ortumcore.sat_shift_add
+// SELECT: ortumcore.sat_shift_sub
+// SELECT-NOT: ondsp.cx_butterfly
 
 // Object-level differential gate for the packed-Q31 CFFT profile: extents 4,
 // 8, 16, and the maximum supported 64 in both directions plus the
