@@ -17,7 +17,21 @@ func.func @cx_butterfly_q31(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
   return %o0, %o1 : i64, i64
 }
 
-// CHECK-LABEL: func.func @cx_butterfly_q31
+// The raw-high selection narrows each cross term first, so no exact carrier for
+// the combined product exists at all: the four products are i64, each floored
+// to i32, and the exact sum plus the left shift fit in i34.
+func.func @cx_butterfly_q31_raw_high(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
+  %o0, %o1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+  } : (i64, i64, i64) -> (i64, i64)
+  return %o0, %o1 : i64, i64
+}
+
+// CHECK-LABEL: func.func @cx_butterfly_q31(
 // Unpack: real is the low i32, imaginary the logical high i32.
 // CHECK: arith.trunci %{{.*}} : i64 to i32
 // CHECK: arith.shrui %{{.*}} : i64
@@ -40,9 +54,27 @@ func.func @cx_butterfly_q31(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
 // CHECK: arith.shli %{{.*}} : i64
 // CHECK: arith.ori %{{.*}} : i64
 
+// CHECK-LABEL: func.func @cx_butterfly_q31_raw_high(
+// Each cross term floors on its own: an i64 product, one arithmetic shift by
+// the storage width, then the narrowing that fixes the floor.
+// CHECK: arith.muli %{{.*}} : i64
+// CHECK: arith.shrsi %{{.*}} : i64
+// CHECK: arith.trunci %{{.*}} : i64 to i32
+// CHECK: arith.muli %{{.*}} : i64
+// CHECK: arith.shrsi %{{.*}} : i64
+// CHECK: arith.trunci %{{.*}} : i64 to i32
+// The combine is exact over the already-floored terms, and the left shift of
+// the product scale rides in the same carrier.
+// CHECK: arith.extsi %{{.*}} : i32 to i34
+// CHECK: arith.subi %{{.*}} : i34
+// CHECK: arith.addi %{{.*}} : i34
+// CHECK: arith.shli %{{.*}} : i34
+// CHECK: arith.trunci %{{.*}} : i34 to i32
+// CHECK-NOT: i128
+
 // Canonical-twiddle specialization is proven for packed Q15 only, so the same
 // opt-in flag must leave the Q31 general product path in place.
-// GENERAL-LABEL: func.func @cx_butterfly_q31
+// GENERAL-LABEL: func.func @cx_butterfly_q31(
 // GENERAL: arith.muli %{{.*}} : i128
 // GENERAL: arith.muli %{{.*}} : i128
 // GENERAL: arith.muli %{{.*}} : i128

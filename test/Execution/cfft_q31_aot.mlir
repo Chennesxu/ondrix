@@ -1,5 +1,5 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --expand-strided-metadata --lower-affine --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
-// RUN: FileCheck %s --input-file=%t.mlir --check-prefix=CARRIER
+// RUN: FileCheck %s --input-file=%t.mlir --check-prefix=CARRIER --implicit-check-not=i128 --implicit-check-not=ondrix. --implicit-check-not=ondsp.
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
 // RUN: cc %S/Inputs/cfft_q31_aot.c %t.o -o %t
@@ -7,22 +7,17 @@
 
 // Object-level differential gate for the packed-Q31 CFFT profile: extents 4,
 // 8, 16, and the maximum supported 64 in both directions plus the
-// forward/inverse composition, checked against an independent __int128
-// reference over full-scale rails and xorshift trials.
+// forward/inverse composition, checked against an independent reference over
+// full-scale rails and xorshift trials.
 
-// Structural pin only: the shared butterfly lowering must still hand this
-// profile the i128 carrier. It is NOT a necessity witness. Inside the CFFT
-// the twiddles are frozen unit-circle constants, so |br*wr - bi*wi| and
-// |br*wi + bi*wr| are bounded by 2^31 * max(|wr| + |wi|) = 0.7071 *
-// INT64_MAX: no CFFT input can make an i64 carrier wrap, and this corpus
-// passes unchanged with one. The wrapping-i64 carrier is refuted at the
-// operation level instead, by test/Execution/cx_butterfly_q31_aot.mlir,
-// where an arbitrary SSA twiddle reaches 2^63 — and that gate also states
-// why the refutation covers wrapping i64 alone, not every i64-based
-// implementation.
-// CARRIER: i128
-// CARRIER-NOT: ondrix.
-// CARRIER-NOT: ondsp.
+// The profile is the Q31 scalar target's equation, so no exact carrier for a
+// combined cross product exists anywhere in the transform: each term floors to
+// i32 inside its own i64 product and the stage combines in i34. The i128
+// carrier of the full-product selection must therefore be absent — that
+// selection keeps its own operation-level gate in
+// test/Execution/cx_butterfly_q31_aot.mlir, where an arbitrary SSA twiddle
+// reaches 2^63 and the wide carrier is load bearing.
+// CARRIER: i34
 
 func.func @cfft4_forward_q31(%input: tensor<4xi64>) -> tensor<4xi64>
     attributes {llvm.emit_c_interface} {
@@ -30,9 +25,9 @@ func.func @cfft4_forward_q31(%input: tensor<4xi64>) -> tensor<4xi64>
     direction = #ondrix.cfft_direction<forward>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<4xi64>) -> tensor<4xi64>
   return %result : tensor<4xi64>
 }
@@ -43,9 +38,9 @@ func.func @cfft4_inverse_q31(%input: tensor<4xi64>) -> tensor<4xi64>
     direction = #ondrix.cfft_direction<inverse>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<4xi64>) -> tensor<4xi64>
   return %result : tensor<4xi64>
 }
@@ -56,9 +51,9 @@ func.func @cfft8_forward_q31(%input: tensor<8xi64>) -> tensor<8xi64>
     direction = #ondrix.cfft_direction<forward>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<8xi64>) -> tensor<8xi64>
   return %result : tensor<8xi64>
 }
@@ -69,9 +64,9 @@ func.func @cfft8_inverse_q31(%input: tensor<8xi64>) -> tensor<8xi64>
     direction = #ondrix.cfft_direction<inverse>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<8xi64>) -> tensor<8xi64>
   return %result : tensor<8xi64>
 }
@@ -82,9 +77,9 @@ func.func @cfft16_forward_q31(%input: tensor<16xi64>) -> tensor<16xi64>
     direction = #ondrix.cfft_direction<forward>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<16xi64>) -> tensor<16xi64>
   return %result : tensor<16xi64>
 }
@@ -95,9 +90,9 @@ func.func @cfft16_inverse_q31(%input: tensor<16xi64>) -> tensor<16xi64>
     direction = #ondrix.cfft_direction<inverse>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<16xi64>) -> tensor<16xi64>
   return %result : tensor<16xi64>
 }
@@ -108,9 +103,9 @@ func.func @cfft64_forward_q31(%input: tensor<64xi64>) -> tensor<64xi64>
     direction = #ondrix.cfft_direction<forward>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<64xi64>) -> tensor<64xi64>
   return %result : tensor<64xi64>
 }
@@ -121,9 +116,9 @@ func.func @cfft64_inverse_q31(%input: tensor<64xi64>) -> tensor<64xi64>
     direction = #ondrix.cfft_direction<inverse>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<64xi64>) -> tensor<64xi64>
   return %result : tensor<64xi64>
 }
@@ -136,17 +131,17 @@ func.func @cfft8_round_trip_q31(%input: tensor<8xi64>) -> tensor<8xi64>
     direction = #ondrix.cfft_direction<forward>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<8xi64>) -> tensor<8xi64>
   %result = ondrix.cfft %spectrum {
     direction = #ondrix.cfft_direction<inverse>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<8xi64>) -> tensor<8xi64>
   return %result : tensor<8xi64>
 }

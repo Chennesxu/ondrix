@@ -336,7 +336,8 @@ def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
     * `packed_i32_imag_hi_real_lo`: signed Q31 components in an i64
       container, imaginary in bits 63:32 and real in bits 31:0.
 
-    The complex product `b*w` is evaluated as exact signed cross-products
+    `product` selects where the cross terms requantize. Under `full` the
+    complex product `b*w` is evaluated as exact signed cross-products
     wide enough to hold both `br*wr - bi*wi` and `br*wi + bi*wr` without
     wrapping for any operand values the profile admits. The imaginary term is
     the binding one: it reaches `2^63` at `b = w = (-2^31, -2^31)` in the Q31
@@ -346,16 +347,29 @@ def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
     subtractions form `a + b*w` and `a - b*w`; `output_scale` independently
     requantizes those components before packing.
 
+    Under `high_raw` each of the four cross terms requantizes FIRST, to the
+    arithmetic high half of its own `2W`-bit product, and the combine is
+    exact over those already-narrowed terms. That is a different equation,
+    not a shift variant of `full`: two independent floors do not compose into
+    one, so the two selections disagree by up to an LSB per component. It is
+    admitted only on an opted-in Q31 stage, whose scalar target selects that
+    half natively. The raw high half lands one fractional bit short of the
+    component position, so its `product_scale` carries `pre_shift_left = 1`
+    rather than a right shift.
+
     Both scaling boundaries explicitly apply left shift, signed right-shift
-    rounding, then destination wrap or saturation. Each profile is
-    deliberately closed to scalar or matching fixed Vector packed container
-    values, full products, a product shift of `storage width - 1`, and an
-    output shift of 0 or 1; each boundary independently declares
-    `nearest_even`, `toward_negative`, or `nearest_ties_positive` rounding
-    and wrap or saturating narrowing (the non-default modes are the packed
-    target inventory, so a target-directed stage is writable as the same
-    contract). Vector lanes are independent butterflies; the operation does
-    not reorder FFT stages or move either requantization boundary.
+    rounding, then destination wrap or saturation. The product boundary's
+    shift follows from the product selection alone: right by
+    `2F - (W - 1)` for a full product, left by one for the raw high half.
+    Each profile is otherwise deliberately closed to scalar or matching fixed
+    Vector packed container values and an output shift of 0 or 1. A closed
+    stage declares `nearest_even` rounding with saturating narrowing; the
+    packed 16-bit target inventory additionally admits `toward_negative` and
+    `nearest_ties_positive` and wrapping narrowing, so a target-directed
+    stage is writable as the same contract; a `high_raw` stage requires
+    `toward_negative` and saturation, the only rounding and overflow its
+    target performs. Vector lanes are independent butterflies; the operation
+    does not reorder FFT stages or move either requantization boundary.
 
     The optional `variant` selects the combine structure over the SAME
     requantized product `t`: `plain` (absent) forms `a +- t`; `cross` forms

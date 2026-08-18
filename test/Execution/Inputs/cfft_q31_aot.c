@@ -1,14 +1,14 @@
 /* Independent reference for the packed-Q31 radix-2 CFFT contract.
  *
- * Every intermediate here is __int128 because the contract says the products
- * are exact, not because this corpus can wrap an int64_t. Inside the CFFT the
- * twiddles are frozen unit-circle constants, so both cross sums are bounded
- * by 2^31 * max(|wr| + |wi|) = 0.7071 * INT64_MAX and no input reaches an i64
- * overflow. The wrapping-i64 carrier is refuted at the operation level
- * instead, where ondsp.cx_butterfly admits an arbitrary twiddle: see
- * test/Execution/Inputs/cx_butterfly_q31_aot.c. What this reference does
- * establish is the recursion, the packing, the staged scaling, and the
- * saturating requantization, all written from the contract rather than
+ * The profile under test is the Q31 scalar target's equation: every cross term
+ * is the raw high half of its own 32x32 product, so each carries its own floor
+ * and no intermediate here is wider than int64_t. That is what makes it a
+ * different equation from the full-product selection rather than a rescaling
+ * of it, and the full-product carrier is gated separately at the operation
+ * level, where ondsp.cx_butterfly admits an arbitrary twiddle: see
+ * test/Execution/Inputs/cx_butterfly_q31_aot.c. What this reference
+ * establishes is the recursion, the packing, the staged scaling, and the
+ * saturating floor requantization, all written from the contract rather than
  * shared with the compiler. */
 
 #include <inttypes.h>
@@ -95,28 +95,6 @@ static const struct Complex kInverseTwiddles64[32] = {
     {-1893911494, 1012316784}, {-1984016189, 821806413},  {-2055013723, 623381598},
     {-2106220352, 418953276},  {-2137142927, 210490206}};
 
-/* Nearest-even signed right shift with saturation into i32, evaluated on the
- * exact __int128 value. Floor division plus a remainder test is total: the
- * add-half-then-shift shortcut would overflow exactly at the saturating
- * boundaries this gate exists to exercise. */
-static int32_t requantize(__int128 value, unsigned shift) {
-  const __int128 divisor = (__int128)1 << shift;
-  __int128 quotient = value / divisor;
-  __int128 remainder = value % divisor;
-  if (remainder < 0) {
-    --quotient;
-    remainder += divisor;
-  }
-  const __int128 half = divisor >> 1;
-  if (remainder > half || (remainder == half && (quotient & 1)))
-    ++quotient;
-  if (quotient < INT32_MIN)
-    return INT32_MIN;
-  if (quotient > INT32_MAX)
-    return INT32_MAX;
-  return (int32_t)quotient;
-}
-
 static int32_t decodeSigned32(uint32_t bits) {
   int64_t value = bits;
   if ((bits & UINT32_C(0x80000000)) != 0)
@@ -139,19 +117,51 @@ static struct Complex unpack(int64_t value) {
                           decodeSigned32((uint32_t)((uint64_t)value >> 32))};
 }
 
+static int32_t saturate32(int64_t value) {
+  if (value < INT32_MIN)
+    return INT32_MIN;
+  if (value > INT32_MAX)
+    return INT32_MAX;
+  return (int32_t)value;
+}
+
+/* Arithmetic (floor) right shift written as division so the result does not
+ * depend on the host's shift of a negative value. */
+static int64_t floorShift(int64_t value, unsigned shift) {
+  const int64_t divisor = (int64_t)1 << shift;
+  int64_t quotient = value / divisor;
+  if (value % divisor != 0 && value < 0)
+    --quotient;
+  return quotient;
+}
+
+/* The raw high half of one 32x32 signed product: a floor at 32, which is the
+ * term the Q31 scalar target's multiply produces. */
+static int32_t rawHigh(int32_t lhs, int32_t rhs) {
+  return (int32_t)floorShift((int64_t)lhs * (int64_t)rhs, 32);
+}
+
+/* The raw-high profile: each cross term floors independently, the combine is
+ * exact over those terms, and the product scale's left shift returns them to
+ * the component fractional position. Two independent floors are not one floor
+ * of the sum, so this is not the full-product equation at a matching shift. */
 static void butterfly(int64_t aBits, int64_t bBits, struct Complex w, int64_t *out0,
                       int64_t *out1) {
   struct Complex a = unpack(aBits);
   struct Complex b = unpack(bBits);
-  int32_t tr = requantize((__int128)b.real * w.real - (__int128)b.imaginary * w.imaginary, 31);
-  int32_t ti = requantize((__int128)b.real * w.imaginary + (__int128)b.imaginary * w.real, 31);
+  int64_t productReal =
+      (int64_t)rawHigh(b.real, w.real) - (int64_t)rawHigh(b.imaginary, w.imaginary);
+  int64_t productImaginary =
+      (int64_t)rawHigh(b.real, w.imaginary) + (int64_t)rawHigh(b.imaginary, w.real);
+  int32_t tr = saturate32(productReal * 2);
+  int32_t ti = saturate32(productImaginary * 2);
   *out0 = pack((struct Complex){
-      requantize((__int128)a.real + tr, 1),
-      requantize((__int128)a.imaginary + ti, 1),
+      saturate32(floorShift((int64_t)a.real + tr, 1)),
+      saturate32(floorShift((int64_t)a.imaginary + ti, 1)),
   });
   *out1 = pack((struct Complex){
-      requantize((__int128)a.real - tr, 1),
-      requantize((__int128)a.imaginary - ti, 1),
+      saturate32(floorShift((int64_t)a.real - tr, 1)),
+      saturate32(floorShift((int64_t)a.imaginary - ti, 1)),
   });
 }
 

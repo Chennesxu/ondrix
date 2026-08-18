@@ -22,7 +22,13 @@
  * The lowering's i128 is the exact generic choice (the minimal exact width
  * is i65); a saturating-i64 lowering would be admissible only with its own
  * equivalence proof, which is a statement this gate documents rather than
- * decides. */
+ * decides.
+ *
+ * All of that concerns the full-product selection. The same corpus also runs
+ * the raw-high selection, whose terms never need a carrier past i64 because
+ * each one narrows before the combine — a different equation, so it carries
+ * its own reference plus a fused-floor alternative the discriminating cases
+ * must separate. */
 
 #include <inttypes.h>
 #include <limits.h>
@@ -35,6 +41,8 @@ extern int64_t cx_butterfly_q31_result(int64_t a, int64_t b, int64_t twiddle, in
 extern int64_t cx_butterfly_q31_vector_result(int64_t a0, int64_t a1, int64_t b0, int64_t b1,
                                               int64_t w0, int64_t w1, int32_t result_index,
                                               int32_t lane);
+extern int64_t cx_butterfly_q31_raw_high_result(int64_t a, int64_t b, int64_t twiddle,
+                                                int32_t result_index);
 
 struct Complex {
   int32_t real;
@@ -108,6 +116,68 @@ static void butterfly_reference(int64_t packed_a, int64_t packed_b, int64_t pack
   *out1 = pack(second);
 }
 
+static int32_t saturate32(__int128 value) {
+  if (value < INT32_MIN)
+    return INT32_MIN;
+  if (value > INT32_MAX)
+    return INT32_MAX;
+  return (int32_t)value;
+}
+
+static __int128 floorShift(__int128 value, unsigned shift) {
+  const __int128 divisor = (__int128)1 << shift;
+  __int128 quotient = value / divisor;
+  if (value % divisor != 0 && value < 0)
+    --quotient;
+  return quotient;
+}
+
+/* The raw-high profile: every cross term floors at the storage width on its
+ * own, the combine is exact over those terms, and the product scale's left
+ * shift returns them to the component fractional position. */
+static void rawHighButterflyReference(int64_t packed_a, int64_t packed_b, int64_t packed_twiddle,
+                                      int64_t *out0, int64_t *out1) {
+  struct Complex a = unpack(packed_a);
+  struct Complex b = unpack(packed_b);
+  struct Complex w = unpack(packed_twiddle);
+  int64_t term_real = (int64_t)floorShift((__int128)b.real * w.real, 32) -
+                      (int64_t)floorShift((__int128)b.imaginary * w.imaginary, 32);
+  int64_t term_imaginary = (int64_t)floorShift((__int128)b.real * w.imaginary, 32) +
+                           (int64_t)floorShift((__int128)b.imaginary * w.real, 32);
+  int32_t twiddled_real = saturate32((__int128)term_real * 2);
+  int32_t twiddled_imaginary = saturate32((__int128)term_imaginary * 2);
+  *out0 = pack((struct Complex){
+      saturate32(floorShift((__int128)a.real + twiddled_real, 1)),
+      saturate32(floorShift((__int128)a.imaginary + twiddled_imaginary, 1)),
+  });
+  *out1 = pack((struct Complex){
+      saturate32(floorShift((__int128)a.real - twiddled_real, 1)),
+      saturate32(floorShift((__int128)a.imaginary - twiddled_imaginary, 1)),
+  });
+}
+
+/* The plausible-but-wrong reading of the same profile: one floor of the exact
+ * combined cross sum instead of one floor per term. It lands at the same
+ * fractional position, so only the corpus can tell the two apart. */
+static void fusedFloorButterflyReference(int64_t packed_a, int64_t packed_b, int64_t packed_twiddle,
+                                         int64_t *out0, int64_t *out1) {
+  struct Complex a = unpack(packed_a);
+  struct Complex b = unpack(packed_b);
+  struct Complex w = unpack(packed_twiddle);
+  int32_t twiddled_real =
+      saturate32(floorShift((__int128)b.real * w.real - (__int128)b.imaginary * w.imaginary, 31));
+  int32_t twiddled_imaginary =
+      saturate32(floorShift((__int128)b.real * w.imaginary + (__int128)b.imaginary * w.real, 31));
+  *out0 = pack((struct Complex){
+      saturate32(floorShift((__int128)a.real + twiddled_real, 1)),
+      saturate32(floorShift((__int128)a.imaginary + twiddled_imaginary, 1)),
+  });
+  *out1 = pack((struct Complex){
+      saturate32(floorShift((__int128)a.real - twiddled_real, 1)),
+      saturate32(floorShift((__int128)a.imaginary - twiddled_imaginary, 1)),
+  });
+}
+
 static uint32_t nextState(uint32_t state) {
   state ^= state << 13;
   state ^= state >> 17;
@@ -147,6 +217,41 @@ static int check(const struct Case *test) {
             "%s: expected (%016" PRIx64 ", %016" PRIx64 "), got (%016" PRIx64 ", %016" PRIx64 ")\n",
             test->name, (uint64_t)expected0, (uint64_t)expected1, (uint64_t)actual0,
             (uint64_t)actual1);
+    return 1;
+  }
+  return 0;
+}
+
+static int checkRawHigh(const struct Case *test) {
+  int64_t a = pack(test->a);
+  int64_t b = pack(test->b);
+  int64_t twiddle = pack(test->twiddle);
+  int64_t expected0, expected1;
+  rawHighButterflyReference(a, b, twiddle, &expected0, &expected1);
+  int64_t actual0 = cx_butterfly_q31_raw_high_result(a, b, twiddle, 0);
+  int64_t actual1 = cx_butterfly_q31_raw_high_result(a, b, twiddle, 1);
+  if (actual0 != expected0 || actual1 != expected1) {
+    fprintf(stderr,
+            "raw-high %s: expected (%016" PRIx64 ", %016" PRIx64 "), got (%016" PRIx64
+            ", %016" PRIx64 ")\n",
+            test->name, (uint64_t)expected0, (uint64_t)expected1, (uint64_t)actual0,
+            (uint64_t)actual1);
+    return 1;
+  }
+  return 0;
+}
+
+/* A corpus that cannot separate the per-term floors from one fused floor would
+ * pass under either reading, so the discriminator is checked, not asserted. */
+static int checkRawHighDiscriminates(const struct Case *test) {
+  int64_t a = pack(test->a);
+  int64_t b = pack(test->b);
+  int64_t twiddle = pack(test->twiddle);
+  int64_t perTerm0, perTerm1, fused0, fused1;
+  rawHighButterflyReference(a, b, twiddle, &perTerm0, &perTerm1);
+  fusedFloorButterflyReference(a, b, twiddle, &fused0, &fused1);
+  if (perTerm0 == fused0 && perTerm1 == fused1) {
+    fprintf(stderr, "raw-high discriminator %s no longer separates the fused floor\n", test->name);
     return 1;
   }
   return 0;
@@ -226,16 +331,28 @@ int main(void) {
       /* Saturating rails through both boundaries. */
       {"rail-add", {INT32_MAX, INT32_MAX}, {INT32_MAX, INT32_MAX}, {INT32_MAX, 0}},
       {"rail-subtract", {INT32_MIN, INT32_MIN}, {INT32_MAX, INT32_MAX}, {INT32_MAX, 0}},
+      /* Both raw-high floors land on -1 here, where one floor of their exact
+       * sum lands on -1 as well: 2 * (-1 + -1) is not floor(-2 / 2^31). */
+      {"raw-high-per-term-floors", {1, 1}, {1, 1}, {-1, -1}},
+      /* One term floors and the other is exact, which separates the per-term
+       * reading from the fused one on the real component alone. */
+      {"raw-high-single-term-floor", {1, 0}, {1, 0}, {-1, 0}},
   };
 
   int failed = 0;
   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
     failed |= check(&cases[i]);
 
+  /* The raw-high selection over the same corpus, with its own reference. */
+  for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+    failed |= checkRawHigh(&cases[i]);
+
   /* The Vector surface, on the hardest directed pairs in both lane orders:
    * the carrier corner in one lane against a tie in the other, then the
    * saturating rails against each other. */
   const unsigned caseCount = sizeof(cases) / sizeof(cases[0]);
+  failed |= checkRawHighDiscriminates(findCase(cases, caseCount, "raw-high-per-term-floors"));
+  failed |= checkRawHighDiscriminates(findCase(cases, caseCount, "raw-high-single-term-floor"));
   const struct Case *corner = findCase(cases, caseCount, "wrapping-i64-refutation-corner");
   const struct Case *tie = findCase(cases, caseCount, "product-tie-even-parities");
   const struct Case *railAdd = findCase(cases, caseCount, "rail-add");
@@ -260,6 +377,7 @@ int main(void) {
     snprintf(name, sizeof(name), "trial %u", trial);
     struct Case test = {name, operand[0], operand[1], operand[2]};
     failed |= check(&test);
+    failed |= checkRawHigh(&test);
     if (trial & 1) {
       char vectorName[40];
       snprintf(vectorName, sizeof(vectorName), "vector trials %u|%u", trial - 1, trial);

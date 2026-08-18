@@ -74,30 +74,48 @@ LogicalResult verifyExecutableFpFormat(Operation *op, FpAttr numeric, StringRef 
   return success();
 }
 
-static LogicalResult verifyButterflyScale(Operation *op, ScaleAttr scale, unsigned minRightShift,
-                                          unsigned maxRightShift, unsigned storageWidth,
-                                          StringRef name, bool targetInventory) {
-  if (scale.getPreShiftLeft() != 0 || scale.getPostShiftRight() < minRightShift ||
+// Which rounding and overflow inventory one butterfly boundary may declare.
+// `Closed` is the portable baseline; the other two are the proven target
+// profiles, the packed 16-bit unit and the Q31 scalar raw-high path.
+enum class ButterflyBoundaryPolicy { Closed, PackedInventory, RawHighFloor };
+
+static LogicalResult verifyButterflyScale(Operation *op, ScaleAttr scale, unsigned preShiftLeft,
+                                          unsigned minRightShift, unsigned maxRightShift,
+                                          unsigned storageWidth, StringRef name,
+                                          ButterflyBoundaryPolicy policy) {
+  if (scale.getPreShiftLeft() != preShiftLeft || scale.getPostShiftRight() < minRightShift ||
       scale.getPostShiftRight() > maxRightShift) {
-    auto diagnostic = op->emitOpError()
-                      << name
-                      << " requires pre_shift_left=0 and post_shift_right=" << minRightShift;
+    auto diagnostic = op->emitOpError() << name << " requires pre_shift_left=" << preShiftLeft
+                                        << " and post_shift_right=" << minRightShift;
     if (maxRightShift != minRightShift)
       diagnostic << " or " << maxRightShift;
     return diagnostic;
   }
   RoundingMode rounding = scale.getRounding();
-  if (targetInventory) {
+  switch (policy) {
+  case ButterflyBoundaryPolicy::PackedInventory:
     if (rounding != RoundingMode::NearestEven && rounding != RoundingMode::TowardNegative &&
         rounding != RoundingMode::NearestTiesPositive)
       return op->emitOpError() << name
                                << " admits nearest_even, toward_negative, or "
                                   "nearest_ties_positive rounding";
-  } else {
+    break;
+  case ButterflyBoundaryPolicy::RawHighFloor:
+    // The scalar Q31 target selects the raw high half with one arithmetic
+    // shift and combines through a saturating scaled add/sub, so floor is the
+    // only rounding it performs and every boundary saturates.
+    if (rounding != RoundingMode::TowardNegative)
+      return op->emitOpError() << name
+                               << " requires toward_negative rounding under a raw-high product";
+    if (scale.getOverflow() != OverflowMode::Saturate)
+      return op->emitOpError() << name << " requires saturating overflow";
+    break;
+  case ButterflyBoundaryPolicy::Closed:
     if (rounding != RoundingMode::NearestEven)
       return op->emitOpError() << name << " requires nearest_even rounding";
     if (scale.getOverflow() != OverflowMode::Saturate)
       return op->emitOpError() << name << " requires saturating overflow";
+    break;
   }
   auto destination = dyn_cast<IntegerType>(scale.getSaturateTo());
   if (!destination || !destination.isSignless() || destination.getWidth() != storageWidth)
@@ -134,20 +152,43 @@ LogicalResult verifyPackedButterflyPolicy(Operation *op, CxLayoutAttr layout, At
       fixed.getFrac() != storageWidth - 1 || fixed.getSignedness() != Signedness::Signed)
     return op->emitOpError() << "packed butterfly requires signed Q" << (storageWidth - 1)
                              << " numeric semantics for this layout";
-  if (!isFullProduct(product))
-    return op->emitOpError("packed butterfly requires product = #ondsp.product<full>");
+  bool rawHigh = product.getSelection() == ProductSelection::HighRaw;
+  if (!isFullProduct(product) && !rawHigh)
+    return op->emitOpError("packed butterfly requires product = #ondsp.product<full> or "
+                           "#ondsp.product<high_raw>");
+  // The raw-high term is one target's native product selection, not a portable
+  // alternative: it requantizes every cross term BEFORE the combine, so it is
+  // admitted only on the profile whose target does that. It needs no inventory
+  // opt-in because it narrows the closed policy rather than widening it.
+  if (rawHigh && storageWidth != 32)
+    return op->emitOpError("the raw-high product term is admitted only on the "
+                           "packed_i32_imag_hi_real_lo profile, whose scalar target selects that "
+                           "half natively");
+  FailureOr<ProductSemantics> semantics = inferProductSemantics(op, fixed, product);
+  if (failed(semantics))
+    return failure();
   // One product requantization per product term and one output scale per
   // stage: both boundaries are declared, never folded into each other. The
-  // widened rounding/overflow/shift inventory is admitted only where the
-  // caller opted in AND the profile is the 16-bit packed target's; the Q31
-  // profile has no packed target and keeps the closed policies.
+  // product boundary returns the term to the component fractional position,
+  // shifting right for a full product and left for the raw high half, which
+  // lands exactly one bit short of it.
+  unsigned componentFrac = storageWidth - 1;
+  unsigned productPreShift = componentFrac > semantics->frac ? componentFrac - semantics->frac : 0;
+  unsigned productRightShift =
+      semantics->frac > componentFrac ? semantics->frac - componentFrac : 0;
+  // The widened inventory is admitted only where the caller opted in AND the
+  // profile is a target's: the 16-bit packed unit, or the Q31 raw-high scalar
+  // path. A full-product Q31 stage has no target and keeps the closed policy.
   bool widened = targetInventory && storageWidth == 16;
-  unsigned minOutputShift = widened ? 0 : 1;
-  if (failed(verifyButterflyScale(op, productScale, storageWidth - 1, storageWidth - 1,
-                                  storageWidth, "product_scale", widened)))
+  ButterflyBoundaryPolicy policy = rawHigh   ? ButterflyBoundaryPolicy::RawHighFloor
+                                   : widened ? ButterflyBoundaryPolicy::PackedInventory
+                                             : ButterflyBoundaryPolicy::Closed;
+  unsigned minOutputShift = policy == ButterflyBoundaryPolicy::Closed ? 1 : 0;
+  if (failed(verifyButterflyScale(op, productScale, productPreShift, productRightShift,
+                                  productRightShift, storageWidth, "product_scale", policy)))
     return failure();
-  return verifyButterflyScale(op, outputScale, minOutputShift, 1, storageWidth, "output_scale",
-                              widened);
+  return verifyButterflyScale(op, outputScale, 0, minOutputShift, 1, storageWidth, "output_scale",
+                              policy);
 }
 
 FailureOr<ProductSemantics> inferProductSemantics(Operation *op, FixedAttr numeric,

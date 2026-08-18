@@ -34,6 +34,25 @@ func.func @cx_butterfly_q31_result(
   return %result : i64
 }
 
+// The other admitted Q31 product selection, the scalar target's raw-high term.
+// Its whole point is that the four cross terms floor independently, so the
+// harness carries a fused-floor alternative and refuses to run unless the
+// named discriminator separates the two.
+func.func @cx_butterfly_q31_raw_high_result(
+    %a: i64, %b: i64, %twiddle: i64, %result_index: i32) -> i64 {
+  %out0, %out1 = ondsp.cx_butterfly %a, %b, %twiddle {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+  } : (i64, i64, i64) -> (i64, i64)
+  %zero = arith.constant 0 : i32
+  %select_out0 = arith.cmpi eq, %result_index, %zero : i32
+  %result = arith.select %select_out0, %out0, %out1 : i64
+  return %result : i64
+}
+
 // The verifier admits the same profile elementwise over a fixed Vector
 // carrier, so that admitted surface is gated here as well rather than left
 // verifier-only. Each lane must be a complete independent butterfly: the

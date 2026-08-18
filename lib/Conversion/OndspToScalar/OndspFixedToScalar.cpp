@@ -595,24 +595,49 @@ public:
       }
     }
     if (!specialized) {
-      // Exact carrier for both cross sums: the binding imaginary term reaches
-      // 2^63, so Q15 needs 33 bits and Q31 needs 65. i128 is the generic
-      // choice the backend chain already handles, not a minimality claim.
-      Type productType =
-          getIntegerTypeLike(bReal.getType(), storageWidth == 16 ? 33 : 128, rewriter);
-      auto extendProductOperand = [&](Value value) {
-        return rewriter.create<arith::ExtSIOp>(loc, productType, value);
-      };
-      Value br = extendProductOperand(bReal);
-      Value bi = extendProductOperand(bImaginary);
-      Value wr = extendProductOperand(wReal);
-      Value wi = extendProductOperand(wImaginary);
-      Value brwr = rewriter.create<arith::MulIOp>(loc, br, wr);
-      Value biwi = rewriter.create<arith::MulIOp>(loc, bi, wi);
-      Value brwi = rewriter.create<arith::MulIOp>(loc, br, wi);
-      Value biwr = rewriter.create<arith::MulIOp>(loc, bi, wr);
-      Value productReal = rewriter.create<arith::SubIOp>(loc, brwr, biwi);
-      Value productImaginary = rewriter.create<arith::AddIOp>(loc, brwi, biwr);
+      auto fixed = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+      FailureOr<ondrix::ondsp::ProductSemantics> semantics =
+          ondrix::ondsp::inferProductSemantics(op, fixed, op.getProduct());
+      if (failed(semantics))
+        return failure();
+      Value productReal;
+      Value productImaginary;
+      if (semantics->selection == ondrix::ondsp::ProductSelection::HighRaw) {
+        // The raw-high selection requantizes every cross term BEFORE the
+        // combine, so each term carries its own floor; the carrier then holds
+        // their exact sum plus the product scale's left shift.
+        Value brwr = lowerSignedProduct(loc, bReal, wReal, fixed, *semantics, rewriter);
+        Value biwi = lowerSignedProduct(loc, bImaginary, wImaginary, fixed, *semantics, rewriter);
+        Value brwi = lowerSignedProduct(loc, bReal, wImaginary, fixed, *semantics, rewriter);
+        Value biwr = lowerSignedProduct(loc, bImaginary, wReal, fixed, *semantics, rewriter);
+        Type termSumType = getIntegerTypeLike(
+            bReal.getType(), semantics->rawWidth + 1 + op.getProductScale().getPreShiftLeft(),
+            rewriter);
+        auto extendTerm = [&](Value value) {
+          return rewriter.create<arith::ExtSIOp>(loc, termSumType, value);
+        };
+        productReal = rewriter.create<arith::SubIOp>(loc, extendTerm(brwr), extendTerm(biwi));
+        productImaginary = rewriter.create<arith::AddIOp>(loc, extendTerm(brwi), extendTerm(biwr));
+      } else {
+        // Exact carrier for both cross sums: the binding imaginary term reaches
+        // 2^63, so Q15 needs 33 bits and Q31 needs 65. i128 is the generic
+        // choice the backend chain already handles, not a minimality claim.
+        Type productType =
+            getIntegerTypeLike(bReal.getType(), storageWidth == 16 ? 33 : 128, rewriter);
+        auto extendProductOperand = [&](Value value) {
+          return rewriter.create<arith::ExtSIOp>(loc, productType, value);
+        };
+        Value br = extendProductOperand(bReal);
+        Value bi = extendProductOperand(bImaginary);
+        Value wr = extendProductOperand(wReal);
+        Value wi = extendProductOperand(wImaginary);
+        Value brwr = rewriter.create<arith::MulIOp>(loc, br, wr);
+        Value biwi = rewriter.create<arith::MulIOp>(loc, bi, wi);
+        Value brwi = rewriter.create<arith::MulIOp>(loc, br, wi);
+        Value biwr = rewriter.create<arith::MulIOp>(loc, bi, wr);
+        productReal = rewriter.create<arith::SubIOp>(loc, brwr, biwi);
+        productImaginary = rewriter.create<arith::AddIOp>(loc, brwi, biwr);
+      }
       twiddledReal = requantizeSignedValue(loc, productReal, op.getProductScale(), rewriter);
       twiddledImaginary =
           requantizeSignedValue(loc, productImaginary, op.getProductScale(), rewriter);

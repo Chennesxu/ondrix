@@ -14,8 +14,10 @@ func.func @rejects_non_q15_numeric(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
 
 // -----
 
-func.func @rejects_raw_high_product(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
-  // expected-error@+1 {{packed butterfly requires product = #ondsp.product<full>}}
+// The packed 16-bit target computes exact cross products, so the raw-high term
+// stays closed on its profile even though the Q31 profile now admits it.
+func.func @rejects_raw_high_product_on_q15(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
+  // expected-error@+1 {{the raw-high product term is admitted only on the packed_i32_imag_hi_real_lo profile}}
   %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
     layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
@@ -24,6 +26,54 @@ func.func @rejects_raw_high_product(%a: i32, %b: i32, %tw: i32) -> (i32, i32) {
     output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
   } : (i32, i32, i32) -> (i32, i32)
   return %0, %1 : i32, i32
+}
+
+// -----
+
+// The raw high half lands one fractional bit short of the component position,
+// so a right-shifting product scale would be requantizing the wrong term.
+func.func @rejects_raw_high_right_shift(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
+  // expected-error@+1 {{product_scale requires pre_shift_left=1 and post_shift_right=0}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+  } : (i64, i64, i64) -> (i64, i64)
+  return %0, %1 : i64, i64
+}
+
+// -----
+
+// The Q31 scalar target's scaled add/sub shifts arithmetically and never
+// rounds, so a nearest mode is not writable at either boundary.
+func.func @rejects_raw_high_nearest_rounding(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
+  // expected-error@+1 {{output_scale requires toward_negative rounding under a raw-high product}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+  } : (i64, i64, i64) -> (i64, i64)
+  return %0, %1 : i64, i64
+}
+
+// -----
+
+// Both raw-high boundaries saturate: sat32 is what the target's readout and its
+// scaled add/sub both perform, and a wrapping stage is not that equation.
+func.func @rejects_raw_high_wrapping(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
+  // expected-error@+1 {{product_scale requires saturating overflow}}
+  %0, %1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = wrap, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+  } : (i64, i64, i64) -> (i64, i64)
+  return %0, %1 : i64, i64
 }
 
 // -----

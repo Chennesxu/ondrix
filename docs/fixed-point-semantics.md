@@ -37,8 +37,10 @@ high_raw.frac  = 2F - W
 `high_raw` is an arithmetic raw-bit selection. It does not imply doubling,
 rounding, saturation, or conversion back to the operand fractional position.
 For signed Q31 (`W = 32`, `F = 31`), `high_raw` therefore produces a Q30 term.
-A fractional or doubled-high multiply requires a separate explicit policy and
-is not currently part of the public contract.
+A fractional or doubled-high multiply is not a product selection of its own; it
+is composed from one, by a scale that declares the missing shift. The packed
+Q31 butterfly composes exactly that: `high_raw` terms and a `product_scale`
+carrying `pre_shift_left = 1`.
 
 The executable Q15 path selects `full`, producing a signed 32-bit raw value
 with `frac = 30`. No rounding or saturation occurs during multiplication.
@@ -262,6 +264,9 @@ scalar tail.
   path.
 - Q31 `high_raw` computes the exact signed i64 product before selecting the
   arithmetic high i32 half; no implicit fractional doubling is introduced.
+- Where a consumer combines several `high_raw` terms, each term narrows before
+  the combine. That is a different equation from narrowing the combined sum,
+  because independent floors do not compose into one.
 - Generic LLVM Vector lowering currently supports only the default address
   space. Other memory spaces remain on the scalar path until a target-specific
   Vector mapping exists; invalid integer spaces fail before LLVM lowering.

@@ -17,6 +17,23 @@ func.func @cx_butterfly_q31(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
   return %o0, %o1 : i64, i64
 }
 
+// The raw-high term is the Q31 scalar target's own product selection: every
+// cross term narrows before the combine, and the product scale shifts LEFT by
+// one because the raw high half lands a bit short of the component position.
+func.func @cx_butterfly_q31_raw_high(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
+  // CHECK: ondsp.cx_butterfly
+  // CHECK-SAME: product = #ondsp.product<high_raw>
+  // CHECK-SAME: product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+  %o0, %o1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+  } : (i64, i64, i64) -> (i64, i64)
+  return %o0, %o1 : i64, i64
+}
+
 // The Q31 profile admits the same fixed Vector lane batching as Q15; only the
 // container width differs.
 func.func @cx_butterfly_q31_vector(
