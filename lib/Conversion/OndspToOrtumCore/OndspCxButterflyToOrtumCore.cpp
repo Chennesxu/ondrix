@@ -230,8 +230,14 @@ private:
                                                     uint64_t(outputShift))
           .getResult();
     };
-    op.getOut0().replaceAllUsesWith(pack(stage(ar, tr, false), stage(ai, ti, false)));
-    op.getOut1().replaceAllUsesWith(pack(stage(ar, tr, true), stage(ai, ti, true)));
+    // Sequenced deliberately: two calls inside one argument list would emit in
+    // an order the language does not fix.
+    Value sumReal = stage(ar, tr, /*subtract=*/false);
+    Value sumImaginary = stage(ai, ti, /*subtract=*/false);
+    Value differenceReal = stage(ar, tr, /*subtract=*/true);
+    Value differenceImaginary = stage(ai, ti, /*subtract=*/true);
+    op.getOut0().replaceAllUsesWith(pack(sumReal, sumImaginary));
+    op.getOut1().replaceAllUsesWith(pack(differenceReal, differenceImaginary));
     op.erase();
     return true;
   }
