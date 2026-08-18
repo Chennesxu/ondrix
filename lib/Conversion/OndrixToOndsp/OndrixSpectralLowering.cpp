@@ -424,39 +424,37 @@ static Value lowerPackedQ15CfftLoops(Location loc, Value input, int64_t extent,
           builder.create<scf::YieldOp>(loc, butterflyLoop.getResult(0));
           return;
         }
-        // Paired form as two half-range loops so each body carries one
-        // fixed variant and stays branch-free; both legs of a pair read
-        // twiddles[H/2 + j]. Only H >= 4 reaches here, so each range is
-        // exactly half of the stage's legs.
+        // Paired form as group-nested unit-stride loops: each inner body
+        // carries one fixed variant and walks its data and twiddle streams
+        // at stride one, and the group-major order matches the flat legs
+        // it replaces element for element. Both legs of a pair read
+        // twiddles[H/2 + j]; only H >= 4 reaches here.
         Value halfHalf = builder.create<arith::ShRUIOp>(loc, half, one);
-        Value totalPlain = builder.create<arith::ShRUIOp>(loc, halfExtent, one);
-        Value totalCross = totalPlain;
-        auto plainLoop = builder.create<scf::ForOp>(
-            loc, zero, totalPlain, one, ValueRange{stageArgs.front()},
-            [&](OpBuilder &builder, Location loc, Value leg, ValueRange legArgs) {
-              Value group = builder.create<arith::DivUIOp>(loc, leg, halfHalf);
-              Value j = builder.create<arith::RemUIOp>(loc, leg, halfHalf);
-              Value base = builder.create<arith::MulIOp>(loc, group, doubled);
-              Value upper = builder.create<arith::AddIOp>(loc, base, j);
-              Value twiddleIndex = builder.create<arith::AddIOp>(loc, halfHalf, j);
-              builder.create<scf::YieldOp>(loc, buildLeg(builder, loc, legArgs.front(), half, upper,
-                                                         twiddleIndex,
-                                                         ondrix::ondsp::CxButterflyVariant::Plain));
-            });
-        auto crossLoop = builder.create<scf::ForOp>(
-            loc, zero, totalCross, one, ValueRange{plainLoop.getResult(0)},
-            [&](OpBuilder &builder, Location loc, Value leg, ValueRange legArgs) {
-              Value group = builder.create<arith::DivUIOp>(loc, leg, halfHalf);
-              Value j = builder.create<arith::RemUIOp>(loc, leg, halfHalf);
-              Value base = builder.create<arith::MulIOp>(loc, group, doubled);
-              Value phase = builder.create<arith::AddIOp>(loc, halfHalf, j);
-              Value upper = builder.create<arith::AddIOp>(loc, base, phase);
-              Value twiddleIndex = builder.create<arith::AddIOp>(loc, halfHalf, j);
-              builder.create<scf::YieldOp>(loc, buildLeg(builder, loc, legArgs.front(), half, upper,
-                                                         twiddleIndex,
-                                                         ondrix::ondsp::CxButterflyVariant::Cross));
-            });
-        builder.create<scf::YieldOp>(loc, crossLoop.getResult(0));
+        Value groups = builder.create<arith::DivUIOp>(loc, extentValue, doubled);
+        auto legLoops = [&](Value data, Value phaseBase,
+                            ondrix::ondsp::CxButterflyVariant variant) -> Value {
+          auto groupLoop = builder.create<scf::ForOp>(
+              loc, zero, groups, one, ValueRange{data},
+              [&](OpBuilder &builder, Location loc, Value group, ValueRange groupArgs) {
+                Value base = builder.create<arith::MulIOp>(loc, group, doubled);
+                Value start = builder.create<arith::AddIOp>(loc, base, phaseBase);
+                auto innerLoop = builder.create<scf::ForOp>(
+                    loc, zero, halfHalf, one, ValueRange{groupArgs.front()},
+                    [&](OpBuilder &builder, Location loc, Value j, ValueRange innerArgs) {
+                      Value upper = builder.create<arith::AddIOp>(loc, start, j);
+                      Value twiddleIndex = builder.create<arith::AddIOp>(loc, halfHalf, j);
+                      builder.create<scf::YieldOp>(loc,
+                                                   buildLeg(builder, loc, innerArgs.front(), half,
+                                                            upper, twiddleIndex, variant));
+                    });
+                builder.create<scf::YieldOp>(loc, innerLoop.getResult(0));
+              });
+          return groupLoop.getResult(0);
+        };
+        Value afterPlain =
+            legLoops(stageArgs.front(), zero, ondrix::ondsp::CxButterflyVariant::Plain);
+        Value afterCross = legLoops(afterPlain, halfHalf, ondrix::ondsp::CxButterflyVariant::Cross);
+        builder.create<scf::YieldOp>(loc, afterCross);
       });
   return stageLoop.getResult(0);
 }
