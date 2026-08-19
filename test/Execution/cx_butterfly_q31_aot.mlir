@@ -82,3 +82,29 @@ func.func @cx_butterfly_q31_vector_result(
   %result = vector.extractelement %chosen[%lane : i32] : vector<2xi64>
   return %result : i64
 }
+
+// The raw-high selection over the same Vector carrier, so the batched form the
+// Q31 CFFT Vector mode emits is gated per lane rather than left verifier-only.
+func.func @cx_butterfly_q31_raw_high_vector_result(
+    %a0: i64, %a1: i64, %b0: i64, %b1: i64, %w0: i64, %w1: i64,
+    %result_index: i32, %lane: i32) -> i64 {
+  %seed = arith.constant dense<0> : vector<2xi64>
+  %a_low = vector.insert %a0, %seed [0] : i64 into vector<2xi64>
+  %a = vector.insert %a1, %a_low [1] : i64 into vector<2xi64>
+  %b_low = vector.insert %b0, %seed [0] : i64 into vector<2xi64>
+  %b = vector.insert %b1, %b_low [1] : i64 into vector<2xi64>
+  %w_low = vector.insert %w0, %seed [0] : i64 into vector<2xi64>
+  %w = vector.insert %w1, %w_low [1] : i64 into vector<2xi64>
+  %out0, %out1 = ondsp.cx_butterfly %a, %b, %w {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+  } : (vector<2xi64>, vector<2xi64>, vector<2xi64>) -> (vector<2xi64>, vector<2xi64>)
+  %zero = arith.constant 0 : i32
+  %select_out0 = arith.cmpi eq, %result_index, %zero : i32
+  %chosen = arith.select %select_out0, %out0, %out1 : vector<2xi64>
+  %result = vector.extractelement %chosen[%lane : i32] : vector<2xi64>
+  return %result : i64
+}

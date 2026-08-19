@@ -43,6 +43,9 @@ extern int64_t cx_butterfly_q31_vector_result(int64_t a0, int64_t a1, int64_t b0
                                               int32_t lane);
 extern int64_t cx_butterfly_q31_raw_high_result(int64_t a, int64_t b, int64_t twiddle,
                                                 int32_t result_index);
+extern int64_t cx_butterfly_q31_raw_high_vector_result(int64_t a0, int64_t a1, int64_t b0,
+                                                       int64_t b1, int64_t w0, int64_t w1,
+                                                       int32_t result_index, int32_t lane);
 
 struct Complex {
   int32_t real;
@@ -270,18 +273,21 @@ static const struct Case *findCase(const struct Case *cases, unsigned count, con
  * so a lowering that shared a carrier across lanes, swapped lanes, or let one
  * lane's saturation leak into the other fails on the same directed data the
  * scalar corpus decides with. */
-static int checkVectorPair(const char *name, const struct Case *lane0, const struct Case *lane1) {
+static int checkVectorPairAgainst(
+    const char *name, const struct Case *lane0, const struct Case *lane1,
+    void (*reference)(int64_t, int64_t, int64_t, int64_t *, int64_t *),
+    int64_t (*subject)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int32_t, int32_t)) {
   const struct Case *lanes[2] = {lane0, lane1};
   int failed = 0;
   for (int32_t result_index = 0; result_index < 2; ++result_index) {
     for (int32_t lane = 0; lane < 2; ++lane) {
       int64_t expected0, expected1;
-      butterfly_reference(pack(lanes[lane]->a), pack(lanes[lane]->b), pack(lanes[lane]->twiddle),
-                          &expected0, &expected1);
+      reference(pack(lanes[lane]->a), pack(lanes[lane]->b), pack(lanes[lane]->twiddle), &expected0,
+                &expected1);
       int64_t expected = result_index == 0 ? expected0 : expected1;
-      int64_t actual = cx_butterfly_q31_vector_result(
-          pack(lanes[0]->a), pack(lanes[1]->a), pack(lanes[0]->b), pack(lanes[1]->b),
-          pack(lanes[0]->twiddle), pack(lanes[1]->twiddle), result_index, lane);
+      int64_t actual =
+          subject(pack(lanes[0]->a), pack(lanes[1]->a), pack(lanes[0]->b), pack(lanes[1]->b),
+                  pack(lanes[0]->twiddle), pack(lanes[1]->twiddle), result_index, lane);
       if (actual != expected) {
         fprintf(stderr,
                 "%s lane %" PRId32 " out%" PRId32 ": expected %016" PRIx64 ", got %016" PRIx64 "\n",
@@ -291,6 +297,17 @@ static int checkVectorPair(const char *name, const struct Case *lane0, const str
     }
   }
   return failed;
+}
+
+static int checkVectorPair(const char *name, const struct Case *lane0, const struct Case *lane1) {
+  return checkVectorPairAgainst(name, lane0, lane1, butterfly_reference,
+                                cx_butterfly_q31_vector_result);
+}
+
+static int checkRawHighVectorPair(const char *name, const struct Case *lane0,
+                                  const struct Case *lane1) {
+  return checkVectorPairAgainst(name, lane0, lane1, rawHighButterflyReference,
+                                cx_butterfly_q31_raw_high_vector_result);
 }
 
 int main(void) {
@@ -361,6 +378,16 @@ int main(void) {
   failed |= checkVectorPair("vector tie|corner", tie, corner);
   failed |= checkVectorPair("vector rails", railAdd, railSubtract);
 
+  /* The raw-high Vector surface, pairing the two floor discriminators in both
+   * lane orders so a lane swap or a shared floor could not pass, then the same
+   * saturating rails. */
+  const struct Case *perTermFloors = findCase(cases, caseCount, "raw-high-per-term-floors");
+  const struct Case *singleTermFloor = findCase(cases, caseCount, "raw-high-single-term-floor");
+  failed |= checkRawHighVectorPair("raw-high vector floors", perTermFloors, singleTermFloor);
+  failed |=
+      checkRawHighVectorPair("raw-high vector floors swapped", singleTermFloor, perTermFloors);
+  failed |= checkRawHighVectorPair("raw-high vector rails", railAdd, railSubtract);
+
   /* Random breadth over the full packed domain, including arbitrary twiddles
    * no CFFT stage would ever produce. */
   uint32_t state = 0x5bd1e995u;
@@ -379,9 +406,11 @@ int main(void) {
     failed |= check(&test);
     failed |= checkRawHigh(&test);
     if (trial & 1) {
-      char vectorName[40];
+      char vectorName[48];
       snprintf(vectorName, sizeof(vectorName), "vector trials %u|%u", trial - 1, trial);
       failed |= checkVectorPair(vectorName, &previous, &test);
+      snprintf(vectorName, sizeof(vectorName), "raw-high vector trials %u|%u", trial - 1, trial);
+      failed |= checkRawHighVectorPair(vectorName, &previous, &test);
     }
     previous = test;
     previous.name = "previous";

@@ -18,11 +18,20 @@
 // RUN: cc %S/Inputs/cfft_q31_aot.c %t.target.o -o %t.target.bin
 // RUN: %t.target.bin
 
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="vectorize-static-cfft" --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --expand-strided-metadata --lower-affine --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.vector.mlir
+// RUN: FileCheck %s --input-file=%t.vector.mlir --check-prefix=CARRIER --implicit-check-not=i128 --implicit-check-not=ondrix. --implicit-check-not=ondsp.
+// RUN: ondrix-translate %t.vector.mlir --mlir-to-llvmir > %t.vector.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.vector.ll -o %t.vector.o
+// RUN: cc %S/Inputs/cfft_q31_aot.c %t.vector.o -o %t.vector
+// RUN: %t.vector
+
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=SELECT
 
 // The .loops pipeline runs the opt-in fft-loops lowering of the same profile
 // against the SAME independent reference: the loop form must be bit-identical
-// to the unrolled recursion, per element and at every extent here. The .target
+// to the unrolled recursion, per element and at every extent here. The .vector
+// pipeline batches the independent combine-stage butterflies over the i64
+// container and must also be bit-identical per element. The .target
 // pipeline selects every stage butterfly onto the Q31 scalar target's
 // capabilities and executes their emulation against that same reference, so the
 // selection is gated by execution rather than by inspection alone.

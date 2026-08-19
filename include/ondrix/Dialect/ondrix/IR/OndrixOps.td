@@ -634,8 +634,9 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
 
     The executable profiles are deliberately limited to static power-of-two
     extents within each profile's declared range, explicit forward or inverse
-    direction, an imag-high/real-low packed layout, exact full products, and
-    the same two scale policies as the executable butterfly; at Q15 that
+    direction, an imag-high/real-low packed layout, and the same product and
+    scale policies as the executable butterfly (exact full products, plus the
+    raw-high selection on the Q31 profile); at Q15 that
     includes the packed target inventory (toward_negative or
     nearest_ties_positive rounding, wrap or saturating narrowing, output
     shift 0 or 1), which the unrolled lowering propagates unchanged into
@@ -649,11 +650,11 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
     (a -+ j*t). -j never appears as a multiplier anywhere; this staged
     equation IS the inventory equation, not an optimization of the
     nearest-even one, whose unpaired uniformly-quantized equation is
-    unchanged. The Vector-batched mode applies only to the nearest-even
-    profile; inventory-profile conversion is always the paired scalar
-    form. Dynamic planning, other sizes, and other numeric profiles
-    require separate extensions. The opt-in loop-form and Vector-batched
-    CFFT lowerings remain Q15-only and reject the Q31 profile.
+    unchanged. The opt-in loop-form and Vector-batched CFFT lowerings
+    follow the packed profile at both widths; the Q15 inventory profile
+    is the exception, always converting as the paired scalar form.
+    Dynamic planning, other sizes, and other numeric profiles require
+    separate extensions.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondrix_CfftDirectionAttr:$direction,

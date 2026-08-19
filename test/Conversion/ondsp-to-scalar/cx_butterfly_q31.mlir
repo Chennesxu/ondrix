@@ -31,6 +31,21 @@ func.func @cx_butterfly_q31_raw_high(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
   return %o0, %o1 : i64, i64
 }
 
+// The same raw-high equation over a fixed Vector carrier lowers elementwise
+// through the identical width-typed helpers.
+func.func @cx_butterfly_q31_raw_high_vector(
+    %a: vector<2xi64>, %b: vector<2xi64>, %tw: vector<2xi64>)
+    -> (vector<2xi64>, vector<2xi64>) {
+  %o0, %o1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+  } : (vector<2xi64>, vector<2xi64>, vector<2xi64>) -> (vector<2xi64>, vector<2xi64>)
+  return %o0, %o1 : vector<2xi64>, vector<2xi64>
+}
+
 // CHECK-LABEL: func.func @cx_butterfly_q31(
 // Unpack: real is the low i32, imaginary the logical high i32.
 // CHECK: arith.trunci %{{.*}} : i64 to i32
@@ -70,6 +85,15 @@ func.func @cx_butterfly_q31_raw_high(%a: i64, %b: i64, %tw: i64) -> (i64, i64) {
 // CHECK: arith.addi %{{.*}} : i34
 // CHECK: arith.shli %{{.*}} : i34
 // CHECK: arith.trunci %{{.*}} : i34 to i32
+// CHECK-NOT: i128
+
+// CHECK-LABEL: func.func @cx_butterfly_q31_raw_high_vector(
+// CHECK: arith.muli %{{.*}} : vector<2xi64>
+// CHECK: arith.shrsi %{{.*}} : vector<2xi64>
+// CHECK: arith.trunci %{{.*}} : vector<2xi64> to vector<2xi32>
+// CHECK: arith.extsi %{{.*}} : vector<2xi32> to vector<2xi34>
+// CHECK: arith.shli %{{.*}} : vector<2xi34>
+// CHECK: arith.trunci %{{.*}} : vector<2xi34> to vector<2xi32>
 // CHECK-NOT: i128
 
 // Canonical-twiddle specialization is proven for packed Q15 only, so the same

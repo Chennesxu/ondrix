@@ -50,3 +50,21 @@ func.func @cx_butterfly_q31_vector(
   } : (vector<2xi64>, vector<2xi64>, vector<2xi64>) -> (vector<2xi64>, vector<2xi64>)
   return %o0, %o1 : vector<2xi64>, vector<2xi64>
 }
+
+// The raw-high selection batches over the same Vector carrier: the policy
+// check is per element, so the lane shape adds nothing to admit.
+func.func @cx_butterfly_q31_raw_high_vector(
+    %a: vector<2xi64>, %b: vector<2xi64>, %tw: vector<2xi64>)
+    -> (vector<2xi64>, vector<2xi64>) {
+  // CHECK: ondsp.cx_butterfly
+  // CHECK-SAME: product = #ondsp.product<high_raw>
+  // CHECK-SAME: (vector<2xi64>, vector<2xi64>, vector<2xi64>) -> (vector<2xi64>, vector<2xi64>)
+  %o0, %o1 = ondsp.cx_butterfly %a, %b, %tw {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+  } : (vector<2xi64>, vector<2xi64>, vector<2xi64>) -> (vector<2xi64>, vector<2xi64>)
+  return %o0, %o1 : vector<2xi64>, vector<2xi64>
+}

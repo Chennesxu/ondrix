@@ -510,12 +510,6 @@ public:
         ondrix::ondsp::getPackedComplexProfile(layout.getLayout());
     if (!profile)
       return rewriter.notifyMatchFailure(op, "layout has no executable packed complex profile");
-    // The Vector-batched mode still carries hardcoded Q15 lane arithmetic, so
-    // it fails closed on the packed-Q31 profile rather than emitting a
-    // plausible but unvalidated schedule. The loop form follows the profile.
-    if (profile->storageWidth != 16 && vectorizeStaticCfft)
-      return op.emitOpError("Vector-batched CFFT lowering supports only the packed Q15 profile");
-
     int64_t extent = op.getInput().getType().getDimSize(0);
     if (!hasAdmissiblePackedTwiddleTables(profile->storageWidth, op.getDirection(), extent))
       return rewriter.notifyMatchFailure(op, "the stage twiddle table is unavailable");

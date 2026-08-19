@@ -1,5 +1,6 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s --check-prefix=STRUCTURE
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s --check-prefix=TWIDDLE
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="vectorize-static-cfft" | FileCheck %s --check-prefix=VECTOR
 
 func.func @cfft4_q31(%input: tensor<4xi64>) -> tensor<4xi64> {
   %result = ondrix.cfft %input {
@@ -42,6 +43,13 @@ func.func @cfft8_q31(%input: tensor<8xi64>) -> tensor<8xi64> {
 // TWIDDLE-LABEL: func.func @cfft8_q31
 // TWIDDLE-DAG: arith.constant -6521908911199323750 : i64
 // TWIDDLE-DAG: arith.constant -6521908909941356954 : i64
+
+// The Vector-batched mode follows the packed profile, so the Q31 combine
+// stages batch over the i64 container exactly as Q15 does over i32.
+// VECTOR-LABEL: func.func @cfft8_q31
+// VECTOR: ondsp.cx_butterfly {{.*}} : (vector<2xi64>, vector<2xi64>, vector<2xi64>) -> (vector<2xi64>, vector<2xi64>)
+// VECTOR: ondsp.cx_butterfly {{.*}} : (vector<4xi64>, vector<4xi64>, vector<4xi64>) -> (vector<4xi64>, vector<4xi64>)
+// VECTOR: vector.extract
 
 func.func @icfft8_q31(%input: tensor<8xi64>) -> tensor<8xi64> {
   %result = ondrix.cfft %input {
