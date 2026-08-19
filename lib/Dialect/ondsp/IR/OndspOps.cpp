@@ -187,21 +187,6 @@ static LogicalResult verifyMacLike(Operation *op, Value acc, Value lhs, Value rh
   return success();
 }
 
-static bool isPackedI16Layout(CxLayoutAttr layout) {
-  return layout.getLayout() == ComplexLayout::PackedI16ImagHiRealLo ||
-         layout.getLayout() == ComplexLayout::PackedI16RealHiImagLo;
-}
-
-static bool hasI32Container(Type type) {
-  if (auto integer = type.dyn_cast<IntegerType>())
-    return integer.isSignless() && integer.getWidth() == 32;
-  if (auto shaped = type.dyn_cast<ShapedType>()) {
-    auto element = shaped.getElementType().dyn_cast<IntegerType>();
-    return element && element.isSignless() && element.getWidth() == 32;
-  }
-  return false;
-}
-
 static LogicalResult verifyReduceDomain(ReduceMacOp op) {
   if (isa<RankedTensorType>(op.getLhs().getType()) || isa<RankedTensorType>(op.getRhs().getType()))
     return op.emitOpError(
@@ -447,40 +432,6 @@ LogicalResult ReduceMacOp::verify() {
   return success();
 }
 
-static LogicalResult verifyComplexValueDomain(Operation *op, TypeRange types, CxLayoutAttr layout,
-                                              Attribute numeric) {
-  if (failed(verifySameElementwiseShape(op, types)))
-    return failure();
-  // The packed Q31 layout exists only for the butterfly profile. Falling
-  // through to the unpacked branch here would verify an i32 value against an
-  // i32 numeric policy and silently ignore the declared packing.
-  if (layout.getLayout() == ComplexLayout::PackedI32ImagHiRealLo)
-    return op->emitOpError(
-        "packed_i32_imag_hi_real_lo is supported only by the packed butterfly profile");
-  if (!isPackedI16Layout(layout)) {
-    for (Type type : types)
-      if (failed(verifyValueNumericType(op, type, numeric, "complex value")))
-        return failure();
-    return success();
-  }
-
-  auto fixed = dyn_cast<FixedAttr>(numeric);
-  auto storage = fixed ? dyn_cast<IntegerType>(fixed.getStorage()) : IntegerType();
-  if (!storage || storage.getWidth() != 16)
-    return op->emitOpError("packed i16 complex layout requires an i16 fixed numeric policy");
-  if (!llvm::all_of(types, hasI32Container))
-    return op->emitOpError("packed i16 complex values require signless i32 container storage");
-  return success();
-}
-
-LogicalResult CxMulOp::verify() {
-  if (failed(verifyValueOnlyTypes(*this)))
-    return failure();
-  return verifyComplexValueDomain(*this,
-                                  {getLhs().getType(), getRhs().getType(), getResult().getType()},
-                                  getLayout(), getNumeric());
-}
-
 LogicalResult CxButterflyOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();
@@ -519,8 +470,6 @@ LogicalResult CxButterflyOp::verify() {
                                      getProductScale(), getOutputScale(),
                                      /*targetInventory=*/true);
 }
-
-LogicalResult FftStageOp::verify() { return verifyValueOnlyTypes(*this); }
 
 LogicalResult BitrevAddOp::verify() {
   if (getWidth() < 1 || getWidth() > 32)

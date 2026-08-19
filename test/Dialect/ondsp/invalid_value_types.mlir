@@ -54,12 +54,12 @@ func.func @sub_shift_rejects_memref_result(
 
 // -----
 
-func.func @cx_mul_rejects_nested_memref(
-    %lhs: tuple<memref<1xi32>>, %rhs: tuple<memref<1xi32>>)
-    -> tuple<memref<1xi32>> {
+func.func @add_shift_rejects_nested_memref_operands(
+    %lhs: tuple<memref<1xi16>>, %rhs: tuple<memref<1xi16>>)
+    -> tuple<memref<1xi16>> {
   // expected-error@+1 {{value-only operation does not accept memref operands}}
-  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tuple<memref<1xi32>>, tuple<memref<1xi32>>) -> tuple<memref<1xi32>>
-  return %0 : tuple<memref<1xi32>>
+  %0 = ondsp.add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tuple<memref<1xi16>>, tuple<memref<1xi16>>) -> tuple<memref<1xi16>>
+  return %0 : tuple<memref<1xi16>>
 }
 
 // -----
@@ -86,15 +86,6 @@ func.func @elementwise_value_ops_accept_shaped_values(
 
 // -----
 
-func.func @cx_mul_rejects_memref_operand(
-    %lhs: memref<1xi32>, %rhs: i32) -> i32 {
-  // expected-error@+1 {{value-only operation does not accept memref operands}}
-  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (memref<1xi32>, i32) -> i32
-  return %0 : i32
-}
-
-// -----
-
 func.func @cx_butterfly_rejects_unranked_memref_operand(
     %a: memref<*xi32>, %b: i32, %twiddle: i32) -> (i32, i32) {
   // expected-error@+1 {{value-only operation does not accept memref operands}}
@@ -104,55 +95,37 @@ func.func @cx_butterfly_rejects_unranked_memref_operand(
 
 // -----
 
-func.func @fft_stage_rejects_memref_result(%input: i32) -> memref<1xi32> {
-  // expected-error@+1 {{value-only operation does not produce memref results}}
-  %0 = ondsp.fft_stage %input {stage = 0 : i64, layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i32) -> memref<1xi32>
-  return %0 : memref<1xi32>
-}
-
-// -----
-
-func.func @complex_value_ops_accept_shaped_values(
-    %vector: vector<2xi16>, %tensor: tensor<2xi16>)
-    -> (vector<2xi16>, vector<2xi16>) {
-  %0 = ondsp.cx_mul %vector, %vector {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (vector<2xi16>, vector<2xi16>) -> vector<2xi16>
-  %1 = ondsp.fft_stage %vector {stage = 0 : i64, layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (vector<2xi16>) -> vector<2xi16>
-  return %0, %1 : vector<2xi16>, vector<2xi16>
-}
-
-// -----
-
-func.func @cx_mul_rejects_nested_scalable_vector_operand(
-    %lhs: tuple<vector<[2]xi16>>, %rhs: tuple<vector<[2]xi16>>) -> i32 {
+func.func @add_shift_rejects_nested_scalable_vector_operands(
+    %lhs: tuple<vector<[2]xi16>>, %rhs: tuple<vector<[2]xi16>>) -> i16 {
   // expected-error@+1 {{value-only operation does not accept scalable vector operands}}
-  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tuple<vector<[2]xi16>>, tuple<vector<[2]xi16>>) -> i32
-  return %0 : i32
-}
-
-// -----
-
-func.func @cx_mul_rejects_nested_scalable_vector_result(
-    %lhs: i16, %rhs: i16) -> tuple<vector<[2]xi16>> {
-  // expected-error@+1 {{value-only operation does not produce scalable vector results}}
-  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i16, i16) -> tuple<vector<[2]xi16>>
-  return %0 : tuple<vector<[2]xi16>>
-}
-
-// -----
-
-func.func @cx_mul_rejects_nested_dynamic_tensor_operand(
-    %lhs: tuple<tensor<?xi16>>, %rhs: tuple<tensor<?xi16>>) -> i16 {
-  // expected-error@+1 {{value-only operation does not accept dynamic or unranked shaped operands}}
-  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tuple<tensor<?xi16>>, tuple<tensor<?xi16>>) -> i16
+  %0 = ondsp.add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tuple<vector<[2]xi16>>, tuple<vector<[2]xi16>>) -> i16
   return %0 : i16
 }
 
 // -----
 
-func.func @cx_mul_rejects_unranked_tensor_result(
-    %lhs: i16, %rhs: i16) -> tensor<*xi16> {
+func.func @round_shift_rejects_nested_scalable_vector_result(
+    %input: i16) -> tuple<vector<[2]xi16>> {
+  // expected-error@+1 {{value-only operation does not produce scalable vector results}}
+  %0 = ondsp.round_shift %input {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (i16) -> tuple<vector<[2]xi16>>
+  return %0 : tuple<vector<[2]xi16>>
+}
+
+// -----
+
+func.func @add_shift_rejects_nested_dynamic_tensor_operands(
+    %lhs: tuple<tensor<?xi16>>, %rhs: tuple<tensor<?xi16>>) -> i16 {
+  // expected-error@+1 {{value-only operation does not accept dynamic or unranked shaped operands}}
+  %0 = ondsp.add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (tuple<tensor<?xi16>>, tuple<tensor<?xi16>>) -> i16
+  return %0 : i16
+}
+
+// -----
+
+func.func @round_shift_rejects_unranked_tensor_result(
+    %input: i16) -> tensor<*xi16> {
   // expected-error@+1 {{value-only operation does not produce dynamic or unranked shaped results}}
-  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i16, i16) -> tensor<*xi16>
+  %0 = ondsp.round_shift %input {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (i16) -> tensor<*xi16>
   return %0 : tensor<*xi16>
 }
 
@@ -181,24 +154,6 @@ func.func @add_shift_rejects_mismatched_shapes(
   // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
   %0 = ondsp.add_shift %lhs, %rhs {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>} : (vector<2xi16>, vector<4xi16>) -> vector<2xi16>
   return %0 : vector<2xi16>
-}
-
-// -----
-
-func.func @cx_mul_rejects_mismatched_shapes(
-    %lhs: tensor<2xi16>, %rhs: tensor<3xi16>) -> tensor<2xi16> {
-  // expected-error@+1 {{operands and results must use the same scalar or static shaped domain}}
-  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tensor<2xi16>, tensor<3xi16>) -> tensor<2xi16>
-  return %0 : tensor<2xi16>
-}
-
-// -----
-
-func.func @cx_mul_rejects_wrong_numeric_storage(
-    %lhs: vector<2xi32>, %rhs: vector<2xi32>) -> vector<2xi32> {
-  // expected-error@+1 {{complex value type does not match numeric storage type}}
-  %0 = ondsp.cx_mul %lhs, %rhs {layout = #ondsp.cx_layout<interleaved>, numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (vector<2xi32>, vector<2xi32>) -> vector<2xi32>
-  return %0 : vector<2xi32>
 }
 
 // -----

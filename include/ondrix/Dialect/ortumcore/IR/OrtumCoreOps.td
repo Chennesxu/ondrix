@@ -137,17 +137,6 @@ def OrtumCore_AccOutOp : OrtumCore_Op<"acc_out", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-class OrtumCore_BinaryOp<string mnemonic, string opSummary>
-    : OrtumCore_Op<mnemonic, [Pure]> {
-  let summary = opSummary;
-  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
-  let results = (outs AnyType:$result);
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
-def OrtumCore_SatAddOp : OrtumCore_BinaryOp<"sat_add", "Saturating add semantic op">;
-def OrtumCore_SatSubOp : OrtumCore_BinaryOp<"sat_sub", "Saturating subtract semantic op">;
-
 def OrtumCore_CxMulConjOp : OrtumCore_Op<"cx_mul_conj", [Pure]> {
   let summary = "Packed complex multiply by the conjugated twiddle";
   let description = [{

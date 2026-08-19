@@ -315,15 +315,6 @@ def Ondsp_ReduceMacOp
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
-def Ondsp_CxMulOp : Ondsp_Op<"cx_mul", [Pure]> {
-  let summary = "Experimental complex multiply semantic operation";
-  let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_CxLayoutAttr:$layout,
-                   Ondsp_NumericAttr:$numeric);
-  let results = (outs AnyType:$result);
-  let hasVerifier = 1;
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
 def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
   let summary = "Packed fixed-point elementwise radix-2 butterfly semantic operation";
   let description = [{
@@ -396,21 +387,6 @@ def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
                    OptionalAttr<Ondsp_CxButterflyVariantAttr>:$variant);
   let results = (outs AnyType:$out0, AnyType:$out1);
   let hasVerifier = 1;
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
-def Ondsp_FftStageOp : Ondsp_Op<"fft_stage", [Pure]> {
-  let summary = "Experimental FFT stage intent operation";
-  let arguments = (ins Variadic<AnyType>:$inputs, I64Attr:$stage,
-                   Ondsp_CxLayoutAttr:$layout, Ondsp_NumericAttr:$numeric);
-  let results = (outs Variadic<AnyType>:$outputs);
-  let hasVerifier = 1;
-  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-}
-
-def Ondsp_BitrevIndexOp : Ondsp_Op<"bitrev_index", [Pure]> {
-  let arguments = (ins Index:$input, I64Attr:$width);
-  let results = (outs Index:$result);
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 

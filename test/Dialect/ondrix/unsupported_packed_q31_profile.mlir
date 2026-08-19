@@ -74,20 +74,6 @@ func.func @cx_magnitude_rejects_q31_profile(%input: tensor<5xi64>) -> tensor<5xi
 
 // -----
 
-// ondsp.cx_mul shares the layout enum but has no packed-Q31 equation. Without
-// this branch it would fall through to the unpacked value check and silently
-// ignore the declared packing.
-func.func @cx_mul_rejects_q31_profile(%lhs: i64, %rhs: i64) -> i64 {
-  // expected-error@+1 {{packed_i32_imag_hi_real_lo is supported only by the packed butterfly profile}}
-  %0 = ondsp.cx_mul %lhs, %rhs {
-    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
-    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
-  } : (i64, i64) -> i64
-  return %0 : i64
-}
-
-// -----
-
 // A shape-legal transform whose only defect is the product selection: the
 // whole-transform Q31 profile is frozen to raw-high, and full products stay
 // admitted only on ondsp.cx_butterfly, where the exact-carrier gate lives.
