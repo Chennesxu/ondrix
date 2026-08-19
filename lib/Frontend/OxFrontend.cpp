@@ -198,7 +198,7 @@ private:
   unsigned column = 1;
 };
 
-enum class SourceType { Q15, Q31, F32, ComplexQ15 };
+enum class SourceType { Q15, Q31, F32, ComplexQ15, ComplexQ31 };
 
 enum class ContainerKind { Scalar, Buffer, Tensor, Constexpr };
 
@@ -1361,6 +1361,10 @@ private:
       advance();
       return SourceType::ComplexQ15;
     }
+    if (isIdentifier("complex_q31")) {
+      advance();
+      return SourceType::ComplexQ31;
+    }
     diagnostics.error(current.position, message);
     return std::nullopt;
   }
@@ -2484,9 +2488,31 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return ComposedType{SourceType::Q15, input->extent};
       }
       if (isCfftKind(call.kind)) {
-        if (input->elementType != SourceType::ComplexQ15) {
-          diagnostics.error(call.position, "cfft and icfft require complex_q15 operand elements");
+        if (input->elementType != SourceType::ComplexQ15 &&
+            input->elementType != SourceType::ComplexQ31) {
+          diagnostics.error(call.position,
+                            "cfft and icfft require complex_q15 or complex_q31 operand elements");
           return std::nullopt;
+        }
+        if (input->elementType == SourceType::ComplexQ31) {
+          if (input->extent < 4 || input->extent > 64 || !llvm::isPowerOf2_64(input->extent)) {
+            diagnostics.error(
+                call.position,
+                "a complex_q31 cfft currently supports power-of-two extents in [4, 64]");
+            return std::nullopt;
+          }
+          // The packed-Q31 profile has exactly one gated stage policy, so the
+          // parameters admit only its spelling.
+          if ((!call.rounding.empty() && parseRounding(call.rounding) !=
+                                             std::optional(ondsp::RoundingMode::TowardNegative)) ||
+              (!call.destinationOverflow.empty() &&
+               parseOverflow(call.destinationOverflow) !=
+                   std::optional(ondsp::OverflowMode::Saturate))) {
+            diagnostics.error(call.position, "the packed-Q31 cfft profile is frozen to "
+                                             "toward_negative saturating stages");
+            return std::nullopt;
+          }
+          return *input;
         }
         if (input->extent != 4 && input->extent != 8) {
           diagnostics.error(call.position, "cfft currently supports only four or eight points");
@@ -2573,6 +2599,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     diagnostics.error(
         ast.result.position,
         "complex_q15 is currently supported only by FFT-family and butterfly builtins");
+    return std::nullopt;
+  }
+  if (ast.primaryResult().type == SourceType::ComplexQ31) {
+    diagnostics.error(ast.result.position,
+                      "complex_q31 is currently supported only by the cfft and icfft builtins");
     return std::nullopt;
   }
 
@@ -3129,6 +3160,8 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       return builder.getI16Type();
     if (type == SourceType::Q31 || type == SourceType::ComplexQ15)
       return builder.getI32Type();
+    if (type == SourceType::ComplexQ31)
+      return builder.getI64Type();
     return builder.getF32Type();
   };
   Type elementType = getStorageType(kernel.ast.primaryResult().type);
@@ -3327,6 +3360,23 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         auto direction = ir::CfftDirectionAttr::get(&context, call.kind == ReductionKind::Cfft
                                                                   ? ir::CfftDirection::Forward
                                                                   : ir::CfftDirection::Inverse);
+        if (inputType.getElementType().isInteger(64)) {
+          // The re-frozen packed-Q31 profile: sema admitted no other stage
+          // policy, so the frozen equation is emitted directly.
+          auto i32 = builder.getI32Type();
+          auto q31Layout =
+              ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI32ImagHiRealLo);
+          auto q31Numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, i32, 31);
+          auto q31Product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::HighRaw);
+          auto stageProduct =
+              ondsp::ScaleAttr::get(&context, 1, 0, ondsp::RoundingMode::TowardNegative,
+                                    ondsp::OverflowMode::Saturate, i32);
+          auto stageOutput =
+              ondsp::ScaleAttr::get(&context, 0, 1, ondsp::RoundingMode::TowardNegative,
+                                    ondsp::OverflowMode::Saturate, i32);
+          return builder.create<ir::CfftOp>(callLocation, inputType, input, direction, q31Layout,
+                                            q31Numeric, q31Product, stageProduct, stageOutput);
+        }
         ondsp::RoundingMode stageRounding = call.rounding.empty() ? ondsp::RoundingMode::NearestEven
                                                                   : *parseRounding(call.rounding);
         ondsp::OverflowMode stageOverflow = call.destinationOverflow.empty()

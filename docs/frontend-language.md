@@ -249,6 +249,15 @@ corresponding 5 or 9 packed bins and returns N real Q15 values. DC and
 Nyquist imaginary components are canonicalized to zero by the existing Ondrix
 contract.
 
+`complex_q31` is the matching packed 32-bit spelling: one `i64` with the
+imaginary component in bits 63:32 and the real component in bits 31:0. Only
+`cfft` and `icfft` accept it, at static power-of-two extents from 4 through
+64, and they emit the re-frozen packed-Q31 profile — raw-high per-term
+products and toward_negative saturating stage scaling. That profile has
+exactly one gated stage policy, so the optional `rounding=`/`overflow=`
+parameters admit only `toward_negative` and `saturate`; the other real and
+complex builtins remain Q15-only.
+
 As a bounded expression-composition slice, the unary FFT-family builtins may
 be nested when every intermediate type and extent satisfies the next
 builtin's contract. Each nested call emits a separate Ondrix operation, so the
