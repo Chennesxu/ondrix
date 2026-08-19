@@ -107,13 +107,12 @@ static bool hasAdmissiblePackedTwiddleTables(unsigned storageWidth,
   return true;
 }
 
-// The real-spectrum lowerings below are packed-Q15 only: their verifiers
-// accept no other layout, so they name the layout and let the shared mapping
-// supply its widths rather than restating them.
-static ondrix::ondsp::PackedComplexProfile getPackedQ15Profile() {
+// The real-spectrum verifiers admit only layouts with an executable packed
+// profile, so the lowering reads the widths from the op's own layout.
+static ondrix::ondsp::PackedComplexProfile getVerifiedPackedProfile(Attribute layout) {
   std::optional<ondrix::ondsp::PackedComplexProfile> profile =
-      ondrix::ondsp::getPackedComplexProfile(ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo);
-  assert(profile && "the packed Q15 layout must have an executable profile");
+      ondrix::ondsp::getPackedComplexProfile(cast<ondrix::ondsp::CxLayoutAttr>(layout).getLayout());
+  assert(profile && "the verified layout must have an executable profile");
   return *profile;
 }
 
@@ -468,27 +467,36 @@ lowerPackedCfftLoops(Location loc, Value input, int64_t extent, ondrix::ir::Cfft
   return stageLoop.getResult(0);
 }
 
-static Value canonicalizePackedQ15Real(Location loc, Value packed, OpBuilder &rewriter) {
-  Value real = rewriter.create<arith::TruncIOp>(loc, rewriter.getI16Type(), packed);
-  return rewriter.create<arith::ExtUIOp>(loc, rewriter.getI32Type(), real);
+static Value canonicalizePackedReal(Location loc, Value packed,
+                                    ondrix::ondsp::PackedComplexProfile profile,
+                                    OpBuilder &rewriter) {
+  IntegerType storage = rewriter.getIntegerType(profile.storageWidth);
+  IntegerType container = rewriter.getIntegerType(profile.containerWidth);
+  Value real = rewriter.create<arith::TruncIOp>(loc, storage, packed);
+  return rewriter.create<arith::ExtUIOp>(loc, container, real);
 }
 
-static Value conjugatePackedQ15Saturating(Location loc, Value packed, OpBuilder &rewriter) {
-  IntegerType i16 = rewriter.getI16Type();
-  IntegerType i32 = rewriter.getI32Type();
-  Value real = rewriter.create<arith::TruncIOp>(loc, i16, packed);
-  Value shift = rewriter.create<arith::ConstantIntOp>(loc, 16, 32);
+static Value conjugatePackedSaturating(Location loc, Value packed,
+                                       ondrix::ondsp::PackedComplexProfile profile,
+                                       OpBuilder &rewriter) {
+  IntegerType storage = rewriter.getIntegerType(profile.storageWidth);
+  IntegerType container = rewriter.getIntegerType(profile.containerWidth);
+  int64_t storageMinimum = -(int64_t(1) << (profile.storageWidth - 1));
+  Value real = rewriter.create<arith::TruncIOp>(loc, storage, packed);
+  Value shift =
+      rewriter.create<arith::ConstantIntOp>(loc, profile.storageWidth, profile.containerWidth);
   Value high = rewriter.create<arith::ShRUIOp>(loc, packed, shift);
-  Value imaginary = rewriter.create<arith::TruncIOp>(loc, i16, high);
-  Value zero = rewriter.create<arith::ConstantIntOp>(loc, 0, 16);
-  Value minimum = rewriter.create<arith::ConstantIntOp>(loc, -32768, 16);
-  Value maximum = rewriter.create<arith::ConstantIntOp>(loc, 32767, 16);
+  Value imaginary = rewriter.create<arith::TruncIOp>(loc, storage, high);
+  Value zero = rewriter.create<arith::ConstantIntOp>(loc, 0, profile.storageWidth);
+  Value minimum = rewriter.create<arith::ConstantIntOp>(loc, storageMinimum, profile.storageWidth);
+  Value maximum =
+      rewriter.create<arith::ConstantIntOp>(loc, -(storageMinimum + 1), profile.storageWidth);
   Value isMinimum =
       rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, imaginary, minimum);
   Value negated = rewriter.create<arith::SubIOp>(loc, zero, imaginary);
   Value conjugatedImaginary = rewriter.create<arith::SelectOp>(loc, isMinimum, maximum, negated);
-  Value realBits = rewriter.create<arith::ExtUIOp>(loc, i32, real);
-  Value imaginaryBits = rewriter.create<arith::ExtUIOp>(loc, i32, conjugatedImaginary);
+  Value realBits = rewriter.create<arith::ExtUIOp>(loc, container, real);
+  Value imaginaryBits = rewriter.create<arith::ExtUIOp>(loc, container, conjugatedImaginary);
   Value shiftedImaginary = rewriter.create<arith::ShLIOp>(loc, imaginaryBits, shift);
   return rewriter.create<arith::OrIOp>(loc, shiftedImaginary, realBits);
 }
@@ -555,29 +563,30 @@ public:
   LogicalResult matchAndRewrite(ondrix::ir::RfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
+    ondrix::ondsp::PackedComplexProfile profile = getVerifiedPackedProfile(op.getLayout());
+    IntegerType container = rewriter.getIntegerType(profile.containerWidth);
     int64_t extent = op.getInput().getType().getDimSize(0);
-    if (!hasAdmissiblePackedTwiddleTables(getPackedQ15Profile().storageWidth,
-                                          ondrix::ir::CfftDirection::Forward, extent))
+    if (!hasAdmissiblePackedTwiddleTables(profile.storageWidth, ondrix::ir::CfftDirection::Forward,
+                                          extent))
       return rewriter.notifyMatchFailure(op, "the stage twiddle table is unavailable");
     if (fftLoops) {
-      IntegerType i32 = rewriter.getI32Type();
       Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
       Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
       Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
-      Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{extent}, i32);
+      Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{extent}, container);
       auto packLoop = rewriter.create<scf::ForOp>(
           loc, zero, extentValue, one, ValueRange{empty},
           [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
             Value real = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
-            Value packed = builder.create<arith::ExtUIOp>(loc, builder.getI32Type(), real);
+            Value packed = builder.create<arith::ExtUIOp>(loc, container, real);
             Value inserted =
                 builder.create<tensor::InsertOp>(loc, packed, iterArgs.front(), position);
             builder.create<scf::YieldOp>(loc, inserted);
           });
-      Value spectrum = lowerPackedCfftLoops(
-          loc, packLoop.getResult(0), extent, ondrix::ir::CfftDirection::Forward,
-          ondrix::ondsp::PackedComplexProfile{16, 32}, op.getLayout(), op.getNumeric(),
-          op.getProduct(), op.getProductScale(), op.getOutputScale(), rewriter);
+      Value spectrum = lowerPackedCfftLoops(loc, packLoop.getResult(0), extent,
+                                            ondrix::ir::CfftDirection::Forward, profile,
+                                            op.getLayout(), op.getNumeric(), op.getProduct(),
+                                            op.getProductScale(), op.getOutputScale(), rewriter);
       RankedTensorType resultType = op.getResult().getType();
       int64_t binCount = resultType.getDimSize(0);
       Value compact = rewriter.create<tensor::ExtractSliceOp>(
@@ -586,11 +595,11 @@ public:
           ArrayRef<OpFoldResult>{rewriter.getIndexAttr(1)});
       Value half = rewriter.create<arith::ConstantIndexOp>(loc, extent / 2);
       Value dc = rewriter.create<tensor::ExtractOp>(loc, compact, zero);
-      compact = rewriter.create<tensor::InsertOp>(loc, canonicalizePackedQ15Real(loc, dc, rewriter),
-                                                  compact, zero);
+      compact = rewriter.create<tensor::InsertOp>(
+          loc, canonicalizePackedReal(loc, dc, profile, rewriter), compact, zero);
       Value nyquist = rewriter.create<tensor::ExtractOp>(loc, compact, half);
       compact = rewriter.create<tensor::InsertOp>(
-          loc, canonicalizePackedQ15Real(loc, nyquist, rewriter), compact, half);
+          loc, canonicalizePackedReal(loc, nyquist, profile, rewriter), compact, half);
       rewriter.replaceOp(op, compact);
       return success();
     }
@@ -599,15 +608,14 @@ public:
     for (int64_t index = 0; index < extent; ++index) {
       Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
       Value real = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
-      inputs.push_back(rewriter.create<arith::ExtUIOp>(loc, rewriter.getI32Type(), real));
+      inputs.push_back(rewriter.create<arith::ExtUIOp>(loc, container, real));
     }
 
-    SmallVector<Value> outputs =
-        lowerPackedCfft(loc, inputs, ondrix::ir::CfftDirection::Forward, getPackedQ15Profile(),
-                        op.getLayout(), op.getNumeric(), op.getProduct(), op.getProductScale(),
-                        op.getOutputScale(), vectorizeStaticCfft, rewriter);
-    outputs.front() = canonicalizePackedQ15Real(loc, outputs.front(), rewriter);
-    outputs[extent / 2] = canonicalizePackedQ15Real(loc, outputs[extent / 2], rewriter);
+    SmallVector<Value> outputs = lowerPackedCfft(
+        loc, inputs, ondrix::ir::CfftDirection::Forward, profile, op.getLayout(), op.getNumeric(),
+        op.getProduct(), op.getProductScale(), op.getOutputScale(), vectorizeStaticCfft, rewriter);
+    outputs.front() = canonicalizePackedReal(loc, outputs.front(), profile, rewriter);
+    outputs[extent / 2] = canonicalizePackedReal(loc, outputs[extent / 2], profile, rewriter);
 
     RankedTensorType resultType = op.getResult().getType();
     Value result =
@@ -634,38 +642,40 @@ public:
   LogicalResult matchAndRewrite(ondrix::ir::IrfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
+    ondrix::ondsp::PackedComplexProfile profile = getVerifiedPackedProfile(op.getLayout());
+    IntegerType storage = rewriter.getIntegerType(profile.storageWidth);
     int64_t extent = op.getResult().getType().getDimSize(0);
-    if (!hasAdmissiblePackedTwiddleTables(getPackedQ15Profile().storageWidth,
-                                          ondrix::ir::CfftDirection::Inverse, extent))
+    if (!hasAdmissiblePackedTwiddleTables(profile.storageWidth, ondrix::ir::CfftDirection::Inverse,
+                                          extent))
       return rewriter.notifyMatchFailure(op, "the stage twiddle table is unavailable");
     int64_t half = extent / 2;
     if (fftLoops) {
-      IntegerType i32 = rewriter.getI32Type();
+      IntegerType container = rewriter.getIntegerType(profile.containerWidth);
       Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
       Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
       Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
       Value halfValue = rewriter.create<arith::ConstantIndexOp>(loc, half);
-      Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{extent}, i32);
+      Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{extent}, container);
       Value dc = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), zero);
       Value seeded = rewriter.create<tensor::InsertOp>(
-          loc, canonicalizePackedQ15Real(loc, dc, rewriter), empty, zero);
+          loc, canonicalizePackedReal(loc, dc, profile, rewriter), empty, zero);
       Value nyquist = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), halfValue);
       seeded = rewriter.create<tensor::InsertOp>(
-          loc, canonicalizePackedQ15Real(loc, nyquist, rewriter), seeded, halfValue);
+          loc, canonicalizePackedReal(loc, nyquist, profile, rewriter), seeded, halfValue);
       auto mirrorLoop = rewriter.create<scf::ForOp>(
           loc, one, halfValue, one, ValueRange{seeded},
           [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
             Value bin = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
             Value direct = builder.create<tensor::InsertOp>(loc, bin, iterArgs.front(), position);
             Value mirrored = builder.create<arith::SubIOp>(loc, extentValue, position);
-            Value conjugated = conjugatePackedQ15Saturating(loc, bin, builder);
+            Value conjugated = conjugatePackedSaturating(loc, bin, profile, builder);
             Value full = builder.create<tensor::InsertOp>(loc, conjugated, direct, mirrored);
             builder.create<scf::YieldOp>(loc, full);
           });
-      Value outputs = lowerPackedCfftLoops(
-          loc, mirrorLoop.getResult(0), extent, ondrix::ir::CfftDirection::Inverse,
-          ondrix::ondsp::PackedComplexProfile{16, 32}, op.getLayout(), op.getNumeric(),
-          op.getProduct(), op.getProductScale(), op.getOutputScale(), rewriter);
+      Value outputs = lowerPackedCfftLoops(loc, mirrorLoop.getResult(0), extent,
+                                           ondrix::ir::CfftDirection::Inverse, profile,
+                                           op.getLayout(), op.getNumeric(), op.getProduct(),
+                                           op.getProductScale(), op.getOutputScale(), rewriter);
       RankedTensorType resultType = op.getResult().getType();
       Value resultEmpty =
           rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
@@ -673,7 +683,7 @@ public:
           loc, zero, extentValue, one, ValueRange{resultEmpty},
           [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
             Value packed = builder.create<tensor::ExtractOp>(loc, outputs, position);
-            Value real = builder.create<arith::TruncIOp>(loc, builder.getI16Type(), packed);
+            Value real = builder.create<arith::TruncIOp>(loc, storage, packed);
             Value inserted =
                 builder.create<tensor::InsertOp>(loc, real, iterArgs.front(), position);
             builder.create<scf::YieldOp>(loc, inserted);
@@ -689,23 +699,22 @@ public:
     }
 
     SmallVector<Value> spectrum(extent);
-    spectrum.front() = canonicalizePackedQ15Real(loc, compact.front(), rewriter);
-    spectrum[half] = canonicalizePackedQ15Real(loc, compact[half], rewriter);
+    spectrum.front() = canonicalizePackedReal(loc, compact.front(), profile, rewriter);
+    spectrum[half] = canonicalizePackedReal(loc, compact[half], profile, rewriter);
     for (int64_t index = 1; index < half; ++index) {
       spectrum[index] = compact[index];
-      spectrum[extent - index] = conjugatePackedQ15Saturating(loc, compact[index], rewriter);
+      spectrum[extent - index] = conjugatePackedSaturating(loc, compact[index], profile, rewriter);
     }
 
-    SmallVector<Value> outputs =
-        lowerPackedCfft(loc, spectrum, ondrix::ir::CfftDirection::Inverse, getPackedQ15Profile(),
-                        op.getLayout(), op.getNumeric(), op.getProduct(), op.getProductScale(),
-                        op.getOutputScale(), vectorizeStaticCfft, rewriter);
+    SmallVector<Value> outputs = lowerPackedCfft(
+        loc, spectrum, ondrix::ir::CfftDirection::Inverse, profile, op.getLayout(), op.getNumeric(),
+        op.getProduct(), op.getProductScale(), op.getOutputScale(), vectorizeStaticCfft, rewriter);
     RankedTensorType resultType = op.getResult().getType();
     Value result =
         rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
     for (int64_t index = 0; index < extent; ++index) {
       Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
-      Value real = rewriter.create<arith::TruncIOp>(loc, rewriter.getI16Type(), outputs[index]);
+      Value real = rewriter.create<arith::TruncIOp>(loc, storage, outputs[index]);
       result = rewriter.create<tensor::InsertOp>(loc, real, result, position);
     }
     rewriter.replaceOp(op, result);

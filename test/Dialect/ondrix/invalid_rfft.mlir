@@ -15,7 +15,7 @@ func.func @rfft_wrong_extent(%input: tensor<12xi16>) -> tensor<7xi32> {
 // -----
 
 func.func @rfft_wrong_layout(%input: tensor<8xi16>) -> tensor<5xi32> {
-  // expected-error@+1 {{executable RFFT requires packed_i16_imag_hi_real_lo layout}}
+  // expected-error@+1 {{executable RFFT requires packed_i16_imag_hi_real_lo or packed_i32_imag_hi_real_lo layout}}
   %result = ondrix.rfft %input {
     layout = #ondsp.cx_layout<interleaved>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,

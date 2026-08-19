@@ -1,8 +1,8 @@
 // RUN: ondrix-opt %s -split-input-file -verify-diagnostics
 
 // Every operation that can carry an ondsp.cx_layout attribute but has no
-// executable packed-Q31 contract rejects the profile explicitly. Only
-// ondrix.cfft and ondsp.cx_butterfly implement it in this slice; the rest stay
+// executable packed-Q31 contract rejects the profile explicitly. ondrix.cfft,
+// ondrix.rfft/irfft, and ondsp.cx_butterfly implement it; the rest stay
 // Q15-only and must fail closed rather than reinterpret a wider container.
 
 func.func @butterfly_rejects_q31_profile(%a: i64, %b: i64, %twiddle: i64) -> (i64, i64) {
@@ -19,30 +19,32 @@ func.func @butterfly_rejects_q31_profile(%a: i64, %b: i64, %twiddle: i64) -> (i6
 
 // -----
 
-func.func @rfft_rejects_q31_profile(%input: tensor<8xi32>) -> tensor<5xi64> {
-  // expected-error@+1 {{executable RFFT requires packed_i16_imag_hi_real_lo layout}}
+// The Q31 RFFT extent ceiling is the frozen twiddle table, not the Q15 1024.
+func.func @rfft_rejects_q31_beyond_table(%input: tensor<128xi32>) -> tensor<65xi64> {
+  // expected-error@+1 {{executable RFFT requires tensor<Nxi32> to tensor<(N/2+1)xi64> with power-of-two N in [8, 64]}}
   %result = ondrix.rfft %input {
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
-  } : (tensor<8xi32>) -> tensor<5xi64>
-  return %result : tensor<5xi64>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+  } : (tensor<128xi32>) -> tensor<65xi64>
+  return %result : tensor<65xi64>
 }
 
 // -----
 
-func.func @irfft_rejects_q31_profile(%input: tensor<9xi64>) -> tensor<16xi32> {
-  // expected-error@+1 {{executable IRFFT requires packed_i16_imag_hi_real_lo layout}}
+// A Q15-shaped value domain under the Q31 layout must not pass either check.
+func.func @irfft_rejects_mixed_width_domain(%input: tensor<9xi32>) -> tensor<16xi16> {
+  // expected-error@+1 {{executable IRFFT requires tensor<(N/2+1)xi64> to tensor<Nxi32> with power-of-two N in [8, 64]}}
   %result = ondrix.irfft %input {
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
-  } : (tensor<9xi64>) -> tensor<16xi32>
-  return %result : tensor<16xi32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+  } : (tensor<9xi32>) -> tensor<16xi16>
+  return %result : tensor<16xi16>
 }
 
 // -----

@@ -127,38 +127,52 @@ static LogicalResult verifyCfftValueDomain(CfftOp op) {
 }
 
 static LogicalResult verifyRfftValueDomain(RfftOp op) {
-  if (op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
-    return op.emitOpError("executable RFFT requires packed_i16_imag_hi_real_lo layout");
+  // The layout selects the profile exactly as CFFT does; the extent ceilings
+  // are the same twiddle contracts (in-compiler Q15, frozen offline Q31).
+  std::optional<ondrix::ondsp::PackedComplexProfile> profile =
+      ondrix::ondsp::getPackedComplexProfile(op.getLayout().getLayout());
+  if (!profile)
+    return op.emitOpError("executable RFFT requires packed_i16_imag_hi_real_lo or "
+                          "packed_i32_imag_hi_real_lo layout");
   RankedTensorType inputType = op.getInput().getType();
   RankedTensorType resultType = op.getResult().getType();
   if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
     return failure();
+  int64_t maximumExtent = profile->storageWidth == 16 ? 1024 : ondrix::kMaxQ31TwiddleExtent;
   int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
-  if (inputExtent < 8 || inputExtent > 1024 || !llvm::isPowerOf2_64(inputExtent) ||
-      resultExtent != inputExtent / 2 + 1 || !inputType.getElementType().isSignlessInteger(16) ||
-      !resultType.getElementType().isSignlessInteger(32))
-    return op.emitOpError("executable RFFT requires tensor<Nxi16> to tensor<(N/2+1)xi32> "
-                          "with power-of-two N in [8, 1024]");
+  if (inputExtent < 8 || inputExtent > maximumExtent || !llvm::isPowerOf2_64(inputExtent) ||
+      resultExtent != inputExtent / 2 + 1 ||
+      !inputType.getElementType().isSignlessInteger(profile->storageWidth) ||
+      !resultType.getElementType().isSignlessInteger(profile->containerWidth))
+    return op.emitOpError() << "executable RFFT requires tensor<Nxi" << profile->storageWidth
+                            << "> to tensor<(N/2+1)xi" << profile->containerWidth
+                            << "> with power-of-two N in [8, " << maximumExtent << "]";
   return success();
 }
 
 static LogicalResult verifyIrfftValueDomain(IrfftOp op) {
-  if (op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
-    return op.emitOpError("executable IRFFT requires packed_i16_imag_hi_real_lo layout");
+  std::optional<ondrix::ondsp::PackedComplexProfile> profile =
+      ondrix::ondsp::getPackedComplexProfile(op.getLayout().getLayout());
+  if (!profile)
+    return op.emitOpError("executable IRFFT requires packed_i16_imag_hi_real_lo or "
+                          "packed_i32_imag_hi_real_lo layout");
   RankedTensorType inputType = op.getInput().getType();
   RankedTensorType resultType = op.getResult().getType();
   if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
     return failure();
+  int64_t maximumExtent = profile->storageWidth == 16 ? 1024 : ondrix::kMaxQ31TwiddleExtent;
   int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
-  if (resultExtent < 8 || resultExtent > 1024 || !llvm::isPowerOf2_64(resultExtent) ||
-      inputExtent != resultExtent / 2 + 1 || !inputType.getElementType().isSignlessInteger(32) ||
-      !resultType.getElementType().isSignlessInteger(16))
-    return op.emitOpError("executable IRFFT requires tensor<(N/2+1)xi32> to tensor<Nxi16> "
-                          "with power-of-two N in [8, 1024]");
+  if (resultExtent < 8 || resultExtent > maximumExtent || !llvm::isPowerOf2_64(resultExtent) ||
+      inputExtent != resultExtent / 2 + 1 ||
+      !inputType.getElementType().isSignlessInteger(profile->containerWidth) ||
+      !resultType.getElementType().isSignlessInteger(profile->storageWidth))
+    return op.emitOpError() << "executable IRFFT requires tensor<(N/2+1)xi"
+                            << profile->containerWidth << "> to tensor<Nxi" << profile->storageWidth
+                            << "> with power-of-two N in [8, " << maximumExtent << "]";
   return success();
 }
 
