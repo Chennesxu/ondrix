@@ -20,6 +20,7 @@ extern void _mlir_ciface_cic_s2_r4_m1_wrap(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_cic_s2_r4_m1_saturate(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_cic_s3_r8_m2_wrap(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_cic_s4_r16_m1_wrap(MemRefI16 *, MemRefI16 *);
+extern void _mlir_ciface_cic_s8_r64_m1_wrap(MemRefI16 *, MemRefI16 *);
 #endif
 
 enum { kMaxInput = 128, kMaxOutput = 64, kStageLimit = 8, kTrialCount = 8 };
@@ -27,20 +28,22 @@ enum { kMaxInput = 128, kMaxOutput = 64, kStageLimit = 8, kTrialCount = 8 };
 /* Independent reference: the contract's pseudocode with the two overflow
  * modes written out separately, so neither the carrier width nor the mode
  * is inherited from the compiler's own arithmetic. */
-static int64_t wrapTo(int64_t value, int width) {
+/* The exact sum or difference arrives in an __int128 carrier: at the W=64
+ * rail the i64 addition itself could overflow before the mode applies. */
+static int64_t wrapTo(__int128 value, int width) {
   uint64_t mask = (width >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << width) - 1);
   uint64_t bits = (uint64_t)value & mask;
   uint64_t sign = (uint64_t)1 << (width - 1);
   return (bits & sign) ? (int64_t)(bits | ~mask) : (int64_t)bits;
 }
 
-static int64_t saturateTo(int64_t value, int width) {
+static int64_t saturateTo(__int128 value, int width) {
   int64_t high = (int64_t)(((uint64_t)1 << (width - 1)) - 1);
   int64_t low = -high - 1;
-  return value > high ? high : (value < low ? low : value);
+  return value > high ? high : (value < low ? low : (int64_t)value);
 }
 
-static int64_t combine(int64_t value, int width, int wrapping) {
+static int64_t combine(__int128 value, int width, int wrapping) {
   return wrapping ? wrapTo(value, width) : saturateTo(value, width);
 }
 
@@ -51,9 +54,14 @@ static int64_t combine(int64_t value, int width, int wrapping) {
 #endif
 
 static int16_t exportSample(int64_t value, int shift) {
-  int64_t quotient = value >> shift;
-  int64_t remainder = value - (quotient << shift);
-  int64_t half = (int64_t)1 << (shift - 1);
+  int64_t divisor = (int64_t)1 << shift;
+  int64_t quotient = value / divisor;
+  int64_t remainder = value % divisor;
+  if (remainder < 0) {
+    --quotient;
+    remainder += divisor;
+  }
+  int64_t half = divisor >> 1;
   if (CIC_EXPORT_TIES_POSITIVE ? remainder >= half
                                : (remainder > half || (remainder == half && (quotient & 1))))
     ++quotient;
@@ -84,12 +92,12 @@ static void reference(const int16_t *input, int64_t outputs, int stages, int rat
     for (int64_t phase = 0; phase < rate; ++phase) {
       carried = input[block * rate + phase];
       for (int stage = 0; stage < stages; ++stage) {
-        integrator[stage] = combine(integrator[stage] + carried, width, wrapping);
+        integrator[stage] = combine((__int128)integrator[stage] + carried, width, wrapping);
         carried = integrator[stage];
       }
     }
     for (int stage = 0; stage < stages; ++stage) {
-      int64_t differenced = combine(carried - line[stage][delay - 1], width, wrapping);
+      int64_t differenced = combine((__int128)carried - line[stage][delay - 1], width, wrapping);
       for (int tap = delay - 1; tap > 0; --tap)
         line[stage][tap] = line[stage][tap - 1];
       line[stage][0] = carried;
@@ -225,6 +233,10 @@ int main(void) {
     failed |= check(_mlir_ciface_cic_s3_r8_m2_wrap, input, 8, 3, 8, 2, 1, label);
     snprintf(label, sizeof label, "s4r16m1 trial %d", trial);
     failed |= check(_mlir_ciface_cic_s4_r16_m1_wrap, input, 4, 4, 16, 1, 1, label);
+    /* growth 48: the W = 64 admission ceiling, where the update sits at the
+     * i64 rail and the exact combine needs the oracle's wide carrier. */
+    snprintf(label, sizeof label, "s8r64m1 trial %d", trial);
+    failed |= check(_mlir_ciface_cic_s8_r64_m1_wrap, input, 2, 8, 64, 1, 1, label);
 #endif
   }
 
