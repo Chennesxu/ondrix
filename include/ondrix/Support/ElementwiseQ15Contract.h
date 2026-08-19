@@ -3,6 +3,8 @@
 
 #include "ondrix/Dialect/ondsp/IR/OndspEnums.h"
 
+#include "llvm/Support/ErrorHandling.h"
+
 #include <cstdint>
 
 namespace ondrix {
@@ -37,28 +39,27 @@ inline int64_t roundSignedShift(int64_t value, unsigned shift, ondsp::RoundingMo
   int64_t half = divisor / 2;
   switch (rounding) {
   case ondsp::RoundingMode::TowardNegative:
-    break;
+    return quotient;
   case ondsp::RoundingMode::TowardZero:
-    if (value < 0 && remainder != 0)
-      ++quotient;
-    break;
+    return quotient + (value < 0 && remainder != 0);
   case ondsp::RoundingMode::NearestEven:
-    if (remainder > half || (remainder == half && (quotient & 1)))
-      ++quotient;
-    break;
+    return quotient + (remainder > half || (remainder == half && (quotient & 1)));
   case ondsp::RoundingMode::NearestTiesPositive:
-    if (remainder >= half)
-      ++quotient;
-    break;
+    return quotient + (remainder >= half);
   }
-  return quotient;
+  llvm_unreachable("unhandled declared rounding mode");
 }
 
 inline int64_t narrowToQ15(int64_t value, ondsp::OverflowMode overflow) {
-  if (overflow == ondsp::OverflowMode::Saturate)
+  switch (overflow) {
+  case ondsp::OverflowMode::Saturate:
     return value > 32767 ? 32767 : (value < -32768 ? -32768 : value);
-  int64_t bits = value & 0xFFFF;
-  return bits >= 32768 ? bits - 65536 : bits;
+  case ondsp::OverflowMode::Wrap: {
+    int64_t bits = value & 0xFFFF;
+    return bits >= 32768 ? bits - 65536 : bits;
+  }
+  }
+  llvm_unreachable("unhandled declared overflow mode");
 }
 
 // One element of one unary member: the exact integer result, then the single

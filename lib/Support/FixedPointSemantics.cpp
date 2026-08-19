@@ -109,30 +109,29 @@ llvm::APInt exportSignedAccumulator(const llvm::APInt &accumulator,
                                 ? accumulator
                                 : accumulator.trunc(fractionalBitsToDiscard).zext(accumulatorWidth);
     llvm::APInt one(accumulatorWidth, 1);
-    switch (roundingMode) {
-    case RoundingMode::TowardNegative:
-      break;
-    case RoundingMode::TowardZero:
-      if (accumulator.isNegative() && !remainder.isZero())
-        rounded += one;
-      break;
-    case RoundingMode::NearestTiesPositive: {
-      // Ties toward +infinity on top of the floor already taken above: a
-      // remainder of at least half always steps up. Expressed on the
-      // remainder rather than as an in-width add of half, which would
-      // overflow near the accumulator maximum.
-      llvm::APInt half = one.shl(fractionalBitsToDiscard - 1);
-      if (remainder.uge(half))
-        rounded += one;
-      break;
-    }
-    case RoundingMode::NearestEven: {
-      llvm::APInt half = one.shl(fractionalBitsToDiscard - 1);
-      if (remainder.ugt(half) || (remainder == half && rounded[0]))
-        rounded += one;
-      break;
-    }
-    }
+    bool increment = [&]() -> bool {
+      switch (roundingMode) {
+      case RoundingMode::TowardNegative:
+        return false;
+      case RoundingMode::TowardZero:
+        return accumulator.isNegative() && !remainder.isZero();
+      case RoundingMode::NearestTiesPositive: {
+        // Ties toward +infinity on top of the floor already taken above: a
+        // remainder of at least half always steps up. Expressed on the
+        // remainder rather than as an in-width add of half, which would
+        // overflow near the accumulator maximum.
+        llvm::APInt half = one.shl(fractionalBitsToDiscard - 1);
+        return remainder.uge(half);
+      }
+      case RoundingMode::NearestEven: {
+        llvm::APInt half = one.shl(fractionalBitsToDiscard - 1);
+        return remainder.ugt(half) || (remainder == half && rounded[0]);
+      }
+      }
+      llvm_unreachable("unhandled declared rounding mode");
+    }();
+    if (increment)
+      rounded += one;
   }
 
   switch (overflowMode) {
