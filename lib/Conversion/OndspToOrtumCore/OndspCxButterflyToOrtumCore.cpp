@@ -21,8 +21,10 @@ using namespace mlir;
 
 namespace {
 
-// The packed target rounding inventory; nearest_even deliberately maps to
-// nothing so the default profile stays on the generic path.
+// The packed target rounding inventory. nearest_even and toward_zero
+// deliberately map to nothing so those profiles stay on the generic path,
+// and a newly declared mode lands there too (plus a -Wswitch finding here)
+// instead of borrowing an inventory member.
 static std::optional<ondrix::ortumcore::CxRounding>
 selectTargetRounding(ondrix::ondsp::RoundingMode mode) {
   switch (mode) {
@@ -30,14 +32,22 @@ selectTargetRounding(ondrix::ondsp::RoundingMode mode) {
     return ondrix::ortumcore::CxRounding::TowardNegative;
   case ondrix::ondsp::RoundingMode::NearestTiesPositive:
     return ondrix::ortumcore::CxRounding::NearestTiesPositive;
-  default:
+  case ondrix::ondsp::RoundingMode::NearestEven:
+  case ondrix::ondsp::RoundingMode::TowardZero:
     return std::nullopt;
   }
+  return std::nullopt;
 }
 
-static ondrix::ortumcore::CxOverflow selectTargetOverflow(ondrix::ondsp::OverflowMode mode) {
-  return mode == ondrix::ondsp::OverflowMode::Wrap ? ondrix::ortumcore::CxOverflow::Wrap
-                                                   : ondrix::ortumcore::CxOverflow::Saturate;
+static std::optional<ondrix::ortumcore::CxOverflow>
+selectTargetOverflow(ondrix::ondsp::OverflowMode mode) {
+  switch (mode) {
+  case ondrix::ondsp::OverflowMode::Wrap:
+    return ondrix::ortumcore::CxOverflow::Wrap;
+  case ondrix::ondsp::OverflowMode::Saturate:
+    return ondrix::ortumcore::CxOverflow::Saturate;
+  }
+  return std::nullopt;
 }
 
 struct TargetScale {
@@ -48,13 +58,13 @@ struct TargetScale {
 
 static std::optional<TargetScale> classifyTargetScale(ondrix::ondsp::ScaleAttr scale) {
   std::optional<ondrix::ortumcore::CxRounding> rounding = selectTargetRounding(scale.getRounding());
-  if (!rounding || scale.getPreShiftLeft() != 0)
+  std::optional<ondrix::ortumcore::CxOverflow> overflow = selectTargetOverflow(scale.getOverflow());
+  if (!rounding || !overflow || scale.getPreShiftLeft() != 0)
     return std::nullopt;
   auto destination = dyn_cast<IntegerType>(scale.getSaturateTo());
   if (!destination || !destination.isSignless() || destination.getWidth() != 16)
     return std::nullopt;
-  return TargetScale{*rounding, selectTargetOverflow(scale.getOverflow()),
-                     int64_t(scale.getPostShiftRight())};
+  return TargetScale{*rounding, *overflow, int64_t(scale.getPostShiftRight())};
 }
 
 // The exact conjugate of a packed Q15 constant, or nullopt at the one

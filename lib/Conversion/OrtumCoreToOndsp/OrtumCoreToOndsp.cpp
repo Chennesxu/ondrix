@@ -304,15 +304,53 @@ static Value extractComponent(OpBuilder &builder, Location loc, Value packed, bo
   return builder.create<arith::ExtSIOp>(loc, carrier, half);
 }
 
+// The target enums map onto declared ondsp modes exhaustively; an unlisted
+// enum case fails the pattern instead of borrowing a neighbour's semantics.
+static std::optional<ondrix::ondsp::RoundingMode>
+convertCxRounding(ondrix::ortumcore::CxRounding rounding) {
+  switch (rounding) {
+  case ondrix::ortumcore::CxRounding::TowardNegative:
+    return ondrix::ondsp::RoundingMode::TowardNegative;
+  case ondrix::ortumcore::CxRounding::NearestTiesPositive:
+    return ondrix::ondsp::RoundingMode::NearestTiesPositive;
+  }
+  return std::nullopt;
+}
+
+static std::optional<ondrix::ondsp::OverflowMode>
+convertCxOverflow(ondrix::ortumcore::CxOverflow overflow) {
+  switch (overflow) {
+  case ondrix::ortumcore::CxOverflow::Wrap:
+    return ondrix::ondsp::OverflowMode::Wrap;
+  case ondrix::ortumcore::CxOverflow::Saturate:
+    return ondrix::ondsp::OverflowMode::Saturate;
+  }
+  return std::nullopt;
+}
+
+static std::optional<bool> isImagHighLayout(ondrix::ortumcore::CxLayout layout) {
+  switch (layout) {
+  case ondrix::ortumcore::CxLayout::ImagHi:
+    return true;
+  case ondrix::ortumcore::CxLayout::RealHi:
+    return false;
+  }
+  return std::nullopt;
+}
+
+static std::optional<bool> isCrossVariant(ondrix::ortumcore::CxBflyVariant variant) {
+  switch (variant) {
+  case ondrix::ortumcore::CxBflyVariant::Cross:
+    return true;
+  case ondrix::ortumcore::CxBflyVariant::Plain:
+    return false;
+  }
+  return std::nullopt;
+}
+
 static Value narrowComponent(OpBuilder &builder, Location loc, Value wide, int64_t shift,
-                             ondrix::ortumcore::CxRounding rounding,
-                             ondrix::ortumcore::CxOverflow overflow) {
-  auto mode = rounding == ondrix::ortumcore::CxRounding::TowardNegative
-                  ? ondrix::ondsp::RoundingMode::TowardNegative
-                  : ondrix::ondsp::RoundingMode::NearestTiesPositive;
-  auto narrowing = overflow == ondrix::ortumcore::CxOverflow::Wrap
-                       ? ondrix::ondsp::OverflowMode::Wrap
-                       : ondrix::ondsp::OverflowMode::Saturate;
+                             ondrix::ondsp::RoundingMode mode,
+                             ondrix::ondsp::OverflowMode narrowing) {
   auto scale = ondrix::ondsp::ScaleAttr::get(builder.getContext(), 0, unsigned(shift), mode,
                                              narrowing, builder.getI16Type());
   return builder.create<ondrix::ondsp::RoundShiftOp>(loc, builder.getI16Type(), wide, scale);
@@ -336,6 +374,11 @@ public:
   LogicalResult matchAndRewrite(ondrix::ortumcore::CxMulConjOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
+    std::optional<ondrix::ondsp::RoundingMode> mode = convertCxRounding(op.getRounding());
+    std::optional<ondrix::ondsp::OverflowMode> narrowing = convertCxOverflow(op.getOverflow());
+    std::optional<bool> imagHigh = isImagHighLayout(op.getLayout());
+    if (!mode || !narrowing || !imagHigh)
+      return rewriter.notifyMatchFailure(op, "declared mode has no ondsp emulation mapping");
     Type carrier = rewriter.getI64Type();
     Value vr = extractComponent(rewriter, loc, adaptor.getValue(), false, carrier);
     Value vi = extractComponent(rewriter, loc, adaptor.getValue(), true, carrier);
@@ -345,13 +388,10 @@ public:
                                                 rewriter.create<arith::MulIOp>(loc, vi, wi));
     Value imag = rewriter.create<arith::SubIOp>(loc, rewriter.create<arith::MulIOp>(loc, vi, wr),
                                                 rewriter.create<arith::MulIOp>(loc, vr, wi));
-    Value realNarrow =
-        narrowComponent(rewriter, loc, real, op.getShift(), op.getRounding(), op.getOverflow());
-    Value imagNarrow =
-        narrowComponent(rewriter, loc, imag, op.getShift(), op.getRounding(), op.getOverflow());
-    bool imagHigh = op.getLayout() == ondrix::ortumcore::CxLayout::ImagHi;
-    rewriter.replaceOp(op, packComponents(rewriter, loc, imagHigh ? imagNarrow : realNarrow,
-                                          imagHigh ? realNarrow : imagNarrow));
+    Value realNarrow = narrowComponent(rewriter, loc, real, op.getShift(), *mode, *narrowing);
+    Value imagNarrow = narrowComponent(rewriter, loc, imag, op.getShift(), *mode, *narrowing);
+    rewriter.replaceOp(op, packComponents(rewriter, loc, *imagHigh ? imagNarrow : realNarrow,
+                                          *imagHigh ? realNarrow : imagNarrow));
     return success();
   }
 };
@@ -363,6 +403,11 @@ public:
   LogicalResult matchAndRewrite(ondrix::ortumcore::CxBflyOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
+    std::optional<ondrix::ondsp::RoundingMode> mode = convertCxRounding(op.getRounding());
+    std::optional<ondrix::ondsp::OverflowMode> narrowing = convertCxOverflow(op.getOverflow());
+    std::optional<bool> cross = isCrossVariant(op.getVariant());
+    if (!mode || !narrowing || !cross)
+      return rewriter.notifyMatchFailure(op, "declared mode has no ondsp emulation mapping");
     Type carrier = rewriter.getI32Type();
     Value ar = extractComponent(rewriter, loc, adaptor.getLhs(), false, carrier);
     Value ai = extractComponent(rewriter, loc, adaptor.getLhs(), true, carrier);
@@ -374,14 +419,13 @@ public:
     Value diffImag = rewriter.create<arith::SubIOp>(loc, ai, bi);
     // Both variants keep sum-of-reals in out0 and difference-of-reals in
     // out1; cross swaps only the imaginary halves.
-    bool cross = op.getVariant() == ondrix::ortumcore::CxBflyVariant::Cross;
     auto narrow = [&](Value component) {
-      return narrowComponent(rewriter, loc, component, op.getShift(), op.getRounding(),
-                             op.getOverflow());
+      return narrowComponent(rewriter, loc, component, op.getShift(), *mode, *narrowing);
     };
-    Value out0 = packComponents(rewriter, loc, narrow(cross ? diffImag : sumImag), narrow(sumReal));
+    Value out0 =
+        packComponents(rewriter, loc, narrow(*cross ? diffImag : sumImag), narrow(sumReal));
     Value out1 =
-        packComponents(rewriter, loc, narrow(cross ? sumImag : diffImag), narrow(diffReal));
+        packComponents(rewriter, loc, narrow(*cross ? sumImag : diffImag), narrow(diffReal));
     rewriter.replaceOp(op, {out0, out1});
     return success();
   }

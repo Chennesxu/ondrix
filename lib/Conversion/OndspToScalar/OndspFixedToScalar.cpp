@@ -286,25 +286,31 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
     break;
   }
 
-  if (overflowMode == ondrix::ondsp::OverflowMode::Wrap)
+  // An exhaustive switch, so a newly declared mode is a compile-time
+  // -Wswitch finding here instead of borrowing a neighbour's semantics.
+  switch (overflowMode) {
+  case ondrix::ondsp::OverflowMode::Wrap:
     return builder.create<arith::TruncIOp>(loc, accumulatorType, updated);
-
-  // Clamp in the exact update width before narrowing to the accumulator. The
-  // comparison and select vectorize elementwise, so every lane saturates
-  // independently against the same accumulator bounds.
-  llvm::APInt minimum =
-      llvm::APInt::getSignedMinValue(accumulatorElement.getWidth()).sext(intermediateWidth);
-  llvm::APInt maximum =
-      llvm::APInt::getSignedMaxValue(accumulatorElement.getWidth()).sext(intermediateWidth);
-  Value minimumValue = createIntegerConstant(loc, intermediateType, minimum, builder);
-  Value maximumValue = createIntegerConstant(loc, intermediateType, maximum, builder);
-  Value belowMinimum =
-      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, updated, minimumValue);
-  Value aboveMaximum =
-      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, updated, maximumValue);
-  Value lowerClamped = builder.create<arith::SelectOp>(loc, belowMinimum, minimumValue, updated);
-  Value clamped = builder.create<arith::SelectOp>(loc, aboveMaximum, maximumValue, lowerClamped);
-  return builder.create<arith::TruncIOp>(loc, accumulatorType, clamped);
+  case ondrix::ondsp::OverflowMode::Saturate: {
+    // Clamp in the exact update width before narrowing to the accumulator.
+    // The comparison and select vectorize elementwise, so every lane
+    // saturates independently against the same accumulator bounds.
+    llvm::APInt minimum =
+        llvm::APInt::getSignedMinValue(accumulatorElement.getWidth()).sext(intermediateWidth);
+    llvm::APInt maximum =
+        llvm::APInt::getSignedMaxValue(accumulatorElement.getWidth()).sext(intermediateWidth);
+    Value minimumValue = createIntegerConstant(loc, intermediateType, minimum, builder);
+    Value maximumValue = createIntegerConstant(loc, intermediateType, maximum, builder);
+    Value belowMinimum =
+        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, updated, minimumValue);
+    Value aboveMaximum =
+        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, updated, maximumValue);
+    Value lowerClamped = builder.create<arith::SelectOp>(loc, belowMinimum, minimumValue, updated);
+    Value clamped = builder.create<arith::SelectOp>(loc, aboveMaximum, maximumValue, lowerClamped);
+    return builder.create<arith::TruncIOp>(loc, accumulatorType, clamped);
+  }
+  }
+  llvm_unreachable("unhandled declared overflow mode");
 }
 
 static Value roundSignedRightShift(Location loc, Value input, unsigned shift,
@@ -373,24 +379,28 @@ static Value narrowSignedValue(Location loc, Value input, Type destinationType,
   Type inputType = input.getType();
   if (inputType == destinationType)
     return input;
-  if (overflowMode == ondrix::ondsp::OverflowMode::Wrap)
+  switch (overflowMode) {
+  case ondrix::ondsp::OverflowMode::Wrap:
     return rewriter.create<arith::TruncIOp>(loc, destinationType, input);
-
-  IntegerType inputElementType = getIntegerElementType(inputType);
-  IntegerType destinationElementType = getIntegerElementType(destinationType);
-  llvm::APInt minimum = llvm::APInt::getSignedMinValue(destinationElementType.getWidth())
-                            .sext(inputElementType.getWidth());
-  llvm::APInt maximum = llvm::APInt::getSignedMaxValue(destinationElementType.getWidth())
-                            .sext(inputElementType.getWidth());
-  Value minimumValue = createIntegerConstant(loc, inputType, minimum, rewriter);
-  Value maximumValue = createIntegerConstant(loc, inputType, maximum, rewriter);
-  Value belowMinimum =
-      rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, input, minimumValue);
-  Value aboveMaximum =
-      rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, input, maximumValue);
-  Value lowerClamped = rewriter.create<arith::SelectOp>(loc, belowMinimum, minimumValue, input);
-  Value clamped = rewriter.create<arith::SelectOp>(loc, aboveMaximum, maximumValue, lowerClamped);
-  return rewriter.create<arith::TruncIOp>(loc, destinationType, clamped);
+  case ondrix::ondsp::OverflowMode::Saturate: {
+    IntegerType inputElementType = getIntegerElementType(inputType);
+    IntegerType destinationElementType = getIntegerElementType(destinationType);
+    llvm::APInt minimum = llvm::APInt::getSignedMinValue(destinationElementType.getWidth())
+                              .sext(inputElementType.getWidth());
+    llvm::APInt maximum = llvm::APInt::getSignedMaxValue(destinationElementType.getWidth())
+                              .sext(inputElementType.getWidth());
+    Value minimumValue = createIntegerConstant(loc, inputType, minimum, rewriter);
+    Value maximumValue = createIntegerConstant(loc, inputType, maximum, rewriter);
+    Value belowMinimum =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, input, minimumValue);
+    Value aboveMaximum =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, input, maximumValue);
+    Value lowerClamped = rewriter.create<arith::SelectOp>(loc, belowMinimum, minimumValue, input);
+    Value clamped = rewriter.create<arith::SelectOp>(loc, aboveMaximum, maximumValue, lowerClamped);
+    return rewriter.create<arith::TruncIOp>(loc, destinationType, clamped);
+  }
+  }
+  llvm_unreachable("unhandled declared overflow mode");
 }
 
 static Value requantizeSignedValue(Location loc, Value input, ondrix::ondsp::ScaleAttr scale,

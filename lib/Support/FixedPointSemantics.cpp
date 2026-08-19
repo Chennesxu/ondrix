@@ -135,18 +135,22 @@ llvm::APInt exportSignedAccumulator(const llvm::APInt &accumulator,
     }
   }
 
-  if (overflowMode == AccumulatorOverflowMode::Wrap)
+  switch (overflowMode) {
+  case AccumulatorOverflowMode::Wrap:
     return rounded.sextOrTrunc(destinationWidth);
-
-  unsigned comparisonWidth = std::max(accumulatorWidth, destinationWidth) + 1;
-  llvm::APInt extended = rounded.sext(comparisonWidth);
-  llvm::APInt minimum = llvm::APInt::getSignedMinValue(destinationWidth);
-  llvm::APInt maximum = llvm::APInt::getSignedMaxValue(destinationWidth);
-  if (extended.slt(minimum.sext(comparisonWidth)))
-    return minimum;
-  if (extended.sgt(maximum.sext(comparisonWidth)))
-    return maximum;
-  return rounded.sextOrTrunc(destinationWidth);
+  case AccumulatorOverflowMode::Saturate: {
+    unsigned comparisonWidth = std::max(accumulatorWidth, destinationWidth) + 1;
+    llvm::APInt extended = rounded.sext(comparisonWidth);
+    llvm::APInt minimum = llvm::APInt::getSignedMinValue(destinationWidth);
+    llvm::APInt maximum = llvm::APInt::getSignedMaxValue(destinationWidth);
+    if (extended.slt(minimum.sext(comparisonWidth)))
+      return minimum;
+    if (extended.sgt(maximum.sext(comparisonWidth)))
+      return maximum;
+    return rounded.sextOrTrunc(destinationWidth);
+  }
+  }
+  llvm_unreachable("unhandled declared overflow mode");
 }
 
 std::optional<SignedUniformSosDf2Step> evaluateSignedUniformSosDf2Section(
