@@ -18,9 +18,11 @@ public:
     SmallVector<Type> resultTypes;
     if (failed(getTypeConverter()->convertTypes(op.getResultTypes(), resultTypes)))
       return failure();
+    // No attribute propagation: these structural ops have no inherent
+    // attributes and no pass stamps discardable metadata on them, so a
+    // wholesale copy could only smuggle unapproved attributes.
     auto replacement =
         rewriter.create<UnrealizedConversionCastOp>(op.getLoc(), resultTypes, adaptor.getInputs());
-    replacement->setAttrs(op->getAttrs());
     rewriter.replaceOp(op, replacement.getResults());
     return success();
   }
@@ -35,6 +37,8 @@ public:
     Type resultType = getTypeConverter()->convertType(op.getType());
     if (!resultType)
       return failure();
+    // Discardable metadata on a select survives the structural type
+    // conversion; accumulator_control_flow_q15.mlir witnesses the contract.
     auto replacement =
         rewriter.create<arith::SelectOp>(op.getLoc(), resultType, adaptor.getCondition(),
                                          adaptor.getTrueValue(), adaptor.getFalseValue());
