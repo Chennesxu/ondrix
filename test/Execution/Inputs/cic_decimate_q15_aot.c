@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,7 +24,7 @@ extern void _mlir_ciface_cic_s4_r16_m1_wrap(MemRefI16 *, MemRefI16 *);
 extern void _mlir_ciface_cic_s8_r64_m1_wrap(MemRefI16 *, MemRefI16 *);
 #endif
 
-enum { kMaxInput = 128, kMaxOutput = 64, kStageLimit = 8, kTrialCount = 8 };
+enum { kMaxInput = 256, kMaxOutput = 64, kStageLimit = 8, kTrialCount = 8 };
 
 /* Independent reference: the contract's pseudocode with the two overflow
  * modes written out separately, so neither the carrier width nor the mode
@@ -43,7 +44,14 @@ static int64_t saturateTo(__int128 value, int width) {
   return value > high ? high : (value < low ? low : (int64_t)value);
 }
 
+/* Counts every exact combine outside i64: the witness that the W = 64 legs
+ * actually need the wide carrier, asserted nonzero after the corpus so a
+ * shrunken corpus cannot silently stop exercising the rail. */
+static int64_t wideCombineCount;
+
 static int64_t combine(__int128 value, int width, int wrapping) {
+  if (value > INT64_MAX || value < INT64_MIN)
+    ++wideCombineCount;
   return wrapping ? wrapTo(value, width) : saturateTo(value, width);
 }
 
@@ -233,10 +241,11 @@ int main(void) {
     failed |= check(_mlir_ciface_cic_s3_r8_m2_wrap, input, 8, 3, 8, 2, 1, label);
     snprintf(label, sizeof label, "s4r16m1 trial %d", trial);
     failed |= check(_mlir_ciface_cic_s4_r16_m1_wrap, input, 4, 4, 16, 1, 1, label);
-    /* growth 48: the W = 64 admission ceiling, where the update sits at the
-     * i64 rail and the exact combine needs the oracle's wide carrier. */
+    /* growth 48: the W = 64 admission ceiling. A sustained full-scale input
+     * drives the eighth integrator past INT64_MAX near sample 238, so the
+     * 256-sample corpus reaches the rail the wide oracle carrier exists for. */
     snprintf(label, sizeof label, "s8r64m1 trial %d", trial);
-    failed |= check(_mlir_ciface_cic_s8_r64_m1_wrap, input, 2, 8, 64, 1, 1, label);
+    failed |= check(_mlir_ciface_cic_s8_r64_m1_wrap, input, 4, 8, 64, 1, 1, label);
 #endif
   }
 
@@ -249,6 +258,10 @@ int main(void) {
   failed |= checkConstantRecovery(_mlir_ciface_cic_s2_r4_m1_wrap, -32768, 8, 2, 4, 1, "s2r4m1neg");
   failed |= checkConstantRecovery(_mlir_ciface_cic_s3_r8_m2_wrap, 12345, 8, 3, 8, 2, "s3r8m2");
   failed |= checkModeDivergence();
+  if (wideCombineCount == 0) {
+    fprintf(stderr, "the corpus never drove an exact combine past i64\n");
+    failed = 1;
+  }
   return failed;
 #endif
 }

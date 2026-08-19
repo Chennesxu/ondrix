@@ -73,8 +73,9 @@ func.func @cic_s4_r16_m1_wrap(%input: tensor<64xi16>) -> tensor<4xi16>
   return %result : tensor<4xi16>
 }
 
-// The W = 64 admission ceiling: growth 8 * log2(64) = 48 over i16 input.
-func.func @cic_s8_r64_m1_wrap(%input: tensor<128xi16>) -> tensor<2xi16>
+// The W = 64 admission ceiling: growth 8 * log2(64) = 48 over i16 input,
+// with a corpus long enough that the exact combine provably leaves i64.
+func.func @cic_s8_r64_m1_wrap(%input: tensor<256xi16>) -> tensor<4xi16>
     attributes {llvm.emit_c_interface} {
   %result = ondrix.cic_decimate %input {
     stages = 8 : i64,
@@ -83,6 +84,6 @@ func.func @cic_s8_r64_m1_wrap(%input: tensor<128xi16>) -> tensor<2xi16>
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
     overflow = #ondsp.overflow<wrap>,
     rounding = #ondsp.rounding<nearest_even>
-  } : (tensor<128xi16>) -> tensor<2xi16>
-  return %result : tensor<2xi16>
+  } : (tensor<256xi16>) -> tensor<4xi16>
+  return %result : tensor<4xi16>
 }
