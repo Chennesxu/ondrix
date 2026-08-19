@@ -42,7 +42,7 @@ public:
     auto replacement =
         rewriter.create<arith::SelectOp>(op.getLoc(), resultType, adaptor.getCondition(),
                                          adaptor.getTrueValue(), adaptor.getFalseValue());
-    replacement->setAttrs(op->getAttrs());
+    replacement->setDiscardableAttrs(op->getDiscardableAttrDictionary());
     rewriter.replaceOp(op, replacement);
     return success();
   }
