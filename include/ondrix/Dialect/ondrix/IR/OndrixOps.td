@@ -634,9 +634,12 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
 
     The executable profiles are deliberately limited to static power-of-two
     extents within each profile's declared range, explicit forward or inverse
-    direction, an imag-high/real-low packed layout, and the same product and
-    scale policies as the executable butterfly (exact full products, plus the
-    raw-high selection on the Q31 profile); at Q15 that
+    direction, an imag-high/real-low packed layout, and the executable
+    butterfly's scale policies. The Q15 profile uses exact full products; the
+    Q31 profile is frozen to the raw-high selection, and any other product
+    selection is refused at the transform level (the full product stays
+    admitted only on the operation-level butterfly, where its exact-carrier
+    gate lives); at Q15 that
     includes the packed target inventory (toward_negative or
     nearest_ties_positive rounding, wrap or saturating narrowing, output
     shift 0 or 1), which the unrolled lowering propagates unchanged into
@@ -700,8 +703,8 @@ def Ondrix_RfftOp : Ondrix_Op<"rfft", [Pure]> {
 
     The executable profiles are limited to static power-of-two extents in
     each profile's declared range, the imag-high/real-low packed layouts,
-    and the same product and scale policies as the executable butterfly
-    (exact full products, plus the raw-high selection on the Q31 profile).
+    and the executable butterfly's scale policies: exact full products at
+    Q15, and only the raw-high selection at Q31.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_CxLayoutAttr:$layout,
@@ -746,8 +749,8 @@ def Ondrix_IrfftOp : Ondrix_Op<"irfft", [Pure]> {
 
     The executable profiles are limited to static power-of-two extents in
     each profile's declared range, the imag-high/real-low packed layouts,
-    and the same product and scale policies as the executable butterfly
-    (exact full products, plus the raw-high selection on the Q31 profile).
+    and the executable butterfly's scale policies: exact full products at
+    Q15, and only the raw-high selection at Q31.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_CxLayoutAttr:$layout,

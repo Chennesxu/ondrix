@@ -1104,26 +1104,47 @@ LogicalResult ButterflyOp::verify() {
                                                     getProductScale(), getOutputScale());
 }
 
+// The whole-transform packed-Q31 profile is frozen to the raw-high selection.
+// The full product stays admitted only on ondsp.cx_butterfly, where its
+// exact-carrier evidence lives; a transform-level op has no gate for it.
+static LogicalResult verifyPackedQ31TransformProduct(Operation *op,
+                                                     ondrix::ondsp::CxLayoutAttr layout,
+                                                     ondrix::ondsp::ProductAttr product) {
+  if (layout.getLayout() != ondrix::ondsp::ComplexLayout::PackedI32ImagHiRealLo)
+    return success();
+  if (product.getSelection() != ondrix::ondsp::ProductSelection::HighRaw)
+    return op->emitOpError(
+        "the packed-Q31 transform profile is frozen to the raw-high product selection");
+  return success();
+}
+
 LogicalResult CfftOp::verify() {
   if (failed(verifyCfftValueDomain(*this)))
     return failure();
-  return ondrix::ondsp::verifyPackedButterflyPolicy(*this, getLayout(), getNumeric(), getProduct(),
-                                                    getProductScale(), getOutputScale(),
-                                                    /*targetInventory=*/true);
+  if (failed(ondrix::ondsp::verifyPackedButterflyPolicy(
+          *this, getLayout(), getNumeric(), getProduct(), getProductScale(), getOutputScale(),
+          /*targetInventory=*/true)))
+    return failure();
+  return verifyPackedQ31TransformProduct(*this, cast<ondrix::ondsp::CxLayoutAttr>(getLayout()),
+                                         getProduct());
 }
 
 LogicalResult RfftOp::verify() {
   if (failed(verifyRfftValueDomain(*this)))
     return failure();
-  return ondrix::ondsp::verifyPackedButterflyPolicy(*this, getLayout(), getNumeric(), getProduct(),
-                                                    getProductScale(), getOutputScale());
+  if (failed(ondrix::ondsp::verifyPackedButterflyPolicy(
+          *this, getLayout(), getNumeric(), getProduct(), getProductScale(), getOutputScale())))
+    return failure();
+  return verifyPackedQ31TransformProduct(*this, getLayout(), getProduct());
 }
 
 LogicalResult IrfftOp::verify() {
   if (failed(verifyIrfftValueDomain(*this)))
     return failure();
-  return ondrix::ondsp::verifyPackedButterflyPolicy(*this, getLayout(), getNumeric(), getProduct(),
-                                                    getProductScale(), getOutputScale());
+  if (failed(ondrix::ondsp::verifyPackedButterflyPolicy(
+          *this, getLayout(), getNumeric(), getProduct(), getProductScale(), getOutputScale())))
+    return failure();
+  return verifyPackedQ31TransformProduct(*this, getLayout(), getProduct());
 }
 
 LogicalResult RfftRadix4SplitOp::verify() {

@@ -85,3 +85,49 @@ func.func @cx_mul_rejects_q31_profile(%lhs: i64, %rhs: i64) -> i64 {
   } : (i64, i64) -> i64
   return %0 : i64
 }
+
+// -----
+
+// A shape-legal transform whose only defect is the product selection: the
+// whole-transform Q31 profile is frozen to raw-high, and full products stay
+// admitted only on ondsp.cx_butterfly, where the exact-carrier gate lives.
+func.func @cfft_rejects_q31_full_product(%input: tensor<8xi64>) -> tensor<8xi64> {
+  // expected-error@+1 {{the packed-Q31 transform profile is frozen to the raw-high product selection}}
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+  } : (tensor<8xi64>) -> tensor<8xi64>
+  return %result : tensor<8xi64>
+}
+
+// -----
+
+func.func @rfft_rejects_q31_full_product(%input: tensor<8xi32>) -> tensor<5xi64> {
+  // expected-error@+1 {{the packed-Q31 transform profile is frozen to the raw-high product selection}}
+  %result = ondrix.rfft %input {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+  } : (tensor<8xi32>) -> tensor<5xi64>
+  return %result : tensor<5xi64>
+}
+
+// -----
+
+func.func @irfft_rejects_q31_full_product(%input: tensor<5xi64>) -> tensor<8xi32> {
+  // expected-error@+1 {{the packed-Q31 transform profile is frozen to the raw-high product selection}}
+  %result = ondrix.irfft %input {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+  } : (tensor<5xi64>) -> tensor<8xi32>
+  return %result : tensor<8xi32>
+}

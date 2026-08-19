@@ -66,9 +66,9 @@ func.func @q31_requires_i64_container(%input: tensor<4xi32>) -> tensor<4xi32> {
     direction = #ondrix.cfft_direction<forward>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<4xi32>) -> tensor<4xi32>
   return %result : tensor<4xi32>
 }
@@ -83,9 +83,9 @@ func.func @q31_extent_beyond_frozen_tables(%input: tensor<128xi64>) -> tensor<12
     direction = #ondrix.cfft_direction<forward>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<128xi64>) -> tensor<128xi64>
   return %result : tensor<128xi64>
 }
@@ -98,9 +98,9 @@ func.func @q31_layout_rejects_q15_numeric(%input: tensor<4xi64>) -> tensor<4xi64
     direction = #ondrix.cfft_direction<forward>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<4xi64>) -> tensor<4xi64>
   return %result : tensor<4xi64>
 }
@@ -108,14 +108,14 @@ func.func @q31_layout_rejects_q15_numeric(%input: tensor<4xi64>) -> tensor<4xi64
 // -----
 
 func.func @q31_rejects_q15_product_shift(%input: tensor<4xi64>) -> tensor<4xi64> {
-  // expected-error@+1 {{product_scale requires pre_shift_left=0 and post_shift_right=31}}
+  // expected-error@+1 {{product_scale requires pre_shift_left=1 and post_shift_right=0}}
   %result = ondrix.cfft %input {
     direction = #ondrix.cfft_direction<forward>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i32>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
   } : (tensor<4xi64>) -> tensor<4xi64>
   return %result : tensor<4xi64>
 }
@@ -128,9 +128,9 @@ func.func @q31_rejects_narrow_output_destination(%input: tensor<4xi64>) -> tenso
     direction = #ondrix.cfft_direction<forward>,
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
-    product = #ondsp.product<full>,
-    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i32>,
-    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+    product = #ondsp.product<high_raw>,
+    product_scale = #ondsp.scale<pre_shift_left = 1, post_shift_right = 0, rounding = toward_negative, overflow = saturate, saturate_to = i32>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i16>
   } : (tensor<4xi64>) -> tensor<4xi64>
   return %result : tensor<4xi64>
 }
