@@ -72,8 +72,10 @@ inline int64_t applyElementwiseUnary(int64_t value, const ElementwiseUnaryStep &
   case ElementwiseUnaryKind::Offset:
     return narrowToQ15(value + step.parameter, step.overflow);
   case ElementwiseUnaryKind::Shift:
+    // Multiplication, not <<: a left shift of a negative value is undefined,
+    // and the verifier's amount bound keeps 2^15 * |value| far inside i64.
     if (step.parameter >= 0)
-      return narrowToQ15(value << step.parameter, step.overflow);
+      return narrowToQ15(value * (int64_t(1) << step.parameter), step.overflow);
     return narrowToQ15(roundSignedShift(value, unsigned(-step.parameter), step.rounding),
                        step.overflow);
   }
