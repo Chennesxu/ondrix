@@ -49,8 +49,7 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_cfft_ne_wrap.ox 2>&1 | FileCheck %s --check-prefix=NEWRAP
 // RUN: not ondrix-compile %S/Inputs/invalid_cfft_rounding.ox 2>&1 | FileCheck %s --check-prefix=BADROUND
 
-// One declared pair names both scale boundaries: the gated inventory shape
-// and the packed target's single mode register.
+// One declared pair names both scale boundaries, the gated inventory shape.
 // TARGET-LABEL: func.func @q15_cfft8_floor(
 // TARGET: ondrix.cfft
 // TARGET-SAME: output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = wrap, saturate_to = i16>

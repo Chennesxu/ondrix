@@ -237,15 +237,21 @@ def q15_rfft_round_trip(input: tensor[q15,16]) -> tensor[q15,16]:
 `complex_q15` is stored as one `i32` with the imaginary component in bits
 31:16 and the real component in bits 15:0. The current builtins accept only
 matching static extents of four or eight and emit closed radix-2 profiles:
-`cfft` uses forward twiddles and `icfft` uses their conjugates. Both use exact
-full complex products, nearest-even saturating Q30-to-Q15 product scaling,
-and nearest-even saturating one-bit scaling at every butterfly stage. The
-per-stage scaling makes the inverse profile include the `1/N` normalization.
-This spelling does not imply a general source complex type; other sizes,
-dynamic planning, and configurable complex policies remain unsupported.
+`cfft` uses forward twiddles and `icfft` uses their conjugates. Both use
+exact full complex products. The default stage policy is nearest-even
+saturating Q30-to-Q15 product scaling and nearest-even saturating one-bit
+scaling at every butterfly stage; optional `rounding=`/`overflow=`
+parameters name one declared pair for both scale boundaries, admitting the
+gated target-inventory combinations (`toward_negative` or
+`nearest_ties_positive`, with `wrap` or `saturate`) — `nearest_even` with
+`wrap` has no gate and is refused. The per-stage scaling makes the inverse
+profile include the `1/N` normalization. This spelling does not imply a
+general source complex type; other sizes and dynamic planning remain
+unsupported.
 `rfft` accepts static power-of-two real extents from 8 through 64 and returns
-the compact natural Hermitian bins 0 through N/2. `irfft` accepts the
-corresponding 5 or 9 packed bins and returns N real Q15 values. DC and
+the compact natural Hermitian bins 0 through N/2. `irfft` is narrower: it
+accepts only 5 or 9 packed bins (real extents 8 or 16) and returns N real
+Q15 values, so the larger `rfft` extents have no `irfft` counterpart yet. DC and
 Nyquist imaginary components are canonicalized to zero by the existing Ondrix
 contract.
 

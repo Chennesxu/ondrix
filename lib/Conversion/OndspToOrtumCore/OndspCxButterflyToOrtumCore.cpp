@@ -152,10 +152,8 @@ private:
     op.erase();
   }
 
-  // The scalar Q31 target has no packed complex instruction, and it needs
-  // none: the i64 container is a GPR pair, so taking the halves apart and
-  // putting them back costs nothing, and the butterfly is the raw-high MAC
-  // chains plus the scaled saturating stage arithmetic.
+  // Selection by decomposition onto the existing scalar capabilities; the
+  // equivalence argument is the pass description in Passes.td.
   bool rewriteRawHighQ31Butterfly(ondrix::ondsp::CxButterflyOp op) {
     if (!op.getA().getType().isSignlessInteger(64) ||
         op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI32ImagHiRealLo ||

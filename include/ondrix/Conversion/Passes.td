@@ -155,6 +155,23 @@ def ConvertOndspCxButterflyToOrtumCore
     unconverted butterfly remains a generic ondsp operation with unchanged
     semantics.
 
+    The packed-Q31 raw-high profile is selected by DECOMPOSITION rather than
+    matching: the current OrtumCore surface has no direct packed-Q31
+    capability, so the conversion composes the equivalent equation from the
+    existing scalar capabilities. The container halves come apart with plain
+    arithmetic; each cross-term pair becomes one accumulator web of
+    `ortumcore.q31_mac_add`/`q31_mac_sub` steps with a shift-0
+    `ortumcore.acc_out` readout; the product scale's left shift becomes a
+    saturating doubling of that readout; and each stage leg becomes one
+    `ortumcore.sat_shift_add`/`sat_shift_sub` carrying the declared output
+    shift. Two facts make the web exact: every raw-high term is bounded by
+    2^30, so a term pair stays far inside the i40 accumulator and its
+    saturating updates never clamp; and reading out at shift 0 before a
+    saturating doubling equals doubling the exact term sum, because clamping
+    before a monotone doubling that clamps again agrees with clamping after
+    — a reachable corner, since |sum| can attain 2^31. The full-product Q31
+    selection stays generic.
+
     The pass also selects every `ondsp.bitrev_add` index walk onto the
     32-bit `ortumcore.bitrev_add` progression. The composition is exact for
     any verified width: shifting both operands' low `width` bits to the top

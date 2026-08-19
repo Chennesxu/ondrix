@@ -38,8 +38,7 @@
 
 // Nothing generic survives the selection: each butterfly becomes two
 // accumulator webs of raw-high MAC steps and four scaled saturating stage
-// operations, and the container halves come apart with plain arithmetic
-// because the container is a register pair on the target.
+// operations, composed per the pass description in Passes.td.
 // SELECT: ortumcore.q31_mac_add
 // SELECT: ortumcore.q31_mac_sub
 // SELECT: ortumcore.acc_out

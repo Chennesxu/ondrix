@@ -814,9 +814,8 @@ public:
         return std::nullopt;
       call.operands.push_back(std::move(*operand));
       // Only the CFFT profile admits a declared stage policy; one pair names
-      // both scale boundaries, matching the gated combinations and the
-      // packed target's single mode register. Omission keeps the
-      // nearest_even saturating default.
+      // both scale boundaries, the shape the gated combinations share.
+      // Omission keeps the nearest_even saturating default.
       if (isCfftKind(call.kind) && current.kind == TokenKind::Comma &&
           next.spelling == "rounding") {
         if (!expect(TokenKind::Comma, "expected ',' before rounding policy") ||

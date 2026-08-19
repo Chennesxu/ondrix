@@ -1,12 +1,8 @@
 // RUN: ondrix-opt %s --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s
 // RUN: ondrix-opt %s --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s --check-prefix=CLOSED
 
-// The scalar Q31 target has no packed-complex instruction, so the selection
-// decomposes the butterfly instead of matching it: two accumulator webs of
-// raw-high MAC steps carry the cross terms, the product scale's left shift
-// becomes a saturating doubling of the readout, and the stage arithmetic is the
-// scaled saturating add/sub. Taking the container halves apart is free because
-// the container is a register pair on the target.
+// Pins the decomposed shape of the raw-high selection — accumulator webs,
+// saturating doubling, scaled stage legs; the argument is in Passes.td.
 
 // CHECK-LABEL: func.func @raw_high_q31
 // The real term: one web that adds br*wr and subtracts bi*wi.
