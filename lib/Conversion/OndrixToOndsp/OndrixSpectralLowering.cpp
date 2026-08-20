@@ -7,6 +7,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Support/DctCoefficients.h"
 #include "ondrix/Support/GuardedQ15Quantization.h"
+#include "ondrix/Support/Q30SplitTwiddleTables.h"
 #include "ondrix/Support/Q31TwiddleTables.h"
 
 #include "llvm/ADT/APInt.h"
@@ -726,8 +727,8 @@ private:
   bool fftLoops;
 };
 
-// One complex value of the half-size radix-4 split schedule, carried as two
-// i32 SSA components between the explicit ondsp requantization points.
+// One complex value of a half-size split schedule, carried as two i32 SSA
+// components between the explicit ondsp requantization points.
 struct SplitComplexValue {
   Value real;
   Value imaginary;
@@ -924,6 +925,120 @@ public:
   }
 };
 
+class RfftSplitOpLowering final : public OpConversionPattern<ondrix::ir::RfftSplitOp> {
+public:
+  using OpConversionPattern<ondrix::ir::RfftSplitOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::RfftSplitOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    MLIRContext *context = rewriter.getContext();
+    IntegerType i32 = rewriter.getI32Type();
+    IntegerType i64 = rewriter.getIntegerType(64);
+    int64_t extent = op.getInput().getType().getDimSize(0);
+
+    // The one toward-negative site. Its scale must stay attribute-identical
+    // to the scaled saturating subtract the OrtumCore emulation emits, so a
+    // later selection pass can still recognize this site.
+    auto floorHalveSaturating = [&](Value lhs, Value rhs) -> Value {
+      auto scale = ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0,
+                                                 /*postShiftRight=*/1,
+                                                 ondrix::ondsp::RoundingMode::TowardNegative,
+                                                 ondrix::ondsp::OverflowMode::Saturate, i32);
+      return rewriter.create<ondrix::ondsp::SubShiftOp>(loc, i32, lhs, rhs, scale);
+    };
+    // Every other rounding decision. The carrier never narrows here, so the
+    // scale's overflow mode is unreachable.
+    auto truncateShift = [&](Value value, unsigned shift, IntegerType carrier) -> Value {
+      auto scale = ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, shift,
+                                                 ondrix::ondsp::RoundingMode::TowardZero,
+                                                 ondrix::ondsp::OverflowMode::Wrap, carrier);
+      return rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, carrier, value, scale);
+    };
+    auto add = [&](Value lhs, Value rhs) -> Value {
+      return rewriter.create<arith::AddIOp>(loc, lhs, rhs);
+    };
+    auto sub = [&](Value lhs, Value rhs) -> Value {
+      return rewriter.create<arith::SubIOp>(loc, lhs, rhs);
+    };
+    auto widen = [&](Value value) -> Value {
+      return rewriter.create<arith::ExtSIOp>(loc, i64, value);
+    };
+    auto constant64 = [&](int64_t value) -> Value {
+      return rewriter.create<arith::ConstantIntOp>(loc, value, 64);
+    };
+    auto scaleProduct = [&](int64_t coefficient, Value value) -> Value {
+      Value product = rewriter.create<arith::MulIOp>(loc, constant64(coefficient), value);
+      return truncateShift(product, 30, i64);
+    };
+    // The combines are exact in i64 and the halved result provably fits i32,
+    // so this boundary truncates without a clamp.
+    auto combine = [&](Value value) -> Value {
+      return rewriter.create<arith::TruncIOp>(loc, i32, truncateShift(value, 1, i64));
+    };
+
+    Value shift32 = rewriter.create<arith::ConstantIntOp>(loc, 32, 64);
+    auto unpack = [&](int64_t index) -> SplitComplexValue {
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      Value packed = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+      Value real = rewriter.create<arith::TruncIOp>(loc, i32, packed);
+      Value high = rewriter.create<arith::ShRUIOp>(loc, packed, shift32);
+      return {real, rewriter.create<arith::TruncIOp>(loc, i32, high)};
+    };
+    auto packBin = [&](Value real, Value imaginary) -> Value {
+      Value realBits = rewriter.create<arith::ExtUIOp>(loc, i64, real);
+      Value imaginaryBits = rewriter.create<arith::ExtUIOp>(loc, i64, imaginary);
+      Value shifted = rewriter.create<arith::ShLIOp>(loc, imaginaryBits, shift32);
+      return rewriter.create<arith::OrIOp>(loc, shifted, realBits);
+    };
+
+    int64_t half = extent / 2;
+    SmallVector<Value> bins(extent);
+    SplitComplexValue dc = unpack(0);
+    bins[0] = packBin(truncateShift(add(dc.real, dc.imaginary), 1, i32),
+                      rewriter.create<arith::ConstantIntOp>(loc, 0, 32));
+
+    for (int64_t k = 1; k < half; ++k) {
+      std::optional<ondrix::Q30SplitTwiddle> twiddle = ondrix::getQ30SplitTwiddle(extent, k);
+      assert(twiddle && "the verified split extent must have a frozen twiddle pair");
+      SplitComplexValue x = unpack(k);
+      SplitComplexValue mirror = unpack(extent - k);
+      Value ar = widen(floorHalveSaturating(x.real, mirror.real));
+      Value sr = widen(truncateShift(add(x.real, mirror.real), 1, i32));
+      Value ai = widen(truncateShift(sub(x.imaginary, mirror.imaginary), 1, i32));
+      Value si = widen(truncateShift(add(x.imaginary, mirror.imaginary), 1, i32));
+      Value p1 = scaleProduct(twiddle->sine, ar);
+      Value p2 = scaleProduct(twiddle->cosine, si);
+      Value p3 = scaleProduct(twiddle->sine, si);
+      Value p4 = scaleProduct(twiddle->cosine, ar);
+      bins[k] = packBin(combine(add(sub(sr, p1), p2)), combine(sub(sub(ai, p3), p4)));
+      bins[extent - k] =
+          packBin(combine(sub(add(sr, p1), p2)), combine(sub(sub(sub(constant64(0), ai), p3), p4)));
+    }
+
+    // The self-paired bin has ar and ai exactly zero, so the p1 and p4 terms
+    // are absent rather than folded away.
+    std::optional<ondrix::Q30SplitTwiddle> selfTwiddle = ondrix::getQ30SplitTwiddle(extent, half);
+    assert(selfTwiddle && "the verified split extent must have a frozen twiddle pair");
+    SplitComplexValue self = unpack(half);
+    Value selfSr = widen(truncateShift(add(self.real, self.real), 1, i32));
+    Value selfSi = widen(truncateShift(add(self.imaginary, self.imaginary), 1, i32));
+    Value selfP2 = scaleProduct(selfTwiddle->cosine, selfSi);
+    Value selfP3 = scaleProduct(selfTwiddle->sine, selfSi);
+    bins[half] = packBin(combine(add(selfSr, selfP2)), combine(sub(constant64(0), selfP3)));
+
+    RankedTensorType resultType = op.getResult().getType();
+    Value result =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    for (int64_t index = 0; index < extent; ++index) {
+      Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      result = rewriter.create<tensor::InsertOp>(loc, bins[index], result, position);
+    }
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 class DctOpLowering final : public OpConversionPattern<ondrix::ir::DctOp> {
 public:
   using OpConversionPattern<ondrix::ir::DctOp>::OpConversionPattern;
@@ -1035,9 +1150,8 @@ void ondrix::conversion::populateOndrixSpectralLoweringPatterns(RewritePatternSe
                                                                 bool vectorizeStaticCfft,
                                                                 bool fftLoops) {
   MLIRContext *context = patterns.getContext();
-  patterns
-      .add<ButterflyOpLowering, RfftRadix4SplitOpLowering, DctOpLowering, CxMagnitudeOpLowering>(
-          context);
+  patterns.add<ButterflyOpLowering, RfftRadix4SplitOpLowering, RfftSplitOpLowering, DctOpLowering,
+               CxMagnitudeOpLowering>(context);
   patterns.add<CfftOpLowering, RfftOpLowering, IrfftOpLowering>(context, vectorizeStaticCfft,
                                                                 fftLoops);
 }

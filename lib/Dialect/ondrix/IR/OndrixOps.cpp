@@ -4,6 +4,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 #include "ondrix/Support/DSPTypeUtils.h"
+#include "ondrix/Support/Q30SplitTwiddleTables.h"
 #include "ondrix/Support/Q31TwiddleTables.h"
 
 #include "llvm/Support/MathExtras.h"
@@ -223,6 +224,26 @@ static LogicalResult verifyRfftRadix4SplitValueDomain(RfftRadix4SplitOp op) {
       !resultType.getElementType().isSignlessInteger(32))
     return op.emitOpError(
         "executable radix-4 split RFFT requires tensor<32xi16> to tensor<17xi32>");
+  return success();
+}
+
+static LogicalResult verifyRfftSplitValueDomain(RfftSplitOp op) {
+  if (op.getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI32ImagHiRealLo)
+    return op.emitOpError("executable split RFFT requires packed_i32_imag_hi_real_lo layout");
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType resultType = op.getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
+    return failure();
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if (inputExtent < 4 || inputExtent > ondrix::kMaxQ30SplitTwiddleExtent ||
+      !llvm::isPowerOf2_64(inputExtent) || resultExtent != inputExtent ||
+      !inputType.getElementType().isSignlessInteger(64) ||
+      !resultType.getElementType().isSignlessInteger(64))
+    return op.emitOpError() << "executable split RFFT requires matching tensor<Nxi64> input and "
+                               "result with power-of-two N in [4, "
+                            << ondrix::kMaxQ30SplitTwiddleExtent << "]";
   return success();
 }
 
@@ -1155,6 +1176,16 @@ LogicalResult RfftRadix4SplitOp::verify() {
   if (!ondrix::ondsp::isFullProduct(getProduct()))
     return emitOpError("executable radix-4 split RFFT requires product = #ondsp.product<full>");
   return verifyRfftRadix4SplitValueDomain(*this);
+}
+
+LogicalResult RfftSplitOp::verify() {
+  if (failed(verifySignedFixedFormat(getOperation(), getInputNumeric(), 32, 31, "input_numeric")))
+    return failure();
+  if (failed(verifySignedFixedFormat(getOperation(), getOutputNumeric(), 32, 31, "output_numeric")))
+    return failure();
+  if (!ondrix::ondsp::isFullProduct(getProduct()))
+    return emitOpError("executable split RFFT requires product = #ondsp.product<full>");
+  return verifyRfftSplitValueDomain(*this);
 }
 
 LogicalResult DctOp::verify() {

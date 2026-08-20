@@ -813,6 +813,92 @@ def Ondrix_RfftRadix4SplitOp : Ondrix_Op<"rfft_radix4_split", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_RfftSplitOp : Ondrix_Op<"rfft_split", [Pure]> {
+  let summary = "Half-size packed-Q31 real-spectrum split stage";
+  let description = [{
+    Consumes the natural-order output of a half-size packed-Q31 complex FFT
+    and produces the compact real spectrum of the real signal that transform
+    packed. This is a THIRD real-spectrum contract, deliberately different
+    from `ondrix.rfft`, which emits the `N/2+1` Hermitian bins of the
+    full-length staged transform, and from `ondrix.rfft_radix4_split`, which
+    is the Q15 whole-transform profile. None of the three is interchangeable
+    with another. Forward only.
+
+    Input and result are matching `tensor<Nxi64>` values for power-of-two `N`
+    in `[4, 32]`, where `N` is the complex point count of the producing
+    half-size transform. Both carry the imag-high/real-low packed layout with
+    signed `i32` components at `frac = 31` and exact full products.
+
+    Every bin `k` pairs with its mirror `m = N-k` under the Q2.30 twiddle
+    pair `(ws, wc) = (sin, cos)(pi*k/N)`. With `xr`/`xi` the components of
+    `input[k]`, `mr`/`mi` those of `input[m]`, `wrap32` two's-complement
+    32-bit wrapping, `tz` toward-zero and `floor` toward-negative rounding,
+    and `low32` truncation to the low thirty-two bits, each `k` in
+    `1..N/2-1` is:
+
+    ```
+    ar = sat32( floor((xr - mr) / 2) )
+    sr = tz( wrap32(xr + mr) / 2 )
+    ai = tz( wrap32(xi - mi) / 2 )
+    si = tz( wrap32(xi + mi) / 2 )
+    p1 = tz( (ws * ar) / 2^30 )
+    p2 = tz( (wc * si) / 2^30 )
+    p3 = tz( (ws * si) / 2^30 )
+    p4 = tz( (wc * ar) / 2^30 )
+    Y_re[k]   = low32( tz((sr - p1 + p2) / 2) )
+    Y_im[k]   = low32( tz((ai - p3 - p4) / 2) )
+    Y_re[N-k] = low32( tz((sr + p1 - p2) / 2) )
+    Y_im[N-k] = low32( tz((-ai - p3 - p4) / 2) )
+    ```
+
+    Bin `N/2` is its own mirror, so `ar` and `ai` are exactly zero and the
+    schedule collapses to two terms:
+
+    ```
+    sr = tz( wrap32(xr + xr) / 2 )
+    si = tz( wrap32(xi + xi) / 2 )
+    Y_re[N/2] = low32( tz((sr + tz((wc * si) / 2^30)) / 2) )
+    Y_im[N/2] = low32( tz((-tz((ws * si) / 2^30)) / 2) )
+    ```
+
+    DC is `Y_re[0] = tz( wrap32(x_re[0] + x_im[0]) / 2 )` with `Y_im[0] = 0`.
+    The Nyquist bin is deliberately dropped: this profile emits exactly `N`
+    compact bins, which is part of the contract and not an omission.
+
+    The four products are exact 64-bit multiplies scaled afterwards, never
+    a narrowed operand. The `floor` at `ar` is the schedule's single
+    toward-negative site and its clamp is provably inert, because a 33-bit
+    difference halved always fits `i32`; every other rounding decision is
+    toward zero. The `wrap32` inside the halvings is reachable at peak plus
+    peak and is contract, not undefined behavior.
+
+    The `low32` truncations carry no saturation because none is reachable.
+    The wrapped halvings bound `|sr|`, `|ai|`, and `|si|` by `2^30`, while
+    `ar` is an unwrapped 33-bit difference halved and so bounds only by
+    `2^31` - the same fact that makes its clamp inert. Hence `|p1|` and
+    `|p4|` bound by `2*|w|`, and each output combine bounds by
+    `2^30 + (2*|ws| + |wc|)` or by its symmetric `2^30 + (|ws| + 2*|wc|)`
+    form. Since `ws` and `wc` lie on the Q2.30 circle, `max(2s + c)` is
+    `sqrt(5) * 2^30`, so every combine stays strictly below
+    `(1 + sqrt(5)) * 2^30 + 3 < 2^32` and the final toward-zero halving
+    always fits `i32`: the truncation is exact for all inputs. The largest
+    combine magnitude the extremes reach is `3.2352 * 2^30`.
+
+    Twiddles are the frozen signed Q2.30 words of `sin`/`cos(pi*k/32)`;
+    smaller extents stride the same quadrant by `32/N`. Other extents,
+    layouts, numeric formats, product selections, and the inverse direction
+    fail closed.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_CxLayoutAttr:$layout,
+                   Ondsp_NumericAttr:$input_numeric,
+                   Ondsp_NumericAttr:$output_numeric,
+                   Ondsp_ProductAttr:$product);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
   let summary = "Static signed-Q15 type-II DCT";
   let description = [{
