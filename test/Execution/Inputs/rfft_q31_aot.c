@@ -27,11 +27,18 @@ typedef struct {
   int64_t strides[1];
 } MemRefI64;
 
+#ifndef ONDRIX_OX_RFFT_ROUND_TRIP_Q31
 extern void _mlir_ciface_rfft8_q31(MemRefI64 *result, MemRefI32 *input);
 extern void _mlir_ciface_rfft64_q31(MemRefI64 *result, MemRefI32 *input);
 extern void _mlir_ciface_irfft8_q31(MemRefI32 *result, MemRefI64 *input);
 extern void _mlir_ciface_irfft64_q31(MemRefI32 *result, MemRefI64 *input);
 extern void _mlir_ciface_rfft_round_trip8_q31(MemRefI32 *result, MemRefI32 *input);
+#else
+/* The .ox binding gate reuses only the round-trip battery under its own
+ * kernel symbol. */
+extern void _mlir_ciface_q31_rfft_round_trip(MemRefI32 *result, MemRefI32 *input);
+#define _mlir_ciface_rfft_round_trip8_q31 _mlir_ciface_q31_rfft_round_trip
+#endif
 
 struct Complex {
   int32_t real;
@@ -222,6 +229,7 @@ static void referenceIrfft(const int64_t *input, unsigned size, int32_t *output)
     output[i] = unpack(transformed[i]).real;
 }
 
+#ifndef ONDRIX_OX_RFFT_ROUND_TRIP_Q31
 static bool checkForward(const char *name, const int32_t *input, unsigned size) {
   int64_t expected[kMaxExtent / 2 + 1];
   referenceRfft(input, size, expected);
@@ -273,6 +281,7 @@ static bool checkInverse(const char *name, const int64_t *spectrum, unsigned siz
   free(output.allocated);
   return passed;
 }
+#endif
 
 static bool checkRoundTrip8(const char *name, const int32_t *input) {
   int64_t spectrum[5];
@@ -324,10 +333,13 @@ int main(void) {
   for (unsigned i = 0; i < sizeof(cases8) / sizeof(cases8[0]); ++i) {
     char name[24];
     snprintf(name, sizeof(name), "rfft8-case-%u", i);
+#ifndef ONDRIX_OX_RFFT_ROUND_TRIP_Q31
     failed |= !checkForward(name, cases8[i], 8);
+#endif
     failed |= !checkRoundTrip8(name, cases8[i]);
   }
 
+#ifndef ONDRIX_OX_RFFT_ROUND_TRIP_Q31
   int64_t packedSpectrum8[5];
   for (unsigned i = 0; i < 5; ++i)
     packedSpectrum8[i] = pack(spectrum8[i]);
@@ -353,6 +365,7 @@ int main(void) {
   }
   spectrum64[17] = pack((struct Complex){-77777777, INT32_MIN});
   failed |= !checkInverse("irfft64-xorshift", spectrum64, kMaxExtent);
+#endif
 
   return failed;
 }

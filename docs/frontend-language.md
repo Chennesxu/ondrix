@@ -249,16 +249,18 @@ profile include the `1/N` normalization. This spelling does not imply a
 general source complex type; other sizes and dynamic planning remain
 unsupported.
 `rfft` accepts static power-of-two real extents from 8 through 64 and returns
-the compact natural Hermitian bins 0 through N/2. `irfft` is narrower: it
-accepts only 5 or 9 packed bins (real extents 8 or 16) and returns N real
-Q15 values, so the larger `rfft` extents have no `irfft` counterpart yet. DC and
-Nyquist imaginary components are canonicalized to zero by the existing Ondrix
-contract.
+the compact natural Hermitian bins 0 through N/2, for `q15` and `q31`
+elements alike. The Q15 `irfft` is narrower: it accepts only 5 or 9 packed
+bins (real extents 8 or 16), so the larger Q15 `rfft` extents have no
+`irfft` counterpart yet; the Q31 `irfft` accepts every bin count whose real
+extent is a power of two in [8, 64]. DC and Nyquist imaginary components are
+canonicalized to zero by the existing Ondrix contract.
 
 `complex_q31` is the matching packed 32-bit spelling: one `i64` with the
-imaginary component in bits 63:32 and the real component in bits 31:0. Only
-`cfft` and `icfft` accept it, at static power-of-two extents from 4 through
-64, and they emit the re-frozen packed-Q31 profile — raw-high per-term
+imaginary component in bits 63:32 and the real component in bits 31:0. The
+FFT-family builtins accept it — `cfft`/`icfft` at static power-of-two
+extents from 4 through 64, `rfft` over `q31` reals, and `irfft` back to
+them — and all emit the re-frozen packed-Q31 profile: raw-high per-term
 products and toward_negative saturating stage scaling. That profile has
 exactly one gated stage policy, so the optional `rounding=`/`overflow=`
 parameters admit only `toward_negative` and `saturate`; the other real and

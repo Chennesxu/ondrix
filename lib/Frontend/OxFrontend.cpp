@@ -2540,8 +2540,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return *input;
       }
       if (call.kind == ReductionKind::Rfft) {
-        if (input->elementType != SourceType::Q15) {
-          diagnostics.error(call.position, "rfft requires Q15 real operand elements");
+        if (input->elementType != SourceType::Q15 && input->elementType != SourceType::Q31) {
+          diagnostics.error(call.position, "rfft requires Q15 or Q31 real operand elements");
           return std::nullopt;
         }
         if (input->extent < 8 || input->extent > 64 || !llvm::isPowerOf2_64(input->extent)) {
@@ -2549,10 +2549,22 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                             "rfft currently supports power-of-two extents in [8, 64]");
           return std::nullopt;
         }
-        return ComposedType{SourceType::ComplexQ15, input->extent / 2 + 1};
+        return ComposedType{input->elementType == SourceType::Q15 ? SourceType::ComplexQ15
+                                                                  : SourceType::ComplexQ31,
+                            input->extent / 2 + 1};
+      }
+      if (input->elementType == SourceType::ComplexQ31) {
+        int64_t realExtent = (input->extent - 1) * 2;
+        if (realExtent < 8 || realExtent > 64 || !llvm::isPowerOf2_64(realExtent)) {
+          diagnostics.error(call.position, "a complex_q31 irfft currently supports Hermitian bin "
+                                           "counts for power-of-two extents in [8, 64]");
+          return std::nullopt;
+        }
+        return ComposedType{SourceType::Q31, realExtent};
       }
       if (input->elementType != SourceType::ComplexQ15) {
-        diagnostics.error(call.position, "irfft requires complex_q15 Hermitian operand elements");
+        diagnostics.error(call.position,
+                          "irfft requires complex_q15 or complex_q31 Hermitian operand elements");
         return std::nullopt;
       }
       if (input->extent != 5 && input->extent != 9) {
@@ -2601,8 +2613,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     return std::nullopt;
   }
   if (ast.primaryResult().type == SourceType::ComplexQ31) {
-    diagnostics.error(ast.result.position,
-                      "complex_q31 is currently supported only by the cfft and icfft builtins");
+    diagnostics.error(ast.result.position, "complex_q31 is currently supported only by the cfft, "
+                                           "icfft, rfft, and irfft builtins");
     return std::nullopt;
   }
 
@@ -3245,6 +3257,17 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                                               ondsp::OverflowMode::Saturate, i16);
     auto outputScale = ondsp::ScaleAttr::get(&context, 0, 1, ondsp::RoundingMode::NearestEven,
                                              ondsp::OverflowMode::Saturate, i16);
+    // The re-frozen packed-Q31 profile shared by the i64-element FFT
+    // builtins; sema admitted no other stage policy.
+    auto i32 = builder.getI32Type();
+    auto q31Layout =
+        ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI32ImagHiRealLo);
+    auto q31Numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, i32, 31);
+    auto q31Product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::HighRaw);
+    auto q31StageProduct = ondsp::ScaleAttr::get(
+        &context, 1, 0, ondsp::RoundingMode::TowardNegative, ondsp::OverflowMode::Saturate, i32);
+    auto q31StageOutput = ondsp::ScaleAttr::get(&context, 0, 1, ondsp::RoundingMode::TowardNegative,
+                                                ondsp::OverflowMode::Saturate, i32);
     std::function<Value(const BuiltinCallAst &)> emitComposedCall =
         [&](const BuiltinCallAst &call) -> Value {
       if (call.kind == ReductionKind::FirFilter) {
@@ -3359,23 +3382,10 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         auto direction = ir::CfftDirectionAttr::get(&context, call.kind == ReductionKind::Cfft
                                                                   ? ir::CfftDirection::Forward
                                                                   : ir::CfftDirection::Inverse);
-        if (inputType.getElementType().isInteger(64)) {
-          // The re-frozen packed-Q31 profile: sema admitted no other stage
-          // policy, so the frozen equation is emitted directly.
-          auto i32 = builder.getI32Type();
-          auto q31Layout =
-              ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI32ImagHiRealLo);
-          auto q31Numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, i32, 31);
-          auto q31Product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::HighRaw);
-          auto stageProduct =
-              ondsp::ScaleAttr::get(&context, 1, 0, ondsp::RoundingMode::TowardNegative,
-                                    ondsp::OverflowMode::Saturate, i32);
-          auto stageOutput =
-              ondsp::ScaleAttr::get(&context, 0, 1, ondsp::RoundingMode::TowardNegative,
-                                    ondsp::OverflowMode::Saturate, i32);
+        if (inputType.getElementType().isInteger(64))
           return builder.create<ir::CfftOp>(callLocation, inputType, input, direction, q31Layout,
-                                            q31Numeric, q31Product, stageProduct, stageOutput);
-        }
+                                            q31Numeric, q31Product, q31StageProduct,
+                                            q31StageOutput);
         ondsp::RoundingMode stageRounding = call.rounding.empty() ? ondsp::RoundingMode::NearestEven
                                                                   : *parseRounding(call.rounding);
         ondsp::OverflowMode stageOverflow = call.destinationOverflow.empty()
@@ -3390,11 +3400,23 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       }
       if (call.kind == ReductionKind::Rfft) {
         int64_t realExtent = inputType.getDimSize(0);
+        // Q31 real samples arrive as i32 elements and produce packed i64
+        // bins under the frozen profile.
+        if (inputType.getElementType().isInteger(32)) {
+          auto outputType = RankedTensorType::get({realExtent / 2 + 1}, builder.getI64Type());
+          return builder.create<ir::RfftOp>(callLocation, outputType, input, q31Layout, q31Numeric,
+                                            q31Product, q31StageProduct, q31StageOutput);
+        }
         auto outputType = RankedTensorType::get({realExtent / 2 + 1}, builder.getI32Type());
         return builder.create<ir::RfftOp>(callLocation, outputType, input, layout, numeric, product,
                                           productScale, outputScale);
       }
       int64_t realExtent = (inputType.getDimSize(0) - 1) * 2;
+      if (inputType.getElementType().isInteger(64)) {
+        auto outputType = RankedTensorType::get({realExtent}, builder.getI32Type());
+        return builder.create<ir::IrfftOp>(callLocation, outputType, input, q31Layout, q31Numeric,
+                                           q31Product, q31StageProduct, q31StageOutput);
+      }
       auto outputType = RankedTensorType::get({realExtent}, builder.getI16Type());
       return builder.create<ir::IrfftOp>(callLocation, outputType, input, layout, numeric, product,
                                          productScale, outputScale);
