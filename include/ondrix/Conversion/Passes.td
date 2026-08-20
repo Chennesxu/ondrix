@@ -172,6 +172,14 @@ def ConvertOndspCxButterflyToOrtumCore
     — a reachable corner, since |sum| can attain 2^31. The full-product Q31
     selection stays generic.
 
+    The pass also selects every standalone `ondsp.add_shift`/`ondsp.sub_shift`
+    whose scale is exactly the scaled saturating add/sub capability - i32
+    operands and result, no pre-shift, post shift inside the capability
+    domain, `toward_negative`, saturating to i32 - onto
+    `ortumcore.sat_shift_add`/`sat_shift_sub`. That is the same attribute
+    shape the OrtumCore emulation regenerates, so selection and emulation
+    round-trip exactly; any other scale stays a generic ondsp operation.
+
     The pass also selects every `ondsp.bitrev_add` index walk onto the
     32-bit `ortumcore.bitrev_add` progression. The composition is exact for
     any verified width: shifting both operands' low `width` bits to the top

@@ -84,16 +84,21 @@ public:
     conjugatedTables.clear();
     SmallVector<ondrix::ondsp::CxButterflyOp> candidates;
     SmallVector<ondrix::ondsp::BitrevAddOp> walks;
+    SmallVector<Operation *> shifts;
     getOperation()->walk([&](Operation *op) {
       if (auto butterfly = dyn_cast<ondrix::ondsp::CxButterflyOp>(op))
         candidates.push_back(butterfly);
       else if (auto walk = dyn_cast<ondrix::ondsp::BitrevAddOp>(op))
         walks.push_back(walk);
+      else if (isa<ondrix::ondsp::AddShiftOp, ondrix::ondsp::SubShiftOp>(op))
+        shifts.push_back(op);
     });
     for (ondrix::ondsp::CxButterflyOp op : candidates)
       rewriteButterfly(op);
     for (ondrix::ondsp::BitrevAddOp op : walks)
       rewriteBitrevAdd(op);
+    for (Operation *op : shifts)
+      rewriteScaledShift(op);
   }
 
 private:
@@ -160,6 +165,39 @@ private:
     Value result = builder.create<arith::IndexCastUIOp>(loc, builder.getIndexType(), extracted);
     op.getResult().replaceAllUsesWith(result);
     op.erase();
+  }
+
+  // A standalone add/sub_shift whose scale IS the target's scaled saturating
+  // add/sub (the exact attribute shape the OrtumCore emulation regenerates)
+  // selects directly; every other scale stays generic.
+  void rewriteScaledShift(Operation *op) {
+    auto scale = cast<ondrix::ondsp::ScaleAttr>(op->getAttr("scale"));
+    auto destination = dyn_cast<IntegerType>(scale.getSaturateTo());
+    if (scale.getPreShiftLeft() != 0 ||
+        uint64_t(scale.getPostShiftRight()) >
+            ondrix::ortumcore::getShiftedSaturatingI32ScaledBinaryDomain().maxShift ||
+        scale.getRounding() != ondrix::ondsp::RoundingMode::TowardNegative ||
+        scale.getOverflow() != ondrix::ondsp::OverflowMode::Saturate || !destination ||
+        !destination.isSignless() || destination.getWidth() != 32 ||
+        !op->getResult(0).getType().isSignlessInteger(32) ||
+        !op->getOperand(0).getType().isSignlessInteger(32) ||
+        !op->getOperand(1).getType().isSignlessInteger(32))
+      return;
+    OpBuilder builder(op);
+    Location loc = op->getLoc();
+    IntegerType i32 = builder.getI32Type();
+    uint64_t shift = uint64_t(scale.getPostShiftRight());
+    Value selected = isa<ondrix::ondsp::SubShiftOp>(op)
+                         ? builder
+                               .create<ondrix::ortumcore::SatShiftSubOp>(
+                                   loc, i32, op->getOperand(0), op->getOperand(1), shift)
+                               .getResult()
+                         : builder
+                               .create<ondrix::ortumcore::SatShiftAddOp>(
+                                   loc, i32, op->getOperand(0), op->getOperand(1), shift)
+                               .getResult();
+    op->getResult(0).replaceAllUsesWith(selected);
+    op->erase();
   }
 
   // Selection by decomposition onto the existing scalar capabilities; the
