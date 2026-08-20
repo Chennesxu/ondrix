@@ -1,6 +1,14 @@
 // RUN: ondrix-opt %s --convert-ondsp-cx-butterfly-to-ortumcore | FileCheck %s
+// RUN: ondrix-opt %s --convert-ondsp-cx-butterfly-to-ortumcore --convert-ortumcore-to-ondsp-emulation | FileCheck %s --check-prefix=ROUNDTRIP
 
 // The capability profile selects; every scale outside it stays generic.
+// The second RUN closes the loop: emulation regenerates the exact scale
+// the matcher accepted, so selection and emulation cannot drift apart.
+
+// ROUNDTRIP-LABEL: func.func @capability_pair
+// ROUNDTRIP: ondsp.sub_shift {{.*}}scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+// ROUNDTRIP: ondsp.add_shift {{.*}}scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 3, rounding = toward_negative, overflow = saturate, saturate_to = i32>
+// ROUNDTRIP-NOT: ortumcore.
 
 // CHECK-LABEL: func.func @capability_pair
 // CHECK: ortumcore.sat_shift_sub %{{.*}} {shift = 1 : i64}

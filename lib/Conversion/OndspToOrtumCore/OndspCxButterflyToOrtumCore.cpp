@@ -168,24 +168,25 @@ private:
   }
 
   // A standalone add/sub_shift whose scale IS the target's scaled saturating
-  // add/sub (the exact attribute shape the OrtumCore emulation regenerates)
-  // selects directly; every other scale stays generic.
+  // add/sub selects directly; every other scale stays generic. Every matched
+  // field reads from the capability domain the emulation also reads, so the
+  // two directions cannot drift apart one literal at a time.
   void rewriteScaledShift(Operation *op) {
+    ondrix::ortumcore::ScaledBinaryDomain domain =
+        ondrix::ortumcore::getShiftedSaturatingI32ScaledBinaryDomain();
     auto scale = cast<ondrix::ondsp::ScaleAttr>(op->getAttr("scale"));
     auto destination = dyn_cast<IntegerType>(scale.getSaturateTo());
-    if (scale.getPreShiftLeft() != 0 ||
-        uint64_t(scale.getPostShiftRight()) >
-            ondrix::ortumcore::getShiftedSaturatingI32ScaledBinaryDomain().maxShift ||
-        scale.getRounding() != ondrix::ondsp::RoundingMode::TowardNegative ||
-        scale.getOverflow() != ondrix::ondsp::OverflowMode::Saturate || !destination ||
-        !destination.isSignless() || destination.getWidth() != 32 ||
-        !op->getResult(0).getType().isSignlessInteger(32) ||
-        !op->getOperand(0).getType().isSignlessInteger(32) ||
-        !op->getOperand(1).getType().isSignlessInteger(32))
+    if (scale.getPreShiftLeft() != 0 || uint64_t(scale.getPostShiftRight()) > domain.maxShift ||
+        scale.getRounding() != domain.rounding || scale.getOverflow() != domain.overflow ||
+        !destination || !destination.isSignless() ||
+        destination.getWidth() != domain.storageWidth ||
+        !op->getResult(0).getType().isSignlessInteger(domain.storageWidth) ||
+        !op->getOperand(0).getType().isSignlessInteger(domain.storageWidth) ||
+        !op->getOperand(1).getType().isSignlessInteger(domain.storageWidth))
       return;
     OpBuilder builder(op);
     Location loc = op->getLoc();
-    IntegerType i32 = builder.getI32Type();
+    IntegerType i32 = builder.getIntegerType(domain.storageWidth);
     uint64_t shift = uint64_t(scale.getPostShiftRight());
     Value selected = isa<ondrix::ondsp::SubShiftOp>(op)
                          ? builder
