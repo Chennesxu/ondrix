@@ -114,6 +114,13 @@ operations — splitting one instance into independent results, crossing a
 non-additive boundary such as a division, a saturation, or an export, or
 changing a term's operands or index relation.
 
+A membership check may still compare graphs up to identities proved bitwise —
+same non-NaN output for every input: multiplicand exchange in a rounded or
+fused product, `x * 1.0 = x`, and `fma(x, 1.0, c) = c + x`. Two graphs equal
+under that quotient are the same function, so the quotient admits no member
+the definitions exclude; it does not extend to addition operands, whose order
+carries the tree shape R governs.
+
 ### R and F compose over term occurrences, not IR nodes
 
 **F** selects a fused multiply-add event for a term in place of a rounded
