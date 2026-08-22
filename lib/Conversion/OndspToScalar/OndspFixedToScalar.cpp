@@ -146,49 +146,10 @@ static bool containsOndspArtifact(Attribute attribute) {
 }
 
 static LogicalResult verifySourceArtifactUsage(Operation *root) {
-  WalkResult result = root->walk([](Operation *op) {
-    auto containsNested = [](TypeRange types) {
-      return llvm::any_of(types, isNestedAccumulatorContainer);
-    };
-    if (containsNested(op->getOperandTypes()) || containsNested(op->getResultTypes())) {
-      op->emitOpError("nested accumulator containers are unsupported");
-      return WalkResult::interrupt();
-    }
-    if (auto function = dyn_cast<func::FuncOp>(op)) {
-      FunctionType type = function.getFunctionType();
-      if (containsNested(type.getInputs()) || containsNested(type.getResults())) {
-        op->emitOpError("nested accumulator containers are unsupported");
-        return WalkResult::interrupt();
-      }
-    }
-    for (Region &region : op->getRegions())
-      for (Block &block : region)
-        if (containsNested(block.getArgumentTypes())) {
-          op->emitOpError("nested accumulator containers are unsupported");
-          return WalkResult::interrupt();
-        }
-
-    auto function = dyn_cast<func::FuncOp>(op);
-    for (NamedAttribute namedAttribute : op->getAttrs()) {
-      // Function signature types are converted by the standard function
-      // conversion patterns and were checked structurally above.
-      if (function && namedAttribute.getName() == function.getFunctionTypeAttrName())
-        continue;
-      // Attributes owned by source operations are consumed with those
-      // operations. Host-operation metadata has no generic conversion.
-      if (op->getDialect() &&
-          op->getDialect()->getNamespace() == ondrix::ondsp::OndspDialect::getDialectNamespace())
-        continue;
-      if (!containsOndspArtifact(namedAttribute.getValue()))
-        continue;
-      op->emitOpError() << "attribute '" << namedAttribute.getName().getValue()
-                        << "' contains an Ondsp type or attribute; source artifacts in host "
-                           "metadata are unsupported";
-      return WalkResult::interrupt();
-    }
-    return WalkResult::advance();
-  });
-  return failure(result.wasInterrupted());
+  return ondrix::conversion::verifySourceArtifactUsage(
+      root, isNestedAccumulatorContainer, "nested accumulator containers are unsupported",
+      ondrix::ondsp::OndspDialect::getDialectNamespace(), containsOndspArtifact,
+      "contains an Ondsp type or attribute; source artifacts in host metadata are unsupported");
 }
 
 static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) {

@@ -37,6 +37,18 @@ bool hasLegalConvertedTypesAndAttributes(mlir::Operation *op, mlir::TypeConverte
 mlir::LogicalResult verifySCFWhileTypeConversionSafety(mlir::Operation *root,
                                                        TypePredicate convertedType);
 
+/// Pre-conversion walk shared by the source-artifact guards: rejects any
+/// value, function signature, or block argument whose type matches
+/// `rejectedType` (diagnosed with `typeMessage`), and any attribute outside
+/// `ownDialectNamespace` operations matching `rejectedArtifact` (diagnosed as
+/// "attribute '<name>' " + `attributeMessage`; the function-type attribute is
+/// exempt because the structural check already covered it).
+mlir::LogicalResult verifySourceArtifactUsage(mlir::Operation *root, TypePredicate rejectedType,
+                                              llvm::StringRef typeMessage,
+                                              llvm::StringRef ownDialectNamespace,
+                                              AttributePredicate rejectedArtifact,
+                                              llvm::StringRef attributeMessage);
+
 } // namespace ondrix::conversion
 
 #endif // ONDRIX_CONVERSION_UTILS_CONVERSIONLEGALITY_H

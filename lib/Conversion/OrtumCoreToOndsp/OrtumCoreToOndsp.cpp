@@ -84,47 +84,11 @@ static bool isUnsupportedOrNestedOrtumCoreType(Type type) {
 }
 
 static LogicalResult verifySourceArtifactUsage(Operation *root) {
-  WalkResult result = root->walk([](Operation *op) {
-    auto containsUnsupported = [](TypeRange types) {
-      return llvm::any_of(types, isUnsupportedOrNestedOrtumCoreType);
-    };
-    if (containsUnsupported(op->getOperandTypes()) || containsUnsupported(op->getResultTypes())) {
-      op->emitOpError("unsupported or nested OrtumCore type");
-      return WalkResult::interrupt();
-    }
-    if (auto function = dyn_cast<func::FuncOp>(op)) {
-      FunctionType type = function.getFunctionType();
-      if (containsUnsupported(type.getInputs()) || containsUnsupported(type.getResults())) {
-        op->emitOpError("unsupported or nested OrtumCore type");
-        return WalkResult::interrupt();
-      }
-    }
-    for (Region &region : op->getRegions())
-      for (Block &block : region)
-        if (containsUnsupported(block.getArgumentTypes())) {
-          op->emitOpError("unsupported or nested OrtumCore type");
-          return WalkResult::interrupt();
-        }
-
-    // An OrtumCore operation's own attributes are contract operands the
-    // conversion consumes; the metadata guard is for every other op.
-    if (isa_and_nonnull<ondrix::ortumcore::OrtumCoreDialect>(op->getDialect()))
-      return WalkResult::advance();
-
-    auto function = dyn_cast<func::FuncOp>(op);
-    for (NamedAttribute namedAttribute : op->getAttrs()) {
-      if (function && namedAttribute.getName() == function.getFunctionTypeAttrName())
-        continue;
-      if (!containsOrtumCoreArtifact(namedAttribute.getValue()))
-        continue;
-      op->emitOpError() << "attribute '" << namedAttribute.getName().getValue()
-                        << "' contains an OrtumCore type or attribute; target artifacts in "
-                           "metadata attributes are unsupported";
-      return WalkResult::interrupt();
-    }
-    return WalkResult::advance();
-  });
-  return failure(result.wasInterrupted());
+  return ondrix::conversion::verifySourceArtifactUsage(
+      root, isUnsupportedOrNestedOrtumCoreType, "unsupported or nested OrtumCore type",
+      ondrix::ortumcore::OrtumCoreDialect::getDialectNamespace(), containsOrtumCoreArtifact,
+      "contains an OrtumCore type or attribute; target artifacts in metadata attributes are "
+      "unsupported");
 }
 
 static bool hasLegalConvertedTypes(Operation *op, TypeConverter &typeConverter) {

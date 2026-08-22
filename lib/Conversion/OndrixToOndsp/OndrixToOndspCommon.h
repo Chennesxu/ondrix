@@ -2,17 +2,14 @@
 #define ONDRIX_LIB_CONVERSION_ONDRIXTOONDSP_ONDRIXTOONDSPCOMMON_H
 
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
+#include "ondrix/Support/FpAccumulatorUpdate.h"
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/PatternMatch.h"
 
 namespace ondrix::conversion {
 
-/// One declared floating-point accumulator update under the call site's
-/// contract mode; the fast mode spends its fuse permission here.
-mlir::Value createFpAccumulatorUpdate(mlir::Location loc, mlir::Value lhs, mlir::Value rhs,
-                                      mlir::Value accumulator, ondsp::FpAttr numeric,
-                                      mlir::OpBuilder &builder);
+using ::ondrix::createFpAccumulatorUpdate;
 
 /// Contract-invariant product and sum sites (nothing to fuse, declared order).
 mlir::Value createFpMultiply(mlir::Location loc, mlir::Value lhs, mlir::Value rhs,

@@ -51,16 +51,11 @@ public:
   }
 };
 
-// One round-half-even signed Q1.15 quantization of a binary64 twiddle
-// component through the shared guarded quantizer (the same 2^-20 tie guard
-// as the FIR design contract): an admissible value provably quantizes
-// exactly like the real-valued cos/sin definition for any evaluation chain
-// whose total error stays below the guard — the declared libm/binary64
-// budget is more than three orders of magnitude below it. +1.0 saturates to
-// 32767 by declared convention; -1.0 is exact. A 50-digit sweep of every
-// stage twiddle component for power-of-two sizes up to 1024 shows a
-// worst-case margin of 0.0036 LSB, so all supported extents are admissible;
-// the guard remains as the fail-closed backstop.
+// Guard argument in GuardedQ15Quantization.h. +1.0 saturates to 32767 by
+// declared convention; -1.0 is exact. A 50-digit sweep of every stage
+// twiddle component for power-of-two sizes up to 1024 shows a worst-case
+// margin of 0.0036 LSB, so all supported extents are admissible; the guard
+// remains as the fail-closed backstop.
 static std::optional<int64_t> quantizeTwiddleComponentQ15(double value) {
   std::optional<ondrix::GuardedQ15Value> quantized = ondrix::quantizeGuardedQ15(value);
   if (!quantized)

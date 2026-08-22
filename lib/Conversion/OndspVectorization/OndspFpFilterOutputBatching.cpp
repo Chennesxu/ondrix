@@ -182,11 +182,8 @@ FailureOr<FpFilterLoopShape> matchFpFilterLoop(scf::ForOp loop, int64_t vectorWi
       ondrix::conversion::mayShareStorage(shape.input, shape.coefficients))
     return failure();
 
-  // Extent facts. Unlike the decimate batching there is no widened span: at
-  // tap t the lanes for outputs m .. m+W-1 read input[m+t .. m+t+W-1], which
-  // is exactly the union of those W ordered windows, so every full block of W
-  // outputs is batchable and the last batched element is the last element the
-  // ordered schedule reads.
+  // No widened span, unlike the decimate batching (window-union argument in
+  // the pass description).
   auto inputType = cast<MemRefType>(shape.input.getType());
   if (inputType.isDynamicDim(0))
     return failure();

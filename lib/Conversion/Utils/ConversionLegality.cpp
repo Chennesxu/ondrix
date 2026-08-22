@@ -2,6 +2,7 @@
 
 #include "llvm/ADT/STLExtras.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -72,6 +73,53 @@ LogicalResult verifySCFWhileTypeConversionSafety(Operation *root, TypePredicate 
     op.emitOpError("attributes on scf.while carrying converted source types are unsupported by "
                    "the LLVM 17 structural type conversion");
     return WalkResult::interrupt();
+  });
+  return failure(result.wasInterrupted());
+}
+
+LogicalResult verifySourceArtifactUsage(Operation *root, TypePredicate rejectedType,
+                                        llvm::StringRef typeMessage,
+                                        llvm::StringRef ownDialectNamespace,
+                                        AttributePredicate rejectedArtifact,
+                                        llvm::StringRef attributeMessage) {
+  WalkResult result = root->walk([&](Operation *op) {
+    auto rejects = [&](TypeRange types) { return llvm::any_of(types, rejectedType); };
+    if (rejects(op->getOperandTypes()) || rejects(op->getResultTypes())) {
+      op->emitOpError(typeMessage);
+      return WalkResult::interrupt();
+    }
+    if (auto function = dyn_cast<func::FuncOp>(op)) {
+      FunctionType type = function.getFunctionType();
+      if (rejects(type.getInputs()) || rejects(type.getResults())) {
+        op->emitOpError(typeMessage);
+        return WalkResult::interrupt();
+      }
+    }
+    for (Region &region : op->getRegions())
+      for (Block &block : region)
+        if (rejects(block.getArgumentTypes())) {
+          op->emitOpError(typeMessage);
+          return WalkResult::interrupt();
+        }
+
+    // A source operation's own attributes are contract operands the
+    // conversion consumes; the metadata guard is for every other op.
+    if (op->getDialect() && op->getDialect()->getNamespace() == ownDialectNamespace)
+      return WalkResult::advance();
+
+    auto function = dyn_cast<func::FuncOp>(op);
+    for (NamedAttribute namedAttribute : op->getAttrs()) {
+      // Function signature types are converted by the standard function
+      // conversion patterns and were checked structurally above.
+      if (function && namedAttribute.getName() == function.getFunctionTypeAttrName())
+        continue;
+      if (!rejectedArtifact(namedAttribute.getValue()))
+        continue;
+      op->emitOpError() << "attribute '" << namedAttribute.getName().getValue() << "' "
+                        << attributeMessage;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
   });
   return failure(result.wasInterrupted());
 }

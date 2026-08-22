@@ -1,8 +1,7 @@
 // RUN: ondrix-opt %s | ondrix-opt | FileCheck %s
 
 // The Q31 raw-high MAC family shares the parameterless accumulator with the
-// Q15 full-product family, because the raw high half lands at that
-// accumulator's own fractional position.
+// Q15 family: the raw high half lands at that accumulator's own frac position.
 // CHECK-LABEL: func.func @q31_mac_web
 // CHECK: ortumcore.acc_init : !ortumcore.acc
 // CHECK: ortumcore.q31_mac_add {{.*}} : (!ortumcore.acc, i32, i32) -> !ortumcore.acc

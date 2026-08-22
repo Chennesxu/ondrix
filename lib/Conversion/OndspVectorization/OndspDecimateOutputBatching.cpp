@@ -221,13 +221,8 @@ FailureOr<DecimateLoopShape> matchDecimateLoop(scf::ForOp loop, int64_t vectorWi
     return failure();
 
   // The rewrite moves the W stores of a block past all K tap loads of that
-  // block, so it is only sound when the three sequences are distinct storage.
-  // The ordered schedule makes output m visible to the window of output m + 1;
-  // the batched one does not, and the two then compute different values. Refuse
-  // every sharing that is statically decidable rather than case-splitting on
-  // which pair is the actual store-versus-load hazard. What remains — distinct
-  // block arguments that alias at run time — is not decidable here and is
-  // stated as a precondition on the pass instead.
+  // block, so it is only sound when the three sequences are distinct storage;
+  // the refusal set and the run-time precondition are in the pass description.
   if (ondrix::conversion::mayShareStorage(shape.input, shape.output) ||
       ondrix::conversion::mayShareStorage(shape.coefficients, shape.output) ||
       ondrix::conversion::mayShareStorage(shape.input, shape.coefficients))

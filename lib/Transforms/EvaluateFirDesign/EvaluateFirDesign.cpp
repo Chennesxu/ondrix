@@ -32,13 +32,9 @@ struct QuantizedTable {
   int64_t saturated = 0;
 };
 
-// One round-half-even signed Q1.15 quantization per composite real value,
-// through the shared guarded quantizer. The guard rejects any coefficient
-// whose binary64 estimate cannot prove the real-valued rounding decision, so
-// under the declared evaluation error budget (libm sin/cos, the binary64 pi
-// constant, and ratio arithmetic; documented at more than three orders of
-// magnitude below the guard) an emitted table equals the quantization of the
-// real-valued definition and inherits its exact symmetry.
+// Guard argument in GuardedQ15Quantization.h. Under the declared evaluation
+// error budget an emitted table equals the quantization of the real-valued
+// definition and inherits its exact symmetry.
 FailureOr<QuantizedTable> quantizeSignedQ15(Operation *op, llvm::ArrayRef<double> reals) {
   QuantizedTable table;
   table.values.reserve(reals.size());

@@ -1,8 +1,7 @@
 // RUN: ondrix-opt %s --convert-ortumcore-to-ondsp-emulation | FileCheck %s --implicit-check-not=ortumcore.
 
-// The Q31 MAC family emulates as the same ondsp accumulator updates as the Q15
-// family with one attribute changed — the raw-high product selection — which is
-// the whole difference between the two capabilities.
+// The Q31 MAC family emulates as the Q15 family's accumulator updates with one
+// attribute changed: the raw-high product selection.
 // CHECK-LABEL: func.func @q31_web
 // CHECK: ondsp.acc_zero
 // CHECK: ondsp.mac {{.*}}numeric = #ondsp.fixed<signed, storage = i32, frac = 31>, product = #ondsp.product<high_raw>

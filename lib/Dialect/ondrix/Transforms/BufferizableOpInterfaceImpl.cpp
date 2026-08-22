@@ -6,6 +6,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Support/DctCoefficients.h"
+#include "ondrix/Support/FpAccumulatorUpdate.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
@@ -37,23 +38,6 @@ static Value createInitialAccumulator(OpTy op, OpBuilder &builder, Location loc)
   auto fp = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
   return builder.create<arith::ConstantOp>(loc, fp.getFormat(),
                                            builder.getZeroAttr(fp.getFormat()));
-}
-
-static Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value accumulator,
-                                       ondrix::ondsp::FpAttr numeric, OpBuilder &builder) {
-  switch (numeric.getContract()) {
-  case ondrix::ondsp::FpContractMode::Off: {
-    Value product = builder.create<arith::MulFOp>(loc, lhs, rhs);
-    return builder.create<arith::AddFOp>(loc, accumulator, product);
-  }
-  case ondrix::ondsp::FpContractMode::Fma:
-    return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator);
-  case ondrix::ondsp::FpContractMode::Fast:
-    return ondrix::ondsp::consumeFastPermission(
-        builder.create<math::FmaOp>(loc, lhs, rhs, accumulator),
-        ondrix::ondsp::FastPermission::FuseMultiplyAdd);
-  }
-  llvm_unreachable("unknown floating-point contract mode");
 }
 
 template <typename OpTy>
@@ -457,15 +441,9 @@ struct MatmulOpInterface
     ondrix::ondsp::ProductAttr product;
     if (!fp)
       product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
-    // Two independent arguments meet here. Reassociation legality needs only
-    // the wrap overflow mode: exact-modulo accumulation is associative at any
-    // width, so the horizontal Vector consumer may reassociate with no
-    // constant-coefficient or prefix-range proof and no range assumption.
-    // The range bound is what ties the wrapped value to the CONTRACT: every
-    // full product magnitude is at most 2^30 and K is at most 64, so
-    // |sum| <= 64 * 2^30 = 2^36 < 2^39 and the i40 wrapping accumulator never
-    // actually wraps — its value equals the exact K-sum of the tensor-form
-    // lowering.
+    // Wrap alone authorizes reassociation (exact-modulo); the range bound
+    // tying the wrapped i40 value to the contract's exact K-sum is derived
+    // in the Ondrix_MatmulOp description.
     ondrix::ondsp::AccType accumulatorType;
     if (!fp)
       accumulatorType = getExactWrapAccumulator(context, /*width=*/40);
@@ -596,14 +574,10 @@ struct RmsOpInterface : public BufferizableOpInterface::ExternalModel<RmsOpInter
     unsigned meanShift = llvm::Log2_64(extent);
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
-    // Squaring the input is one reduction whose two operands are the same
-    // buffer. As with matmul, wrap alone authorizes reassociation; the range
-    // bound is what ties the wrapped value to the contract: every square is
-    // at most 2^30 and N is at most 4096, so the sum is at most 2^42 < 2^63
-    // and the i64 wrapping accumulator never actually wraps — it equals the
-    // exact sum of squares. An i40 accumulator would NOT suffice
-    // (2^42 > 2^39), which is why this reduction needs the wider wrapping
-    // accumulator admitted by the horizontal-domain predicate.
+    // As with matmul, wrap alone authorizes reassociation; the 2^42 bound is
+    // derived in the Ondrix_RmsOp description. An i40 accumulator would NOT
+    // suffice (2^42 > 2^39): this reduction needs the wider wrapping width
+    // admitted by the horizontal-domain predicate.
     ondrix::ondsp::AccType accumulatorType = getExactWrapAccumulator(context, /*width=*/64);
     Value initial = rewriter.create<ondrix::ondsp::AccZeroOp>(loc, accumulatorType);
     Value reduced = rewriter.create<ondrix::ondsp::ReduceMacOp>(loc, accumulatorType, initial,

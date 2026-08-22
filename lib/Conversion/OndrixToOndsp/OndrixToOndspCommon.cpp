@@ -11,24 +11,6 @@ using namespace mlir;
 
 namespace ondrix::conversion {
 
-Value createFpAccumulatorUpdate(Location loc, Value lhs, Value rhs, Value accumulator,
-                                ondrix::ondsp::FpAttr numeric, OpBuilder &builder) {
-  switch (numeric.getContract()) {
-  case ondrix::ondsp::FpContractMode::Off: {
-    Value product = builder.create<arith::MulFOp>(loc, lhs, rhs);
-    return builder.create<arith::AddFOp>(loc, accumulator, product);
-  }
-  case ondrix::ondsp::FpContractMode::Fma:
-    return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator);
-  case ondrix::ondsp::FpContractMode::Fast:
-    // fast admits both members here; selecting the fused one spends F.
-    return ondrix::ondsp::consumeFastPermission(
-        builder.create<math::FmaOp>(loc, lhs, rhs, accumulator),
-        ondrix::ondsp::FastPermission::FuseMultiplyAdd);
-  }
-  llvm_unreachable("unknown floating-point contract mode");
-}
-
 // Contract-invariant sites: a bare product has no addend to fuse, and these
 // sums are built in declared order even where they form a reduction tree. A
 // permission that is not used is a permission that is not emitted.
