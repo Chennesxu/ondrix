@@ -10,6 +10,7 @@ add_ondrix_library(OndrixConversionUtils
   LINK_LIBS PUBLIC
   MLIRArithDialect
   MLIRControlFlowDialect
+  MLIRFuncDialect
   MLIRIR
   MLIRMemRefDialect
   MLIRSCFDialect
