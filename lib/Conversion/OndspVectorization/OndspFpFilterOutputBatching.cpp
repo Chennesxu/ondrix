@@ -550,10 +550,13 @@ struct FpColumnTileLoopShape {
   Value output;
   /// The column-invariant row index, available outside the column loop.
   Value rowIndex;
-  /// Recovered from the emitted events rather than from an attribute: there is
-  /// no contract-carrying operation left after bufferization. A fused event
-  /// already carrying a spend record is a fast site.
-  ondrix::ondsp::FpContractMode contract = ondrix::ondsp::FpContractMode::Off;
+  /// The arithmetic shape of one term, and the only fidelity authority: a
+  /// fused body batches as fused events, a separate body as separate ones.
+  bool fused = false;
+  /// Whether new fused events carry the F record forward. The spend record is
+  /// discardable audit metadata — it may continue bookkeeping, never select
+  /// which arithmetic is emitted.
+  bool recordsFuse = false;
 };
 
 /// Whether `value` is available where the loop is, rather than produced inside
@@ -567,7 +570,8 @@ bool isAvailableAtLoop(scf::ForOp loop, Value value) {
 /// a +0.0 initial value with a column-invariant scalar `A[i,k]` and a
 /// unit-stride `B[k,j]`, and one store. Anything else fails closed and keeps
 /// the ordered schedule.
-FailureOr<FpColumnTileLoopShape> matchFpColumnTileLoop(scf::ForOp loop, int64_t vectorWidth) {
+FailureOr<FpColumnTileLoopShape> matchFpColumnTileLoop(scf::ForOp loop, int64_t vectorWidth,
+                                                       bool supportsVectorFma) {
   if (!loop.getInitArgs().empty())
     return failure();
 
@@ -640,7 +644,8 @@ FailureOr<FpColumnTileLoopShape> matchFpColumnTileLoop(scf::ForOp loop, int64_t 
 
   Value accumulator = termBody.getArgument(1);
   auto yield = cast<scf::YieldOp>(termBody.getTerminator());
-  ondrix::ondsp::FpContractMode contract;
+  bool bodyFused = false;
+  bool recordsFuse = false;
   if (events.size() == 4) {
     auto product = dyn_cast<arith::MulFOp>(events[2]);
     auto sum = dyn_cast<arith::AddFOp>(events[3]);
@@ -649,16 +654,19 @@ FailureOr<FpColumnTileLoopShape> matchFpColumnTileLoop(scf::ForOp loop, int64_t 
         sum.getLhs() != accumulator || sum.getRhs() != product.getResult() ||
         yield.getOperand(0) != sum.getResult())
       return failure();
-    contract = ondrix::ondsp::FpContractMode::Off;
   } else {
     auto fused = dyn_cast<math::FmaOp>(events[2]);
     if (!fused || fused.getA() != left.getResult() || fused.getB() != right.getResult() ||
         fused.getC() != accumulator || yield.getOperand(0) != fused.getResult())
       return failure();
-    contract =
-        ondrix::ondsp::hasSpentFastPermission(fused, ondrix::ondsp::FastPermission::FuseMultiplyAdd)
-            ? ondrix::ondsp::FpContractMode::Fast
-            : ondrix::ondsp::FpContractMode::Fma;
+    // A fused body batches only onto a declared vector fused multiply-add;
+    // de-fusing on its absence would need a contract authority this loop no
+    // longer carries, so the batching is refused instead.
+    if (!supportsVectorFma)
+      return failure();
+    bodyFused = true;
+    recordsFuse = ondrix::ondsp::hasSpentFastPermission(
+        fused, ondrix::ondsp::FastPermission::FuseMultiplyAdd);
   }
 
   FpColumnTileLoopShape shape;
@@ -669,7 +677,8 @@ FailureOr<FpColumnTileLoopShape> matchFpColumnTileLoop(scf::ForOp loop, int64_t 
   shape.rhs = right.getMemRef();
   shape.output = store.getMemRef();
   shape.rowIndex = rowIndex;
-  shape.contract = contract;
+  shape.fused = bodyFused;
+  shape.recordsFuse = recordsFuse;
 
   if (!isStaticRankTwoF32MemRef(shape.lhs) || !isVectorAccessibleRankTwoMemRef(shape.rhs) ||
       !isVectorAccessibleRankTwoMemRef(shape.output))
@@ -707,8 +716,21 @@ FailureOr<FpColumnTileLoopShape> matchFpColumnTileLoop(scf::ForOp loop, int64_t 
 /// per-output events verbatim — +0.0 initial value, ascending inner index, one
 /// update event per term — which is the same per-lane event-graph identity the
 /// filter batching relies on.
-void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth, bool fuseFast,
+void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
                         OpBuilder &builder) {
+  // Shape-preserving term emission: the audit record decides bookkeeping
+  // continuation only, never the arithmetic.
+  auto updateLanes = [&shape](OpBuilder &b, Location l, Value splat, Value values,
+                              Value accumulator) -> Value {
+    if (shape.fused) {
+      Operation *fma = b.create<math::FmaOp>(l, splat, values, accumulator);
+      return shape.recordsFuse ? ondrix::ondsp::consumeFastPermission(
+                                     fma, ondrix::ondsp::FastPermission::FuseMultiplyAdd)
+                               : fma->getResult(0);
+    }
+    Value product = b.create<arith::MulFOp>(l, splat, values);
+    return b.create<arith::AddFOp>(l, accumulator, product);
+  };
   scf::ForOp loop = shape.loop;
   Location loc = loop.getLoc();
   int64_t fullBlocks = shape.columnCount / vectorWidth;
@@ -749,8 +771,7 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
             Value index = blockBuilder.create<arith::ConstantIndexOp>(blockLoc, term);
             Value values = blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.rhs,
                                                                ValueRange{index, blockStart});
-            lanes = createLaneUpdate(blockBuilder, blockLoc, rowSplats[term], values, lanes,
-                                     shape.contract, fuseFast);
+            lanes = updateLanes(blockBuilder, blockLoc, rowSplats[term], values, lanes);
           }
         } else {
           auto terms = blockBuilder.create<scf::ForOp>(
@@ -762,8 +783,7 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
                 Value values = termBuilder.create<vector::LoadOp>(termLoc, laneType, shape.rhs,
                                                                   ValueRange{index, blockStart});
                 termBuilder.create<scf::YieldOp>(
-                    termLoc, createLaneUpdate(termBuilder, termLoc, splat, values, iterArgs.front(),
-                                              shape.contract, fuseFast));
+                    termLoc, updateLanes(termBuilder, termLoc, splat, values, iterArgs.front()));
               });
           lanes = terms.getResult(0);
         }
@@ -816,9 +836,10 @@ public:
         batchFpWindowSumOutputs(*shape, vectorWidth, builder);
         continue;
       }
-      if (FailureOr<FpColumnTileLoopShape> shape = matchFpColumnTileLoop(loop, vectorWidth);
+      if (FailureOr<FpColumnTileLoopShape> shape =
+              matchFpColumnTileLoop(loop, vectorWidth, supportsVectorFma);
           succeeded(shape))
-        batchFpColumnTiles(*shape, vectorWidth, supportsVectorFma, builder);
+        batchFpColumnTiles(*shape, vectorWidth, builder);
     }
     ondrix::ondsp::summarizeFastPermissions(getOperation());
   }

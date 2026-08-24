@@ -44,8 +44,10 @@ bool hasSpentFastPermission(Operation *op, FastPermission permission) {
   if (!record)
     return false;
   StringRef spelling = getFastPermissionSpelling(permission);
-  return llvm::any_of(
-      record, [&](Attribute entry) { return cast<StringAttr>(entry).getValue() == spelling; });
+  return llvm::any_of(record, [&](Attribute entry) {
+    auto name = dyn_cast<StringAttr>(entry);
+    return name && name.getValue() == spelling;
+  });
 }
 
 Value consumeFastPermission(Operation *op, FastPermission permission) {

@@ -646,11 +646,13 @@ def VectorizeOndspFpFilterOutputs
     order-preserving batch is inside every declared set, so R is never
     spent here. Its taps select between the two admitted members by the
     declared `supports-vector-fma` capability, and selecting the fused one
-    spends F. This is also the selection policy for sites with an output
-    axis: this pass runs before the horizontal fast reduction and takes
-    them, so spending a permission never buys a schedule worse than the
-    permission-free one; the horizontal pass consumes only residual
-    reductions with no output axis.
+    spends F. Running this pass before the horizontal fast reduction is the
+    axis-selection policy: it removed the observed regression where a fast
+    site with an output axis took a worse horizontal schedule. It is a
+    policy, not a guarantee — no static pass order can promise relative
+    speed across targets, and the fused/separate choice remains a target
+    schedule policy whose payoff is target evidence. The horizontal pass
+    consumes only residual reductions with no output axis.
 
     The canonical pipeline runs this pass inside its schedule stage; the
     standalone flag remains an ablation and oracle interface. It fires only

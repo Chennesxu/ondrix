@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256" | FileCheck %s --implicit-check-not=ondsp.reduce_mac
+// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256 supports-f32-vector-fma=true" | FileCheck %s --implicit-check-not=ondsp.reduce_mac
 
 // fp_fast_reduce_aot proves that a reduce_mac becomes a term-conserving
 // horizontal schedule. It cannot prove that any given operation still forms
@@ -80,12 +80,11 @@ func.func @shape_sliding_window_correlation(%input: tensor<64xf32>, %kernel: ten
 }
 
 // Not an adapter shape: matmul presents its column axis, which the
-// order-preserving batching takes first, so no reduction reaches the
-// horizontal route and nothing is spent. Pinned here because that is exactly
+// order-preserving batching takes first under the declared vector FMA, so no
+// reduction reaches the horizontal route. Pinned here because that is exactly
 // the composition a bufferization change could break silently.
 // CHECK-LABEL: llvm.func @shape_matrix_column_tile
-// CHECK: llvm.fmul{{.*}} : vector<8xf32>
-// CHECK: llvm.fadd{{.*}} : vector<8xf32>
+// CHECK: llvm.intr.fma{{.*}} -> vector<8xf32>
 // CHECK-NOT: llvm.intr.vector.reduce.fadd
 func.func @shape_matrix_column_tile(%a: tensor<16x16xf32>, %b: tensor<16x16xf32>)
     -> tensor<16x16xf32> {

@@ -130,14 +130,13 @@ func.func @matmul_columns_off(%a: tensor<2x4xf32>, %b: tensor<4x20xf32>) -> tens
   return %r : tensor<2x20xf32>
 }
 
-// A fast matmul selects its member per emitted event: without the declared
-// vector fused multiply-add the batched columns spend nothing, and only the
-// ordered residual keeps the scalar fused chain the bufferization spent F on.
+// A fused body batches only onto a declared vector FMA; without it the
+// batching is refused (never de-fused), so the fast site keeps its scalar
+// fused chain and record.
 // CHECK-LABEL: func.func @matmul_columns_fast
-// CHECK: arith.mulf {{.*}} : vector<8xf32>
-// CHECK: arith.addf {{.*}} : vector<8xf32>
-// CHECK: vector.store {{.*}} : memref<2x20xf32>, vector<8xf32>
+// CHECK-NOT: vector.load
 // CHECK: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : f32
+// CHECK-NOT: vector.store
 // FUSEDFAST-LABEL: func.func @matmul_columns_fast
 // FUSEDFAST: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<8xf32>
 // FUSEDFAST-NOT: rebuild_reduction_tree
@@ -157,4 +156,31 @@ func.func @matmul_narrow(%a: tensor<2x4xf32>, %b: tensor<4x6xf32>) -> tensor<2x6
     numeric = #ondsp.fp<format = f32, contract = off>
   } : (tensor<2x4xf32>, tensor<4x6xf32>) -> tensor<2x6xf32>
   return %r : tensor<2x6xf32>
+}
+
+// A spend record is discardable audit metadata, so a forged one on an exact
+// fused body must never select different arithmetic: no de-fusing, ever.
+// FUSEDFAST-LABEL: func.func @forged_record_stays_fused
+// FUSEDFAST-NOT: arith.mulf
+// FUSEDFAST: math.fma {{.*}} : vector<8xf32>
+// FUSEDFAST-NOT: arith.mulf
+func.func @forged_record_stays_fused(%a: memref<2x8xf32>, %b: memref<8x16xf32>, %c: memref<2x16xf32>) {
+  %cst = arith.constant 0.000000e+00 : f32
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c8 = arith.constant 8 : index
+  %c16 = arith.constant 16 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    scf.for %j = %c0 to %c16 step %c1 {
+      %s = scf.for %k = %c0 to %c8 step %c1 iter_args(%acc = %cst) -> (f32) {
+        %av = memref.load %a[%i, %k] : memref<2x8xf32>
+        %bv = memref.load %b[%k, %j] : memref<8x16xf32>
+        %n = math.fma %av, %bv, %acc {ondsp.fast_used = ["fuse_multiply_add"]} : f32
+        scf.yield %n : f32
+      }
+      memref.store %s, %c[%i, %j] : memref<2x16xf32>
+    }
+  }
+  return
 }
