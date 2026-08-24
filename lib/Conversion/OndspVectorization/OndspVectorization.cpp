@@ -135,11 +135,12 @@ class ConstantSaturatingReduceMacVectorization final
     : public OpRewritePattern<ondrix::ondsp::ReduceMacOp> {
 public:
   ConstantSaturatingReduceMacVectorization(
-      MLIRContext *context, int64_t vectorWidth, int64_t maxElements,
+      MLIRContext *context, int64_t vectorWidth, int64_t maxElements, bool dischargeUpdateGuard,
       const DenseMap<Operation *, int64_t> &subjectOrdinals,
       SmallVectorImpl<ondrix::analysis::NoOverflowChunkReassociationTrace> &proofTraces)
       : OpRewritePattern(context), vectorWidth(vectorWidth), maxElements(maxElements),
-        subjectOrdinals(subjectOrdinals), proofTraces(proofTraces) {}
+        dischargeUpdateGuard(dischargeUpdateGuard), subjectOrdinals(subjectOrdinals),
+        proofTraces(proofTraces) {}
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op,
                                 PatternRewriter &rewriter) const override {
@@ -166,13 +167,14 @@ public:
             return failure();
 
           Location loc = op.getLoc();
+          Value seed = createCertifiedSeed(op, rewriter);
           Value vectorStep = rewriter.create<arith::ConstantIndexOp>(loc, vectorWidth);
           Value remainder = rewriter.create<arith::RemUIOp>(loc, bounds->upperBound, vectorStep);
           Value vectorEnd = rewriter.create<arith::SubIOp>(loc, bounds->upperBound, remainder);
           auto vectorType = VectorType::get({vectorWidth}, numeric.getStorage());
 
           auto vectorLoop = rewriter.create<scf::ForOp>(
-              loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{op.getInitial()},
+              loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{seed},
               [&](OpBuilder &builder, Location bodyLoc, Value base, ValueRange iterArgs) {
                 Value lhs = builder.create<vector::LoadOp>(bodyLoc, vectorType, op.getLhs(), base);
                 Value rhs = builder.create<vector::LoadOp>(bodyLoc, vectorType, op.getRhs(), base);
@@ -202,8 +204,25 @@ public:
   }
 
 private:
+  // The plan proves that no prefix of the emitted schedule reaches the
+  // accumulator rail, so its declared saturating update is unreachable. Seed
+  // the certified schedule with the wrapping accumulator of the same storage,
+  // frac and signedness whenever every consumer only reads the final value.
+  Value createCertifiedSeed(ondrix::ondsp::ReduceMacOp op, PatternRewriter &rewriter) const {
+    auto declared = cast<ondrix::ondsp::AccType>(op.getInitial().getType());
+    if (!dischargeUpdateGuard || !llvm::all_of(op.getResult().getUsers(), [](Operation *user) {
+          return isa<ondrix::ondsp::AccExportOp>(user);
+        }))
+      return op.getInitial();
+    auto certified = ondrix::ondsp::AccType::get(
+        declared.getContext(), declared.getStorage(), declared.getFrac(), declared.getSignedness(),
+        ondrix::ondsp::OverflowMode::Wrap, declared.getLanes());
+    return rewriter.create<ondrix::ondsp::AccZeroOp>(op.getLoc(), certified);
+  }
+
   int64_t vectorWidth;
   int64_t maxElements;
+  bool dischargeUpdateGuard;
   const DenseMap<Operation *, int64_t> &subjectOrdinals;
   SmallVectorImpl<ondrix::analysis::NoOverflowChunkReassociationTrace> &proofTraces;
 };
@@ -522,7 +541,8 @@ public:
 
     RewritePatternSet patterns(&getContext());
     patterns.add<ConstantSaturatingReduceMacVectorization>(&getContext(), vectorWidth, maxElements,
-                                                           subjectOrdinals, proofTraces);
+                                                           dischargeUpdateGuard, subjectOrdinals,
+                                                           proofTraces);
 
     GreedyRewriteConfig config;
     config.strictMode = GreedyRewriteStrictness::ExistingOps;

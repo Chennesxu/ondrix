@@ -1,8 +1,11 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --vectorize-ondsp-constant-saturating-memref-reduce="vector-width=4 max-elements=512" | FileCheck %s
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --vectorize-ondsp-constant-saturating-memref-reduce="vector-width=4 max-elements=7" | FileCheck %s --check-prefix=LIMIT
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp --vectorize-ondsp-constant-saturating-memref-reduce="vector-width=4 max-elements=512 discharge-update-guard=false" | FileCheck %s --check-prefix=GUARD
 
 memref.global "private" constant @safe_q15_coefficients : memref<8xi16> =
   dense<[1, -2, 3, -4, 5, -6, 7, -8]>
+memref.global "private" constant @safe_q15_nine_coefficients : memref<9xi16> =
+  dense<[1, -2, 3, -4, 5, -6, 7, -8, 9]>
 memref.global "private" constant @safe_q31_coefficients : memref<4xi32> =
   dense<[1, -2, 3, -4]>
 memref.global "private" constant @unsafe_q15_coefficients : memref<512xi16> = dense<-32768>
@@ -23,12 +26,43 @@ func.func @safe_q15(%input: memref<8xi16>)
                               update_overflow = saturate>
 }
 
+// The accumulator itself escapes, so a later update could still saturate and
+// only the reassociation is spent here.
 // CHECK-LABEL: func.func @safe_q15
 // CHECK: scf.for
 // CHECK: vector.load {{.*}} : memref<8xi16>, vector<4xi16>
 // CHECK: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
-// CHECK: ondsp.acc_add_term
+// CHECK: ondsp.acc_add_term {{.*}} update_overflow = saturate
 // CHECK-NOT: ondsp.reduce_mac
+
+func.func @exported_q15(%input: memref<9xi16>) -> i64 {
+  %coefficients = memref.get_global @safe_q15_nine_coefficients : memref<9xi16>
+  %result = ondrix.fir %input, %coefficients {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (memref<9xi16>, memref<9xi16>)
+      -> !ondsp.acc<storage = i40, frac = 30, signed,
+                    update_overflow = saturate>
+  %exported = ondsp.acc_export %result {
+    dst = #ondsp.fixed<signed, storage = i64, frac = 30>,
+    overflow = #ondsp.overflow<saturate>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed,
+                  update_overflow = saturate>) -> i64
+  return %exported : i64
+}
+
+// Nine coefficients keep one ordered element after the width-4 chunks, so the
+// certified tail is checked with the chunk loop rather than assumed to follow.
+// CHECK-LABEL: func.func @exported_q15
+// CHECK: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = wrap>
+// CHECK: ondsp.acc_add_term {{.*}} update_overflow = wrap
+// CHECK: ondsp.mac {{.*}} update_overflow = wrap
+// CHECK: ondsp.acc_export {{.*}} update_overflow = wrap
+
+// GUARD-LABEL: func.func @exported_q15
+// GUARD: ondsp.acc_add_term {{.*}} update_overflow = saturate
+// GUARD: ondsp.mac {{.*}} update_overflow = saturate
 
 func.func @safe_q15_portable_i34(%input: memref<8xi16>)
     -> !ondsp.acc<storage = i34, frac = 30, signed,

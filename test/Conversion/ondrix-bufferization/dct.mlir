@@ -86,16 +86,15 @@ func.func @dct4_q15(%input: tensor<4xi16>) -> tensor<4xi16> {
   return %result : tensor<4xi16>
 }
 
-// The constant-coefficient prefix-range proof authorizes the horizontal form:
-// every chunked prefix of a row stays inside the i40 accumulator because
-// sum_n |c[k][n]| * 32768 <= 64 * 32767 * 32768 < 2^39, so no reassociated
-// partial sum can saturate. The wrap shortcut is unavailable here by
-// construction, which is exactly what this route demonstrates.
+// Every chunked prefix of a row stays inside the i40 accumulator because
+// sum_n |c[k][n]| * 32768 <= 64 * 32767 * 32768 < 2^39, so the same proof that
+// authorizes the horizontal form also leaves the declared saturating update
+// unreachable and the certified loops carry the wrapping accumulator.
 // FULL-VECTOR-LABEL: func.func @dct8_q15
 // FULL-VECTOR-COUNT-2: vector.load {{.*}} vector<4xi16>
 // FULL-VECTOR: arith.muli {{.*}} : vector<4xi32>
 // FULL-VECTOR: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
-// FULL-VECTOR: ondsp.acc_add_term {{.*}} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i64) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+// FULL-VECTOR: ondsp.acc_add_term {{.*}} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, i64) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
 // FULL-VECTOR: ondsp.acc_export {{.*}} -> i64
 // FULL-VECTOR: ondsp.round_shift
 // FULL-VECTOR-LABEL: func.func @dct8_shared_tables_q15

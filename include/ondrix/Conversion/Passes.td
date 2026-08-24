@@ -369,6 +369,17 @@ def VectorizeOndspConstantSaturatingMemRefReduce
     transformed schedule can overflow. Unsupported, mutable, partial-view,
     seeded, raw-high, and unproven reductions remain unchanged for the ordered
     Vector or scalar fallback.
+
+    The same proof discharges the accumulator's update guard. Authorization
+    requires every prefix of the emitted schedule to fit the accumulator
+    storage, so the declared saturating update is unreachable on that schedule
+    and the certified loops carry the wrapping accumulator of the same
+    storage, frac and signedness instead. The declared contract is unchanged:
+    the reduction that was refused a proof keeps its saturating updates, and
+    an accumulator whose value reaches a consumer other than `acc_export`
+    keeps them as well, because only the final value is certified. Set
+    `discharge-update-guard=false` to keep the guard and measure what
+    spending the proof is worth.
   }];
   let constructor = "ondrix::createVectorizeOndspConstantSaturatingMemRefReducePass()";
   let dependentDialects = [
@@ -386,6 +397,8 @@ def VectorizeOndspConstantSaturatingMemRefReduce
            "Maximum immutable coefficient count analyzed">,
     Option<"proofTraceOutput", "proof-trace-output", "std::string", /*default=*/"\"\"",
            "Optional path for an experimental JSON proof audit trace">,
+    Option<"dischargeUpdateGuard", "discharge-update-guard", "bool", /*default=*/"true",
+           "Run the certified schedule on a wrapping accumulator the proof leaves unreachable">,
   ];
 }
 
