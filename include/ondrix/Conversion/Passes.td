@@ -225,6 +225,16 @@ def LowerOndspF32ReduceToScalar
     Partially lower rank-1 f32 memref ondsp.reduce_mac operations to generic
     scalar MLIR. Other ondsp operations and non-memref reductions remain legal;
     this is not a final scalar legalization pass.
+
+    `vector-width` batches the PRODUCTS of a `contract = off` reduction a block
+    at a time while every accumulator fold stays scalar and in index order. No
+    permission is spent and no bit changes: an f32 multiply is exact and the
+    products of distinct indices are independent, so computing a block of them
+    in one operation is the same event graph the contract already declares.
+    A `fma` or `fast` contract has no separable product - it declared the
+    multiply and the add to be one event - so it keeps the ordered scalar
+    chain. The strictest contract is therefore the one that admits this
+    batching, which is the opposite of the usual direction.
   }];
   let constructor = "ondrix::createLowerOndspF32ReduceToScalarPass()";
   let dependentDialects = [
@@ -235,6 +245,11 @@ def LowerOndspF32ReduceToScalar
     "mlir::math::MathDialect",
     "mlir::memref::MemRefDialect",
     "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"1",
+           "Products per block for a declared-off reduction; 1 keeps the scalar form">,
   ];
 }
 

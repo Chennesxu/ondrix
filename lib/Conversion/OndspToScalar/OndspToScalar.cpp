@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
@@ -38,7 +39,8 @@ static bool isSupportedF32MemRefReduction(ondrix::ondsp::ReduceMacOp op) {
 
 class ReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
 public:
-  using OpConversionPattern<ondrix::ondsp::ReduceMacOp>::OpConversionPattern;
+  ReduceMacOpLowering(MLIRContext *context, int64_t vectorWidth)
+      : OpConversionPattern(context), vectorWidth(vectorWidth) {}
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -64,10 +66,42 @@ public:
       return failure();
 
     Location loc = op.getLoc();
+    // A declared-off contract states that the multiply and the add are separate
+    // events, so the products are independent and exact and may be computed a
+    // block at a time; only the accumulator folds stay in index order. A fused
+    // contract has no separable product and keeps the scalar chain.
+    Value seed = adaptor.getInitial();
+    Value scalarStart = bounds->lowerBound;
+    auto lhsType = dyn_cast<MemRefType>(adaptor.getLhs().getType());
+    auto rhsType = dyn_cast<MemRefType>(adaptor.getRhs().getType());
+    bool contiguous = lhsType && rhsType && isLastMemrefDimUnitStride(lhsType) &&
+                      isLastMemrefDimUnitStride(rhsType);
+    if (vectorWidth > 1 && contiguous &&
+        numeric.getContract() == ondrix::ondsp::FpContractMode::Off) {
+      Value blockStep = rewriter.create<arith::ConstantIndexOp>(loc, vectorWidth);
+      Value remainder = rewriter.create<arith::RemUIOp>(loc, bounds->upperBound, blockStep);
+      Value blockEnd = rewriter.create<arith::SubIOp>(loc, bounds->upperBound, remainder);
+      auto vectorType = VectorType::get({vectorWidth}, rewriter.getF32Type());
+      auto blockLoop = rewriter.create<scf::ForOp>(
+          loc, bounds->lowerBound, blockEnd, blockStep, ValueRange{seed},
+          [&](OpBuilder &builder, Location bodyLoc, Value base, ValueRange iterArgs) {
+            Value lhs = builder.create<vector::LoadOp>(bodyLoc, vectorType, adaptor.getLhs(), base);
+            Value rhs = builder.create<vector::LoadOp>(bodyLoc, vectorType, adaptor.getRhs(), base);
+            Value products = builder.create<arith::MulFOp>(bodyLoc, lhs, rhs);
+            Value accumulator = iterArgs.front();
+            for (int64_t lane = 0; lane < vectorWidth; ++lane) {
+              Value product = builder.create<vector::ExtractOp>(bodyLoc, products, lane);
+              accumulator = builder.create<arith::AddFOp>(bodyLoc, accumulator, product);
+            }
+            builder.create<scf::YieldOp>(bodyLoc, accumulator);
+          });
+      seed = blockLoop.getResult(0);
+      scalarStart = blockEnd;
+    }
     Value step = rewriter.create<arith::ConstantIndexOp>(loc, 1);
 
     auto loop = rewriter.create<scf::ForOp>(
-        loc, bounds->lowerBound, bounds->upperBound, step, ValueRange{adaptor.getInitial()},
+        loc, scalarStart, bounds->upperBound, step, ValueRange{seed},
         [&](OpBuilder &builder, Location bodyLoc, Value iv, ValueRange iterArgs) {
           Value lhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), iv);
           Value rhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), iv);
@@ -95,6 +129,9 @@ public:
     rewriter.replaceOp(op, loop.getResult(0));
     return success();
   }
+
+private:
+  int64_t vectorWidth;
 };
 
 class LowerOndspF32ReduceToScalarPass final
@@ -105,12 +142,12 @@ public:
 
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
-    patterns.add<ReduceMacOpLowering>(&getContext());
+    patterns.add<ReduceMacOpLowering>(&getContext(), vectorWidth);
 
     ConversionTarget target(getContext());
     target.addLegalDialect<BuiltinDialect, arith::ArithDialect, cf::ControlFlowDialect,
                            func::FuncDialect, math::MathDialect, memref::MemRefDialect,
-                           scf::SCFDialect, ondrix::ondsp::OndspDialect>();
+                           scf::SCFDialect, vector::VectorDialect, ondrix::ondsp::OndspDialect>();
     target.addDynamicallyLegalOp<ondrix::ondsp::ReduceMacOp>(
         [](ondrix::ondsp::ReduceMacOp op) { return !isSupportedF32MemRefReduction(op); });
 

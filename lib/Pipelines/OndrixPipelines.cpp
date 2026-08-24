@@ -64,8 +64,14 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
     os << "normalize-ondsp-fixed-vector-reduce,";
   }
 
-  // Lowering tail down to the LLVM dialect.
-  os << "lower-ondsp-f32-reduce-to-scalar,";
+  // Lowering tail down to the LLVM dialect. The declared-off reduction batches
+  // its products at the target width; the fold order is untouched, so this is
+  // reached whether or not the schedule stage ran.
+  if (options.vectorBits >= 64)
+    os << llvm::formatv("lower-ondsp-f32-reduce-to-scalar{{vector-width={0}},",
+                        options.vectorBits / 32);
+  else
+    os << "lower-ondsp-f32-reduce-to-scalar,";
   os << "lower-rank-one-memref-copy-to-scf,";
   os << "convert-ondsp-fixed-to-scalar,";
   os << "func.func(buffer-deallocation),";
