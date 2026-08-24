@@ -380,6 +380,17 @@ def VectorizeOndspConstantSaturatingMemRefReduce
     keeps them as well, because only the final value is certified. Set
     `discharge-update-guard=false` to keep the guard and measure what
     spending the proof is worth.
+
+    A certified chunk may span several machine vectors. `chunk-multiple`
+    names the widest one to attempt; the pass tries the ladder downwards and
+    takes the first width the analysis authorizes, so a reduction too short
+    for the wide chunk falls back to a narrower certified one instead of
+    losing vectorization. The obligation is not weakened by widening: every
+    prefix bound is rederived for the width actually chosen, and the trace
+    records that width per subject, which the replay pass reselects rather
+    than trusts. What widening buys is schedule shape — one horizontal
+    collapse per chunk instead of per machine vector, so the loop-carried
+    recurrence holds proportionally fewer of them.
   }];
   let constructor = "ondrix::createVectorizeOndspConstantSaturatingMemRefReducePass()";
   let dependentDialects = [
@@ -397,6 +408,8 @@ def VectorizeOndspConstantSaturatingMemRefReduce
            "Maximum immutable coefficient count analyzed">,
     Option<"proofTraceOutput", "proof-trace-output", "std::string", /*default=*/"\"\"",
            "Optional path for an experimental JSON proof audit trace">,
+    Option<"chunkMultiple", "chunk-multiple", "int64_t", /*default=*/"1",
+           "Widest certified chunk, in machine vectors; the ladder falls back per reduction">,
     Option<"dischargeUpdateGuard", "discharge-update-guard", "bool", /*default=*/"true",
            "Run the certified schedule on a wrapping accumulator the proof leaves unreachable">,
   ];

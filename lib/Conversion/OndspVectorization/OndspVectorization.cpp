@@ -43,6 +43,8 @@ namespace {
 
 constexpr uint64_t maxProofTraceBytes = 64ULL * 1024 * 1024;
 constexpr int64_t maxProofTraceElements = 65536;
+// Widest certified chunk, in machine vectors. Bounds the emitted vector type.
+constexpr int64_t maxChunkMultiple = 16;
 constexpr unsigned maxProofTraceAPIntWidth = 4096;
 
 bool isRepresentableLLVMAddressSpace(IntegerAttr memorySpace) {
@@ -131,76 +133,105 @@ planConstantSaturatingReduction(ondrix::ondsp::ReduceMacOp op, int64_t vectorWid
       op, *constant, vectorWidth);
 }
 
+/// The certified chunk may be several machine vectors wide. Widening it does
+/// not weaken the obligation - the analysis re-derives every prefix bound for
+/// the width it is asked about - but it does move work out of the loop-carried
+/// recurrence, so the largest authorized width in the ladder is taken and a
+/// subject too short for it falls back rather than losing vectorization.
+struct SelectedConstantSaturatingPlan {
+  ondrix::analysis::NoOverflowChunkReassociationPlan plan;
+  int64_t chunkWidth;
+};
+
+FailureOr<SelectedConstantSaturatingPlan>
+selectConstantSaturatingPlan(ondrix::ondsp::ReduceMacOp op, int64_t vectorWidth,
+                             int64_t chunkMultiple, int64_t maxElements) {
+  for (int64_t multiple = chunkMultiple; multiple >= 1; --multiple) {
+    int64_t chunkWidth = vectorWidth * multiple;
+    FailureOr<ondrix::analysis::NoOverflowChunkReassociationPlan> plan =
+        planConstantSaturatingReduction(op, chunkWidth, maxElements);
+    if (succeeded(plan))
+      return SelectedConstantSaturatingPlan{std::move(*plan), chunkWidth};
+  }
+  return failure();
+}
+
 class ConstantSaturatingReduceMacVectorization final
     : public OpRewritePattern<ondrix::ondsp::ReduceMacOp> {
 public:
   ConstantSaturatingReduceMacVectorization(
-      MLIRContext *context, int64_t vectorWidth, int64_t maxElements, bool dischargeUpdateGuard,
-      const DenseMap<Operation *, int64_t> &subjectOrdinals,
+      MLIRContext *context, int64_t vectorWidth, int64_t chunkMultiple, int64_t maxElements,
+      bool dischargeUpdateGuard, const DenseMap<Operation *, int64_t> &subjectOrdinals,
       SmallVectorImpl<ondrix::analysis::NoOverflowChunkReassociationTrace> &proofTraces)
-      : OpRewritePattern(context), vectorWidth(vectorWidth), maxElements(maxElements),
-        dischargeUpdateGuard(dischargeUpdateGuard), subjectOrdinals(subjectOrdinals),
-        proofTraces(proofTraces) {}
+      : OpRewritePattern(context), vectorWidth(vectorWidth), chunkMultiple(chunkMultiple),
+        maxElements(maxElements), dischargeUpdateGuard(dischargeUpdateGuard),
+        subjectOrdinals(subjectOrdinals), proofTraces(proofTraces) {}
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op,
                                 PatternRewriter &rewriter) const override {
-    FailureOr<ondrix::analysis::NoOverflowChunkReassociationPlan> plan =
-        planConstantSaturatingReduction(op, vectorWidth, maxElements);
-    if (failed(plan))
+    FailureOr<SelectedConstantSaturatingPlan> selected =
+        selectConstantSaturatingPlan(op, vectorWidth, chunkMultiple, maxElements);
+    if (failed(selected))
       return failure();
+    int64_t chunkWidth = selected->chunkWidth;
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
 
-    return std::move(*plan).consumeIfValid(
-        op, vectorWidth,
-        [&](const ondrix::ondsp::ProductSemantics &productSemantics,
-            llvm::ArrayRef<llvm::APInt> validatedCoefficients, int64_t validatedWidth,
-            const ondrix::analysis::NoOverflowChunkReassociationTrace &proofTrace) {
-          if (productSemantics.selection != ondrix::ondsp::ProductSelection::Full ||
-              validatedCoefficients.empty() || validatedWidth != vectorWidth)
-            return failure();
+    return std::move(selected->plan)
+        .consumeIfValid(
+            op, chunkWidth,
+            [&](const ondrix::ondsp::ProductSemantics &productSemantics,
+                llvm::ArrayRef<llvm::APInt> validatedCoefficients, int64_t validatedWidth,
+                const ondrix::analysis::NoOverflowChunkReassociationTrace &proofTrace) {
+              if (productSemantics.selection != ondrix::ondsp::ProductSelection::Full ||
+                  validatedCoefficients.empty() || validatedWidth != chunkWidth)
+                return failure();
 
-          FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
-              ondrix::conversion::createRankOneMemRefReductionBounds(
-                  op, op.getLhs(), op.getRhs(), numeric.getStorage(),
-                  "constant saturating memref vectorization", rewriter);
-          if (failed(bounds))
-            return failure();
+              FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
+                  ondrix::conversion::createRankOneMemRefReductionBounds(
+                      op, op.getLhs(), op.getRhs(), numeric.getStorage(),
+                      "constant saturating memref vectorization", rewriter);
+              if (failed(bounds))
+                return failure();
 
-          Location loc = op.getLoc();
-          Value seed = createCertifiedSeed(op, rewriter);
-          Value vectorStep = rewriter.create<arith::ConstantIndexOp>(loc, vectorWidth);
-          Value remainder = rewriter.create<arith::RemUIOp>(loc, bounds->upperBound, vectorStep);
-          Value vectorEnd = rewriter.create<arith::SubIOp>(loc, bounds->upperBound, remainder);
-          auto vectorType = VectorType::get({vectorWidth}, numeric.getStorage());
+              Location loc = op.getLoc();
+              Value seed = createCertifiedSeed(op, rewriter);
+              Value vectorStep = rewriter.create<arith::ConstantIndexOp>(loc, chunkWidth);
+              Value remainder =
+                  rewriter.create<arith::RemUIOp>(loc, bounds->upperBound, vectorStep);
+              Value vectorEnd = rewriter.create<arith::SubIOp>(loc, bounds->upperBound, remainder);
+              auto vectorType = VectorType::get({chunkWidth}, numeric.getStorage());
 
-          auto vectorLoop = rewriter.create<scf::ForOp>(
-              loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{seed},
-              [&](OpBuilder &builder, Location bodyLoc, Value base, ValueRange iterArgs) {
-                Value lhs = builder.create<vector::LoadOp>(bodyLoc, vectorType, op.getLhs(), base);
-                Value rhs = builder.create<vector::LoadOp>(bodyLoc, vectorType, op.getRhs(), base);
-                Value next =
-                    createHorizontalAccumulatorUpdate(op, iterArgs.front(), lhs, rhs, builder);
-                builder.create<scf::YieldOp>(bodyLoc, next);
-              });
+              auto vectorLoop = rewriter.create<scf::ForOp>(
+                  loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{seed},
+                  [&](OpBuilder &builder, Location bodyLoc, Value base, ValueRange iterArgs) {
+                    Value lhs =
+                        builder.create<vector::LoadOp>(bodyLoc, vectorType, op.getLhs(), base);
+                    Value rhs =
+                        builder.create<vector::LoadOp>(bodyLoc, vectorType, op.getRhs(), base);
+                    Value next =
+                        createHorizontalAccumulatorUpdate(op, iterArgs.front(), lhs, rhs, builder);
+                    builder.create<scf::YieldOp>(bodyLoc, next);
+                  });
 
-          Value scalarStep = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-          auto tailLoop = rewriter.create<scf::ForOp>(
-              loc, vectorEnd, bounds->upperBound, scalarStep, ValueRange{vectorLoop.getResult(0)},
-              [&](OpBuilder &builder, Location bodyLoc, Value index, ValueRange iterArgs) {
-                Value lhs = builder.create<memref::LoadOp>(bodyLoc, op.getLhs(), index);
-                Value rhs = builder.create<memref::LoadOp>(bodyLoc, op.getRhs(), index);
-                Value next = builder.create<ondrix::ondsp::MacOp>(
-                    bodyLoc, iterArgs.front().getType(), iterArgs.front(), lhs, rhs, numeric,
-                    *op.getProduct());
-                builder.create<scf::YieldOp>(bodyLoc, next);
-              });
+              Value scalarStep = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+              auto tailLoop = rewriter.create<scf::ForOp>(
+                  loc, vectorEnd, bounds->upperBound, scalarStep,
+                  ValueRange{vectorLoop.getResult(0)},
+                  [&](OpBuilder &builder, Location bodyLoc, Value index, ValueRange iterArgs) {
+                    Value lhs = builder.create<memref::LoadOp>(bodyLoc, op.getLhs(), index);
+                    Value rhs = builder.create<memref::LoadOp>(bodyLoc, op.getRhs(), index);
+                    Value next = builder.create<ondrix::ondsp::MacOp>(
+                        bodyLoc, iterArgs.front().getType(), iterArgs.front(), lhs, rhs, numeric,
+                        *op.getProduct());
+                    builder.create<scf::YieldOp>(bodyLoc, next);
+                  });
 
-          ondrix::analysis::NoOverflowChunkReassociationTrace recordedTrace = proofTrace;
-          recordedTrace.subjectOrdinal = subjectOrdinals.lookup(op.getOperation());
-          proofTraces.push_back(std::move(recordedTrace));
-          rewriter.replaceOp(op, tailLoop.getResult(0));
-          return success();
-        });
+              ondrix::analysis::NoOverflowChunkReassociationTrace recordedTrace = proofTrace;
+              recordedTrace.subjectOrdinal = subjectOrdinals.lookup(op.getOperation());
+              proofTraces.push_back(std::move(recordedTrace));
+              rewriter.replaceOp(op, tailLoop.getResult(0));
+              return success();
+            });
   }
 
 private:
@@ -221,6 +252,7 @@ private:
   }
 
   int64_t vectorWidth;
+  int64_t chunkMultiple;
   int64_t maxElements;
   bool dischargeUpdateGuard;
   const DenseMap<Operation *, int64_t> &subjectOrdinals;
@@ -229,7 +261,7 @@ private:
 
 LogicalResult writeProofTrace(StringRef path,
                               ArrayRef<ondrix::analysis::NoOverflowChunkReassociationTrace> traces,
-                              int64_t vectorWidth, int64_t maxElements,
+                              int64_t vectorWidth, int64_t chunkMultiple, int64_t maxElements,
                               int64_t candidateReductionCount, ModuleOp module) {
   if (path.empty())
     return success();
@@ -263,8 +295,9 @@ LogicalResult writeProofTrace(StringRef path,
     }
     proofs.emplace_back(ondrix::analysis::toJSON(trace));
   }
-  llvm::json::Object document{{"schema_version", 1},
+  llvm::json::Object document{{"schema_version", 2},
                               {"vector_width", vectorWidth},
+                              {"chunk_multiple", chunkMultiple},
                               {"analysis_max_elements", maxElements},
                               {"candidate_reduction_count", candidateReductionCount},
                               {"proofs", std::move(proofs)}};
@@ -332,16 +365,19 @@ public:
         document ? document->getInteger("schema_version") : std::nullopt;
     std::optional<int64_t> vectorWidth =
         document ? document->getInteger("vector_width") : std::nullopt;
+    std::optional<int64_t> traceChunkMultiple =
+        document ? document->getInteger("chunk_multiple") : std::nullopt;
     std::optional<int64_t> analysisMaxElements =
         document ? document->getInteger("analysis_max_elements") : std::nullopt;
     std::optional<int64_t> candidateReductionCount =
         document ? document->getInteger("candidate_reduction_count") : std::nullopt;
     const llvm::json::Array *proofs = document ? document->getArray("proofs") : nullptr;
-    if (!schema || *schema != 1 || !vectorWidth || *vectorWidth <= 1 || !analysisMaxElements ||
+    if (!schema || *schema != 2 || !vectorWidth || *vectorWidth <= 1 || !traceChunkMultiple ||
+        *traceChunkMultiple < 1 || *traceChunkMultiple > maxChunkMultiple || !analysisMaxElements ||
         *analysisMaxElements <= 0 || *analysisMaxElements > maxElements ||
         *analysisMaxElements > maxProofTraceElements || !candidateReductionCount ||
         *candidateReductionCount < 0 || !proofs || proofs->empty()) {
-      getOperation().emitError("proof trace must contain a nonempty schema-version 1 proof array");
+      getOperation().emitError("proof trace must contain a nonempty schema-version 2 proof array");
       signalPassFailure();
       return;
     }
@@ -364,7 +400,8 @@ public:
       FailureOr<ondrix::analysis::NoOverflowChunkReassociationTrace> trace =
           ondrix::analysis::parseNoOverflowChunkReassociationTrace(value, parseLimits);
       if (failed(trace) || trace->subjectOrdinal >= static_cast<int64_t>(reductions.size()) ||
-          trace->chunkWidth != *vectorWidth ||
+          trace->chunkWidth % *vectorWidth != 0 ||
+          trace->chunkWidth / *vectorWidth > *traceChunkMultiple ||
           !tracesByOrdinal.try_emplace(trace->subjectOrdinal, std::move(*trace)).second) {
         getOperation().emitError("invalid or duplicate proof trace record ") << recordIndex;
         signalPassFailure();
@@ -374,8 +411,16 @@ public:
 
     for (const auto &[ordinal, reduction] : llvm::enumerate(reductions)) {
       auto trace = tracesByOrdinal.find(static_cast<int64_t>(ordinal));
+      // Rerun the emitting pass's own width ladder: a record naming a narrower
+      // chunk than the ladder would select is a divergence, not a weaker claim.
+      FailureOr<SelectedConstantSaturatingPlan> selected = selectConstantSaturatingPlan(
+          reduction, *vectorWidth, *traceChunkMultiple, *analysisMaxElements);
       FailureOr<ondrix::analysis::NoOverflowChunkReassociationPlan> plan = failure();
-      plan = planConstantSaturatingReduction(reduction, *vectorWidth, *analysisMaxElements);
+      int64_t chunkWidth = *vectorWidth;
+      if (succeeded(selected)) {
+        chunkWidth = selected->chunkWidth;
+        plan = std::move(selected->plan);
+      }
       if (failed(plan)) {
         if (trace == tracesByOrdinal.end())
           continue;
@@ -388,10 +433,17 @@ public:
         signalPassFailure();
         return;
       }
+      if (trace->second.chunkWidth != chunkWidth) {
+        reduction.emitError("proof trace record names a chunk width the selection would not "
+                            "choose: ")
+            << ordinal;
+        signalPassFailure();
+        return;
+      }
 
       bool matched = false;
       matched = succeeded(std::move(*plan).consumeIfValid(
-          reduction, *vectorWidth,
+          reduction, chunkWidth,
           [&](const auto &, const auto &, int64_t,
               const ondrix::analysis::NoOverflowChunkReassociationTrace &current) {
             ondrix::analysis::NoOverflowChunkReassociationTrace rebound = current;
@@ -533,23 +585,24 @@ public:
       subjectOrdinals.try_emplace(reduction, static_cast<int64_t>(ordinal));
     SmallVector<ondrix::analysis::NoOverflowChunkReassociationTrace> proofTraces;
     if (reductions.empty()) {
-      if (failed(writeProofTrace(proofTraceOutput, proofTraces, vectorWidth, maxElements, 0,
-                                 getOperation())))
+      if (failed(writeProofTrace(proofTraceOutput, proofTraces, vectorWidth, chunkMultiple,
+                                 maxElements, 0, getOperation())))
         signalPassFailure();
       return;
     }
 
     RewritePatternSet patterns(&getContext());
-    patterns.add<ConstantSaturatingReduceMacVectorization>(&getContext(), vectorWidth, maxElements,
-                                                           dischargeUpdateGuard, subjectOrdinals,
-                                                           proofTraces);
+    patterns.add<ConstantSaturatingReduceMacVectorization>(
+        &getContext(), vectorWidth, chunkMultiple, maxElements, dischargeUpdateGuard,
+        subjectOrdinals, proofTraces);
 
     GreedyRewriteConfig config;
     config.strictMode = GreedyRewriteStrictness::ExistingOps;
     FrozenRewritePatternSet frozenPatterns(std::move(patterns));
     if (failed(applyOpPatternsAndFold(reductions, frozenPatterns, config)) ||
-        failed(writeProofTrace(proofTraceOutput, proofTraces, vectorWidth, maxElements,
-                               static_cast<int64_t>(reductions.size()), getOperation())))
+        failed(writeProofTrace(proofTraceOutput, proofTraces, vectorWidth, chunkMultiple,
+                               maxElements, static_cast<int64_t>(reductions.size()),
+                               getOperation())))
       signalPassFailure();
   }
 };
