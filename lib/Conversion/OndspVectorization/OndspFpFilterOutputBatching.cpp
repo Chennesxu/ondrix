@@ -30,6 +30,10 @@ namespace {
 /// Largest accepted batch width, bounding every index the rewrite derives.
 constexpr int64_t kMaxVectorWidth = 4096;
 
+/// Term-count bound for unrolling a block body; a longer window keeps the
+/// rolled loop rather than emitting unbounded straight-line code.
+constexpr int64_t kMaxUnrolledTerms = 64;
+
 /// Everything the matcher recovered from one bufferized f32 filter loop.
 struct FpFilterLoopShape {
   scf::ForOp loop;
@@ -251,6 +255,31 @@ FailureOr<FpFilterLoopShape> matchFpFilterLoop(scf::ForOp loop, int64_t vectorWi
 /// graph unchanged — tap order, one product and one accumulation event per
 /// tap, +0.0 initial value — so the authorization is structural (per-lane
 /// event-graph identity), not algebraic, and holds for both exact contracts.
+/// One per-term lane update in the caller's declared operand order; the fast
+/// member selection and its F spend live here so every batcher agrees.
+Value createLaneUpdate(OpBuilder &builder, Location loc, Value lhs, Value rhs, Value accumulator,
+                       ondrix::ondsp::FpContractMode contract, bool fuseFast) {
+  if (contract == ondrix::ondsp::FpContractMode::Fma)
+    return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator);
+  if (contract == ondrix::ondsp::FpContractMode::Fast && fuseFast) {
+    // fast admits both members; selecting the fused one spends F, and the
+    // order-preserving batch never spends R.
+    return ondrix::ondsp::consumeFastPermission(
+        builder.create<math::FmaOp>(loc, lhs, rhs, accumulator),
+        ondrix::ondsp::FastPermission::FuseMultiplyAdd);
+  }
+  Value product = builder.create<arith::MulFOp>(loc, lhs, rhs);
+  return builder.create<arith::AddFOp>(loc, accumulator, product);
+}
+
+/// blockStart advanced by a compile-time term offset.
+Value createTermBase(OpBuilder &builder, Location loc, Value blockStart, int64_t term) {
+  if (term == 0)
+    return blockStart;
+  Value offset = builder.create<arith::ConstantIndexOp>(loc, term);
+  return builder.create<arith::AddIOp>(loc, blockStart, offset);
+}
+
 void batchFpFilterOutputs(const FpFilterLoopShape &shape, int64_t vectorWidth, bool fuseFast,
                           OpBuilder &builder) {
   scf::ForOp loop = shape.loop;
@@ -269,41 +298,50 @@ void batchFpFilterOutputs(const FpFilterLoopShape &shape, int64_t vectorWidth, b
   Value laneZero = builder.create<arith::ConstantOp>(
       loc, laneType, DenseElementsAttr::get(laneType, builder.getF32FloatAttr(0.0f)));
 
+  // The coefficients are block-invariant reads of storage the matcher proved
+  // distinct from the output, so their splats hoist above the batched loop
+  // and the taps unroll: one lane update per tap, no per-tap reload.
+  bool unrolled = shape.coefficientLength <= kMaxUnrolledTerms;
+  SmallVector<Value> tapSplats;
+  if (unrolled) {
+    for (int64_t tap = 0; tap < shape.coefficientLength; ++tap) {
+      Value index = builder.create<arith::ConstantIndexOp>(loc, tap);
+      Value coefficient =
+          builder.create<memref::LoadOp>(loc, shape.coefficients, ValueRange{index});
+      tapSplats.push_back(builder.create<vector::SplatOp>(loc, laneType, coefficient));
+    }
+  }
+
   builder.create<scf::ForOp>(
       loc, zeroIndex, batchedEnd, batchStep, ValueRange{},
       [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
-        // The taps stay a loop: an f32 vector accumulator is a native
-        // loop-carried value, unlike the multi-lane fixed accumulator the
-        // decimate batching must unroll around.
-        auto taps = blockBuilder.create<scf::ForOp>(
-            blockLoc, zeroIndex, tapEnd, oneIndex, ValueRange{laneZero},
-            [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange iterArgs) {
-              Value base = tapBuilder.create<arith::AddIOp>(tapLoc, blockStart, tap);
-              Value values = tapBuilder.create<vector::LoadOp>(tapLoc, laneType, shape.input,
+        Value lanes;
+        if (unrolled) {
+          lanes = laneZero;
+          for (int64_t tap = 0; tap < shape.coefficientLength; ++tap) {
+            Value base = createTermBase(blockBuilder, blockLoc, blockStart, tap);
+            Value values = blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.input,
                                                                ValueRange{base});
-              Value coefficient =
-                  tapBuilder.create<memref::LoadOp>(tapLoc, shape.coefficients, ValueRange{tap});
-              Value splat = tapBuilder.create<vector::SplatOp>(tapLoc, laneType, coefficient);
-              Value updated;
-              if (shape.contract == ondrix::ondsp::FpContractMode::Fma) {
-                // One fused event per lane per tap, exactly the scalar chain.
-                updated = tapBuilder.create<math::FmaOp>(tapLoc, values, splat, iterArgs.front());
-              } else if (shape.contract == ondrix::ondsp::FpContractMode::Fast && fuseFast) {
-                // fast admits both members; selecting the fused one spends F.
-                // The batch itself is order-preserving, so R is never spent.
-                updated = ondrix::ondsp::consumeFastPermission(
-                    tapBuilder.create<math::FmaOp>(tapLoc, values, splat, iterArgs.front()),
-                    ondrix::ondsp::FastPermission::FuseMultiplyAdd);
-              } else {
-                // Separate ordered product and accumulation events per lane,
-                // in the scalar chain's operand order.
-                Value product = tapBuilder.create<arith::MulFOp>(tapLoc, values, splat);
-                updated = tapBuilder.create<arith::AddFOp>(tapLoc, iterArgs.front(), product);
-              }
-              tapBuilder.create<scf::YieldOp>(tapLoc, updated);
-            });
-        blockBuilder.create<vector::StoreOp>(blockLoc, taps.getResult(0), shape.output,
-                                             ValueRange{blockStart});
+            lanes = createLaneUpdate(blockBuilder, blockLoc, values, tapSplats[tap], lanes,
+                                     shape.contract, fuseFast);
+          }
+        } else {
+          auto taps = blockBuilder.create<scf::ForOp>(
+              blockLoc, zeroIndex, tapEnd, oneIndex, ValueRange{laneZero},
+              [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange iterArgs) {
+                Value base = tapBuilder.create<arith::AddIOp>(tapLoc, blockStart, tap);
+                Value values = tapBuilder.create<vector::LoadOp>(tapLoc, laneType, shape.input,
+                                                                 ValueRange{base});
+                Value coefficient =
+                    tapBuilder.create<memref::LoadOp>(tapLoc, shape.coefficients, ValueRange{tap});
+                Value splat = tapBuilder.create<vector::SplatOp>(tapLoc, laneType, coefficient);
+                tapBuilder.create<scf::YieldOp>(tapLoc, createLaneUpdate(tapBuilder, tapLoc, values,
+                                                                         splat, iterArgs.front(),
+                                                                         shape.contract, fuseFast));
+              });
+          lanes = taps.getResult(0);
+        }
+        blockBuilder.create<vector::StoreOp>(blockLoc, lanes, shape.output, ValueRange{blockStart});
         blockBuilder.create<scf::YieldOp>(blockLoc);
       });
 
@@ -463,23 +501,33 @@ void batchFpWindowSumOutputs(const FpWindowSumLoopShape &shape, int64_t vectorWi
   Value batchStep = builder.create<arith::ConstantIndexOp>(loc, vectorWidth);
   Value divisorLanes = builder.create<vector::SplatOp>(loc, laneType, shape.divisor);
 
+  bool unrolled = shape.windowLength <= kMaxUnrolledTerms;
   builder.create<scf::ForOp>(
       loc, zeroIndex, batchedEnd, batchStep, ValueRange{},
       [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
-        Value seeds =
+        Value sums =
             blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.input, blockStart);
-        auto terms = blockBuilder.create<scf::ForOp>(
-            blockLoc, oneIndex, windowEnd, oneIndex, ValueRange{seeds},
-            [&](OpBuilder &termBuilder, Location termLoc, Value term, ValueRange iterArgs) {
-              Value base = termBuilder.create<arith::AddIOp>(termLoc, blockStart, term);
-              Value values =
-                  termBuilder.create<vector::LoadOp>(termLoc, laneType, shape.input, base);
-              termBuilder.create<scf::YieldOp>(
-                  termLoc,
-                  termBuilder.create<arith::AddFOp>(termLoc, iterArgs.front(), values).getResult());
-            });
-        Value means =
-            blockBuilder.create<arith::DivFOp>(blockLoc, terms.getResult(0), divisorLanes);
+        if (unrolled) {
+          for (int64_t term = 1; term < shape.windowLength; ++term) {
+            Value base = createTermBase(blockBuilder, blockLoc, blockStart, term);
+            Value values =
+                blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.input, base);
+            sums = blockBuilder.create<arith::AddFOp>(blockLoc, sums, values);
+          }
+        } else {
+          auto terms = blockBuilder.create<scf::ForOp>(
+              blockLoc, oneIndex, windowEnd, oneIndex, ValueRange{sums},
+              [&](OpBuilder &termBuilder, Location termLoc, Value term, ValueRange iterArgs) {
+                Value base = termBuilder.create<arith::AddIOp>(termLoc, blockStart, term);
+                Value values =
+                    termBuilder.create<vector::LoadOp>(termLoc, laneType, shape.input, base);
+                termBuilder.create<scf::YieldOp>(
+                    termLoc, termBuilder.create<arith::AddFOp>(termLoc, iterArgs.front(), values)
+                                 .getResult());
+              });
+          sums = terms.getResult(0);
+        }
+        Value means = blockBuilder.create<arith::DivFOp>(blockLoc, sums, divisorLanes);
         blockBuilder.create<vector::StoreOp>(blockLoc, means, shape.output, blockStart);
         blockBuilder.create<scf::YieldOp>(blockLoc);
       });
@@ -677,35 +725,49 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
   Value laneZero = builder.create<arith::ConstantOp>(
       loc, laneType, DenseElementsAttr::get(laneType, builder.getF32FloatAttr(0.0f)));
 
+  // The left operand's row is column-block-invariant, so its splats hoist
+  // above the batched loop and the inner axis unrolls, mirroring the filter
+  // batcher's tap treatment.
+  bool unrolled = shape.innerCount <= kMaxUnrolledTerms;
+  SmallVector<Value> rowSplats;
+  if (unrolled) {
+    for (int64_t term = 0; term < shape.innerCount; ++term) {
+      Value index = builder.create<arith::ConstantIndexOp>(loc, term);
+      Value element =
+          builder.create<memref::LoadOp>(loc, shape.lhs, ValueRange{shape.rowIndex, index});
+      rowSplats.push_back(builder.create<vector::SplatOp>(loc, laneType, element));
+    }
+  }
+
   builder.create<scf::ForOp>(
       loc, zeroIndex, batchedEnd, batchStep, ValueRange{},
       [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
-        auto terms = blockBuilder.create<scf::ForOp>(
-            blockLoc, zeroIndex, innerEnd, oneIndex, ValueRange{laneZero},
-            [&](OpBuilder &termBuilder, Location termLoc, Value index, ValueRange iterArgs) {
-              Value element = termBuilder.create<memref::LoadOp>(termLoc, shape.lhs,
-                                                                 ValueRange{shape.rowIndex, index});
-              Value splat = termBuilder.create<vector::SplatOp>(termLoc, laneType, element);
-              Value values = termBuilder.create<vector::LoadOp>(termLoc, laneType, shape.rhs,
-                                                                ValueRange{index, blockStart});
-              Value updated;
-              if (shape.contract == ondrix::ondsp::FpContractMode::Fma) {
-                updated = termBuilder.create<math::FmaOp>(termLoc, splat, values, iterArgs.front());
-              } else if (shape.contract == ondrix::ondsp::FpContractMode::Fast && fuseFast) {
-                // fast admits both members; selecting the fused one spends F,
-                // and the batch itself never spends R.
-                updated = ondrix::ondsp::consumeFastPermission(
-                    termBuilder.create<math::FmaOp>(termLoc, splat, values, iterArgs.front()),
-                    ondrix::ondsp::FastPermission::FuseMultiplyAdd);
-              } else {
-                // A fast site without the declared vector fused multiply-add
-                // re-selects the separate members here and spends nothing.
-                Value product = termBuilder.create<arith::MulFOp>(termLoc, splat, values);
-                updated = termBuilder.create<arith::AddFOp>(termLoc, iterArgs.front(), product);
-              }
-              termBuilder.create<scf::YieldOp>(termLoc, updated);
-            });
-        blockBuilder.create<vector::StoreOp>(blockLoc, terms.getResult(0), shape.output,
+        Value lanes;
+        if (unrolled) {
+          lanes = laneZero;
+          for (int64_t term = 0; term < shape.innerCount; ++term) {
+            Value index = blockBuilder.create<arith::ConstantIndexOp>(blockLoc, term);
+            Value values = blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.rhs,
+                                                               ValueRange{index, blockStart});
+            lanes = createLaneUpdate(blockBuilder, blockLoc, rowSplats[term], values, lanes,
+                                     shape.contract, fuseFast);
+          }
+        } else {
+          auto terms = blockBuilder.create<scf::ForOp>(
+              blockLoc, zeroIndex, innerEnd, oneIndex, ValueRange{laneZero},
+              [&](OpBuilder &termBuilder, Location termLoc, Value index, ValueRange iterArgs) {
+                Value element = termBuilder.create<memref::LoadOp>(
+                    termLoc, shape.lhs, ValueRange{shape.rowIndex, index});
+                Value splat = termBuilder.create<vector::SplatOp>(termLoc, laneType, element);
+                Value values = termBuilder.create<vector::LoadOp>(termLoc, laneType, shape.rhs,
+                                                                  ValueRange{index, blockStart});
+                termBuilder.create<scf::YieldOp>(
+                    termLoc, createLaneUpdate(termBuilder, termLoc, splat, values, iterArgs.front(),
+                                              shape.contract, fuseFast));
+              });
+          lanes = terms.getResult(0);
+        }
+        blockBuilder.create<vector::StoreOp>(blockLoc, lanes, shape.output,
                                              ValueRange{shape.rowIndex, blockStart});
         blockBuilder.create<scf::YieldOp>(blockLoc);
       });

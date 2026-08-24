@@ -17,8 +17,7 @@
 
 // BATCHED-LABEL: func.func @f32_moving_average
 // BATCHED: vector.load {{.*}} : memref<64xf32>, vector<8xf32>
-// BATCHED: scf.for {{.*}} iter_args({{.*}}) -> (vector<8xf32>)
-// BATCHED: arith.addf {{.*}} : vector<8xf32>
+// BATCHED-COUNT-7: arith.addf {{.*}} : vector<8xf32>
 // BATCHED: arith.divf {{.*}} : vector<8xf32>
 // BATCHED: vector.store {{.*}} : memref<57xf32>, vector<8xf32>
 // 57 outputs at width 8 leave one ordered output behind the 7 full blocks.

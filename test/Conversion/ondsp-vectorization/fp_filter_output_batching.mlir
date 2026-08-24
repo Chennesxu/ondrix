@@ -7,14 +7,12 @@
 // structural ground; a shape whose extents the batched body cannot see
 // statically is refused.
 
-// The fma profile: one fused event per lane per tap, and the single-output
-// scalar recurrence is replaced by a per-lane vector recurrence.
+// The fma profile: one fused event per lane per tap, taps unrolled with the
+// eight coefficient splats hoisted above the batched loop.
 // CHECK-LABEL: func.func @fma_filter
+// CHECK-COUNT-8: vector.splat
 // CHECK: scf.for %{{.*}} = %c0{{.*}} to %c32{{.*}} step %c8
-// CHECK: scf.for %{{.*}} iter_args(%{{.*}} = %{{.*}}) -> (vector<8xf32>)
-// CHECK: vector.load {{.*}} : memref<40xf32>, vector<8xf32>
-// CHECK: vector.splat
-// CHECK: math.fma {{.*}} : vector<8xf32>
+// CHECK-COUNT-8: math.fma {{.*}} : vector<8xf32>
 // CHECK-NOT: arith.mulf
 // CHECK: vector.store {{.*}} : memref<33xf32>, vector<8xf32>
 // CHECK: scf.for %{{.*}} = %c32{{.*}} to %c33
@@ -99,8 +97,9 @@ func.func @dynamic_filter(%input: tensor<?xf32>, %coeffs: tensor<?xf32>,
 // scalar-loaded through it and the outputs batch on the same axis.
 // CHECK-LABEL: func.func @conv_reversed_off
 // CHECK: %[[REV:.*]] = memref.subview %{{.*}}[7] [8] [-1]
-// CHECK: vector.load {{.*}} : memref<64xf32>, vector<8xf32>
 // CHECK: memref.load %[[REV]][%{{.*}}]
+// CHECK-COUNT-8: vector.splat
+// CHECK: vector.load {{.*}} : memref<64xf32>, vector<8xf32>
 // CHECK: arith.mulf {{.*}} : vector<8xf32>
 // CHECK: vector.store
 // CHECK: ondsp.reduce_mac
@@ -117,12 +116,10 @@ func.func @conv_reversed_off(%signal: tensor<64xf32>, %kernel: tensor<8xf32>,
 // broadcast row element is scalar-loaded, and the residual columns keep the
 // ordered schedule.
 // CHECK-LABEL: func.func @matmul_columns_off
-// CHECK: scf.for %{{.*}} = %c0{{.*}} to %c16{{.*}} step %c8
 // CHECK: %[[ROW:.*]] = memref.load %{{.*}} : memref<2x4xf32>
 // CHECK: vector.splat %[[ROW]] : vector<8xf32>
-// CHECK: vector.load %{{.*}} : memref<4x20xf32>, vector<8xf32>
-// CHECK: arith.mulf {{.*}} : vector<8xf32>
-// CHECK: arith.addf {{.*}} : vector<8xf32>
+// CHECK: scf.for %{{.*}} = %c0{{.*}} to %c16{{.*}} step %c8
+// CHECK-COUNT-4: vector.load %{{.*}} : memref<4x20xf32>, vector<8xf32>
 // CHECK: vector.store {{.*}} : memref<2x20xf32>, vector<8xf32>
 // CHECK: scf.for %{{.*}} = %c16{{.*}} to %c20
 // CHECK: arith.mulf {{.*}} : f32
