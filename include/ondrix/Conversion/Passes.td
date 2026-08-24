@@ -444,6 +444,13 @@ def VectorizeOndspFixedMemRefReduce
     ondsp.reduce_mac operation for subsequent normalization, and the scalar
     tail uses ondsp.mac. The transformation preserves increasing-index
     accumulator update order.
+    A chunk may span several machine vectors: `chunk-multiple` names the
+    widest one and the width steps down to what the reduction's static extent
+    admits, because a chunk wider than the extent leaves an empty vector loop
+    and moves the whole reduction into the scalar tail. Chunking is
+    order-preserving at any width, so this needs no reassociation argument;
+    what it changes is how often the consumer's horizontal collapse lands in
+    the loop-carried recurrence. Dynamic extents keep one machine vector.
     Only the default LLVM memory space is supported because MLIR 17 Vector to
     LLVM lowering rejects nonzero address spaces. Other valid memory spaces
     remain unchanged for scalar or target-specific lowering; invalid integer
@@ -462,6 +469,8 @@ def VectorizeOndspFixedMemRefReduce
   let options = [
     Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
            "Number of fixed-point lanes per vector chunk">,
+    Option<"chunkMultiple", "chunk-multiple", "int64_t", /*default=*/"1",
+           "Widest chunk in machine vectors; steps down to the static extent">,
   ];
 }
 

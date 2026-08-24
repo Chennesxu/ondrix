@@ -465,8 +465,8 @@ public:
 
 class ReduceMacOpVectorization final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
 public:
-  ReduceMacOpVectorization(MLIRContext *context, int64_t vectorWidth)
-      : OpConversionPattern(context), vectorWidth(vectorWidth) {}
+  ReduceMacOpVectorization(MLIRContext *context, int64_t vectorWidth, int64_t chunkMultiple)
+      : OpConversionPattern(context), vectorWidth(vectorWidth), chunkMultiple(chunkMultiple) {}
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -486,10 +486,18 @@ public:
       return failure();
 
     Location loc = op.getLoc();
-    Value vectorStep = rewriter.create<arith::ConstantIndexOp>(loc, vectorWidth);
+    // A wider chunk only helps while the reduction can fill one: past that the
+    // vector loop is empty and the whole reduction lands in the scalar tail,
+    // so the width steps down to what the static extent actually admits.
+    int64_t chunkWidth = vectorWidth * chunkMultiple;
+    auto lhsType = cast<MemRefType>(op.getLhs().getType());
+    int64_t extent = lhsType.isDynamicDim(0) ? 0 : lhsType.getDimSize(0);
+    while (chunkWidth > vectorWidth && (extent == 0 || extent < chunkWidth))
+      chunkWidth -= vectorWidth;
+    Value vectorStep = rewriter.create<arith::ConstantIndexOp>(loc, chunkWidth);
     Value remainder = rewriter.create<arith::RemUIOp>(loc, bounds->upperBound, vectorStep);
     Value vectorEnd = rewriter.create<arith::SubIOp>(loc, bounds->upperBound, remainder);
-    auto vectorType = VectorType::get({vectorWidth}, elementType);
+    auto vectorType = VectorType::get({chunkWidth}, elementType);
 
     auto vectorLoop = rewriter.create<scf::ForOp>(
         loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{adaptor.getInitial()},
@@ -520,6 +528,7 @@ public:
 
 private:
   int64_t vectorWidth;
+  int64_t chunkMultiple;
 };
 
 class VectorizeOndspFixedMemRefReducePass final
@@ -537,7 +546,7 @@ public:
     }
 
     RewritePatternSet patterns(&getContext());
-    patterns.add<ReduceMacOpVectorization>(&getContext(), vectorWidth);
+    patterns.add<ReduceMacOpVectorization>(&getContext(), vectorWidth, chunkMultiple);
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, memref::MemRefDialect,
