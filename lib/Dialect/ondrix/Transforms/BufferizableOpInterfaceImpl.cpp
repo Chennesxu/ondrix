@@ -825,6 +825,75 @@ struct Conv1DOpInterface
   }
 };
 
+struct MovingAverageOpInterface
+    : public BufferizableOpInterface::ExternalModel<MovingAverageOpInterface, MovingAverageOp> {
+  bool bufferizesToAllocation(Operation *, OpResult) const { return true; }
+
+  bool bufferizesToMemoryRead(Operation *, OpOperand &, const AnalysisState &) const {
+    return true;
+  }
+
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &, const AnalysisState &) const {
+    return false;
+  }
+
+  AliasingOpResultList getAliasingOpResults(Operation *, OpOperand &, const AnalysisState &) const {
+    return {};
+  }
+
+  LogicalResult bufferize(Operation *operation, RewriterBase &rewriter,
+                          const BufferizationOptions &options) const {
+    auto op = cast<MovingAverageOp>(operation);
+    // Only the f32 profile is preserved into bufferization; the fixed profile
+    // keeps its tensor lowering and never reaches here.
+    auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+    if (!fp)
+      return failure();
+    FailureOr<Value> input = getBuffer(rewriter, op.getInput(), options);
+    if (failed(input))
+      return failure();
+
+    rewriter.setInsertionPoint(op);
+    Location loc = op.getLoc();
+    FailureOr<Value> output = createProducedResultBuffer(rewriter, op.getResult(), options);
+    if (failed(output))
+      return failure();
+
+    int64_t window = op.getWindow();
+    int64_t outputs = op.getResult().getType().getDimSize(0);
+    Type element = fp.getFormat();
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value windowEnd = rewriter.create<arith::ConstantIndexOp>(loc, window);
+    Value outputEnd = rewriter.create<arith::ConstantIndexOp>(loc, outputs);
+    Value count = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getFloatAttr(element, static_cast<double>(window)));
+
+    // The loop form of the declared window graph: first element as the seed,
+    // left-to-right adds, one division per output. Every contract denotes
+    // these same events (no product exists to fuse), so nothing is spent.
+    rewriter.create<scf::ForOp>(
+        loc, zero, outputEnd, one, ValueRange{},
+        [&](OpBuilder &builder, Location bodyLoc, Value outputIndex, ValueRange) {
+          Value seed = builder.create<memref::LoadOp>(bodyLoc, *input, outputIndex);
+          auto sum = builder.create<scf::ForOp>(
+              bodyLoc, one, windowEnd, one, ValueRange{seed},
+              [&](OpBuilder &termBuilder, Location termLoc, Value term, ValueRange accumulator) {
+                Value position = termBuilder.create<arith::AddIOp>(termLoc, outputIndex, term);
+                Value value = termBuilder.create<memref::LoadOp>(termLoc, *input, position);
+                termBuilder.create<scf::YieldOp>(
+                    termLoc, termBuilder.create<arith::AddFOp>(termLoc, accumulator.front(), value)
+                                 .getResult());
+              });
+          Value mean = builder.create<arith::DivFOp>(bodyLoc, sum.getResult(0), count);
+          builder.create<memref::StoreOp>(bodyLoc, mean, *output, outputIndex);
+          builder.create<scf::YieldOp>(bodyLoc);
+        });
+    replaceOpWithBufferizedValues(rewriter, op, *output);
+    return success();
+  }
+};
+
 } // namespace
 
 void registerBufferizableOpInterfaceExternalModels(DialectRegistry &registry) {
@@ -832,6 +901,7 @@ void registerBufferizableOpInterfaceExternalModels(DialectRegistry &registry) {
     FirFilterOp::attachInterface<FirFilterOpInterface>(*context);
     FirDecimateOp::attachInterface<FirDecimateOpInterface>(*context);
     Conv1DOp::attachInterface<Conv1DOpInterface>(*context);
+    MovingAverageOp::attachInterface<MovingAverageOpInterface>(*context);
     MatmulOp::attachInterface<MatmulOpInterface>(*context);
     RmsOp::attachInterface<RmsOpInterface>(*context);
     DctOp::attachInterface<DctOpInterface>(*context);

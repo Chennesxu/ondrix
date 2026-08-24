@@ -300,6 +300,179 @@ void batchFpFilterOutputs(const FpFilterLoopShape &shape, int64_t vectorWidth, b
   loop.getLowerBoundMutable().assign(batchedEnd);
 }
 
+/// Everything the matcher recovered from one bufferized windowed-sum loop
+/// (the f32 moving-average shape: seed load, ordered adds, one division).
+struct FpWindowSumLoopShape {
+  scf::ForOp loop;
+  int64_t outputLength = 0;
+  int64_t windowLength = 0;
+  Value input;
+  Value output;
+  Value divisor;
+};
+
+/// Matches the loop the f32 moving-average bufferization emits: per output,
+/// a seed load at the output index, a left-to-right add loop over the window
+/// tail, one division by a loop-invariant constant, and one store. Anything
+/// else fails closed and keeps the ordered schedule.
+FailureOr<FpWindowSumLoopShape> matchFpWindowSumLoop(scf::ForOp loop, int64_t vectorWidth) {
+  if (!loop.getInitArgs().empty())
+    return failure();
+
+  std::optional<int64_t> lowerBound = getConstantIntValue(loop.getLowerBound());
+  std::optional<int64_t> upperBound = getConstantIntValue(loop.getUpperBound());
+  std::optional<int64_t> step = getConstantIntValue(loop.getStep());
+  if (!lowerBound || !upperBound || !step || *lowerBound != 0 || *step != 1 || *upperBound <= 0)
+    return failure();
+
+  Block &body = *loop.getBody();
+  Value outputIndex = loop.getInductionVar();
+
+  SmallVector<Operation *> operations;
+  for (Operation &operation : body.without_terminator())
+    operations.push_back(&operation);
+  if (operations.size() != 4)
+    return failure();
+
+  auto seed = dyn_cast<memref::LoadOp>(operations[0]);
+  auto window = dyn_cast<scf::ForOp>(operations[1]);
+  auto mean = dyn_cast<arith::DivFOp>(operations[2]);
+  auto store = dyn_cast<memref::StoreOp>(operations[3]);
+  if (!seed || !window || !mean || !store)
+    return failure();
+
+  if (seed.getIndices().size() != 1 || seed.getIndices().front() != outputIndex ||
+      !seed.getResult().hasOneUse())
+    return failure();
+  if (window.getInitArgs().size() != 1 || window.getInitArgs().front() != seed.getResult() ||
+      !window.getResult(0).hasOneUse())
+    return failure();
+  std::optional<int64_t> windowLower = getConstantIntValue(window.getLowerBound());
+  std::optional<int64_t> windowUpper = getConstantIntValue(window.getUpperBound());
+  std::optional<int64_t> windowStep = getConstantIntValue(window.getStep());
+  if (!windowLower || !windowUpper || !windowStep || *windowLower != 1 || *windowStep != 1 ||
+      *windowUpper <= 1)
+    return failure();
+
+  // The window tail: position = outputIndex + term, one load, one ordered add.
+  Block &windowBody = *window.getBody();
+  SmallVector<Operation *> tail;
+  for (Operation &operation : windowBody.without_terminator())
+    tail.push_back(&operation);
+  if (tail.size() != 3)
+    return failure();
+  auto position = dyn_cast<arith::AddIOp>(tail[0]);
+  auto load = dyn_cast<memref::LoadOp>(tail[1]);
+  auto add = dyn_cast<arith::AddFOp>(tail[2]);
+  if (!position || !load || !add)
+    return failure();
+  if (position.getLhs() != outputIndex || position.getRhs() != window.getInductionVar())
+    return failure();
+  if (load.getIndices().size() != 1 || load.getIndices().front() != position.getResult() ||
+      load.getMemRef() != seed.getMemRef())
+    return failure();
+  if (add.getLhs() != windowBody.getArgument(1) || add.getRhs() != load.getResult())
+    return failure();
+  auto yield = cast<scf::YieldOp>(windowBody.getTerminator());
+  if (yield.getOperand(0) != add.getResult())
+    return failure();
+
+  FloatAttr divisor;
+  if (mean.getLhs() != window.getResult(0) || !matchPattern(mean.getRhs(), m_Constant(&divisor)) ||
+      !divisor.getType().isF32())
+    return failure();
+  if (store.getValueToStore() != mean.getResult() || store.getIndices().size() != 1 ||
+      store.getIndices().front() != outputIndex)
+    return failure();
+
+  FpWindowSumLoopShape shape;
+  shape.loop = loop;
+  shape.outputLength = *upperBound;
+  shape.windowLength = *windowUpper;
+  shape.input = seed.getMemRef();
+  shape.output = store.getMemRef();
+  shape.divisor = mean.getRhs();
+
+  if (!isBatchableRankOneMemRef(shape.input) || !isBatchableRankOneMemRef(shape.output))
+    return failure();
+  if (shape.input.getParentBlock() == &body || shape.output.getParentBlock() == &body ||
+      shape.divisor.getParentBlock() == &body)
+    return failure();
+  if (cast<MemRefType>(shape.input.getType()).getElementType() !=
+          Float32Type::get(loop.getContext()) ||
+      cast<MemRefType>(shape.output.getType()).getElementType() !=
+          Float32Type::get(loop.getContext()))
+    return failure();
+
+  // Same deferred-store obligation and window-union extent argument as the
+  // filter batching: block m reads exactly the union of its W windows.
+  if (ondrix::conversion::mayShareStorage(shape.input, shape.output))
+    return failure();
+  auto inputType = cast<MemRefType>(shape.input.getType());
+  if (inputType.isDynamicDim(0))
+    return failure();
+  int64_t inputLength = inputType.getDimSize(0);
+  if (inputLength < shape.outputLength + shape.windowLength - 1)
+    return failure();
+  int64_t fullBlocks = shape.outputLength / vectorWidth;
+  if (fullBlocks < 1)
+    return failure();
+  int64_t lastLoadEnd = (fullBlocks - 1) * vectorWidth + shape.windowLength - 1 + vectorWidth - 1;
+  if (lastLoadEnd >= inputLength)
+    return failure();
+
+  return shape;
+}
+
+/// Batches W windowed-sum outputs per vector: each lane runs its declared
+/// per-output events verbatim (seed element, left-to-right adds, one
+/// division), so the authorization is the same per-lane event-graph identity
+/// as the filter batching, for every contract.
+void batchFpWindowSumOutputs(const FpWindowSumLoopShape &shape, int64_t vectorWidth,
+                             OpBuilder &builder) {
+  scf::ForOp loop = shape.loop;
+  Location loc = loop.getLoc();
+  int64_t fullBlocks = shape.outputLength / vectorWidth;
+  int64_t batchedOutputs = fullBlocks * vectorWidth;
+
+  auto laneType = VectorType::get({vectorWidth}, builder.getF32Type());
+
+  builder.setInsertionPoint(loop);
+  Value zeroIndex = builder.create<arith::ConstantIndexOp>(loc, 0);
+  Value oneIndex = builder.create<arith::ConstantIndexOp>(loc, 1);
+  Value windowEnd = builder.create<arith::ConstantIndexOp>(loc, shape.windowLength);
+  Value batchedEnd = builder.create<arith::ConstantIndexOp>(loc, batchedOutputs);
+  Value batchStep = builder.create<arith::ConstantIndexOp>(loc, vectorWidth);
+  Value divisorLanes = builder.create<vector::SplatOp>(loc, laneType, shape.divisor);
+
+  builder.create<scf::ForOp>(
+      loc, zeroIndex, batchedEnd, batchStep, ValueRange{},
+      [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
+        Value seeds =
+            blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.input, blockStart);
+        auto terms = blockBuilder.create<scf::ForOp>(
+            blockLoc, oneIndex, windowEnd, oneIndex, ValueRange{seeds},
+            [&](OpBuilder &termBuilder, Location termLoc, Value term, ValueRange iterArgs) {
+              Value base = termBuilder.create<arith::AddIOp>(termLoc, blockStart, term);
+              Value values =
+                  termBuilder.create<vector::LoadOp>(termLoc, laneType, shape.input, base);
+              termBuilder.create<scf::YieldOp>(
+                  termLoc,
+                  termBuilder.create<arith::AddFOp>(termLoc, iterArgs.front(), values).getResult());
+            });
+        Value means =
+            blockBuilder.create<arith::DivFOp>(blockLoc, terms.getResult(0), divisorLanes);
+        blockBuilder.create<vector::StoreOp>(blockLoc, means, shape.output, blockStart);
+        blockBuilder.create<scf::YieldOp>(blockLoc);
+      });
+
+  if (batchedOutputs == shape.outputLength) {
+    loop.erase();
+    return;
+  }
+  loop.getLowerBoundMutable().assign(batchedEnd);
+}
+
 class VectorizeOndspFpFilterOutputsPass final
     : public ondrix::impl::VectorizeOndspFpFilterOutputsBase<VectorizeOndspFpFilterOutputsPass> {
 public:
@@ -325,9 +498,14 @@ public:
 
     OpBuilder builder(&getContext());
     for (scf::ForOp loop : candidates) {
-      FailureOr<FpFilterLoopShape> shape = matchFpFilterLoop(loop, vectorWidth);
-      if (succeeded(shape))
+      if (FailureOr<FpFilterLoopShape> shape = matchFpFilterLoop(loop, vectorWidth);
+          succeeded(shape)) {
         batchFpFilterOutputs(*shape, vectorWidth, supportsVectorFma, builder);
+        continue;
+      }
+      if (FailureOr<FpWindowSumLoopShape> shape = matchFpWindowSumLoop(loop, vectorWidth);
+          succeeded(shape))
+        batchFpWindowSumOutputs(*shape, vectorWidth, builder);
     }
     ondrix::ondsp::summarizeFastPermissions(getOperation());
   }

@@ -61,6 +61,11 @@ public:
       // lowering, so it is not preserved.
       target.addDynamicallyLegalOp<ondrix::ir::DctOp>(
           [](ondrix::ir::DctOp op) { return !isa<ondrix::ondsp::FpAttr>(op.getInputNumeric()); });
+      // The f32 moving average bufferizes to the windowed-sum loop the
+      // schedule stage batches; the fixed profile keeps its tensor lowering.
+      target.addDynamicallyLegalOp<ondrix::ir::MovingAverageOp>([](ondrix::ir::MovingAverageOp op) {
+        return isa<ondrix::ondsp::FpAttr>(op.getNumeric());
+      });
     }
 
     if (failed(applyPartialConversion(module, target, std::move(patterns))))
