@@ -1,5 +1,5 @@
-// RUN: ondrix-opt %s --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=8" | FileCheck %s
-// RUN: ondrix-opt %s --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=8 supports-vector-fma=true" | FileCheck %s --check-prefix=FUSEDFAST
+// RUN: ondrix-opt %s --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries allow-return-allocs function-boundary-type-conversion=identity-layout-map" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=8" | FileCheck %s
+// RUN: ondrix-opt %s --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries allow-return-allocs function-boundary-type-conversion=identity-layout-map" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=8 supports-vector-fma=true" | FileCheck %s --check-prefix=FUSEDFAST
 
 // Order-preserving f32 output batching: W independent outputs ride one
 // vector, each lane running its declared event graph verbatim, and the
@@ -111,4 +111,53 @@ func.func @conv_reversed_off(%signal: tensor<64xf32>, %kernel: tensor<8xf32>,
     numeric = #ondsp.fp<format = f32, contract = off>
   } : (tensor<64xf32>, tensor<8xf32>, tensor<57xf32>) -> tensor<57xf32>
   return %result : tensor<57xf32>
+}
+
+// The matmul column axis: W columns of one output row ride one vector, the
+// broadcast row element is scalar-loaded, and the residual columns keep the
+// ordered schedule.
+// CHECK-LABEL: func.func @matmul_columns_off
+// CHECK: scf.for %{{.*}} = %c0{{.*}} to %c16{{.*}} step %c8
+// CHECK: %[[ROW:.*]] = memref.load %{{.*}} : memref<2x4xf32>
+// CHECK: vector.splat %[[ROW]] : vector<8xf32>
+// CHECK: vector.load %{{.*}} : memref<4x20xf32>, vector<8xf32>
+// CHECK: arith.mulf {{.*}} : vector<8xf32>
+// CHECK: arith.addf {{.*}} : vector<8xf32>
+// CHECK: vector.store {{.*}} : memref<2x20xf32>, vector<8xf32>
+// CHECK: scf.for %{{.*}} = %c16{{.*}} to %c20
+// CHECK: arith.mulf {{.*}} : f32
+func.func @matmul_columns_off(%a: tensor<2x4xf32>, %b: tensor<4x20xf32>) -> tensor<2x20xf32> {
+  %r = ondrix.matmul %a, %b {
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<2x4xf32>, tensor<4x20xf32>) -> tensor<2x20xf32>
+  return %r : tensor<2x20xf32>
+}
+
+// A fast matmul selects its member per emitted event: without the declared
+// vector fused multiply-add the batched columns spend nothing, and only the
+// ordered residual keeps the scalar fused chain the bufferization spent F on.
+// CHECK-LABEL: func.func @matmul_columns_fast
+// CHECK: arith.mulf {{.*}} : vector<8xf32>
+// CHECK: arith.addf {{.*}} : vector<8xf32>
+// CHECK: vector.store {{.*}} : memref<2x20xf32>, vector<8xf32>
+// CHECK: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : f32
+// FUSEDFAST-LABEL: func.func @matmul_columns_fast
+// FUSEDFAST: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<8xf32>
+// FUSEDFAST-NOT: rebuild_reduction_tree
+func.func @matmul_columns_fast(%a: tensor<2x4xf32>, %b: tensor<4x20xf32>) -> tensor<2x20xf32> {
+  %r = ondrix.matmul %a, %b {
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (tensor<2x4xf32>, tensor<4x20xf32>) -> tensor<2x20xf32>
+  return %r : tensor<2x20xf32>
+}
+
+// Fewer columns than lanes: no full block exists, the ordered nest stands.
+// CHECK-LABEL: func.func @matmul_narrow
+// CHECK-NOT: vector.load
+// CHECK: arith.mulf {{.*}} : f32
+func.func @matmul_narrow(%a: tensor<2x4xf32>, %b: tensor<4x6xf32>) -> tensor<2x6xf32> {
+  %r = ondrix.matmul %a, %b {
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<2x4xf32>, tensor<4x6xf32>) -> tensor<2x6xf32>
+  return %r : tensor<2x6xf32>
 }

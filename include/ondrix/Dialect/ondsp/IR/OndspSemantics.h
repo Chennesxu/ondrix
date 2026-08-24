@@ -50,6 +50,12 @@ mlir::Value consumeFastPermission(mlir::Operation *op, FastPermission permission
 /// having the second silently replace the first.
 llvm::StringRef getFastPermissionAttrName();
 
+/// Whether `op` records having spent `permission`. Membership, not presence: a
+/// record naming only the other permission must not read as this one. A later
+/// pass reading a record back is deciding whether it may re-select the member,
+/// which the wrong answer would turn into an unauthorized rewrite.
+bool hasSpentFastPermission(mlir::Operation *op, FastPermission permission);
+
 /// Unions the per-operation records into one module-level set. The LLVM
 /// conversion drops the operation attributes, so a pass that can consume calls
 /// this before handing the module on; the module attribute is what survives to

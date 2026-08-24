@@ -4,8 +4,8 @@
 // horizontal schedule. It cannot prove that any given operation still forms
 // the reduce_mac that reaches it, so a bufferization change that quietly
 // stopped vectorizing an operation would leave that gate green. These pins
-// close the composition: for each source operation, the fast route really does
-// reach the rewrite and really does spend R.
+// close the composition: for each reduction shape a source operation presents,
+// the fast route really does reach the rewrite and really does spend R.
 //
 // Grouped by the adapter shape each operation presents to the reduction, not
 // by operation name, because that shape is what the rewrite accepts or
@@ -79,17 +79,23 @@ func.func @shape_sliding_window_correlation(%input: tensor<64xf32>, %kernel: ten
   return %r : tensor<49xf32>
 }
 
-// Adapter shape 3, a matrix row against a transposed column pack.
-// CHECK-LABEL: llvm.func @shape_matrix_row
-// CHECK: llvm.intr.vector.reduce.fadd
-func.func @shape_matrix_row(%a: tensor<16x16xf32>, %b: tensor<16x16xf32>) -> tensor<16x16xf32> {
+// Not an adapter shape: matmul presents its column axis, which the
+// order-preserving batching takes first, so no reduction reaches the
+// horizontal route and nothing is spent. Pinned here because that is exactly
+// the composition a bufferization change could break silently.
+// CHECK-LABEL: llvm.func @shape_matrix_column_tile
+// CHECK: llvm.fmul{{.*}} : vector<8xf32>
+// CHECK: llvm.fadd{{.*}} : vector<8xf32>
+// CHECK-NOT: llvm.intr.vector.reduce.fadd
+func.func @shape_matrix_column_tile(%a: tensor<16x16xf32>, %b: tensor<16x16xf32>)
+    -> tensor<16x16xf32> {
   %r = ondrix.matmul %a, %b {
     numeric = #ondsp.fp<format = f32, contract = fast>
   } : (tensor<16x16xf32>, tensor<16x16xf32>) -> tensor<16x16xf32>
   return %r : tensor<16x16xf32>
 }
 
-// Adapter shape 4, one operand used twice.
+// Adapter shape 3, one operand used twice.
 // CHECK-LABEL: llvm.func @shape_self_product
 // CHECK: llvm.intr.vector.reduce.fadd
 func.func @shape_self_product(%input: tensor<32xf32>) -> tensor<1xf32> {
@@ -99,7 +105,7 @@ func.func @shape_self_product(%input: tensor<32xf32>) -> tensor<1xf32> {
   return %r : tensor<1xf32>
 }
 
-// Adapter shape 5, a reversed subview. Refused, so the route spends F on the
+// Adapter shape 4, a reversed subview. Refused, so the route spends F on the
 // scalar fused chain instead — the one shape whose refusal is the point.
 // CHECK-LABEL: llvm.func @shape_reversed_subview
 // CHECK-NOT: llvm.intr.vector.reduce.fadd

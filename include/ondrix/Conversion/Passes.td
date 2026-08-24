@@ -660,7 +660,10 @@ def VectorizeOndspFpFilterOutputs
     whole-length static subview at stride +-1 of a contiguous sequence —
     the convolution coefficient order — since taps are scalar-loaded; the
     touched index range is pinned against the base extent rather than
-    assumed in bounds. Unlike the decimate batching there is
+    assumed in bounds. The windowed-sum and matmul column loops are the other
+    two admitted shapes, each with its own structural matcher; batching a
+    matmul's column axis additionally needs a contiguous minor dimension in
+    the right operand and the result. Unlike the decimate batching there is
     no widened load: at tap t the lanes for outputs m .. m+W-1 read
     input[m+t .. m+t+W-1], exactly the union of those W ordered windows, so
     every full block of W outputs is batchable and the batched schedule

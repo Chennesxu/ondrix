@@ -438,21 +438,54 @@ struct MatmulOpInterface
     Type elementType = lhsType.getElementType();
     auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
     Attribute numeric = op.getNumeric();
-    ondrix::ondsp::ProductAttr product;
-    if (!fp)
-      product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
-    // Wrap alone authorizes reassociation (exact-modulo); the range bound
-    // tying the wrapped i40 value to the contract's exact K-sum is derived
-    // in the Ondrix_MatmulOp description.
-    ondrix::ondsp::AccType accumulatorType;
-    if (!fp)
-      accumulatorType = getExactWrapAccumulator(context, /*width=*/40);
 
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     Value rows = rewriter.create<arith::ConstantIndexOp>(loc, rowCount);
     Value inner = rewriter.create<arith::ConstantIndexOp>(loc, innerCount);
     Value columns = rewriter.create<arith::ConstantIndexOp>(loc, columnCount);
+
+    if (fp) {
+      // Column-tile form: the accumulator loop runs over k with A[i,k] as the
+      // column-invariant scalar and B[k,j] on the unit-stride j axis, which is
+      // the axis the output batching reads. Per output this is the declared
+      // event graph of the reduction it replaces: +0.0 seed, ascending k, one
+      // update event per term.
+      rewriter.create<scf::ForOp>(
+          loc, zero, rows, one, ValueRange{},
+          [&](OpBuilder &builder, Location rowLoc, Value row, ValueRange) {
+            builder.create<scf::ForOp>(
+                rowLoc, zero, columns, one, ValueRange{},
+                [&](OpBuilder &columnBuilder, Location columnLoc, Value column, ValueRange) {
+                  Value initial = columnBuilder.create<arith::ConstantOp>(
+                      columnLoc, columnBuilder.getFloatAttr(elementType, 0.0));
+                  auto terms = columnBuilder.create<scf::ForOp>(
+                      columnLoc, zero, inner, one, ValueRange{initial},
+                      [&](OpBuilder &termBuilder, Location termLoc, Value index,
+                          ValueRange accumulator) {
+                        Value left = termBuilder.create<memref::LoadOp>(termLoc, *lhs,
+                                                                        ValueRange{row, index});
+                        Value right = termBuilder.create<memref::LoadOp>(termLoc, *rhs,
+                                                                         ValueRange{index, column});
+                        Value updated = createFpAccumulatorUpdate(
+                            termLoc, left, right, accumulator.front(), fp, termBuilder);
+                        termBuilder.create<scf::YieldOp>(termLoc, updated);
+                      });
+                  columnBuilder.create<memref::StoreOp>(columnLoc, terms.getResult(0), *output,
+                                                        ValueRange{row, column});
+                  columnBuilder.create<scf::YieldOp>(columnLoc);
+                });
+            builder.create<scf::YieldOp>(rowLoc);
+          });
+      replaceOpWithBufferizedValues(rewriter, op, *output);
+      return success();
+    }
+
+    auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
+    // Wrap alone authorizes reassociation (exact-modulo); the range bound
+    // tying the wrapped i40 value to the contract's exact K-sum is derived
+    // in the Ondrix_MatmulOp description.
+    ondrix::ondsp::AccType accumulatorType = getExactWrapAccumulator(context, /*width=*/40);
 
     // The columns of B have stride N and would be refused by the unit-stride
     // Vector legality gate. Pack B once into a transposed scratch buffer so
@@ -491,26 +524,16 @@ struct MatmulOpInterface
               [&](OpBuilder &columnBuilder, Location columnLoc, Value column, ValueRange) {
                 Value packedRow =
                     createUnitStrideRowView(columnBuilder, columnLoc, *packed, column, innerCount);
-                Value element;
-                if (fp) {
-                  // The reduction result is the element: an f32 element has no
-                  // requantization boundary after it.
-                  Value initial = columnBuilder.create<arith::ConstantOp>(
-                      columnLoc, columnBuilder.getFloatAttr(elementType, 0.0));
-                  element = columnBuilder.create<ondrix::ondsp::ReduceMacOp>(
-                      columnLoc, elementType, initial, lhsRow, packedRow, numeric, product);
-                } else {
-                  Value initial =
-                      columnBuilder.create<ondrix::ondsp::AccZeroOp>(columnLoc, accumulatorType);
-                  Value reduced = columnBuilder.create<ondrix::ondsp::ReduceMacOp>(
-                      columnLoc, accumulatorType, initial, lhsRow, packedRow, numeric, product);
-                  // Dividing the raw accumulator by 2^(30 - 15) with nearest-even
-                  // rounding and saturating to i16 is exactly the `round_shift`
-                  // boundary of the tensor-form lowering.
-                  element = columnBuilder.create<ondrix::ondsp::AccExportOp>(
-                      columnLoc, elementType, reduced, cast<ondrix::ondsp::FixedAttr>(numeric),
-                      *op.getRounding(), ondrix::ondsp::OverflowMode::Saturate);
-                }
+                Value initial =
+                    columnBuilder.create<ondrix::ondsp::AccZeroOp>(columnLoc, accumulatorType);
+                Value reduced = columnBuilder.create<ondrix::ondsp::ReduceMacOp>(
+                    columnLoc, accumulatorType, initial, lhsRow, packedRow, numeric, product);
+                // Dividing the raw accumulator by 2^(30 - 15) with nearest-even
+                // rounding and saturating to i16 is exactly the `round_shift`
+                // boundary of the tensor-form lowering.
+                Value element = columnBuilder.create<ondrix::ondsp::AccExportOp>(
+                    columnLoc, elementType, reduced, cast<ondrix::ondsp::FixedAttr>(numeric),
+                    *op.getRounding(), ondrix::ondsp::OverflowMode::Saturate);
                 columnBuilder.create<memref::StoreOp>(columnLoc, element, *output,
                                                       ValueRange{row, column});
                 columnBuilder.create<scf::YieldOp>(columnLoc);

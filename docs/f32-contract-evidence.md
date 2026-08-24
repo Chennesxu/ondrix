@@ -284,9 +284,12 @@ differently must redden the gate and re-justify itself.
 horizontal schedule, under both term selections. It cannot show that a given
 operation still forms the `reduce_mac` that reaches it, so
 `test/Permissions/fast_route_reachability.mlir` pins that composition once per
-adapter shape — whole contiguous memref, sliding unit-stride window, matrix row
-against a transposed pack, one operand used twice, and the reversed subview
-whose refusal is the point. Operations sharing a shape share the argument.
+adapter shape — whole contiguous memref, sliding unit-stride window, one
+operand used twice, and the reversed subview whose refusal is the point.
+Operations sharing a shape share the argument. The same file also pins the one
+operation that presents no reduction shape at all: a matmul's column axis is
+taken by the order-preserving batching, so nothing of it reaches the
+horizontal route.
 
 **What a compilation spent is recorded, not inferred.** A consumed permission
 leaves no fast-math flag, so `consumeFastPermission` writes it down: an audit

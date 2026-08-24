@@ -29,10 +29,28 @@ LogicalResult verifyProductPolicy(Operation *op, Attribute numeric,
 
 llvm::StringRef getFastPermissionAttrName() { return "ondsp.fast_used"; }
 
+static StringRef getFastPermissionSpelling(FastPermission permission) {
+  switch (permission) {
+  case FastPermission::RebuildReductionTree:
+    return "rebuild_reduction_tree";
+  case FastPermission::FuseMultiplyAdd:
+    return "fuse_multiply_add";
+  }
+  llvm_unreachable("unknown fast permission");
+}
+
+bool hasSpentFastPermission(Operation *op, FastPermission permission) {
+  auto record = op->getAttrOfType<ArrayAttr>(getFastPermissionAttrName());
+  if (!record)
+    return false;
+  StringRef spelling = getFastPermissionSpelling(permission);
+  return llvm::any_of(
+      record, [&](Attribute entry) { return cast<StringAttr>(entry).getValue() == spelling; });
+}
+
 Value consumeFastPermission(Operation *op, FastPermission permission) {
   MLIRContext *context = op->getContext();
-  StringRef spelling = permission == FastPermission::RebuildReductionTree ? "rebuild_reduction_tree"
-                                                                          : "fuse_multiply_add";
+  StringRef spelling = getFastPermissionSpelling(permission);
   SetVector<StringRef> used;
   if (auto existing = op->getAttrOfType<ArrayAttr>(getFastPermissionAttrName()))
     for (Attribute entry : existing)
