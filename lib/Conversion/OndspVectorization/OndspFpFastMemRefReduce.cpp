@@ -28,6 +28,10 @@ namespace {
 /// Largest accepted lane count, bounding every index the rewrite derives.
 constexpr int64_t kMaxVectorWidth = 4096;
 
+/// Largest accepted chain count; beyond this the iter-arg pressure exceeds
+/// any real register file.
+constexpr int64_t kMaxInterleave = 64;
+
 /// Reduction length when both operand extents are known at compile time.
 std::optional<int64_t> getStaticReductionLength(MemRefType lhsType, MemRefType rhsType) {
   if (!lhsType.isDynamicDim(0))
@@ -59,8 +63,10 @@ bool isSupportedFastMemRefReduction(ondrix::ondsp::ReduceMacOp op, int64_t vecto
 
 class FastReduceMacOpVectorization final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
 public:
-  FastReduceMacOpVectorization(MLIRContext *context, int64_t vectorWidth, bool fuseTerms)
-      : OpConversionPattern(context), vectorWidth(vectorWidth), fuseTerms(fuseTerms) {}
+  FastReduceMacOpVectorization(MLIRContext *context, int64_t vectorWidth, bool fuseTerms,
+                               int64_t interleave)
+      : OpConversionPattern(context), vectorWidth(vectorWidth), fuseTerms(fuseTerms),
+        interleave(interleave) {}
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -82,26 +88,70 @@ public:
     Value vectorEnd = rewriter.create<arith::SubIOp>(loc, bounds->upperBound, remainder);
     auto vectorType = VectorType::get({vectorWidth}, elementType);
 
-    auto buildBatched = [&](OpBuilder &builder, Location branchLoc) {
-      // The lane seed is the first block's W products: real terms of the
-      // source reduction, never a synthesized identity.
-      Value seedLhs = builder.create<vector::LoadOp>(branchLoc, vectorType, adaptor.getLhs(),
-                                                     bounds->lowerBound);
-      Value seedRhs = builder.create<vector::LoadOp>(branchLoc, vectorType, adaptor.getRhs(),
-                                                     bounds->lowerBound);
-      Value lanes = builder.create<arith::MulFOp>(branchLoc, seedLhs, seedRhs);
+    auto blockBase = [&](OpBuilder &builder, Location branchLoc, Value from, int64_t blockIndex) {
+      if (blockIndex == 0)
+        return from;
+      Value offset = builder.create<arith::ConstantIndexOp>(branchLoc, blockIndex * vectorWidth);
+      return builder.create<arith::AddIOp>(branchLoc, from, offset).getResult();
+    };
 
-      Value secondBlock = builder.create<arith::AddIOp>(branchLoc, bounds->lowerBound, vectorStep);
+    auto loadProducts = [&](OpBuilder &builder, Location branchLoc, Value base) {
+      Value lhs = builder.create<vector::LoadOp>(branchLoc, vectorType, adaptor.getLhs(), base);
+      Value rhs = builder.create<vector::LoadOp>(branchLoc, vectorType, adaptor.getRhs(), base);
+      return std::pair<Value, Value>(lhs, rhs);
+    };
+
+    auto buildBatched = [&](OpBuilder &builder, Location branchLoc, int64_t chains) {
+      // Every chain's lane seed is a real block of W products of the source
+      // reduction, never a synthesized identity.
+      SmallVector<Value> partials;
+      for (int64_t chain = 0; chain < chains; ++chain) {
+        auto [lhs, rhs] = loadProducts(builder, branchLoc,
+                                       blockBase(builder, branchLoc, bounds->lowerBound, chain));
+        partials.push_back(builder.create<arith::MulFOp>(branchLoc, lhs, rhs));
+      }
+
+      Value groupStep = builder.create<arith::ConstantIndexOp>(branchLoc, chains * vectorWidth);
+      Value firstGroup = blockBase(builder, branchLoc, bounds->lowerBound, chains);
+      // With chains > 1 the extent is static, so the group range is exact and
+      // the leftover blocks below are compile-time counted.
+      Value groupEnd = vectorEnd;
+      int64_t leftoverBlocks = 0;
+      if (chains > 1) {
+        int64_t length = *getStaticReductionLength(bounds->lhsType, bounds->rhsType);
+        int64_t blocks = length / vectorWidth;
+        leftoverBlocks = (blocks - chains) % chains;
+        groupEnd = blockBase(builder, branchLoc, bounds->lowerBound, blocks - leftoverBlocks);
+      }
       auto vectorLoop = builder.create<scf::ForOp>(
-          branchLoc, secondBlock, vectorEnd, vectorStep, ValueRange{lanes},
+          branchLoc, firstGroup, groupEnd, groupStep, partials,
           [&](OpBuilder &bodyBuilder, Location bodyLoc, Value base, ValueRange iterArgs) {
-            Value lhs =
-                bodyBuilder.create<vector::LoadOp>(bodyLoc, vectorType, adaptor.getLhs(), base);
-            Value rhs =
-                bodyBuilder.create<vector::LoadOp>(bodyLoc, vectorType, adaptor.getRhs(), base);
-            bodyBuilder.create<scf::YieldOp>(
-                bodyLoc, accumulateTerm(bodyLoc, lhs, rhs, iterArgs.front(), bodyBuilder));
+            SmallVector<Value> next;
+            for (int64_t chain = 0; chain < chains; ++chain) {
+              auto [lhs, rhs] =
+                  loadProducts(bodyBuilder, bodyLoc, blockBase(bodyBuilder, bodyLoc, base, chain));
+              next.push_back(accumulateTerm(bodyLoc, lhs, rhs, iterArgs[chain], bodyBuilder));
+            }
+            bodyBuilder.create<scf::YieldOp>(bodyLoc, next);
           });
+      partials.assign(vectorLoop.getResults().begin(), vectorLoop.getResults().end());
+
+      for (int64_t block = 0; block < leftoverBlocks; ++block) {
+        auto [lhs, rhs] =
+            loadProducts(builder, branchLoc, blockBase(builder, branchLoc, groupEnd, block));
+        partials[block] = accumulateTerm(branchLoc, lhs, rhs, partials[block], builder);
+      }
+
+      // The chain partials are interior nodes of the one rebuilt tree, merged
+      // pairwise; the permission is recorded once, at the fold below.
+      while (partials.size() > 1) {
+        SmallVector<Value> merged;
+        for (size_t i = 0; i + 1 < partials.size(); i += 2)
+          merged.push_back(builder.create<arith::AddFOp>(branchLoc, partials[i], partials[i + 1]));
+        if (partials.size() % 2 != 0)
+          merged.push_back(partials.back());
+        partials = std::move(merged);
+      }
 
       // The initial is the fold's accumulator, so the seed enters exactly once
       // and stays the first leaf: an implicit +0.0 is no leaf of the source
@@ -110,7 +160,7 @@ public:
       // because the tree was rebuilt.
       Value folded = ondrix::ondsp::consumeFastPermission(
           builder.create<vector::ReductionOp>(branchLoc, vector::CombiningKind::ADD,
-                                              vectorLoop.getResult(0), adaptor.getInitial()),
+                                              partials.front(), adaptor.getInitial()),
           ondrix::ondsp::FastPermission::RebuildReductionTree);
       return createOrderedTail(branchLoc, adaptor, vectorEnd, bounds->upperBound, scalarStep,
                                folded, builder);
@@ -118,9 +168,12 @@ public:
 
     // Padding up to one block would be the term invention this rewrite exists
     // to avoid. Only a dynamic extent needs the branch: a statically short one
-    // never reaches this pattern.
-    if (getStaticReductionLength(bounds->lhsType, bounds->rhsType)) {
-      rewriter.replaceOp(op, buildBatched(rewriter, loc));
+    // never reaches this pattern. Interleaving needs the compile-time block
+    // count, so a dynamic extent keeps the single chain.
+    if (std::optional<int64_t> length =
+            getStaticReductionLength(bounds->lhsType, bounds->rhsType)) {
+      int64_t chains = std::min(interleave, *length / vectorWidth);
+      rewriter.replaceOp(op, buildBatched(rewriter, loc, chains));
       return success();
     }
 
@@ -129,7 +182,7 @@ public:
     auto guarded = rewriter.create<scf::IfOp>(
         loc, hasBlock,
         [&](OpBuilder &builder, Location branchLoc) {
-          builder.create<scf::YieldOp>(branchLoc, buildBatched(builder, branchLoc));
+          builder.create<scf::YieldOp>(branchLoc, buildBatched(builder, branchLoc, 1));
         },
         [&](OpBuilder &builder, Location branchLoc) {
           builder.create<scf::YieldOp>(branchLoc,
@@ -171,6 +224,7 @@ private:
 
   int64_t vectorWidth;
   bool fuseTerms;
+  int64_t interleave;
 };
 
 class VectorizeOndspFpFastMemRefReducePass final
@@ -192,8 +246,15 @@ public:
       return;
     }
 
+    if (interleave < 1 || interleave > kMaxInterleave) {
+      getOperation().emitError("interleave must be in [1, ") << kMaxInterleave << "]";
+      signalPassFailure();
+      return;
+    }
+
     RewritePatternSet patterns(&getContext());
-    patterns.add<FastReduceMacOpVectorization>(&getContext(), vectorWidth, supportsVectorFma);
+    patterns.add<FastReduceMacOpVectorization>(&getContext(), vectorWidth, supportsVectorFma,
+                                               interleave);
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,

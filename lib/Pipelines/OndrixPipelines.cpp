@@ -47,8 +47,11 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   if (options.vectorBits >= 64) {
     int64_t lanes = options.vectorBits / 32;
     os << llvm::formatv("vectorize-ondsp-fp-filter-outputs{{vector-width={0}},", lanes);
+    // Four chains: a host-class heuristic for the FMA latency-throughput
+    // product, not a target fact; the pass clamps to the block count per
+    // site, and a target schedule parameter can override it later.
     os << llvm::formatv("vectorize-ondsp-fp-fast-memref-reduce{{vector-width={0} "
-                        "supports-vector-fma={1}},",
+                        "supports-vector-fma={1} interleave=4},",
                         lanes, options.supportsF32VectorFma ? "true" : "false");
     os << llvm::formatv("vectorize-ondsp-fixed-decimate-outputs{{vector-width={0}},", lanes);
     os << llvm::formatv(

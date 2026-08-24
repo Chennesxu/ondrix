@@ -558,6 +558,19 @@ def VectorizeOndspFpFastMemRefReduce
     produces one scalar, so unlike the batching passes it carries no
     aliasing obligation.
 
+    `interleave = C` carries C independent partial-sum vectors through the
+    block loop so the loop-carried dependence is one add per C blocks
+    instead of per block — the fused chain's latency is otherwise the whole
+    schedule's critical path. Term conservation is unchanged in kind: each
+    chain is seeded with its own real block of W products, the group loop
+    covers whole groups of C blocks, the statically counted leftover blocks
+    fold one per chain, and the chains merge pairwise into interior nodes of
+    the same rebuilt tree before the single R-recording fold. Nothing
+    synthesizes an identity and the initial still enters exactly once, at
+    the fold. Chain count needs the compile-time block count, so a dynamic
+    extent keeps the single chain; a static extent uses
+    `min(C, blocks)`.
+
     Folding a term by a separate product and addition or by one fused event
     is a target question and not a legality one — both lie inside the
     declared set — so it is read from the declared `supports-vector-fma`
@@ -595,6 +608,9 @@ def VectorizeOndspFpFastMemRefReduce
     Option<"supportsVectorFma", "supports-vector-fma", "bool", /*default=*/"false",
            "Declared target capability: the target has an f32 vector "
            "fused multiply-add. Never inferred from the host">,
+    Option<"interleave", "interleave", "int64_t", /*default=*/"1",
+           "Number of independent partial-sum chains carried through the "
+           "block loop; above one applies only to static extents">,
   ];
 }
 
