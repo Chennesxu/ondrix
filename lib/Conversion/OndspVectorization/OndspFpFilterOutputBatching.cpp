@@ -3,6 +3,7 @@
 
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
+#include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -37,10 +38,13 @@ struct FpFilterLoopShape {
   /// Static coefficient count, which is also the window length.
   int64_t coefficientLength = 0;
   Value input;
+  /// The view taps are scalar-loaded from: a contiguous sequence, or a
+  /// static reversed subview of one (the convolution coefficient order).
   Value coefficients;
   Value output;
-  /// The declared evaluation policy, off or fma. Both are exact contracts:
-  /// the batched body must reproduce each lane's event graph verbatim.
+  /// The declared evaluation policy. The exact contracts pin each lane's
+  /// event graph verbatim; fast admits both members and never needs R here
+  /// because the batch is order-preserving.
   ondrix::ondsp::FpContractMode contract = ondrix::ondsp::FpContractMode::Off;
 };
 
@@ -113,16 +117,11 @@ FailureOr<FpFilterLoopShape> matchFpFilterLoop(scf::ForOp loop, int64_t vectorWi
   if (lookThroughMemRefCasts(reduce.getLhs()) != window.getResult())
     return failure();
 
-  // The declared policy decides both admissibility and the batched body's
-  // arithmetic. off and fma pin each lane's event graph, which the batched
-  // form preserves verbatim; fast is a different authorization (it relaxes
-  // the relation instead of preserving the graph) and has its own mode, so
-  // it is refused here rather than silently treated as exact.
+  // The exact contracts pin each lane's event graph, which the batched form
+  // preserves verbatim. A fast site is admitted on the same structural
+  // ground: order preservation is inside every declared set.
   auto numeric = dyn_cast<ondrix::ondsp::FpAttr>(reduce.getNumeric());
   if (!numeric || !numeric.getFormat().isF32())
-    return failure();
-  if (numeric.getContract() != ondrix::ondsp::FpContractMode::Off &&
-      numeric.getContract() != ondrix::ondsp::FpContractMode::Fma)
     return failure();
 
   // The ordered reduction starts from +0.0 and the batched lanes must start
@@ -159,8 +158,30 @@ FailureOr<FpFilterLoopShape> matchFpFilterLoop(scf::ForOp loop, int64_t vectorWi
     return failure();
   shape.coefficients = lookThroughMemRefCasts(shape.coefficients);
 
-  if (!isBatchableRankOneMemRef(shape.input) || !isBatchableRankOneMemRef(shape.coefficients) ||
-      !isBatchableRankOneMemRef(shape.output))
+  // Taps are scalar-loaded, so the coefficient view only has to be a static
+  // rank-1 sequence: contiguous, or a whole-length static subview at stride
+  // +-1 of one (a reversed view is the convolution coefficient order; the
+  // touched index range is pinned below, not assumed).
+  if (!isBatchableRankOneMemRef(shape.coefficients)) {
+    auto view = shape.coefficients.getDefiningOp<memref::SubViewOp>();
+    if (!view || view.getType().getRank() != 1 ||
+        !ondrix::conversion::hasDefaultLLVMVectorMemorySpace(view.getType()) ||
+        !isBatchableRankOneMemRef(view.getSource()))
+      return failure();
+    std::optional<int64_t> offset = getConstantIntValue(view.getMixedOffsets().front());
+    std::optional<int64_t> stride = getConstantIntValue(view.getMixedStrides().front());
+    std::optional<int64_t> size = getConstantIntValue(view.getMixedSizes().front());
+    std::optional<int64_t> sourceLength = getStaticRankOneLength(view.getSource());
+    if (!offset || !stride || !size || !sourceLength || *size != shape.coefficientLength ||
+        (*stride != 1 && *stride != -1))
+      return failure();
+    int64_t first = *offset;
+    int64_t last = *offset + *stride * (*size - 1);
+    if (std::min(first, last) < 0 || std::max(first, last) >= *sourceLength)
+      return failure();
+  }
+
+  if (!isBatchableRankOneMemRef(shape.input) || !isBatchableRankOneMemRef(shape.output))
     return failure();
   if (shape.coefficients.getParentBlock() == &body || shape.input.getParentBlock() == &body ||
       shape.output.getParentBlock() == &body)
@@ -212,7 +233,8 @@ FailureOr<FpFilterLoopShape> matchFpFilterLoop(scf::ForOp loop, int64_t vectorWi
 /// graph unchanged — tap order, one product and one accumulation event per
 /// tap, +0.0 initial value — so the authorization is structural (per-lane
 /// event-graph identity), not algebraic, and holds for both exact contracts.
-void batchFpFilterOutputs(const FpFilterLoopShape &shape, int64_t vectorWidth, OpBuilder &builder) {
+void batchFpFilterOutputs(const FpFilterLoopShape &shape, int64_t vectorWidth, bool fuseFast,
+                          OpBuilder &builder) {
   scf::ForOp loop = shape.loop;
   Location loc = loop.getLoc();
   int64_t fullBlocks = shape.outputLength / vectorWidth;
@@ -248,6 +270,12 @@ void batchFpFilterOutputs(const FpFilterLoopShape &shape, int64_t vectorWidth, O
               if (shape.contract == ondrix::ondsp::FpContractMode::Fma) {
                 // One fused event per lane per tap, exactly the scalar chain.
                 updated = tapBuilder.create<math::FmaOp>(tapLoc, values, splat, iterArgs.front());
+              } else if (shape.contract == ondrix::ondsp::FpContractMode::Fast && fuseFast) {
+                // fast admits both members; selecting the fused one spends F.
+                // The batch itself is order-preserving, so R is never spent.
+                updated = ondrix::ondsp::consumeFastPermission(
+                    tapBuilder.create<math::FmaOp>(tapLoc, values, splat, iterArgs.front()),
+                    ondrix::ondsp::FastPermission::FuseMultiplyAdd);
               } else {
                 // Separate ordered product and accumulation events per lane,
                 // in the scalar chain's operand order.
@@ -262,7 +290,13 @@ void batchFpFilterOutputs(const FpFilterLoopShape &shape, int64_t vectorWidth, O
       });
 
   // The ordered loop keeps its body and now starts at the first output the
-  // batched loop did not produce.
+  // batched loop did not produce. A fully covered loop is erased instead:
+  // a dead residual body would still lower and record a spend the audit
+  // can never observe.
+  if (batchedOutputs == shape.outputLength) {
+    loop.erase();
+    return;
+  }
   loop.getLowerBoundMutable().assign(batchedEnd);
 }
 
@@ -293,8 +327,9 @@ public:
     for (scf::ForOp loop : candidates) {
       FailureOr<FpFilterLoopShape> shape = matchFpFilterLoop(loop, vectorWidth);
       if (succeeded(shape))
-        batchFpFilterOutputs(*shape, vectorWidth, builder);
+        batchFpFilterOutputs(*shape, vectorWidth, supportsVectorFma, builder);
     }
+    ondrix::ondsp::summarizeFastPermissions(getOperation());
   }
 };
 

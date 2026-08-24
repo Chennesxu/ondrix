@@ -527,12 +527,13 @@ def VectorizeOndspFpFastMemRefReduce
   let description = [{
     Splits a rank-1 f32 `ondsp.reduce_mac` under `contract = fast` into
     W-lane partial sums, one cross-lane `vector.reduction <add>`, and a
-    scalar tail. This is the one transform that consumes a permission the
+    scalar tail. This is the transform that consumes the R permission the
     fast contract declares: rebuilding the reduction's additive tree across
     lanes is exactly the reordering a call site authorizes by writing
     `contract = fast`, and exactly the value change the off and fma contracts
-    forbid, so those two are refused here — the inverse of the
-    order-preserving batching pass's refusal of fast.
+    forbid, so those two are refused here. The order-preserving batching
+    pass runs first and takes the fast sites that have an output axis;
+    this pass consumes the residual reductions.
 
     Term conservation is what makes the produced graph derivable rather than
     merely permitted. The source tree has `N + 1` leaves: the seed, which is
@@ -639,15 +640,27 @@ def VectorizeOndspFpFilterOutputs
     decimate batching uses. It does still depend on the element and
     environment semantics: a vector lane operation must agree with the
     corresponding scalar operation, which IEEE 754 elementwise vector
-    arithmetic provides. The fast contract is refused here: it relaxes the
-    correctness relation instead of pinning the event graph, and its
-    horizontal reduction is a different mode with different evidence.
+    arithmetic provides.
+
+    A fast site is admitted on the same structural ground — an
+    order-preserving batch is inside every declared set, so R is never
+    spent here. Its taps select between the two admitted members by the
+    declared `supports-vector-fma` capability, and selecting the fused one
+    spends F. This is also the selection policy for sites with an output
+    axis: this pass runs before the horizontal fast reduction and takes
+    them, so spending a permission never buys a schedule worse than the
+    permission-free one; the horizontal pass consumes only residual
+    reductions with no output axis.
 
     The canonical pipeline runs this pass inside its schedule stage; the
     standalone flag remains an ablation and oracle interface. It fires only
     for the loop shape the valid-boundary f32 filter bufferization emits,
     with static extents, contiguous rank-1 operands in the default memory
-    space, and a +0.0 reduction seed. Unlike the decimate batching there is
+    space, and a +0.0 reduction seed. The coefficient view may also be a
+    whole-length static subview at stride +-1 of a contiguous sequence —
+    the convolution coefficient order — since taps are scalar-loaded; the
+    touched index range is pinned against the base extent rather than
+    assumed in bounds. Unlike the decimate batching there is
     no widened load: at tap t the lanes for outputs m .. m+W-1 read
     input[m+t .. m+t+W-1], exactly the union of those W ordered windows, so
     every full block of W outputs is batchable and the batched schedule
@@ -672,6 +685,10 @@ def VectorizeOndspFpFilterOutputs
   let options = [
     Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
            "Number of independent outputs batched per vector">,
+    Option<"supportsVectorFma", "supports-vector-fma", "bool", /*default=*/"false",
+           "Declared target capability: the target has an f32 vector "
+           "fused multiply-add. Decides which member a fast site's taps "
+           "select. Never inferred from the host">,
   ];
 }
 
