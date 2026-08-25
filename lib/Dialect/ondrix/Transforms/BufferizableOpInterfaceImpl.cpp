@@ -653,15 +653,28 @@ static ondrix::ondsp::AccType getSaturatingAccumulator(MLIRContext *context, uns
 /// rank is not one. A single rank-2 table plus per-row rank-reducing
 /// subviews would therefore never resolve to its constant initializer, and
 /// the reduction would silently lose the constant-coefficient route.
-/// Emits or reuses one coefficient row under the reserved `__ondrix_dct`
-/// namespace. The caller builds the initializer, because reuse is legal only
-/// when an existing global carries exactly the coefficients the row requires:
-/// the symbol name proves nothing, and a pre-existing constant global of the
-/// right name, kind, and type but different contents would otherwise be
-/// silently consumed as coefficient data.
-static Value getOrCreateDctTable(RewriterBase &rewriter, Location loc, ModuleOp module,
-                                 StringRef symbol, MemRefType tableType,
-                                 ElementsAttr expectedInitializer) {
+static Value getOrCreateDctRowTable(RewriterBase &rewriter, Location loc, ModuleOp module,
+                                    int64_t extent, int64_t row) {
+  IntegerType elementType = rewriter.getI16Type();
+  auto tableType = MemRefType::get({extent}, elementType);
+  std::string symbol = ("__ondrix_dct" + Twine(extent) + "_row" + Twine(row)).str();
+  // The expected initializer is constructed before any symbol lookup: reuse
+  // is legal only when the existing global carries exactly the coefficients
+  // this row requires. The symbol name proves nothing — a pre-existing
+  // constant global of the right name, kind, and type but different contents
+  // would otherwise be silently consumed as coefficient data, and the
+  // prefix-range proof downstream would then correctly authorize a reduction
+  // over the WRONG table.
+  SmallVector<llvm::APInt> coefficients;
+  coefficients.reserve(extent);
+  for (int64_t column = 0; column < extent; ++column) {
+    // The caller checked complete admissibility before emitting any table.
+    int64_t coefficient = *ondrix::getDctCoefficientQ15(extent, row, column);
+    coefficients.emplace_back(elementType.getWidth(), static_cast<uint64_t>(coefficient),
+                              /*isSigned=*/true);
+  }
+  auto expectedInitializer =
+      DenseIntElementsAttr::get(RankedTensorType::get({extent}, elementType), coefficients);
   if (Operation *existing = SymbolTable::lookupSymbolIn(module, symbol)) {
     // Reuse only a table indistinguishable from one this interface emits:
     // a private constant memref.global of the exact type whose initializer
@@ -696,41 +709,6 @@ static Value getOrCreateDctTable(RewriterBase &rewriter, Location loc, ModuleOp 
   return rewriter.create<memref::GetGlobalOp>(loc, tableType, symbol);
 }
 
-static Value getOrCreateDctRowTable(RewriterBase &rewriter, Location loc, ModuleOp module,
-                                    int64_t extent, int64_t row) {
-  IntegerType elementType = rewriter.getI16Type();
-  auto tableType = MemRefType::get({extent}, elementType);
-  SmallVector<llvm::APInt> coefficients;
-  coefficients.reserve(extent);
-  for (int64_t column = 0; column < extent; ++column) {
-    // The caller checked complete admissibility before emitting any table.
-    int64_t coefficient = *ondrix::getDctCoefficientQ15(extent, row, column);
-    coefficients.emplace_back(elementType.getWidth(), static_cast<uint64_t>(coefficient),
-                              /*isSigned=*/true);
-  }
-  return getOrCreateDctTable(
-      rewriter, loc, module, ("__ondrix_dct" + Twine(extent) + "_row" + Twine(row)).str(),
-      tableType,
-      DenseIntElementsAttr::get(RankedTensorType::get({extent}, elementType), coefficients));
-}
-
-/// The binary32 table needs no tie guard: the guard certifies a quantized
-/// table against an independently specified value, and here the binary32
-/// rounding IS the declared constant.
-static Value getOrCreateDctRowTableF32(RewriterBase &rewriter, Location loc, ModuleOp module,
-                                       int64_t extent, int64_t row) {
-  FloatType elementType = rewriter.getF32Type();
-  auto tableType = MemRefType::get({extent}, elementType);
-  SmallVector<llvm::APFloat> coefficients;
-  coefficients.reserve(extent);
-  for (int64_t column = 0; column < extent; ++column)
-    coefficients.emplace_back(ondrix::getDctCoefficientF32(extent, row, column));
-  return getOrCreateDctTable(
-      rewriter, loc, module, ("__ondrix_dct" + Twine(extent) + "_f32_row" + Twine(row)).str(),
-      tableType,
-      DenseFPElementsAttr::get(RankedTensorType::get({extent}, elementType), coefficients));
-}
-
 struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInterface, DctOp> {
   bool bufferizesToAllocation(Operation *, OpResult) const { return true; }
 
@@ -750,15 +728,12 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
                           const BufferizationOptions &options) const {
     auto op = cast<DctOp>(operation);
     int64_t extent = op.getInput().getType().getDimSize(0);
-    auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getInputNumeric());
     // Same fail-closed admissibility gate as the tensor lowering, through the
     // one shared table generator. Bufferization has no alternative pattern to
     // fall back to, so the refusal is a diagnostic rather than a silent match
-    // failure. The binary32 profile has no tie guard to satisfy.
-    if (!fp && !ondrix::hasAdmissibleDctCoefficients(extent))
+    // failure.
+    if (!ondrix::hasAdmissibleDctCoefficients(extent))
       return op.emitOpError("DCT coefficient quantization is not tie-guard admissible");
-    if (fp && !fp.getFormat().isF32())
-      return op.emitOpError("bufferized DCT supports the binary32 floating-point profile only");
 
     FailureOr<Value> input = getBuffer(rewriter, op.getInput(), options);
     if (failed(input))
@@ -767,47 +742,6 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
     if (!module)
       return op.emitOpError("bufferized DCT requires an enclosing module for its coefficient "
                             "tables");
-
-    if (fp) {
-      rewriter.setInsertionPoint(op);
-      Location fpLoc = op.getLoc();
-      FailureOr<Value> fpOutput = createProducedResultBuffer(rewriter, op.getResult(), options);
-      if (failed(fpOutput))
-        return failure();
-      Value first = rewriter.create<arith::ConstantIndexOp>(fpLoc, 0);
-      for (int64_t k = 0; k < extent; ++k) {
-        Value row = getOrCreateDctRowTableF32(rewriter, fpLoc, module, extent, k);
-        if (!row)
-          return op.emitOpError("a foreign symbol occupies the reserved DCT coefficient table "
-                                "name or carries contents that differ from the required "
-                                "coefficients");
-        // The declared row starts AT the first product, not at zero: seeding an
-        // additive identity instead would export +0.0 where the contract
-        // exports the -0.0 that product can be.
-        Value value = rewriter.create<memref::LoadOp>(fpLoc, *input, first);
-        Value coefficient = rewriter.create<memref::LoadOp>(fpLoc, row, first);
-        Value sum = rewriter.create<arith::MulFOp>(fpLoc, value, coefficient);
-        if (extent > 1) {
-          // Materialized in a fixed order rather than inside the call: emitted
-          // module text must not depend on argument evaluation order.
-          auto tail = [&](Value source) -> Value {
-            return rewriter.create<memref::SubViewOp>(
-                fpLoc, source, ArrayRef<OpFoldResult>{rewriter.getIndexAttr(1)},
-                ArrayRef<OpFoldResult>{rewriter.getIndexAttr(extent - 1)},
-                ArrayRef<OpFoldResult>{rewriter.getIndexAttr(1)});
-          };
-          Value inputTail = tail(*input);
-          Value coefficientTail = tail(row);
-          sum = rewriter.create<ondrix::ondsp::ReduceMacOp>(fpLoc, sum.getType(), sum, inputTail,
-                                                            coefficientTail, fp,
-                                                            ondrix::ondsp::ProductAttr());
-        }
-        Value position = rewriter.create<arith::ConstantIndexOp>(fpLoc, k);
-        rewriter.create<memref::StoreOp>(fpLoc, sum, *fpOutput, position);
-      }
-      replaceOpWithBufferizedValues(rewriter, op, *fpOutput);
-      return success();
-    }
 
     rewriter.setInsertionPoint(op);
     Location loc = op.getLoc();
