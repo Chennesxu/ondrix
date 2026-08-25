@@ -55,12 +55,7 @@ public:
     // which the scalar tensor lowering here would preempt.
     if (preserveBufferizableReductions) {
       target.addLegalOp<ondrix::ir::FirFilterOp, ondrix::ir::FirDecimateOp, ondrix::ir::Conv1DOp,
-                        ondrix::ir::MatmulOp, ondrix::ir::RmsOp>();
-      // The DCT bufferization materializes Q15 coefficient rows as memref
-      // globals; the f32 profile has no such table yet and takes the tensor
-      // lowering, so it is not preserved.
-      target.addDynamicallyLegalOp<ondrix::ir::DctOp>(
-          [](ondrix::ir::DctOp op) { return !isa<ondrix::ondsp::FpAttr>(op.getInputNumeric()); });
+                        ondrix::ir::MatmulOp, ondrix::ir::RmsOp, ondrix::ir::DctOp>();
       // The f32 moving average bufferizes to the windowed-sum loop the
       // schedule stage batches; the fixed profile keeps its tensor lowering.
       target.addDynamicallyLegalOp<ondrix::ir::MovingAverageOp>([](ondrix::ir::MovingAverageOp op) {

@@ -146,6 +146,13 @@ int main(void) {
     x[i] = 0.0f;
   int failed = check(x, "zero");
 
+  /* Row 0 of the DCT has all-positive coefficients, so an all -0.0 input keeps
+   * a -0.0 sum only if each row starts AT its first product; a row seeded with
+   * the additive identity would export +0.0. */
+  for (int64_t i = 0; i < kLength; ++i)
+    x[i] = -0.0f;
+  failed |= check(x, "negative zero");
+
   /* A residual at the 2^-24 tie that a fused DCT term keeps and a rounded
    * product loses. */
   x[0] = 1.0f;
