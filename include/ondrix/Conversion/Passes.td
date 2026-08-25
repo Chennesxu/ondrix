@@ -220,21 +220,29 @@ def ConvertOrtumCoreToOndspEmulation
 
 def LowerOndspF32ReduceToScalar
     : Pass<"lower-ondsp-f32-reduce-to-scalar", "::mlir::ModuleOp"> {
-  let summary = "Lower f32 ondsp reductions to generic scalar MLIR";
+  let summary = "Lower f32 ondsp reductions, batching declared-off products";
   let description = [{
-    Partially lower rank-1 f32 memref ondsp.reduce_mac operations to generic
-    scalar MLIR. Other ondsp operations and non-memref reductions remain legal;
-    this is not a final scalar legalization pass.
+    Partially lower rank-1 f32 memref ondsp.reduce_mac operations. Other ondsp
+    operations and non-memref reductions remain legal; this is not a final
+    scalar legalization pass. With `vector-width` greater than one the emitted
+    body is not purely scalar - it carries one vector load and multiply per
+    block - so this pass currently makes a target-width schedule choice as well
+    as a lowering. That choice belongs in the schedule stage beside the other
+    batchings, and moves there when the matmul and DCT producers need to share
+    the mechanism.
 
     `vector-width` batches the PRODUCTS of a `contract = off` reduction a block
     at a time while every accumulator fold stays scalar and in index order. No
-    permission is spent and no bit changes: an f32 multiply is exact and the
-    products of distinct indices are independent, so computing a block of them
-    in one operation is the same event graph the contract already declares.
-    A `fma` or `fast` contract has no separable product - it declared the
-    multiply and the add to be one event - so it keeps the ordered scalar
-    chain. The strictest contract is therefore the one that admits this
-    batching, which is the opposite of the usual direction.
+    permission is spent and no bit changes. Each lane of the vector multiply
+    performs the same single round-to-nearest-even f32 multiply the scalar
+    multiply of that index would perform, the products of distinct indices do
+    not depend on one another, and no floating-point exception state is
+    observable here, so the block is a different topological schedule of the
+    event graph the contract already declares, not a different graph. A `fma`
+    or `fast` contract has no separable product - it declared the multiply and
+    the add to be one event - so it keeps the ordered scalar chain. The
+    strictest contract is therefore the one that admits this batching, which
+    is the opposite of the usual direction.
   }];
   let constructor = "ondrix::createLowerOndspF32ReduceToScalarPass()";
   let dependentDialects = [

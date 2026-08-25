@@ -43,8 +43,22 @@ namespace {
 
 constexpr uint64_t maxProofTraceBytes = 64ULL * 1024 * 1024;
 constexpr int64_t maxProofTraceElements = 65536;
-// Widest certified chunk, in machine vectors. Bounds the emitted vector type.
+// Widest certified chunk, in machine vectors, and the widest machine vector.
+// Together they bound the emitted vector type, and bounding both before they
+// are multiplied is what keeps the product from overflowing.
 constexpr int64_t maxChunkMultiple = 16;
+constexpr int64_t maxVectorWidth = 4096;
+
+// The emitter must refuse exactly what the replay pass refuses: a width the
+// replay rejects would otherwise leave evidence this compiler produced and
+// cannot revalidate.
+LogicalResult checkChunkLadder(Operation *op, int64_t vectorWidth, int64_t chunkMultiple) {
+  if (vectorWidth > maxVectorWidth)
+    return op->emitError("vector-width exceeds the ") << maxVectorWidth << " lane limit";
+  if (chunkMultiple < 1 || chunkMultiple > maxChunkMultiple)
+    return op->emitError("chunk-multiple must be between 1 and ") << maxChunkMultiple;
+  return success();
+}
 constexpr unsigned maxProofTraceAPIntWidth = 4096;
 
 bool isRepresentableLLVMAddressSpace(IntegerAttr memorySpace) {
@@ -544,6 +558,10 @@ public:
       signalPassFailure();
       return;
     }
+    if (failed(checkChunkLadder(getOperation(), vectorWidth, chunkMultiple))) {
+      signalPassFailure();
+      return;
+    }
 
     RewritePatternSet patterns(&getContext());
     patterns.add<ReduceMacOpVectorization>(&getContext(), vectorWidth, chunkMultiple);
@@ -576,6 +594,10 @@ public:
     }
     if (maxElements <= 0) {
       getOperation().emitError("max-elements must be positive");
+      signalPassFailure();
+      return;
+    }
+    if (failed(checkChunkLadder(getOperation(), vectorWidth, chunkMultiple))) {
       signalPassFailure();
       return;
     }

@@ -25,7 +25,8 @@
 // SPECTRUM-NOT: ondsp.
 
 // The driver's own target flags: an undeclared width is the ordered program,
-// and 128 is the NEON and Helium lane count.
+// and at 128 bits the certified chunk is a whole number of the four-lane NEON
+// and Helium vectors, here the two this reduction's extent can fill.
 // CHECK-NOT: vector<
 // SPECTRUM-NOT: vector<
-// NARROW: vector<4xi64>
+// NARROW: vector<8xi64>

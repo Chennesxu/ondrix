@@ -56,10 +56,15 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
                         "supports-vector-fma={1} interleave=4},",
                         lanes, options.supportsF32VectorFma ? "true" : "false");
     os << llvm::formatv("vectorize-ondsp-fixed-decimate-outputs{{vector-width={0}},", lanes);
+    // Four machine vectors per certified chunk: like the interleave above this
+    // is a host-class heuristic, not a target fact. Both ladders fall back per
+    // reduction, so the only thing a wrong guess costs is a narrower chunk.
     os << llvm::formatv(
-        "vectorize-ondsp-constant-saturating-memref-reduce{{vector-width={0} max-elements=64},",
+        "vectorize-ondsp-constant-saturating-memref-reduce{{vector-width={0} chunk-multiple=4 "
+        "max-elements=64},",
         lanes);
-    os << llvm::formatv("vectorize-ondsp-fixed-memref-reduce{{vector-width={0}},", lanes);
+    os << llvm::formatv("vectorize-ondsp-fixed-memref-reduce{{vector-width={0} chunk-multiple=4},",
+                        lanes);
     os << "parallelize-ondsp-fixed-wrap-vector-reduce,";
     os << "normalize-ondsp-fixed-vector-reduce,";
   }

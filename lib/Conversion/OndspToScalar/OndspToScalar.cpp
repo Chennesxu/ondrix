@@ -27,6 +27,8 @@ using namespace mlir;
 
 namespace {
 
+constexpr int64_t kMaxOrderedProductBlock = 4096;
+
 static bool isSupportedF32MemRefReduction(ondrix::ondsp::ReduceMacOp op) {
   auto numeric = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
   auto lhsType = dyn_cast<MemRefType>(op.getLhs().getType());
@@ -67,9 +69,9 @@ public:
 
     Location loc = op.getLoc();
     // A declared-off contract states that the multiply and the add are separate
-    // events, so the products are independent and exact and may be computed a
-    // block at a time; only the accumulator folds stay in index order. A fused
-    // contract has no separable product and keeps the scalar chain.
+    // events. Each lane rounds once exactly as its scalar multiply would and
+    // distinct indices do not depend on one another, so a block of products is
+    // a rescheduling; only the folds must stay in index order.
     Value seed = adaptor.getInitial();
     Value scalarStart = bounds->lowerBound;
     auto lhsType = dyn_cast<MemRefType>(adaptor.getLhs().getType());
@@ -141,6 +143,13 @@ public:
       LowerOndspF32ReduceToScalarPass>::LowerOndspF32ReduceToScalarBase;
 
   void runOnOperation() override {
+    // The block loop emits one fold per lane, so an unbounded width is a
+    // compile-time expansion, not a schedule.
+    if (vectorWidth < 1 || vectorWidth > kMaxOrderedProductBlock) {
+      getOperation().emitError("vector-width must be between 1 and ") << kMaxOrderedProductBlock;
+      signalPassFailure();
+      return;
+    }
     RewritePatternSet patterns(&getContext());
     patterns.add<ReduceMacOpLowering>(&getContext(), vectorWidth);
 
