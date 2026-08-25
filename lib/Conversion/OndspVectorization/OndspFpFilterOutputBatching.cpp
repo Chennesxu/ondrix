@@ -801,6 +801,247 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
   loop.getLowerBoundMutable().assign(batchedEnd);
 }
 
+/// Whether `value` is the constant index zero.
+bool isZeroIndex(Value value) {
+  std::optional<int64_t> constant = getConstantIntValue(value);
+  return constant && *constant == 0;
+}
+
+struct FpOutputTileLoopShape {
+  scf::ForOp loop;
+  int64_t outputCount = 0;
+  int64_t termCount = 0;
+  /// The rank-1 value sequence, shared by every output.
+  Value values;
+  /// The rank-2 coefficient table, indexed `[term][output]`, so a tile of
+  /// outputs is one contiguous load.
+  Value table;
+  Value output;
+  /// The arithmetic shape of one term, and the only fidelity authority.
+  bool fused = false;
+  /// Whether new fused events carry the F record forward; bookkeeping only.
+  bool recordsFuse = false;
+};
+
+/// Matches the loop shape the f32 DCT bufferization emits: per output, the
+/// first product as the accumulator seed and an ordered loop over the
+/// remaining terms with a shared rank-1 value sequence and a `[term][output]`
+/// table, then one rank-1 store. The seed is what separates this from the
+/// column tile, whose lanes all start at +0.0; here they start at their own
+/// first product, which is the value the contract declares and is observably
+/// different at signed zero.
+FailureOr<FpOutputTileLoopShape> matchFpOutputTileLoop(scf::ForOp loop, int64_t vectorWidth,
+                                                       bool supportsVectorFma) {
+  if (!loop.getInitArgs().empty())
+    return failure();
+  std::optional<int64_t> lowerBound = getConstantIntValue(loop.getLowerBound());
+  std::optional<int64_t> upperBound = getConstantIntValue(loop.getUpperBound());
+  std::optional<int64_t> step = getConstantIntValue(loop.getStep());
+  if (!lowerBound || !upperBound || !step || *lowerBound != 0 || *step != 1 || *upperBound <= 0)
+    return failure();
+
+  Value outputIndex = loop.getInductionVar();
+  SmallVector<Operation *> operations;
+  for (Operation &operation : loop.getBody()->without_terminator()) {
+    if (isa<arith::ConstantOp>(operation))
+      continue;
+    operations.push_back(&operation);
+  }
+  if (operations.size() != 5)
+    return failure();
+
+  auto seedValue = dyn_cast<memref::LoadOp>(operations[0]);
+  auto seedWeight = dyn_cast<memref::LoadOp>(operations[1]);
+  auto seed = dyn_cast<arith::MulFOp>(operations[2]);
+  auto terms = dyn_cast<scf::ForOp>(operations[3]);
+  auto store = dyn_cast<memref::StoreOp>(operations[4]);
+  if (!seedValue || !seedWeight || !seed || !terms || !store)
+    return failure();
+  if (!seedValue.getResult().hasOneUse() || !seedWeight.getResult().hasOneUse() ||
+      !seed.getResult().hasOneUse() || !seed.getType().isF32())
+    return failure();
+
+  // The seed reads term zero of both operands, and the table's second index is
+  // the output axis.
+  if (seedValue.getIndices().size() != 1 || !isZeroIndex(seedValue.getIndices()[0]))
+    return failure();
+  if (seedWeight.getIndices().size() != 2 || !isZeroIndex(seedWeight.getIndices()[0]) ||
+      seedWeight.getIndices()[1] != outputIndex)
+    return failure();
+  if (seed.getLhs() != seedValue.getResult() || seed.getRhs() != seedWeight.getResult())
+    return failure();
+
+  if (terms.getInitArgs().size() != 1 || terms.getInitArgs().front() != seed.getResult() ||
+      !terms.getResult(0).hasOneUse())
+    return failure();
+  std::optional<int64_t> termLower = getConstantIntValue(terms.getLowerBound());
+  std::optional<int64_t> termUpper = getConstantIntValue(terms.getUpperBound());
+  std::optional<int64_t> termStep = getConstantIntValue(terms.getStep());
+  if (!termLower || !termUpper || !termStep || *termLower != 1 || *termStep != 1 || *termUpper <= 1)
+    return failure();
+
+  if (store.getValueToStore() != terms.getResult(0) || store.getIndices().size() != 1 ||
+      store.getIndices()[0] != outputIndex)
+    return failure();
+
+  Block &termBody = *terms.getBody();
+  if (termBody.getNumArguments() != 2)
+    return failure();
+  SmallVector<Operation *> events;
+  for (Operation &operation : termBody.without_terminator())
+    events.push_back(&operation);
+  if (events.size() != 3 && events.size() != 4)
+    return failure();
+
+  auto value = dyn_cast<memref::LoadOp>(events[0]);
+  auto weight = dyn_cast<memref::LoadOp>(events[1]);
+  if (!value || !weight || !value.getResult().hasOneUse() || !weight.getResult().hasOneUse())
+    return failure();
+  if (value.getMemRef() != seedValue.getMemRef() || weight.getMemRef() != seedWeight.getMemRef())
+    return failure();
+  if (value.getIndices().size() != 1 || value.getIndices()[0] != terms.getInductionVar())
+    return failure();
+  if (weight.getIndices().size() != 2 || weight.getIndices()[0] != terms.getInductionVar() ||
+      weight.getIndices()[1] != outputIndex)
+    return failure();
+
+  Value accumulator = termBody.getArgument(1);
+  auto yield = cast<scf::YieldOp>(termBody.getTerminator());
+  bool bodyFused = false;
+  bool recordsFuse = false;
+  if (events.size() == 4) {
+    auto product = dyn_cast<arith::MulFOp>(events[2]);
+    auto sum = dyn_cast<arith::AddFOp>(events[3]);
+    if (!product || !sum || product.getLhs() != value.getResult() ||
+        product.getRhs() != weight.getResult() || !product.getResult().hasOneUse() ||
+        sum.getLhs() != accumulator || sum.getRhs() != product.getResult() ||
+        yield.getOperand(0) != sum.getResult())
+      return failure();
+  } else {
+    auto fused = dyn_cast<math::FmaOp>(events[2]);
+    if (!fused || fused.getA() != value.getResult() || fused.getB() != weight.getResult() ||
+        fused.getC() != accumulator || yield.getOperand(0) != fused.getResult())
+      return failure();
+    // A fused body batches only onto a declared vector fused multiply-add;
+    // de-fusing on its absence would need a contract authority this loop no
+    // longer carries, so the batching is refused instead.
+    if (!supportsVectorFma)
+      return failure();
+    bodyFused = true;
+    recordsFuse = ondrix::ondsp::hasSpentFastPermission(
+        fused, ondrix::ondsp::FastPermission::FuseMultiplyAdd);
+  }
+
+  auto tableType = dyn_cast<MemRefType>(seedWeight.getMemRef().getType());
+  auto outputType = dyn_cast<MemRefType>(store.getMemRef().getType());
+  if (!tableType || !outputType || !isLastMemrefDimUnitStride(tableType) ||
+      !isLastMemrefDimUnitStride(outputType))
+    return failure();
+  if (*upperBound < vectorWidth)
+    return failure();
+
+  FpOutputTileLoopShape shape;
+  shape.loop = loop;
+  shape.outputCount = *upperBound;
+  shape.termCount = *termUpper;
+  shape.values = seedValue.getMemRef();
+  shape.table = seedWeight.getMemRef();
+  shape.output = store.getMemRef();
+  shape.fused = bodyFused;
+  shape.recordsFuse = recordsFuse;
+  return shape;
+}
+
+/// Batches `vectorWidth` outputs into lanes. Each lane keeps its own ordered
+/// sequence - its own first product as the seed, then the same terms in the
+/// same index order - so the per-output event graph is unchanged and no
+/// permission is spent.
+void batchFpOutputTiles(const FpOutputTileLoopShape &shape, int64_t vectorWidth,
+                        OpBuilder &builder) {
+  auto updateLanes = [&shape](OpBuilder &b, Location l, Value splat, Value values,
+                              Value accumulator) -> Value {
+    if (shape.fused) {
+      Operation *fma = b.create<math::FmaOp>(l, splat, values, accumulator);
+      return shape.recordsFuse ? ondrix::ondsp::consumeFastPermission(
+                                     fma, ondrix::ondsp::FastPermission::FuseMultiplyAdd)
+                               : fma->getResult(0);
+    }
+    Value product = b.create<arith::MulFOp>(l, splat, values);
+    return b.create<arith::AddFOp>(l, accumulator, product);
+  };
+
+  scf::ForOp loop = shape.loop;
+  Location loc = loop.getLoc();
+  int64_t fullBlocks = shape.outputCount / vectorWidth;
+  int64_t batchedOutputs = fullBlocks * vectorWidth;
+  auto laneType = VectorType::get({vectorWidth}, builder.getF32Type());
+
+  builder.setInsertionPoint(loop);
+  Value zeroIndex = builder.create<arith::ConstantIndexOp>(loc, 0);
+  Value oneIndex = builder.create<arith::ConstantIndexOp>(loc, 1);
+  Value firstTerm = builder.create<arith::ConstantIndexOp>(loc, 1);
+  Value termEnd = builder.create<arith::ConstantIndexOp>(loc, shape.termCount);
+  Value batchedEnd = builder.create<arith::ConstantIndexOp>(loc, batchedOutputs);
+  Value batchStep = builder.create<arith::ConstantIndexOp>(loc, vectorWidth);
+
+  // The value sequence is output-block-invariant, so its splats hoist above
+  // the batched loop and the term axis unrolls when it is short enough.
+  bool unrolled = shape.termCount <= kMaxUnrolledTerms;
+  SmallVector<Value> valueSplats;
+  if (unrolled) {
+    for (int64_t term = 0; term < shape.termCount; ++term) {
+      Value index = builder.create<arith::ConstantIndexOp>(loc, term);
+      Value element = builder.create<memref::LoadOp>(loc, shape.values, ValueRange{index});
+      valueSplats.push_back(builder.create<vector::SplatOp>(loc, laneType, element));
+    }
+  }
+
+  builder.create<scf::ForOp>(
+      loc, zeroIndex, batchedEnd, batchStep, ValueRange{},
+      [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
+        Value seedWeights = blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.table,
+                                                                ValueRange{zeroIndex, blockStart});
+        Value seedSplat = valueSplats.empty()
+                              ? blockBuilder.create<vector::SplatOp>(
+                                    blockLoc, laneType,
+                                    blockBuilder.create<memref::LoadOp>(blockLoc, shape.values,
+                                                                        ValueRange{zeroIndex}))
+                              : valueSplats.front();
+        Value lanes = blockBuilder.create<arith::MulFOp>(blockLoc, seedSplat, seedWeights);
+        if (unrolled) {
+          for (int64_t term = 1; term < shape.termCount; ++term) {
+            Value index = blockBuilder.create<arith::ConstantIndexOp>(blockLoc, term);
+            Value weights = blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.table,
+                                                                ValueRange{index, blockStart});
+            lanes = updateLanes(blockBuilder, blockLoc, valueSplats[term], weights, lanes);
+          }
+        } else {
+          auto terms = blockBuilder.create<scf::ForOp>(
+              blockLoc, firstTerm, termEnd, oneIndex, ValueRange{lanes},
+              [&](OpBuilder &termBuilder, Location termLoc, Value index, ValueRange iterArgs) {
+                Value element =
+                    termBuilder.create<memref::LoadOp>(termLoc, shape.values, ValueRange{index});
+                Value splat = termBuilder.create<vector::SplatOp>(termLoc, laneType, element);
+                Value weights = termBuilder.create<vector::LoadOp>(termLoc, laneType, shape.table,
+                                                                   ValueRange{index, blockStart});
+                termBuilder.create<scf::YieldOp>(
+                    termLoc, updateLanes(termBuilder, termLoc, splat, weights, iterArgs.front()));
+              });
+          lanes = terms.getResult(0);
+        }
+        blockBuilder.create<vector::StoreOp>(blockLoc, lanes, shape.output, ValueRange{blockStart});
+        blockBuilder.create<scf::YieldOp>(blockLoc);
+      });
+
+  // A fully covered ordered loop is erased rather than left dead: its body
+  // would still record a spend the audit can never observe.
+  if (batchedOutputs == shape.outputCount) {
+    loop.erase();
+    return;
+  }
+  loop.getLowerBoundMutable().assign(batchedEnd);
+}
+
 class VectorizeOndspFpFilterOutputsPass final
     : public ondrix::impl::VectorizeOndspFpFilterOutputsBase<VectorizeOndspFpFilterOutputsPass> {
 public:
@@ -838,8 +1079,14 @@ public:
       }
       if (FailureOr<FpColumnTileLoopShape> shape =
               matchFpColumnTileLoop(loop, vectorWidth, supportsVectorFma);
-          succeeded(shape))
+          succeeded(shape)) {
         batchFpColumnTiles(*shape, vectorWidth, builder);
+        continue;
+      }
+      if (FailureOr<FpOutputTileLoopShape> shape =
+              matchFpOutputTileLoop(loop, vectorWidth, supportsVectorFma);
+          succeeded(shape))
+        batchFpOutputTiles(*shape, vectorWidth, builder);
     }
     ondrix::ondsp::summarizeFastPermissions(getOperation());
   }

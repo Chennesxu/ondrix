@@ -653,28 +653,16 @@ static ondrix::ondsp::AccType getSaturatingAccumulator(MLIRContext *context, uns
 /// rank is not one. A single rank-2 table plus per-row rank-reducing
 /// subviews would therefore never resolve to its constant initializer, and
 /// the reduction would silently lose the constant-coefficient route.
-static Value getOrCreateDctRowTable(RewriterBase &rewriter, Location loc, ModuleOp module,
-                                    int64_t extent, int64_t row) {
-  IntegerType elementType = rewriter.getI16Type();
-  auto tableType = MemRefType::get({extent}, elementType);
-  std::string symbol = ("__ondrix_dct" + Twine(extent) + "_row" + Twine(row)).str();
-  // The expected initializer is constructed before any symbol lookup: reuse
-  // is legal only when the existing global carries exactly the coefficients
-  // this row requires. The symbol name proves nothing — a pre-existing
-  // constant global of the right name, kind, and type but different contents
-  // would otherwise be silently consumed as coefficient data, and the
-  // prefix-range proof downstream would then correctly authorize a reduction
-  // over the WRONG table.
-  SmallVector<llvm::APInt> coefficients;
-  coefficients.reserve(extent);
-  for (int64_t column = 0; column < extent; ++column) {
-    // The caller checked complete admissibility before emitting any table.
-    int64_t coefficient = *ondrix::getDctCoefficientQ15(extent, row, column);
-    coefficients.emplace_back(elementType.getWidth(), static_cast<uint64_t>(coefficient),
-                              /*isSigned=*/true);
-  }
-  auto expectedInitializer =
-      DenseIntElementsAttr::get(RankedTensorType::get({extent}, elementType), coefficients);
+/// Emits or reuses one coefficient table under the reserved `__ondrix_dct`
+/// namespace. The caller builds the initializer, because reuse is legal only
+/// when an existing global carries exactly the coefficients required: the
+/// symbol name proves nothing, and a pre-existing constant global of the right
+/// name, kind, and type but different contents would otherwise be silently
+/// consumed as coefficient data, and the prefix-range proof downstream would
+/// then correctly authorize a reduction over the WRONG table.
+static Value getOrCreateDctTable(RewriterBase &rewriter, Location loc, ModuleOp module,
+                                 StringRef symbol, MemRefType tableType,
+                                 ElementsAttr expectedInitializer) {
   if (Operation *existing = SymbolTable::lookupSymbolIn(module, symbol)) {
     // Reuse only a table indistinguishable from one this interface emits:
     // a private constant memref.global of the exact type whose initializer
@@ -709,6 +697,44 @@ static Value getOrCreateDctRowTable(RewriterBase &rewriter, Location loc, Module
   return rewriter.create<memref::GetGlobalOp>(loc, tableType, symbol);
 }
 
+static Value getOrCreateDctRowTable(RewriterBase &rewriter, Location loc, ModuleOp module,
+                                    int64_t extent, int64_t row) {
+  IntegerType elementType = rewriter.getI16Type();
+  auto tableType = MemRefType::get({extent}, elementType);
+  SmallVector<llvm::APInt> coefficients;
+  coefficients.reserve(extent);
+  for (int64_t column = 0; column < extent; ++column) {
+    // The caller checked complete admissibility before emitting any table.
+    int64_t coefficient = *ondrix::getDctCoefficientQ15(extent, row, column);
+    coefficients.emplace_back(elementType.getWidth(), static_cast<uint64_t>(coefficient),
+                              /*isSigned=*/true);
+  }
+  return getOrCreateDctTable(
+      rewriter, loc, module, ("__ondrix_dct" + Twine(extent) + "_row" + Twine(row)).str(),
+      tableType,
+      DenseIntElementsAttr::get(RankedTensorType::get({extent}, elementType), coefficients));
+}
+
+/// The binary32 table is stored TRANSPOSED, `[n][k]`, so the output index is
+/// the unit-stride axis and a tile of outputs is one contiguous coefficient
+/// load. It needs no tie guard: the guard certifies a quantized table against
+/// an independently specified value, and here the binary32 rounding IS the
+/// declared constant. Rank two is admissible only because this profile carries
+/// no prefix proof to resolve back through rank-reducing views.
+static Value getOrCreateDctTableF32(RewriterBase &rewriter, Location loc, ModuleOp module,
+                                    int64_t extent) {
+  FloatType elementType = rewriter.getF32Type();
+  auto tableType = MemRefType::get({extent, extent}, elementType);
+  SmallVector<llvm::APFloat> coefficients;
+  coefficients.reserve(extent * extent);
+  for (int64_t n = 0; n < extent; ++n)
+    for (int64_t k = 0; k < extent; ++k)
+      coefficients.emplace_back(ondrix::getDctCoefficientF32(extent, k, n));
+  return getOrCreateDctTable(
+      rewriter, loc, module, ("__ondrix_dct" + Twine(extent) + "_f32").str(), tableType,
+      DenseFPElementsAttr::get(RankedTensorType::get({extent, extent}, elementType), coefficients));
+}
+
 struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInterface, DctOp> {
   bool bufferizesToAllocation(Operation *, OpResult) const { return true; }
 
@@ -728,12 +754,15 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
                           const BufferizationOptions &options) const {
     auto op = cast<DctOp>(operation);
     int64_t extent = op.getInput().getType().getDimSize(0);
+    auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getInputNumeric());
     // Same fail-closed admissibility gate as the tensor lowering, through the
     // one shared table generator. Bufferization has no alternative pattern to
     // fall back to, so the refusal is a diagnostic rather than a silent match
-    // failure.
-    if (!ondrix::hasAdmissibleDctCoefficients(extent))
+    // failure. The binary32 profile has no tie guard to satisfy.
+    if (!fp && !ondrix::hasAdmissibleDctCoefficients(extent))
       return op.emitOpError("DCT coefficient quantization is not tie-guard admissible");
+    if (fp && !fp.getFormat().isF32())
+      return op.emitOpError("bufferized DCT supports the binary32 floating-point profile only");
 
     FailureOr<Value> input = getBuffer(rewriter, op.getInput(), options);
     if (failed(input))
@@ -742,6 +771,49 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
     if (!module)
       return op.emitOpError("bufferized DCT requires an enclosing module for its coefficient "
                             "tables");
+
+    if (fp) {
+      rewriter.setInsertionPoint(op);
+      Location fpLoc = op.getLoc();
+      FailureOr<Value> fpOutput = createProducedResultBuffer(rewriter, op.getResult(), options);
+      if (failed(fpOutput))
+        return failure();
+      Value table = getOrCreateDctTableF32(rewriter, fpLoc, module, extent);
+      if (!table)
+        return op.emitOpError("a foreign symbol occupies the reserved DCT coefficient table name "
+                              "or carries contents that differ from the required coefficients");
+      Value first = rewriter.create<arith::ConstantIndexOp>(fpLoc, 0);
+      Value firstTerm = rewriter.create<arith::ConstantIndexOp>(fpLoc, 1);
+      Value one = rewriter.create<arith::ConstantIndexOp>(fpLoc, 1);
+      Value outputs = rewriter.create<arith::ConstantIndexOp>(fpLoc, extent);
+      Value terms = rewriter.create<arith::ConstantIndexOp>(fpLoc, extent);
+      // Outputs outermost over the table's unit-stride axis, the reduction
+      // inside. Each output starts AT its first product, because seeding the
+      // additive identity would export +0.0 where the contract exports the
+      // -0.0 that product can be.
+      rewriter.create<scf::ForOp>(
+          fpLoc, first, outputs, one, ValueRange{},
+          [&](OpBuilder &builder, Location outputLoc, Value output, ValueRange) {
+            Value value = builder.create<memref::LoadOp>(outputLoc, *input, first);
+            Value coefficient =
+                builder.create<memref::LoadOp>(outputLoc, table, ValueRange{first, output});
+            Value seed = builder.create<arith::MulFOp>(outputLoc, value, coefficient);
+            auto sum = builder.create<scf::ForOp>(
+                outputLoc, firstTerm, terms, one, ValueRange{seed},
+                [&](OpBuilder &termBuilder, Location termLoc, Value index, ValueRange accumulator) {
+                  Value term = termBuilder.create<memref::LoadOp>(termLoc, *input, index);
+                  Value weight =
+                      termBuilder.create<memref::LoadOp>(termLoc, table, ValueRange{index, output});
+                  Value updated = createFpAccumulatorUpdate(termLoc, term, weight,
+                                                            accumulator.front(), fp, termBuilder);
+                  termBuilder.create<scf::YieldOp>(termLoc, updated);
+                });
+            builder.create<memref::StoreOp>(outputLoc, sum.getResult(0), *fpOutput, output);
+            builder.create<scf::YieldOp>(outputLoc);
+          });
+      replaceOpWithBufferizedValues(rewriter, op, *fpOutput);
+      return success();
+    }
 
     rewriter.setInsertionPoint(op);
     Location loc = op.getLoc();
