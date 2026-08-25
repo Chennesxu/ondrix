@@ -48,6 +48,7 @@ constexpr int64_t maxProofTraceElements = 65536;
 // are multiplied is what keeps the product from overflowing.
 constexpr int64_t maxChunkMultiple = 16;
 constexpr int64_t maxVectorWidth = 4096;
+constexpr unsigned maxProofTraceAPIntWidth = 4096;
 
 // The emitter must refuse exactly what the replay pass refuses: a width the
 // replay rejects would otherwise leave evidence this compiler produced and
@@ -59,7 +60,6 @@ LogicalResult checkChunkLadder(Operation *op, int64_t vectorWidth, int64_t chunk
     return op->emitError("chunk-multiple must be between 1 and ") << maxChunkMultiple;
   return success();
 }
-constexpr unsigned maxProofTraceAPIntWidth = 4096;
 
 bool isRepresentableLLVMAddressSpace(IntegerAttr memorySpace) {
   const llvm::APInt &value = memorySpace.getValue();
