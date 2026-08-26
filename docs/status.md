@@ -107,7 +107,7 @@ the fourth class requires dropping to `ondrix-opt` and naming passes.
 | Class | Meaning | Members |
 | --- | --- | --- |
 | Semantic contract | Declared in source; changes the admissible result set | Per-call-site numeric contracts (`accumulator`, `rounding`, `overflow`, `contract=off\|fma\|fast`), FIR `boundary`, algorithm parameters (`factor`, `window`, `gain`, `step_size`, design `taps`/`cutoff`) |
-| Target configuration | Describes the machine, not the program | `vector-bits` (register width; lane counts derive from it; zero yields the ordered program) |
+| Target configuration | Describes the machine, not the program | `vector-bits` (register width; lane counts derive from it; zero withdraws the lanes but not the schedule stage — exact contracts get the ordered scalar program, while a `fast` reduction still carries its multi-chain rebuild as scalar chains) |
 | Compiler auto decision | Fixed inside the pipeline, not user-facing | Schedule-stage candidate selection, `preserve-bufferizable-reductions`, the constant-reassociation analysis budget, frontend accumulator-width inference |
 | Ablation and oracle interface | Forces or measures one alternative; never required to compile | `fft-loops`, `vectorize-static-cfft`, `sliding-window-reuse`, `specialize-canonical-twiddles`, `sqrt-estimate`, `tile-size`, `max-taps`, `record-refusals`, proof-trace emission and replay, individual schedule-pass flags |
 | Legacy | Retained for compatibility, outside current claims | `--print-source-locations` |

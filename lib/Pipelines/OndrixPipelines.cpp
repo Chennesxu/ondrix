@@ -67,6 +67,12 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
                         lanes);
     os << "parallelize-ondsp-fixed-wrap-vector-reduce,";
     os << "normalize-ondsp-fixed-vector-reduce,";
+  } else {
+    // Chain count is ILP, not lane count: the multi-chain rebuild pays on a
+    // core with no usable lanes, so it is not gated on the SIMD stage.
+    os << llvm::formatv("vectorize-ondsp-fp-fast-memref-reduce{{vector-width=1 "
+                        "supports-vector-fma={0} interleave=4},",
+                        options.supportsF32VectorFma ? "true" : "false");
   }
 
   // Lowering tail down to the LLVM dialect. The declared-off reduction batches

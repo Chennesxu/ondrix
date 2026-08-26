@@ -630,6 +630,16 @@ def VectorizeOndspFpFastMemRefReduce
     extent keeps the single chain; a static extent uses
     `min(C, blocks)`.
 
+    `vector-width = 1` selects the same rebuild with scalar chains: the
+    interleave is then the classic multi-accumulator schedule, which splits
+    the loop-carried dependence and pays on a core with no usable lanes.
+    Lane count and chain count are separate resources, so the ILP half of
+    this rewrite is not gated on the SIMD half. A width-one rewrite requires
+    a static extent and at least two effective chains, because a single
+    scalar chain would spend the permission to reproduce the ordered
+    schedule; the scalar chains cover every element statically, so no tail
+    loop is emitted.
+
     Folding a term by a separate product and addition or by one fused event
     is a target question and not a legality one — both lie inside the
     declared set — so it is read from the declared `supports-vector-fma`
@@ -663,7 +673,8 @@ def VectorizeOndspFpFastMemRefReduce
   ];
   let options = [
     Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
-           "Number of f32 lanes per partial-sum vector">,
+           "Number of f32 lanes per partial-sum chain; one selects scalar "
+           "chains">,
     Option<"supportsVectorFma", "supports-vector-fma", "bool", /*default=*/"false",
            "Declared target capability: the target has an f32 vector "
            "fused multiply-add. Never inferred from the host">,

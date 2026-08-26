@@ -186,8 +186,10 @@ What moves a route between rows:
   horizontal rewrite, so a short kernel takes the scalar route whatever its
   stride. The `conv1d` mode gate holds both modes at the same extents for
   exactly this reason.
-- **Declared width.** `vector-bits=0` puts every route on the ordered scalar
-  mechanism.
+- **Declared width.** `vector-bits=0` puts every exact route on the ordered
+  scalar mechanism. A `fast` reduction keeps its multi-chain rebuild as scalar
+  chains: chain count is ILP, not lane count, so the permission still buys the
+  split dependence on a machine with no usable lanes.
 - **Declared FMA capability.** `supports-vector-fma=true` moves every {R} row
   to {R, F}.
 

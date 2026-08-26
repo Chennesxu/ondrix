@@ -41,7 +41,8 @@ std::optional<int64_t> getStaticReductionLength(MemRefType lhsType, MemRefType r
   return std::nullopt;
 }
 
-bool isSupportedFastMemRefReduction(ondrix::ondsp::ReduceMacOp op, int64_t vectorWidth) {
+bool isSupportedFastMemRefReduction(ondrix::ondsp::ReduceMacOp op, int64_t vectorWidth,
+                                    int64_t interleave) {
   auto numeric = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
   if (!numeric || !numeric.getFormat().isF32() ||
       numeric.getContract() != ondrix::ondsp::FpContractMode::Fast)
@@ -58,6 +59,10 @@ bool isSupportedFastMemRefReduction(ondrix::ondsp::ReduceMacOp op, int64_t vecto
   // A statically short reduction has no lane to fill, so it keeps the ordered
   // schedule outright instead of carrying a branch that can never be taken.
   std::optional<int64_t> length = getStaticReductionLength(lhsType, rhsType);
+  // At width one the rebuild's only value is carrying several scalar chains;
+  // a single chain would spend the permission on the ordered schedule.
+  if (vectorWidth == 1)
+    return length && std::min(interleave, *length) >= 2;
   return !length || *length >= vectorWidth;
 }
 
@@ -70,7 +75,7 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    if (!isSupportedFastMemRefReduction(op, vectorWidth))
+    if (!isSupportedFastMemRefReduction(op, vectorWidth, interleave))
       return failure();
 
     Type elementType = rewriter.getF32Type();
@@ -84,8 +89,8 @@ public:
     Location loc = op.getLoc();
     Value vectorStep = rewriter.create<arith::ConstantIndexOp>(loc, vectorWidth);
     Value scalarStep = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-    Value remainder = rewriter.create<arith::RemUIOp>(loc, bounds->upperBound, vectorStep);
-    Value vectorEnd = rewriter.create<arith::SubIOp>(loc, bounds->upperBound, remainder);
+    Value remainder = rewriter.createOrFold<arith::RemUIOp>(loc, bounds->upperBound, vectorStep);
+    Value vectorEnd = rewriter.createOrFold<arith::SubIOp>(loc, bounds->upperBound, remainder);
     auto vectorType = VectorType::get({vectorWidth}, elementType);
 
     auto blockBase = [&](OpBuilder &builder, Location branchLoc, Value from, int64_t blockIndex) {
@@ -96,6 +101,11 @@ public:
     };
 
     auto loadProducts = [&](OpBuilder &builder, Location branchLoc, Value base) {
+      if (vectorWidth == 1) {
+        Value lhs = builder.create<memref::LoadOp>(branchLoc, adaptor.getLhs(), base);
+        Value rhs = builder.create<memref::LoadOp>(branchLoc, adaptor.getRhs(), base);
+        return std::pair<Value, Value>(lhs, rhs);
+      }
       Value lhs = builder.create<vector::LoadOp>(branchLoc, vectorType, adaptor.getLhs(), base);
       Value rhs = builder.create<vector::LoadOp>(branchLoc, vectorType, adaptor.getRhs(), base);
       return std::pair<Value, Value>(lhs, rhs);
@@ -158,6 +168,12 @@ public:
       // tree, and it turns an all-negative-zero reduction's declared -0.0 into
       // +0.0. The fold is also where R is recorded, since it exists only
       // because the tree was rebuilt.
+      if (vectorWidth == 1) {
+        // Scalar chains cover every element statically, so there is no tail.
+        return ondrix::ondsp::consumeFastPermission(
+            builder.create<arith::AddFOp>(branchLoc, adaptor.getInitial(), partials.front()),
+            ondrix::ondsp::FastPermission::RebuildReductionTree);
+      }
       Value folded = ondrix::ondsp::consumeFastPermission(
           builder.create<vector::ReductionOp>(branchLoc, vector::CombiningKind::ADD,
                                               partials.front(), adaptor.getInitial()),
@@ -235,8 +251,8 @@ public:
       VectorizeOndspFpFastMemRefReducePass>::VectorizeOndspFpFastMemRefReduceBase;
 
   void runOnOperation() override {
-    if (vectorWidth <= 1) {
-      getOperation().emitError("vector-width must be greater than one");
+    if (vectorWidth < 1) {
+      getOperation().emitError("vector-width must be at least one");
       signalPassFailure();
       return;
     }
@@ -261,8 +277,9 @@ public:
                            memref::MemRefDialect, ondrix::ondsp::OndspDialect, scf::SCFDialect,
                            vector::VectorDialect>();
     target.addDynamicallyLegalOp<ondrix::ondsp::ReduceMacOp>(
-        [width = vectorWidth.getValue()](ondrix::ondsp::ReduceMacOp op) {
-          return !isSupportedFastMemRefReduction(op, width);
+        [width = vectorWidth.getValue(),
+         chains = interleave.getValue()](ondrix::ondsp::ReduceMacOp op) {
+          return !isSupportedFastMemRefReduction(op, width, chains);
         });
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))

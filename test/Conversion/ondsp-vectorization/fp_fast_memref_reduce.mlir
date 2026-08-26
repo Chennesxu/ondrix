@@ -1,6 +1,6 @@
 // RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce | FileCheck %s
 // RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="supports-vector-fma=true" | FileCheck %s --check-prefix=FUSED
-// RUN: not ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="vector-width=1" 2>&1 | FileCheck %s --check-prefix=WIDTH
+// RUN: not ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="vector-width=0" 2>&1 | FileCheck %s --check-prefix=WIDTH
 // RUN: not ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="vector-width=5000" 2>&1 | FileCheck %s --check-prefix=WIDE
 
 // Structure gate for the term-conserving rebuild; the pass description
@@ -8,7 +8,7 @@
 // the schedule is the selection, so any flag reaching here would mean the
 // choice had been handed to the backend instead.
 
-// WIDTH: vector-width must be greater than one
+// WIDTH: vector-width must be at least one
 // WIDE: vector-width must not exceed 4096
 
 // CHECK-NOT: fastmath
