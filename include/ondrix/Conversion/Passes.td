@@ -712,10 +712,18 @@ def VectorizeOndspFpFilterOutputs
     arithmetic provides.
 
     A fast site is admitted on the same structural ground — an
-    order-preserving batch is inside every declared set, so R is never
-    spent here. Its taps select between the two admitted members by the
-    declared `supports-vector-fma` capability, and selecting the fused one
-    spends F. Running this pass before the horizontal fast reduction is the
+    order-preserving batch is inside every declared set, so the batching
+    itself never needs R. Its taps select between the two admitted members
+    by the declared `supports-vector-fma` capability, and selecting the
+    fused one spends F. One shape goes further: a matmul column loop whose
+    inner axis still carries its declared fast contract (stamped by the
+    bufferization as an `ondsp.numeric` attribute — a declaration, not a
+    spend record, so it is an authority) may rebuild that axis into
+    `interleave` independent per-lane chains, the seed staying the first
+    leaf of chain zero, every other chain seeded by its own real product,
+    merged pairwise into one R-recording top fold. Absence of the stamp
+    reads as exact and refuses the rebuild, so a dropped attribute costs
+    only the schedule. Running this pass before the horizontal fast reduction is the
     axis-selection policy: it removed the observed regression where a fast
     site with an output axis took a worse horizontal schedule. It is a
     policy, not a guarantee — no static pass order can promise relative
@@ -731,10 +739,12 @@ def VectorizeOndspFpFilterOutputs
     whole-length static subview at stride +-1 of a contiguous sequence —
     the convolution coefficient order — since taps are scalar-loaded; the
     touched index range is pinned against the base extent rather than
-    assumed in bounds. The windowed-sum and matmul column loops are the other
-    two admitted shapes, each with its own structural matcher; batching a
-    matmul's column axis additionally needs a contiguous minor dimension in
-    the right operand and the result. Unlike the decimate batching there is
+    assumed in bounds. The windowed-sum and matmul column loops and the
+    transposed-table output tile (the shape the f32 DCT bufferization emits,
+    each lane seeded at its own first product) are the other three admitted
+    shapes, each with its own structural matcher; batching a matmul's column
+    axis additionally needs a contiguous minor dimension in the right operand
+    and the result. Unlike the decimate batching there is
     no widened load: at tap t the lanes for outputs m .. m+W-1 read
     input[m+t .. m+t+W-1], exactly the union of those W ordered windows, so
     every full block of W outputs is batchable and the batched schedule
@@ -764,6 +774,10 @@ def VectorizeOndspFpFilterOutputs
            "Declared target capability: the target has an f32 vector "
            "fused multiply-add. Decides which member a fast site's taps "
            "select. Never inferred from the host">,
+    Option<"interleave", "interleave", "int64_t", /*default=*/"1",
+           "Number of independent per-lane chains carried over the column "
+           "tile's unrolled inner axis; above one applies only where the "
+           "loop carries the declared fast contract">,
   ];
 }
 

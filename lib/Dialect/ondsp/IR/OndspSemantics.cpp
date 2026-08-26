@@ -29,6 +29,8 @@ LogicalResult verifyProductPolicy(Operation *op, Attribute numeric,
 
 llvm::StringRef getFastPermissionAttrName() { return "ondsp.fast_used"; }
 
+llvm::StringRef getDeclaredNumericAttrName() { return "ondsp.numeric"; }
+
 static StringRef getFastPermissionSpelling(FastPermission permission) {
   switch (permission) {
   case FastPermission::RebuildReductionTree:

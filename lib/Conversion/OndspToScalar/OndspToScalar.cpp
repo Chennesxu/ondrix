@@ -162,6 +162,11 @@ public:
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       return signalPassFailure();
+    // The declared-contract stamp's only audience is the schedule stage,
+    // which has run by now; a residual stamp on an unbatched loop would trip
+    // the host-metadata artifact guard downstream.
+    getOperation()->walk(
+        [](Operation *op) { op->removeAttr(ondrix::ondsp::getDeclaredNumericAttrName()); });
     ondrix::ondsp::summarizeFastPermissions(getOperation());
   }
 };

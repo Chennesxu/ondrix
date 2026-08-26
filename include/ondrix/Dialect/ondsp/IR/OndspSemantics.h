@@ -50,6 +50,12 @@ mlir::Value consumeFastPermission(mlir::Operation *op, FastPermission permission
 /// having the second silently replace the first.
 llvm::StringRef getFastPermissionAttrName();
 
+/// Name of the discardable attribute a lowering may stamp on a loop it emits
+/// to carry the site's DECLARED numeric contract forward: an authority for a
+/// later schedule stage, unlike the spend record above, which is bookkeeping.
+/// Absence always reads as the exact contract, so dropping it fails closed.
+llvm::StringRef getDeclaredNumericAttrName();
+
 /// Whether `op` records having spent `permission`. Membership, not presence: a
 /// record naming only the other permission must not read as this one. A later
 /// pass reading a record back is deciding whether it may re-select the member,

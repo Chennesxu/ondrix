@@ -167,7 +167,8 @@ At the default width, `supports-vector-fma=false`:
 
 | Route | Mechanism | Used | Executed gate |
 | --- | --- | --- | --- |
-| `dot`, `fir`, `fir_filter`, `matmul`, `rms`, `fir_decimate` | horizontal, separate | {R} | mechanism only (`fp_fast_reduce_aot`) |
+| `dot`, `fir`, `fir_filter`, `rms`, `fir_decimate` | horizontal, separate | {R} | mechanism only (`fp_fast_reduce_aot`) |
+| `matmul` | column tile; the fused body is refused without the vector fused multiply-add, so this configuration keeps the scalar fused chain. Under `supports-vector-fma=true` the tile batches, and its unrolled inner axis rebuilds into interleaved chains, adding {R} | {F} | `fs_f32_solver` route audit, `matmul_f32.mlir` |
 | `conv1d` correlation, K ≥ W | horizontal, separate | {R} | `f32_conv1d_aot`, term conservation |
 | `conv1d` convolution | scalar fused | {F} | `f32_conv1d_aot`, selection pinned |
 | `dct`, `lms`, `fir_interpolate` | scalar fused | {F} | selection pinned |

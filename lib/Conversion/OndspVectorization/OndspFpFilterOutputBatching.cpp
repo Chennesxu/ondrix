@@ -34,6 +34,9 @@ constexpr int64_t kMaxVectorWidth = 4096;
 /// rolled loop rather than emitting unbounded straight-line code.
 constexpr int64_t kMaxUnrolledTerms = 64;
 
+/// Largest accepted chain count for the column tile's rebuilt inner axis.
+constexpr int64_t kMaxColumnInterleave = 64;
+
 /// Everything the matcher recovered from one bufferized f32 filter loop.
 struct FpFilterLoopShape {
   scf::ForOp loop;
@@ -557,6 +560,10 @@ struct FpColumnTileLoopShape {
   /// discardable audit metadata — it may continue bookkeeping, never select
   /// which arithmetic is emitted.
   bool recordsFuse = false;
+  /// The declared contract, read from the stamped `ondsp.numeric` attribute.
+  /// This is the authority for the tree rebuild; absence reads as exact, so a
+  /// dropped attribute only ever costs the schedule, never correctness.
+  ondrix::ondsp::FpContractMode contract = ondrix::ondsp::FpContractMode::Off;
 };
 
 /// Whether `value` is available where the loop is, rather than produced inside
@@ -679,6 +686,10 @@ FailureOr<FpColumnTileLoopShape> matchFpColumnTileLoop(scf::ForOp loop, int64_t 
   shape.rowIndex = rowIndex;
   shape.fused = bodyFused;
   shape.recordsFuse = recordsFuse;
+  if (auto declared =
+          terms->getAttrOfType<ondrix::ondsp::FpAttr>(ondrix::ondsp::getDeclaredNumericAttrName()))
+    if (declared.getFormat().isF32())
+      shape.contract = declared.getContract();
 
   if (!isStaticRankTwoF32MemRef(shape.lhs) || !isVectorAccessibleRankTwoMemRef(shape.rhs) ||
       !isVectorAccessibleRankTwoMemRef(shape.output))
@@ -716,7 +727,7 @@ FailureOr<FpColumnTileLoopShape> matchFpColumnTileLoop(scf::ForOp loop, int64_t 
 /// per-output events verbatim — +0.0 initial value, ascending inner index, one
 /// update event per term — which is the same per-lane event-graph identity the
 /// filter batching relies on.
-void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
+void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth, int64_t interleave,
                         OpBuilder &builder) {
   // Shape-preserving term emission: the audit record decides bookkeeping
   // continuation only, never the arithmetic.
@@ -761,11 +772,47 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
     }
   }
 
+  // The declared fast contract admits a rebuilt tree, so the unrolled inner
+  // axis may carry independent per-lane chains: the seed stays the first leaf
+  // of chain zero, every other chain is seeded by its own real product, and
+  // the chains merge pairwise into the single R-recording top fold.
+  int64_t chains = 1;
+  if (shape.contract == ondrix::ondsp::FpContractMode::Fast && unrolled)
+    chains = std::min<int64_t>(interleave, shape.innerCount);
+
   builder.create<scf::ForOp>(
       loc, zeroIndex, batchedEnd, batchStep, ValueRange{},
       [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
         Value lanes;
-        if (unrolled) {
+        if (unrolled && chains > 1) {
+          auto loadValues = [&](int64_t term) {
+            Value index = blockBuilder.create<arith::ConstantIndexOp>(blockLoc, term);
+            return blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.rhs,
+                                                       ValueRange{index, blockStart});
+          };
+          SmallVector<Value> partials;
+          partials.push_back(
+              updateLanes(blockBuilder, blockLoc, rowSplats[0], loadValues(0), laneZero));
+          for (int64_t chain = 1; chain < chains; ++chain)
+            partials.push_back(
+                blockBuilder.create<arith::MulFOp>(blockLoc, rowSplats[chain], loadValues(chain)));
+          for (int64_t term = chains; term < shape.innerCount; ++term)
+            partials[term % chains] = updateLanes(blockBuilder, blockLoc, rowSplats[term],
+                                                  loadValues(term), partials[term % chains]);
+          while (partials.size() > 1) {
+            SmallVector<Value> merged;
+            for (size_t i = 0; i + 1 < partials.size(); i += 2)
+              merged.push_back(
+                  blockBuilder.create<arith::AddFOp>(blockLoc, partials[i], partials[i + 1]));
+            if (partials.size() % 2 != 0)
+              merged.push_back(partials.back());
+            partials = std::move(merged);
+          }
+          lanes = partials.front();
+          if (Operation *top = lanes.getDefiningOp(); isa<arith::AddFOp>(top))
+            lanes = ondrix::ondsp::consumeFastPermission(
+                top, ondrix::ondsp::FastPermission::RebuildReductionTree);
+        } else if (unrolled) {
           lanes = laneZero;
           for (int64_t term = 0; term < shape.innerCount; ++term) {
             Value index = blockBuilder.create<arith::ConstantIndexOp>(blockLoc, term);
@@ -1068,6 +1115,11 @@ public:
       signalPassFailure();
       return;
     }
+    if (interleave < 1 || interleave > kMaxColumnInterleave) {
+      getOperation().emitError("interleave must be in [1, ") << kMaxColumnInterleave << "]";
+      signalPassFailure();
+      return;
+    }
 
     // Collect first: the batched loop this pass creates must never be offered
     // to the matcher, and the ordered loop is mutated in place.
@@ -1089,7 +1141,7 @@ public:
       if (FailureOr<FpColumnTileLoopShape> shape =
               matchFpColumnTileLoop(loop, vectorWidth, supportsVectorFma);
           succeeded(shape)) {
-        batchFpColumnTiles(*shape, vectorWidth, builder);
+        batchFpColumnTiles(*shape, vectorWidth, interleave, builder);
         continue;
       }
       if (FailureOr<FpOutputTileLoopShape> shape =

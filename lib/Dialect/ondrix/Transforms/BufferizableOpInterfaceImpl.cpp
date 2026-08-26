@@ -471,6 +471,11 @@ struct MatmulOpInterface
                             termLoc, left, right, accumulator.front(), fp, termBuilder);
                         termBuilder.create<scf::YieldOp>(termLoc, updated);
                       });
+                  // fast is the one contract that authorizes a later tree
+                  // rebuild, and this loop is where the declaration would
+                  // otherwise be lost; absence reads as exact.
+                  if (fp.getContract() == ondrix::ondsp::FpContractMode::Fast)
+                    terms->setAttr(ondrix::ondsp::getDeclaredNumericAttrName(), fp);
                   columnBuilder.create<memref::StoreOp>(columnLoc, terms.getResult(0), *output,
                                                         ValueRange{row, column});
                   columnBuilder.create<scf::YieldOp>(columnLoc);
