@@ -2,6 +2,7 @@
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=4 supports-vector-fma=true" | FileCheck %s --check-prefix=BATCHED
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=4 supports-vector-fma=false" | FileCheck %s --check-prefix=NOFMA
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=16 supports-vector-fma=true" | FileCheck %s --check-prefix=TOOWIDE
+// RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=3 supports-vector-fma=true" | FileCheck %s --check-prefix=PARTIAL
 
 // The table is transposed, `[term][output]`, so a tile of outputs is one
 // contiguous load; rank two is admissible because the binary32 profile carries
@@ -61,6 +62,16 @@ func.func @f32_dct8_fast(%input: tensor<8xf32>) -> tensor<8xf32> {
 // NOFMA-LABEL: func.func @f32_dct8_fast
 // NOFMA-NOT: vector<4xf32>
 // NOFMA: math.fma {{.*}} : f32
+
+// Eight outputs at width three: two full blocks, then outputs six and seven
+// keep the ordered scalar loop, whose lower bound is the batched end.
+// PARTIAL-LABEL: func.func @f32_dct8
+// PARTIAL-DAG: %[[END:.*]] = arith.constant 6 : index
+// PARTIAL-DAG: %[[STEP:.*]] = arith.constant 3 : index
+// PARTIAL: scf.for %{{.*}} = %{{.*}} to %[[END]] step %[[STEP]] {
+// PARTIAL: vector.store {{.*}} : memref<8xf32>, vector<3xf32>
+// PARTIAL: scf.for %[[K:.*]] = %[[END]] to %{{.*}} step %{{.*}} {
+// PARTIAL: memref.store {{.*}}, %{{.*}}[%[[K]]] : memref<8xf32>
 
 // A tile wider than the whole output axis has no full block to fill, so the
 // batching refuses rather than emitting an empty batched loop beside the

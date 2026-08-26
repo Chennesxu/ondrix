@@ -939,6 +939,15 @@ FailureOr<FpOutputTileLoopShape> matchFpOutputTileLoop(scf::ForOp loop, int64_t 
     return failure();
   if (*upperBound < vectorWidth)
     return failure();
+  for (Value operand : {seedValue.getMemRef(), seedWeight.getMemRef(), store.getMemRef()})
+    if (!isAvailableAtLoop(loop, operand))
+      return failure();
+  // The rewrite hoists every value read above a block's W stores, so the
+  // ordered visibility of output k to later outputs' reads must be statically
+  // impossible; the table reads are licensed the same way.
+  if (ondrix::conversion::mayShareStorage(seedValue.getMemRef(), store.getMemRef()) ||
+      ondrix::conversion::mayShareStorage(seedWeight.getMemRef(), store.getMemRef()))
+    return failure();
 
   FpOutputTileLoopShape shape;
   shape.loop = loop;

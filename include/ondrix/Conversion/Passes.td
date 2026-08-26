@@ -741,9 +741,10 @@ def VectorizeOndspFpFilterOutputs
     reads no element the ordered one did not.
 
     Aliasing is the same separately discharged obligation as in the decimate
-    batching: the rewrite defers a block's W stores past all of that block's
-    tap loads, so the loop is refused unless the input, coefficient, and
-    output storage are statically distinct (same base-storage analysis, same
+    batching: every shape's rewrite defers a block's W stores past all of
+    that block's loads (the output tile also hoists its value reads above the
+    whole batched loop), so the loop is refused unless the read and output
+    storage are statically distinct (same base-storage analysis, same
     fail-closed treatment of opaque provenance and non-entry block
     arguments). The remaining half is the declared function-entry
     disjointness precondition the `.ox` ABI states.

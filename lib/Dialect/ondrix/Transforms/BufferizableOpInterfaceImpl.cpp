@@ -642,24 +642,12 @@ static ondrix::ondsp::AccType getSaturatingAccumulator(MLIRContext *context, uns
                                      ondrix::ondsp::OverflowMode::Saturate);
 }
 
-/// Immutable Q15 table holding one row of the DCT coefficient matrix, named
-/// deterministically so that repeated `ondrix.dct` operations of the same
-/// extent share it.
-///
-/// One rank-1 global per row is what the constant analysis accepts, not a
-/// choice of convenience: `resolveConstantGlobalRoot` walks only rank-1
-/// `memref.subview`/`memref.cast` views back to a `memref.get_global`, and
-/// `isFullRangeUnitStrideSubview` refuses any view whose source or result
-/// rank is not one. A single rank-2 table plus per-row rank-reducing
-/// subviews would therefore never resolve to its constant initializer, and
-/// the reduction would silently lose the constant-coefficient route.
 /// Emits or reuses one coefficient table under the reserved `__ondrix_dct`
 /// namespace. The caller builds the initializer, because reuse is legal only
 /// when an existing global carries exactly the coefficients required: the
 /// symbol name proves nothing, and a pre-existing constant global of the right
-/// name, kind, and type but different contents would otherwise be silently
-/// consumed as coefficient data, and the prefix-range proof downstream would
-/// then correctly authorize a reduction over the WRONG table.
+/// name, kind, and type but different contents would be silently consumed, and
+/// the prefix-range proof downstream would then authorize the WRONG table.
 static Value getOrCreateDctTable(RewriterBase &rewriter, Location loc, ModuleOp module,
                                  StringRef symbol, MemRefType tableType,
                                  ElementsAttr expectedInitializer) {
@@ -697,6 +685,10 @@ static Value getOrCreateDctTable(RewriterBase &rewriter, Location loc, ModuleOp 
   return rewriter.create<memref::GetGlobalOp>(loc, tableType, symbol);
 }
 
+/// One immutable Q15 global per DCT row, because that is what the constant
+/// analysis accepts: `resolveConstantGlobalRoot` walks only rank-1 views back
+/// to a `memref.get_global`, so a rank-2 table behind rank-reducing subviews
+/// would silently lose the constant-coefficient route.
 static Value getOrCreateDctRowTable(RewriterBase &rewriter, Location loc, ModuleOp module,
                                     int64_t extent, int64_t row) {
   IntegerType elementType = rewriter.getI16Type();
