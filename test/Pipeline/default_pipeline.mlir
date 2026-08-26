@@ -9,9 +9,9 @@
 // candidate transform is filtered by its own legality analysis and applied in
 // the documented priority order, and anything unauthorized keeps its ordered
 // scalar schedule. The vector width is a target fact (register bits), not a
-// user choice: the same module compiles at any width, and width zero is the
-// all-ordered program. Zero is also the default, so an undeclared target gets
-// the schedule that is legal everywhere instead of a guess.
+// user choice: the same module compiles at any width. Width zero, also the
+// default, withdraws the lanes but not the schedule stage: exact sites keep
+// the ordered scalar program, and a fast reduction keeps its scalar chains.
 
 // The static f32 filter batches: its lanes carry independent outputs as
 // fused-event chains, visible after full lowering as a vector fma.

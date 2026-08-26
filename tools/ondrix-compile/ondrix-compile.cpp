@@ -43,8 +43,9 @@ cl::opt<EmitKind> emitKind(
 // Target facts for the schedule stage. Both default to assuming nothing, so an
 // undeclared target compiles to the ordered program rather than to a guess.
 cl::opt<int64_t> vectorBits("vector-bits",
-                            cl::desc("Target vector register width in bits (0 keeps every "
-                                     "ordered scalar schedule)"),
+                            cl::desc("Target vector register width in bits (0 keeps exact "
+                                     "sites ordered and scalar; fast reductions still carry "
+                                     "scalar chains)"),
                             cl::init(0));
 cl::opt<bool> supportsF32VectorFma("supports-f32-vector-fma",
                                    cl::desc("Declared target capability: the target has an f32 "

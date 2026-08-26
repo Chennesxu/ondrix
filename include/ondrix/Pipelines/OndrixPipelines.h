@@ -20,8 +20,9 @@ struct OndrixDefaultPipelineOptions
     : public mlir::PassPipelineOptions<OndrixDefaultPipelineOptions> {
   /// Vector register width in bits, from which each transform's lane count is
   /// derived. Zero is the default because it is the only value that assumes
-  /// nothing: an undeclared target yields the ordered scalar program, which is
-  /// legal everywhere. 128 covers NEON and Helium, 256 AVX2.
+  /// nothing: an undeclared target keeps every exact site on the ordered
+  /// scalar program, while a fast reduction still carries its multi-chain
+  /// rebuild as scalar chains. 128 covers NEON and Helium, 256 AVX2.
   Option<int64_t> vectorBits{*this, "vector-bits",
                              llvm::cl::desc("Target vector register width in bits (0, the "
                                             "default, keeps every ordered scalar schedule)"),
