@@ -1,10 +1,12 @@
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" | FileCheck %s --implicit-check-not=ondsp.reduce_mac
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=4 supports-vector-fma=true" | FileCheck %s --check-prefix=BATCHED --implicit-check-not=ondsp.reduce_mac
-// RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=4 supports-vector-fma=true interleave=4" | FileCheck %s --check-prefix=CHAINED --implicit-check-not=ondsp.reduce_mac
+// RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=4 supports-vector-fma=true interleave=4 column-group=2" | FileCheck %s --check-prefix=CHAINED --implicit-check-not=ondsp.reduce_mac
 // RUN: not ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="interleave=0" 2>&1 | FileCheck %s --check-prefix=CHAINLOW
 // RUN: not ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="interleave=65" 2>&1 | FileCheck %s --check-prefix=CHAINLOW
 
 // CHAINLOW: interleave must be in [1, 64]
+// RUN: not ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="column-group=0" 2>&1 | FileCheck %s --check-prefix=GROUPLOW
+// GROUPLOW: column-group must be in [1, 64]
 
 // The f32 profile bufferizes straight to the column-tile loop form of its
 // declared event graph. No transposed pack of B, hence the single allocation:
@@ -69,4 +71,26 @@ func.func @f32_matmul_fma(%a: tensor<4x8xf32>, %b: tensor<8x6xf32>) -> tensor<4x
     numeric = #ondsp.fp<format = f32, contract = fma>
   } : (tensor<4x8xf32>, tensor<8x6xf32>) -> tensor<4x6xf32>
   return %c : tensor<4x6xf32>
+}
+
+// Two full blocks group into one pass: both blocks' term loads share one
+// splat, each block keeps its own chains, and R is recorded once per block.
+// CHECK-LABEL: func.func @f32_matmul_grouped
+// CHECK: {ondsp.numeric = #ondsp.fp<format = f32, contract = fast>}
+// CHAINED-LABEL: func.func @f32_matmul_grouped
+// CHAINED: %[[SP0:.*]] = vector.splat {{.*}} : vector<4xf32>
+// CHAINED: scf.for %[[BLK:.*]] = %c0{{.*}} step %c8
+// CHAINED: %[[G1:.*]] = arith.addi %[[BLK]], %c4
+// CHAINED: %[[L0:.*]] = vector.load %{{.*}}[%c0{{.*}}, %[[BLK]]] : memref<8x8xf32>, vector<4xf32>
+// CHAINED: %[[S0:.*]] = math.fma %[[SP0]], %[[L0]], %{{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<4xf32>
+// CHAINED: %[[L1:.*]] = vector.load %{{.*}}[%c0{{.*}}, %[[G1]]] : memref<8x8xf32>, vector<4xf32>
+// CHAINED: math.fma %[[SP0]], %[[L1]], %{{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<4xf32>
+// CHAINED-COUNT-2: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : vector<4xf32>
+// CHAINED: vector.store {{.*}}[%{{.*}}, %[[BLK]]] : memref<4x8xf32>, vector<4xf32>
+// CHAINED: vector.store {{.*}}[%{{.*}}, %[[G1]]] : memref<4x8xf32>, vector<4xf32>
+func.func @f32_matmul_grouped(%a: tensor<4x8xf32>, %b: tensor<8x8xf32>) -> tensor<4x8xf32> {
+  %c = ondrix.matmul %a, %b {
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (tensor<4x8xf32>, tensor<8x8xf32>) -> tensor<4x8xf32>
+  return %c : tensor<4x8xf32>
 }

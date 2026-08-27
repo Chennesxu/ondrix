@@ -114,7 +114,7 @@ func.func @conv_reversed_off(%signal: tensor<64xf32>, %kernel: tensor<8xf32>,
 
 // The matmul column axis: W columns of one output row ride one vector, the
 // broadcast row element is scalar-loaded, and the residual columns keep the
-// ordered schedule.
+// ordered schedule. Grouping stays off at the default column-group of one.
 // CHECK-LABEL: func.func @matmul_columns_off
 // CHECK: %[[ROW:.*]] = memref.load %{{.*}} : memref<2x4xf32>
 // CHECK: vector.splat %[[ROW]] : vector<8xf32>

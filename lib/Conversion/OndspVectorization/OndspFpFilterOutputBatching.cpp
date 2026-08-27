@@ -769,7 +769,7 @@ FailureOr<FpColumnTileLoopShape> matchFpColumnTileLoop(scf::ForOp loop, int64_t 
 /// update event per term — which is the same per-lane event-graph identity the
 /// filter batching relies on.
 void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth, int64_t interleave,
-                        OpBuilder &builder) {
+                        int64_t columnGroup, OpBuilder &builder) {
   // Shape-preserving term emission: the audit record decides bookkeeping
   // continuation only, never the arithmetic.
   auto updateLanes = [&shape](OpBuilder &b, Location l, Value splat, Value values,
@@ -795,7 +795,6 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
   Value oneIndex = builder.create<arith::ConstantIndexOp>(loc, 1);
   Value innerEnd = builder.create<arith::ConstantIndexOp>(loc, shape.innerCount);
   Value batchedEnd = builder.create<arith::ConstantIndexOp>(loc, batchedColumns);
-  Value batchStep = builder.create<arith::ConstantIndexOp>(loc, vectorWidth);
   Value laneZero = builder.create<arith::ConstantOp>(
       loc, laneType, DenseElementsAttr::get(laneType, builder.getF32FloatAttr(0.0f)));
 
@@ -821,64 +820,95 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
   if (shape.contract == ondrix::ondsp::FpContractMode::Fast && unrolled)
     chains = std::min<int64_t>(interleave, shape.innerCount);
 
-  builder.create<scf::ForOp>(
-      loc, zeroIndex, batchedEnd, batchStep, ValueRange{},
-      [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
-        Value lanes;
-        if (unrolled && chains > 1) {
-          auto loadValues = [&](int64_t term) {
+  // Adjacent blocks of one row group into a single pass: the row splats are
+  // shared, one term's group loads are contiguous in the right operand, and
+  // each block keeps its own accumulator, so every lane's event graph is the
+  // single-block one verbatim and the grouping spends nothing. The width is
+  // a measured per-target policy (a serializing in-order load pipe regresses).
+  int64_t grouping = unrolled ? std::min<int64_t>(columnGroup, fullBlocks) : 1;
+  int64_t groupChains = chains;
+  if (grouping > 1)
+    groupChains = std::max<int64_t>(1, std::min<int64_t>(chains, 8 / grouping));
+
+  auto emitBatchedLoop = [&](Value startIndex, Value endIndex, int64_t groups, int64_t perChains) {
+    Value step = builder.create<arith::ConstantIndexOp>(loc, groups * vectorWidth);
+    builder.create<scf::ForOp>(
+        loc, startIndex, endIndex, step, ValueRange{},
+        [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
+          SmallVector<Value> bases{blockStart};
+          for (int64_t group = 1; group < groups; ++group)
+            bases.push_back(blockBuilder.create<arith::AddIOp>(
+                blockLoc, blockStart,
+                blockBuilder.create<arith::ConstantIndexOp>(blockLoc, group * vectorWidth)));
+          auto loadValues = [&](int64_t term, int64_t group) {
             Value index = blockBuilder.create<arith::ConstantIndexOp>(blockLoc, term);
             return blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.rhs,
-                                                       ValueRange{index, blockStart});
+                                                       ValueRange{index, bases[group]});
           };
-          SmallVector<Value> partials;
-          partials.push_back(
-              updateLanes(blockBuilder, blockLoc, rowSplats[0], loadValues(0), laneZero));
-          for (int64_t chain = 1; chain < chains; ++chain)
-            partials.push_back(
-                blockBuilder.create<arith::MulFOp>(blockLoc, rowSplats[chain], loadValues(chain)));
-          for (int64_t term = chains; term < shape.innerCount; ++term)
-            partials[term % chains] = updateLanes(blockBuilder, blockLoc, rowSplats[term],
-                                                  loadValues(term), partials[term % chains]);
-          while (partials.size() > 1) {
-            SmallVector<Value> merged;
-            for (size_t i = 0; i + 1 < partials.size(); i += 2)
-              merged.push_back(
-                  blockBuilder.create<arith::AddFOp>(blockLoc, partials[i], partials[i + 1]));
-            if (partials.size() % 2 != 0)
-              merged.push_back(partials.back());
-            partials = std::move(merged);
+          SmallVector<Value> lanes(groups);
+          if (unrolled && perChains > 1) {
+            SmallVector<SmallVector<Value>> partials(groups);
+            for (int64_t group = 0; group < groups; ++group)
+              partials[group].push_back(updateLanes(blockBuilder, blockLoc, rowSplats[0],
+                                                    loadValues(0, group), laneZero));
+            for (int64_t chain = 1; chain < perChains; ++chain)
+              for (int64_t group = 0; group < groups; ++group)
+                partials[group].push_back(blockBuilder.create<arith::MulFOp>(
+                    blockLoc, rowSplats[chain], loadValues(chain, group)));
+            for (int64_t term = perChains; term < shape.innerCount; ++term)
+              for (int64_t group = 0; group < groups; ++group)
+                partials[group][term % perChains] =
+                    updateLanes(blockBuilder, blockLoc, rowSplats[term], loadValues(term, group),
+                                partials[group][term % perChains]);
+            for (int64_t group = 0; group < groups; ++group) {
+              SmallVector<Value> &folds = partials[group];
+              while (folds.size() > 1) {
+                SmallVector<Value> merged;
+                for (size_t i = 0; i + 1 < folds.size(); i += 2)
+                  merged.push_back(
+                      blockBuilder.create<arith::AddFOp>(blockLoc, folds[i], folds[i + 1]));
+                if (folds.size() % 2 != 0)
+                  merged.push_back(folds.back());
+                folds = std::move(merged);
+              }
+              lanes[group] = folds.front();
+              if (Operation *top = lanes[group].getDefiningOp(); isa<arith::AddFOp>(top))
+                lanes[group] = ondrix::ondsp::consumeFastPermission(
+                    top, ondrix::ondsp::FastPermission::RebuildReductionTree);
+            }
+          } else if (unrolled) {
+            for (int64_t group = 0; group < groups; ++group)
+              lanes[group] = laneZero;
+            for (int64_t term = 0; term < shape.innerCount; ++term)
+              for (int64_t group = 0; group < groups; ++group)
+                lanes[group] = updateLanes(blockBuilder, blockLoc, rowSplats[term],
+                                           loadValues(term, group), lanes[group]);
+          } else {
+            auto terms = blockBuilder.create<scf::ForOp>(
+                blockLoc, zeroIndex, innerEnd, oneIndex, ValueRange{laneZero},
+                [&](OpBuilder &termBuilder, Location termLoc, Value index, ValueRange iterArgs) {
+                  Value element = termBuilder.create<memref::LoadOp>(
+                      termLoc, shape.lhs, ValueRange{shape.rowIndex, index});
+                  Value splat = termBuilder.create<vector::SplatOp>(termLoc, laneType, element);
+                  Value values = termBuilder.create<vector::LoadOp>(termLoc, laneType, shape.rhs,
+                                                                    ValueRange{index, blockStart});
+                  termBuilder.create<scf::YieldOp>(
+                      termLoc, updateLanes(termBuilder, termLoc, splat, values, iterArgs.front()));
+                });
+            lanes.front() = terms.getResult(0);
           }
-          lanes = partials.front();
-          if (Operation *top = lanes.getDefiningOp(); isa<arith::AddFOp>(top))
-            lanes = ondrix::ondsp::consumeFastPermission(
-                top, ondrix::ondsp::FastPermission::RebuildReductionTree);
-        } else if (unrolled) {
-          lanes = laneZero;
-          for (int64_t term = 0; term < shape.innerCount; ++term) {
-            Value index = blockBuilder.create<arith::ConstantIndexOp>(blockLoc, term);
-            Value values = blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.rhs,
-                                                               ValueRange{index, blockStart});
-            lanes = updateLanes(blockBuilder, blockLoc, rowSplats[term], values, lanes);
-          }
-        } else {
-          auto terms = blockBuilder.create<scf::ForOp>(
-              blockLoc, zeroIndex, innerEnd, oneIndex, ValueRange{laneZero},
-              [&](OpBuilder &termBuilder, Location termLoc, Value index, ValueRange iterArgs) {
-                Value element = termBuilder.create<memref::LoadOp>(
-                    termLoc, shape.lhs, ValueRange{shape.rowIndex, index});
-                Value splat = termBuilder.create<vector::SplatOp>(termLoc, laneType, element);
-                Value values = termBuilder.create<vector::LoadOp>(termLoc, laneType, shape.rhs,
-                                                                  ValueRange{index, blockStart});
-                termBuilder.create<scf::YieldOp>(
-                    termLoc, updateLanes(termBuilder, termLoc, splat, values, iterArgs.front()));
-              });
-          lanes = terms.getResult(0);
-        }
-        blockBuilder.create<vector::StoreOp>(blockLoc, lanes, shape.output,
-                                             ValueRange{shape.rowIndex, blockStart});
-        blockBuilder.create<scf::YieldOp>(blockLoc);
-      });
+          for (int64_t group = 0; group < groups; ++group)
+            blockBuilder.create<vector::StoreOp>(blockLoc, lanes[group], shape.output,
+                                                 ValueRange{shape.rowIndex, bases[group]});
+          blockBuilder.create<scf::YieldOp>(blockLoc);
+        });
+  };
+
+  int64_t groupedColumns = (fullBlocks / grouping) * grouping * vectorWidth;
+  Value groupedEnd = builder.create<arith::ConstantIndexOp>(loc, groupedColumns);
+  emitBatchedLoop(zeroIndex, groupedEnd, grouping, groupChains);
+  if (groupedColumns < batchedColumns)
+    emitBatchedLoop(groupedEnd, batchedEnd, 1, chains);
 
   // A fully covered ordered loop is erased rather than left dead: its body
   // would still record a spend the audit can never observe.
@@ -1161,6 +1191,11 @@ public:
       signalPassFailure();
       return;
     }
+    if (columnGroup < 1 || columnGroup > kMaxColumnInterleave) {
+      getOperation().emitError("column-group must be in [1, ") << kMaxColumnInterleave << "]";
+      signalPassFailure();
+      return;
+    }
 
     // Collect first: the batched loop this pass creates must never be offered
     // to the matcher, and the ordered loop is mutated in place.
@@ -1182,7 +1217,7 @@ public:
       if (FailureOr<FpColumnTileLoopShape> shape =
               matchFpColumnTileLoop(loop, vectorWidth, supportsVectorFma);
           succeeded(shape)) {
-        batchFpColumnTiles(*shape, vectorWidth, interleave, builder);
+        batchFpColumnTiles(*shape, vectorWidth, interleave, columnGroup, builder);
         continue;
       }
       if (FailureOr<FpOutputTileLoopShape> shape =

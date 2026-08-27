@@ -46,9 +46,13 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // wider registers.
   if (options.vectorBits >= 64) {
     int64_t lanes = options.vectorBits / 32;
+    // Column grouping is a measured per-target policy: the 256-bit host
+    // class pays for it, while the 128-bit in-order class regresses (its
+    // load pipe serializes the grouped pass's paired accesses).
+    int64_t columnGroup = options.vectorBits >= 256 ? 2 : 1;
     os << llvm::formatv("vectorize-ondsp-fp-filter-outputs{{vector-width={0} "
-                        "supports-vector-fma={1} interleave=4},",
-                        lanes, options.supportsF32VectorFma ? "true" : "false");
+                        "supports-vector-fma={1} interleave=4 column-group={2}},",
+                        lanes, options.supportsF32VectorFma ? "true" : "false", columnGroup);
     // Four chains: a host-class heuristic for the FMA latency-throughput
     // product, not a target fact; the pass clamps to the block count per
     // site, and a target schedule parameter can override it later.

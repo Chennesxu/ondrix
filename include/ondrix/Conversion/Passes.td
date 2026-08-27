@@ -715,13 +715,21 @@ def VectorizeOndspFpFilterOutputs
     order-preserving batch is inside every declared set, so the batching
     itself never needs R. Its taps select between the two admitted members
     by the declared `supports-vector-fma` capability, and selecting the
-    fused one spends F. One shape goes further: a matmul column loop whose
+    fused one spends F. Adjacent full blocks of one matmul output
+    row may group into a single pass (`column-group`, default one): the row
+    splats are shared, one term's group loads are contiguous in the right
+    operand, and each block keeps its own accumulator, so every lane's
+    event graph is the single-block one verbatim and the grouping spends
+    nothing under any contract. The group width is a measured per-target
+    policy: a wide out-of-order unit pays for grouping, while an in-order
+    unit whose load pipe serializes paired accesses regresses under it. One shape goes further: a matmul column loop whose
     inner axis still carries its declared fast contract (stamped by the
     bufferization as an `ondsp.numeric` attribute — a declaration, not a
     spend record, so it is an authority) may rebuild that axis into
     `interleave` independent per-lane chains, the seed staying the first
     leaf of chain zero, every other chain seeded by its own real product,
-    merged pairwise into one R-recording top fold. The windowed-sum loop
+    merged pairwise into one R-recording top fold; a grouped pass divides
+    the chains among its blocks so the live accumulators stay bounded. The windowed-sum loop
     carries the same stamp and rebuilds the same way, its chains seeded by
     the window's own leading values since no seed is designated, and capped
     at two chains — its terms are single adds, so halving the fold is where
@@ -785,6 +793,10 @@ def VectorizeOndspFpFilterOutputs
            "Number of independent per-lane chains carried over the column "
            "tile's unrolled inner axis; above one applies only where the "
            "loop carries the declared fast contract">,
+    Option<"columnGroup", "column-group", "int64_t", /*default=*/"1",
+           "Adjacent full column blocks of one matmul output row grouped "
+           "into a single pass; a measured per-target schedule policy, "
+           "exact under every contract">,
   ];
 }
 
