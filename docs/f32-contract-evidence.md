@@ -173,7 +173,7 @@ At the default width, `supports-vector-fma=false`:
 | `conv1d` convolution | scalar fused | {F} | `f32_conv1d_aot`, selection pinned |
 | `dct`, `lms`, `fir_interpolate` | scalar fused | {F} | selection pinned |
 | `goertzel` | scalar fused | {F} | `f32_goertzel_aot`, bitwise against `fma` plus a `.ll` permission pin |
-| `moving_average` | ordered scalar | {} | `f32_unary_aot`, association witness |
+| `moving_average` | batched window; at `K >= 4` the unrolled per-lane sum rebuilds into interleaved chains, adding {R}; below four terms every chained tree is the declared left fold, so the ordered form stays | {} or {R} by `K` | `fs_f32_solver` route audit (K=3 and K=8), `moving_average_f32.mlir` |
 | `gain` | base graph | {} | `f32_gain_lms_aot`, three objects agree |
 | `fir_filter`, `boundary = full` | mixed: guarded ordered edges, horizontal interior | {F} at each edge, {R} in the interior | `fp_fast_full_boundary_edge_aot`, executed edge skip |
 
@@ -264,12 +264,13 @@ one that rejects it.
 **Emitted is `{}` on every route.** Every permission a lowering spends is spent
 by the compiler; none is handed to the backend.
 
-**`fast` is genuinely unused on two routes only**, and for different reasons.
-`gain` is *semantically inert*: its legal set is one graph, so there is nothing
-to spend on any target. `moving_average` is *operationally unused*: its window
-sum is a designated reduction and **R** does apply, but the lowering builds the
-declared tree and no transform rebuilds it. The distinction matters —
-the second can change when a transform lands, the first cannot.
+**`fast` is genuinely unused on one route only.** `gain` is *semantically
+inert*: its legal set is one graph, so there is nothing to spend on any
+target. `moving_average` used to sit beside it as *operationally unused* —
+its window sum is a designated reduction and **R** does apply, but no
+transform rebuilt it. That distinction predicted its own end: the chained
+window rebuild landed and the route now spends **R** at `K >= 4`, while
+`gain` cannot change under any transform.
 
 **Everything else consumes something.** The four routes that select a fused
 chain spend **F**: choosing a fused event over a rounded product and an

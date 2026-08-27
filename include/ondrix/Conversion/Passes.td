@@ -721,7 +721,14 @@ def VectorizeOndspFpFilterOutputs
     spend record, so it is an authority) may rebuild that axis into
     `interleave` independent per-lane chains, the seed staying the first
     leaf of chain zero, every other chain seeded by its own real product,
-    merged pairwise into one R-recording top fold. Absence of the stamp
+    merged pairwise into one R-recording top fold. The windowed-sum loop
+    carries the same stamp and rebuilds the same way, its chains seeded by
+    the window's own leading values since no seed is designated, and capped
+    at two chains — its terms are single adds, so halving the fold is where
+    the latency payoff saturates while deeper cuts feed an in-order load
+    burst (a measured policy); windows
+    shorter than four terms stay ordered because every tree the round-robin
+    can build there is the declared left fold itself. Absence of the stamp
     reads as exact and refuses the rebuild, so a dropped attribute costs
     only the schedule. Running this pass before the horizontal fast reduction is the
     axis-selection policy: it removed the observed regression where a fast

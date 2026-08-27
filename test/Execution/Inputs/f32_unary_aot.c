@@ -74,10 +74,10 @@ static int check(const float *x, const char *label) {
   _mlir_ciface_f32_dct_fast(&dctFast, &inputRef);
 
   int failed = 0;
-  /* One window sum in declared order and one division. There is no product to
-   * fuse, but the window sum IS a reduction tree, so fast's reassociation
-   * permission applies and is simply not used: all three objects run the
-   * declared association. checkWindowAssociation pins that. */
+  /* One window sum in declared order and one division. The window sum IS a
+   * reduction tree, so fast's reassociation permission applies, but at K = 3
+   * the chained rebuild refuses (its tree is the declared left fold), so all
+   * three objects run the declared association. */
   for (int64_t n = 0; n < kAverages; ++n) {
     const float expected = referenceAverage(x, n);
     failed |= compare(label, "average off", n,

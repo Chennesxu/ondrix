@@ -962,8 +962,8 @@ struct MovingAverageOpInterface
         loc, rewriter.getFloatAttr(element, static_cast<double>(window)));
 
     // The loop form of the declared window graph: first element as the seed,
-    // left-to-right adds, one division per output. Every contract denotes
-    // these same events (no product exists to fuse), so nothing is spent.
+    // left-to-right adds, one division per output. No product exists to fuse;
+    // only a later fast batching may rebuild the sum, under the stamp below.
     rewriter.create<scf::ForOp>(
         loc, zero, outputEnd, one, ValueRange{},
         [&](OpBuilder &builder, Location bodyLoc, Value outputIndex, ValueRange) {
@@ -977,6 +977,11 @@ struct MovingAverageOpInterface
                     termLoc, termBuilder.create<arith::AddFOp>(termLoc, accumulator.front(), value)
                                  .getResult());
               });
+          // fast admits rebuilding the batched window sum, and the loop form
+          // is where the declaration would otherwise be lost; absence reads
+          // as exact.
+          if (fp.getContract() == ondrix::ondsp::FpContractMode::Fast)
+            sum->setAttr(ondrix::ondsp::getDeclaredNumericAttrName(), fp);
           Value mean = builder.create<arith::DivFOp>(bodyLoc, sum.getResult(0), count);
           builder.create<memref::StoreOp>(bodyLoc, mean, *output, outputIndex);
           builder.create<scf::YieldOp>(bodyLoc);

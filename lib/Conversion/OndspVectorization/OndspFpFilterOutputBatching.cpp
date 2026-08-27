@@ -368,6 +368,9 @@ struct FpWindowSumLoopShape {
   Value input;
   Value output;
   Value divisor;
+  /// The declared contract, read from the stamped `ondsp.numeric` attribute.
+  /// Absence reads as exact, so a dropped stamp costs schedule, not meaning.
+  ondrix::ondsp::FpContractMode contract = ondrix::ondsp::FpContractMode::Off;
 };
 
 /// Matches the loop the f32 moving-average bufferization emits: per output,
@@ -451,6 +454,10 @@ FailureOr<FpWindowSumLoopShape> matchFpWindowSumLoop(scf::ForOp loop, int64_t ve
   shape.input = seed.getMemRef();
   shape.output = store.getMemRef();
   shape.divisor = mean.getRhs();
+  if (auto declared =
+          window->getAttrOfType<ondrix::ondsp::FpAttr>(ondrix::ondsp::getDeclaredNumericAttrName()))
+    if (declared.getFormat().isF32())
+      shape.contract = declared.getContract();
 
   if (!isBatchableRankOneMemRef(shape.input) || !isBatchableRankOneMemRef(shape.output))
     return failure();
@@ -485,10 +492,12 @@ FailureOr<FpWindowSumLoopShape> matchFpWindowSumLoop(scf::ForOp loop, int64_t ve
 
 /// Batches W windowed-sum outputs per vector: each lane runs its declared
 /// per-output events verbatim (seed element, left-to-right adds, one
-/// division), so the authorization is the same per-lane event-graph identity
-/// as the filter batching, for every contract.
+/// division), so the batching itself is the same per-lane event-graph
+/// identity as the filter batching. Under the stamped fast contract the
+/// unrolled window rebuilds into `interleave` independent per-lane chains
+/// merged pairwise, with R recorded once on the top fold.
 void batchFpWindowSumOutputs(const FpWindowSumLoopShape &shape, int64_t vectorWidth,
-                             OpBuilder &builder) {
+                             int64_t interleave, OpBuilder &builder) {
   scf::ForOp loop = shape.loop;
   Location loc = loop.getLoc();
   int64_t fullBlocks = shape.outputLength / vectorWidth;
@@ -505,12 +514,44 @@ void batchFpWindowSumOutputs(const FpWindowSumLoopShape &shape, int64_t vectorWi
   Value divisorLanes = builder.create<vector::SplatOp>(loc, laneType, shape.divisor);
 
   bool unrolled = shape.windowLength <= kMaxUnrolledTerms;
+  // The declared fast contract admits a rebuilt window sum; below four terms
+  // every chained tree the round-robin can build is the declared left fold
+  // itself, so the ordered form stays and no record is written.
+  int64_t chains = 1;
+  // Capped at two chains: the terms are single adds, so halving the fold is
+  // where the latency payoff saturates, and deeper cuts trade it for a load
+  // burst an in-order unit serializes (a measured policy, not a guarantee).
+  if (shape.contract == ondrix::ondsp::FpContractMode::Fast && unrolled && shape.windowLength >= 4)
+    chains = std::min<int64_t>(std::min<int64_t>(interleave, 2), shape.windowLength);
   builder.create<scf::ForOp>(
       loc, zeroIndex, batchedEnd, batchStep, ValueRange{},
       [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
         Value sums =
             blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.input, blockStart);
-        if (unrolled) {
+        if (unrolled && chains > 1) {
+          auto loadValues = [&](int64_t term) {
+            Value base = createTermBase(blockBuilder, blockLoc, blockStart, term);
+            return blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.input, base);
+          };
+          SmallVector<Value> partials{sums};
+          for (int64_t chain = 1; chain < chains; ++chain)
+            partials.push_back(loadValues(chain));
+          for (int64_t term = chains; term < shape.windowLength; ++term)
+            partials[term % chains] = blockBuilder.create<arith::AddFOp>(
+                blockLoc, partials[term % chains], loadValues(term));
+          while (partials.size() > 1) {
+            SmallVector<Value> merged;
+            for (size_t i = 0; i + 1 < partials.size(); i += 2)
+              merged.push_back(
+                  blockBuilder.create<arith::AddFOp>(blockLoc, partials[i], partials[i + 1]));
+            if (partials.size() % 2 != 0)
+              merged.push_back(partials.back());
+            partials = std::move(merged);
+          }
+          sums = ondrix::ondsp::consumeFastPermission(
+              partials.front().getDefiningOp(),
+              ondrix::ondsp::FastPermission::RebuildReductionTree);
+        } else if (unrolled) {
           for (int64_t term = 1; term < shape.windowLength; ++term) {
             Value base = createTermBase(blockBuilder, blockLoc, blockStart, term);
             Value values =
@@ -1135,7 +1176,7 @@ public:
       }
       if (FailureOr<FpWindowSumLoopShape> shape = matchFpWindowSumLoop(loop, vectorWidth);
           succeeded(shape)) {
-        batchFpWindowSumOutputs(*shape, vectorWidth, builder);
+        batchFpWindowSumOutputs(*shape, vectorWidth, interleave, builder);
         continue;
       }
       if (FailureOr<FpColumnTileLoopShape> shape =

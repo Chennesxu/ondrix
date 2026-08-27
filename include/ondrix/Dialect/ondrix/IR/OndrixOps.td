@@ -1000,10 +1000,13 @@ def Ondrix_MovingAverageOp : Ondrix_Op<"moving_average", [Pure]> {
     result's representation or which operand it comes from, neither of which
     the contract specifies; the invalid condition is symmetric in the
     operands, so exchange does not change it. The first difference in value
-    appears at `K = 3`. The lowering builds the declared tree and
-    spends nothing. There is no product anywhere, so no contract can fuse, and
-    `off`, `fma` and `fast` denote the same events at every window the
-    lowering emits. `K`
+    appears at `K = 3`. The lowering builds the declared tree; a `fast`
+    site additionally carries its declaration forward (an `ondsp.numeric`
+    stamp on the window loop) so the batched schedule may rebuild the sum
+    into independent chains, spending `rebuild_reduction_tree` once on the
+    top fold. There is no product anywhere, so no contract can fuse, and
+    `off` and `fma` denote the same events at every window the lowering
+    emits. `K`
     is exact in binary32 over the admitted range, so the division is one
     correctly rounded event and carries no rounding attribute.
   }];

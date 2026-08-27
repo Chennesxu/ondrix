@@ -9,9 +9,10 @@
 // and fma legs of one window separable at all.
 //
 // The two fast legs differ in what they spend. A moving average has no product
-// to fuse, but its window sum is a reduction tree, so R applies and is simply
-// not used - checkWindowAssociation gates that the declared association is
-// what runs. The DCT rows select the fused chain, which spends F.
+// to fuse; its window sum is a reduction tree, so R applies, but at K = 3
+// every chained tree is the declared left fold, so the rebuild refuses and
+// the declared association is what runs (checkWindowAssociation gates that).
+// The DCT rows select the fused chain, which spends F.
 //
 // Both pin a SELECTION rather than the contract: fast may legally produce any
 // member, so a transform that starts choosing differently must redden these
