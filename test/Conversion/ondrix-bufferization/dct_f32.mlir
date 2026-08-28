@@ -3,6 +3,7 @@
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=4 supports-vector-fma=false" | FileCheck %s --check-prefix=NOFMA
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=16 supports-vector-fma=true" | FileCheck %s --check-prefix=TOOWIDE
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=3 supports-vector-fma=true" | FileCheck %s --check-prefix=PARTIAL
+// RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=4 supports-vector-fma=true row-horizontal=true" | FileCheck %s --check-prefix=ROWH
 
 // The table is transposed, `[term][output]`, so a tile of outputs is one
 // contiguous load; rank two is admissible because the binary32 profile carries
@@ -55,6 +56,39 @@ func.func @f32_dct8_fast(%input: tensor<8xf32>) -> tensor<8xf32> {
 // A fused body batches as fused events, never de-fused ones.
 // BATCHED-LABEL: func.func @f32_dct8_fast
 // BATCHED: math.fma {{.*}} : vector<4xf32>
+
+// The declaration rides the row loop so the schedule stage keeps an authority
+// for the per-row rebuild; the spend record alone must never be one.
+// CHECK-LABEL: func.func @f32_dct8_fast
+// CHECK: {ondsp.numeric = #ondsp.fp<format = f32, contract = fast>}
+
+// The off tile refuses the row-horizontal rewrite (no stamp) and keeps the
+// order-preserving output batching even when the policy asks for rows.
+// ROWH: memref.global "private" constant @__ondrix_dct8_f32_rows : memref<8x8xf32>
+// ROWH-LABEL: func.func @f32_dct8
+// ROWH-NOT: ondsp.fast_used
+// ROWH: vector.store {{.*}} : memref<8xf32>, vector<4xf32>
+
+// Under the stamped fast contract the tile becomes per-row horizontal
+// reductions: the value segments hoist once, each row streams one contiguous
+// row of the transposed sibling table, the halving tree folds the lanes, and
+// R is recorded once per row on the top fold.
+// ROWH-LABEL: func.func @f32_dct8_fast
+// ROWH: %[[ROWS:.*]] = memref.get_global @__ondrix_dct8_f32_rows : memref<8x8xf32>
+// ROWH: %[[X0:.*]] = vector.load %{{.*}} : memref<8xf32>, vector<4xf32>
+// ROWH: %[[X1:.*]] = vector.load %{{.*}} : memref<8xf32>, vector<4xf32>
+// ROWH: scf.for %[[ROW:.*]] =
+// ROWH: %[[C0:.*]] = vector.load %[[ROWS]][%[[ROW]], %{{.*}}] : memref<8x8xf32>, vector<4xf32>
+// ROWH: %[[P0:.*]] = arith.mulf %[[X0]], %[[C0]] : vector<4xf32>
+// ROWH: %[[C1:.*]] = vector.load %[[ROWS]][%[[ROW]], %{{.*}}] : memref<8x8xf32>, vector<4xf32>
+// ROWH: %[[ACC:.*]] = math.fma %[[X1]], %[[C1]], %[[P0]] {ondsp.fast_used = ["fuse_multiply_add"]} : vector<4xf32>
+// ROWH: %[[L:.*]] = vector.shuffle %[[ACC]], %[[ACC]] [0, 1] : vector<4xf32>, vector<4xf32>
+// ROWH: %[[H:.*]] = vector.shuffle %[[ACC]], %[[ACC]] [2, 3] : vector<4xf32>, vector<4xf32>
+// ROWH: %[[S2:.*]] = arith.addf %[[L]], %[[H]] : vector<2xf32>
+// ROWH: %[[E0:.*]] = vector.extract %[[S2]][0] : vector<2xf32>
+// ROWH: %[[E1:.*]] = vector.extract %[[S2]][1] : vector<2xf32>
+// ROWH: arith.addf %[[E0]], %[[E1]] {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
+// ROWH: memref.store {{.*}} : memref<8xf32>
 
 // Without a declared vector fused multiply-add there is no fused lane to batch
 // onto, and de-fusing would need an authority this loop no longer carries, so

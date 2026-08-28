@@ -805,6 +805,11 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
                                                             accumulator.front(), fp, termBuilder);
                   termBuilder.create<scf::YieldOp>(termLoc, updated);
                 });
+            // fast is the one contract that authorizes a later row rebuild,
+            // and this loop is where the declaration would otherwise be
+            // lost; absence reads as exact.
+            if (fp.getContract() == ondrix::ondsp::FpContractMode::Fast)
+              sum->setAttr(ondrix::ondsp::getDeclaredNumericAttrName(), fp);
             builder.create<memref::StoreOp>(outputLoc, sum.getResult(0), *fpOutput, output);
             builder.create<scf::YieldOp>(outputLoc);
           });

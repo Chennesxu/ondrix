@@ -171,7 +171,8 @@ At the default width, `supports-vector-fma=false`:
 | `matmul` | column tile; the fused body is refused without the vector fused multiply-add, so this configuration keeps the scalar fused chain. Under `supports-vector-fma=true` the tile batches, and its unrolled inner axis rebuilds into interleaved chains, adding {R} | {F} | `fs_f32_solver` route audit, `matmul_f32.mlir` |
 | `conv1d` correlation, K ≥ W | horizontal, separate | {R} | `f32_conv1d_aot`, term conservation |
 | `conv1d` convolution | scalar fused | {F} | `f32_conv1d_aot`, selection pinned |
-| `dct`, `lms`, `fir_interpolate` | scalar fused | {F} | selection pinned |
+| `dct` | 128-bit: batched output tile, scalar fused rows, {F}; 256-bit: per-row horizontal rebuild over the transposed sibling table, adding {R} per row | {F} or {F, R} by width | `fs_f32_solver` route audit (N=8 and N=16 w256), `dct_f32.mlir` |
+| `lms`, `fir_interpolate` | scalar fused | {F} | selection pinned |
 | `goertzel` | scalar fused | {F} | `f32_goertzel_aot`, bitwise against `fma` plus a `.ll` permission pin |
 | `moving_average` | batched window; at `K >= 4` the unrolled per-lane sum rebuilds into interleaved chains, adding {R}; below four terms every chained tree is the declared left fold, so the ordered form stays | {} or {R} by `K` | `fs_f32_solver` route audit (K=3 and K=8), `moving_average_f32.mlir` |
 | `gain` | base graph | {} | `f32_gain_lms_aot`, three objects agree |

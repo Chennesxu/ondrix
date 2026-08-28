@@ -46,19 +46,23 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // wider registers.
   if (options.vectorBits >= 64) {
     int64_t lanes = options.vectorBits / 32;
-    // Column grouping is a measured per-target policy: the 256-bit host
-    // class pays for it, while the 128-bit in-order class regresses (its
-    // load pipe serializes the grouped pass's paired accesses).
+    // Column grouping and chain depth are measured per-target policies: the
+    // 256-bit host class pays for grouping and for eight chains, while the
+    // 128-bit in-order class regresses under both (its load pipe serializes
+    // the wider schedules' paired accesses).
     int64_t columnGroup = options.vectorBits >= 256 ? 2 : 1;
+    int64_t chainDepth = options.vectorBits >= 256 ? 8 : 4;
     os << llvm::formatv("vectorize-ondsp-fp-filter-outputs{{vector-width={0} "
-                        "supports-vector-fma={1} interleave=4 column-group={2}},",
-                        lanes, options.supportsF32VectorFma ? "true" : "false", columnGroup);
+                        "supports-vector-fma={1} interleave=4 column-group={2} "
+                        "row-horizontal={3}},",
+                        lanes, options.supportsF32VectorFma ? "true" : "false", columnGroup,
+                        options.vectorBits >= 256 ? "true" : "false");
     // Four chains: a host-class heuristic for the FMA latency-throughput
     // product, not a target fact; the pass clamps to the block count per
     // site, and a target schedule parameter can override it later.
     os << llvm::formatv("vectorize-ondsp-fp-fast-memref-reduce{{vector-width={0} "
-                        "supports-vector-fma={1} interleave=4},",
-                        lanes, options.supportsF32VectorFma ? "true" : "false");
+                        "supports-vector-fma={1} interleave={2}},",
+                        lanes, options.supportsF32VectorFma ? "true" : "false", chainDepth);
     os << llvm::formatv("vectorize-ondsp-fixed-decimate-outputs{{vector-width={0}},", lanes);
     // Four machine vectors per certified chunk: like the interleave above this
     // is a host-class heuristic, not a target fact. Both ladders fall back per

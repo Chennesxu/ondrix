@@ -939,6 +939,9 @@ struct FpOutputTileLoopShape {
   bool fused = false;
   /// Whether new fused events carry the F record forward; bookkeeping only.
   bool recordsFuse = false;
+  /// The declared contract, read from the stamped `ondsp.numeric` attribute.
+  /// Absence reads as exact, so a dropped stamp costs schedule, not meaning.
+  ondrix::ondsp::FpContractMode contract = ondrix::ondsp::FpContractMode::Off;
 };
 
 /// Matches the loop shape the f32 DCT bufferization emits: per output, the
@@ -1076,7 +1079,123 @@ FailureOr<FpOutputTileLoopShape> matchFpOutputTileLoop(scf::ForOp loop, int64_t 
   shape.output = store.getMemRef();
   shape.fused = bodyFused;
   shape.recordsFuse = recordsFuse;
+  if (auto declared =
+          terms->getAttrOfType<ondrix::ondsp::FpAttr>(ondrix::ondsp::getDeclaredNumericAttrName()))
+    if (declared.getFormat().isF32())
+      shape.contract = declared.getContract();
   return shape;
+}
+
+/// Under the declared fast contract, rewrites the whole tile into per-row
+/// horizontal reductions: the value sequence is hoisted once into W-lane
+/// segments, each output row streams one contiguous row of an
+/// `[output][term]` sibling of the coefficient table (a pure data transpose
+/// of the same constant), the segment partials fold through an explicit
+/// halving tree, and R is recorded once per row on the tree's top fold. The
+/// per-row seed stays the row's own first products, so no identity leaf
+/// appears. Returns false (and changes nothing) when the shape or the table
+/// provenance refuses.
+bool rewriteFpOutputTileRowsHorizontal(const FpOutputTileLoopShape &shape, int64_t vectorWidth,
+                                       OpBuilder &builder) {
+  if (shape.contract != ondrix::ondsp::FpContractMode::Fast)
+    return false;
+  if (shape.termCount < vectorWidth || shape.termCount % vectorWidth != 0 ||
+      !llvm::isPowerOf2_64(vectorWidth) || vectorWidth < 2)
+    return false;
+  auto getGlobal = shape.table.getDefiningOp<memref::GetGlobalOp>();
+  if (!getGlobal)
+    return false;
+  auto module = shape.loop->getParentOfType<ModuleOp>();
+  auto tableGlobal = module.lookupSymbol<memref::GlobalOp>(getGlobal.getNameAttr());
+  if (!tableGlobal || !tableGlobal.getConstant())
+    return false;
+  auto initial = llvm::dyn_cast_or_null<DenseElementsAttr>(
+      tableGlobal.getInitialValue().value_or(Attribute()));
+  auto tableType = llvm::dyn_cast<MemRefType>(shape.table.getType());
+  if (!initial || !tableType || tableType.getRank() != 2 ||
+      tableType.getDimSize(0) != shape.termCount || tableType.getDimSize(1) != shape.outputCount)
+    return false;
+
+  // The `[output][term]` sibling: the same constant, transposed once here.
+  std::string rowName = (tableGlobal.getSymName() + "_rows").str();
+  auto rowType = MemRefType::get({shape.outputCount, shape.termCount}, builder.getF32Type());
+  if (auto existing = module.lookupSymbol<memref::GlobalOp>(rowName)) {
+    if (existing.getType() != rowType || !existing.getConstant())
+      return false;
+  } else {
+    auto values = initial.getValues<APFloat>();
+    SmallVector<APFloat> transposed(shape.outputCount * shape.termCount,
+                                    APFloat::getZero(APFloat::IEEEsingle()));
+    for (int64_t term = 0; term < shape.termCount; ++term)
+      for (int64_t output = 0; output < shape.outputCount; ++output)
+        transposed[output * shape.termCount + term] = values[term * shape.outputCount + output];
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPoint(tableGlobal);
+    builder.create<memref::GlobalOp>(
+        tableGlobal.getLoc(), rowName, builder.getStringAttr("private"), rowType,
+        DenseElementsAttr::get(RankedTensorType::get(rowType.getShape(), rowType.getElementType()),
+                               transposed),
+        /*constant=*/true, /*alignment=*/nullptr);
+  }
+
+  scf::ForOp loop = shape.loop;
+  Location loc = loop.getLoc();
+  int64_t segments = shape.termCount / vectorWidth;
+  auto laneType = VectorType::get({vectorWidth}, builder.getF32Type());
+
+  builder.setInsertionPoint(loop);
+  Value rowTable = builder.create<memref::GetGlobalOp>(loc, rowType, rowName);
+  Value zeroIndex = builder.create<arith::ConstantIndexOp>(loc, 0);
+  Value oneIndex = builder.create<arith::ConstantIndexOp>(loc, 1);
+  Value outputEnd = builder.create<arith::ConstantIndexOp>(loc, shape.outputCount);
+  SmallVector<Value> valueSegments;
+  for (int64_t segment = 0; segment < segments; ++segment) {
+    Value base = builder.create<arith::ConstantIndexOp>(loc, segment * vectorWidth);
+    valueSegments.push_back(builder.create<vector::LoadOp>(loc, laneType, shape.values, base));
+  }
+
+  builder.create<scf::ForOp>(
+      loc, zeroIndex, outputEnd, oneIndex, ValueRange{},
+      [&](OpBuilder &rowBuilder, Location rowLoc, Value row, ValueRange) {
+        auto loadRow = [&](int64_t segment) {
+          Value base = rowBuilder.create<arith::ConstantIndexOp>(rowLoc, segment * vectorWidth);
+          return rowBuilder.create<vector::LoadOp>(rowLoc, laneType, rowTable,
+                                                   ValueRange{row, base});
+        };
+        Value lanes = rowBuilder.create<arith::MulFOp>(rowLoc, valueSegments[0], loadRow(0));
+        for (int64_t segment = 1; segment < segments; ++segment) {
+          if (shape.fused) {
+            Operation *fma = rowBuilder.create<math::FmaOp>(rowLoc, valueSegments[segment],
+                                                            loadRow(segment), lanes);
+            lanes = shape.recordsFuse ? ondrix::ondsp::consumeFastPermission(
+                                            fma, ondrix::ondsp::FastPermission::FuseMultiplyAdd)
+                                      : fma->getResult(0);
+          } else {
+            Value product =
+                rowBuilder.create<arith::MulFOp>(rowLoc, valueSegments[segment], loadRow(segment));
+            lanes = rowBuilder.create<arith::AddFOp>(rowLoc, lanes, product);
+          }
+        }
+        for (int64_t width = vectorWidth; width > 2; width /= 2) {
+          SmallVector<int64_t> lowLanes, highLanes;
+          for (int64_t lane = 0; lane < width / 2; ++lane) {
+            lowLanes.push_back(lane);
+            highLanes.push_back(width / 2 + lane);
+          }
+          Value low = rowBuilder.create<vector::ShuffleOp>(rowLoc, lanes, lanes, lowLanes);
+          Value high = rowBuilder.create<vector::ShuffleOp>(rowLoc, lanes, lanes, highLanes);
+          lanes = rowBuilder.create<arith::AddFOp>(rowLoc, low, high);
+        }
+        Value evenLane = rowBuilder.create<vector::ExtractOp>(rowLoc, lanes, 0);
+        Value oddLane = rowBuilder.create<vector::ExtractOp>(rowLoc, lanes, 1);
+        Value result = ondrix::ondsp::consumeFastPermission(
+            rowBuilder.create<arith::AddFOp>(rowLoc, evenLane, oddLane),
+            ondrix::ondsp::FastPermission::RebuildReductionTree);
+        rowBuilder.create<memref::StoreOp>(rowLoc, result, shape.output, row);
+        rowBuilder.create<scf::YieldOp>(rowLoc);
+      });
+  loop.erase();
+  return true;
 }
 
 /// Batches `vectorWidth` outputs into lanes. Each lane keeps its own ordered
@@ -1222,8 +1341,10 @@ public:
       }
       if (FailureOr<FpOutputTileLoopShape> shape =
               matchFpOutputTileLoop(loop, vectorWidth, supportsVectorFma);
-          succeeded(shape))
-        batchFpOutputTiles(*shape, vectorWidth, builder);
+          succeeded(shape)) {
+        if (!rowHorizontal || !rewriteFpOutputTileRowsHorizontal(*shape, vectorWidth, builder))
+          batchFpOutputTiles(*shape, vectorWidth, builder);
+      }
     }
     ondrix::ondsp::summarizeFastPermissions(getOperation());
   }

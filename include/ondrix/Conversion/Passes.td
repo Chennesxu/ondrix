@@ -740,7 +740,16 @@ def VectorizeOndspFpFilterOutputs
     shorter than four terms stay ordered because every tree the round-robin
     can build there is the declared left fold itself. Absence of the stamp
     reads as exact and refuses the rebuild, so a dropped attribute costs
-    only the schedule. Running this pass before the horizontal fast reduction is the
+    only the schedule. Under `row-horizontal` a stamped fast output tile is
+    rewritten the other way around: the value sequence hoists once into
+    W-lane segments, each output row streams one contiguous row of an
+    `[output][term]` sibling of the coefficient table (the same constant,
+    transposed as pure data), the segment partials fold through an explicit
+    halving tree, and R is recorded once per row on the top fold. The row
+    seed stays the row's own first products. This is a measured per-target
+    policy: a wide unit with the whole value sequence resident in registers
+    pays for streaming the table rows, while the batched tile stays the
+    narrow-unit schedule. Running this pass before the horizontal fast reduction is the
     axis-selection policy: it removed the observed regression where a fast
     site with an output axis took a worse horizontal schedule. It is a
     policy, not a guarantee — no static pass order can promise relative
@@ -799,6 +808,10 @@ def VectorizeOndspFpFilterOutputs
            "Adjacent full column blocks of one matmul output row grouped "
            "into a single pass; a measured per-target schedule policy, "
            "exact under every contract">,
+    Option<"rowHorizontal", "row-horizontal", "bool", /*default=*/"false",
+           "Rewrite a declared-fast output tile into per-row horizontal "
+           "reductions over a transposed sibling table, spending R per row; "
+           "a measured per-target schedule policy">,
   ];
 }
 
