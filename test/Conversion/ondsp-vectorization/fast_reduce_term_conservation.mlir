@@ -7,7 +7,7 @@
 
 // CHECK-LABEL: func.func @negative_zero_initial
 // CHECK: %[[INIT:.*]] = arith.constant -0.000000e+00 : f32
-// CHECK: vector.reduction <add>, %{{[^ ]*}}, %[[INIT]] :
+// CHECK: arith.addf %[[INIT]], %{{[^ ]*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
 // CHECK-NOT: ondsp.reduce_mac
 func.func @negative_zero_initial(%lhs: memref<16xf32>, %rhs: memref<16xf32>) -> f32 {
   %initial = arith.constant -0.0 : f32
@@ -18,7 +18,7 @@ func.func @negative_zero_initial(%lhs: memref<16xf32>, %rhs: memref<16xf32>) -> 
 }
 
 // CHECK-LABEL: func.func @dynamic_initial
-// CHECK: vector.reduction <add>, %{{[^ ]*}}, %arg0 :
+// CHECK: arith.addf %arg0, %{{[^ ]*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
 // CHECK-NOT: ondsp.reduce_mac
 func.func @dynamic_initial(%initial: f32, %lhs: memref<16xf32>, %rhs: memref<16xf32>) -> f32 {
   %result = ondsp.reduce_mac %initial, %lhs, %rhs {

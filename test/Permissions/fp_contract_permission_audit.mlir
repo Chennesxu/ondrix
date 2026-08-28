@@ -24,7 +24,11 @@
 // CHECK: = fmul <8 x float> %
 // CHECK: = fmul <8 x float> %
 // CHECK: = fadd <8 x float> %
-// CHECK: = call float @llvm.vector.reduce.fadd.v8f32(float %0, <8 x float>
+// CHECK: = shufflevector <8 x float> %{{.*}}, <4 x i32> <i32 0, i32 1, i32 2, i32 3>
+// CHECK: = fadd <4 x float>
+// CHECK: = fadd <2 x float>
+// CHECK: = fadd float
+// CHECK: = fadd float %0
 // CHECK: = fmul float %
 // CHECK: = fadd float %
 
@@ -45,7 +49,8 @@
 // FUSED-LABEL: define float @fast_site(
 // FUSED: = fmul <8 x float> %
 // FUSED: = call <8 x float> @llvm.fma.v8f32(
-// FUSED: = call float @llvm.vector.reduce.fadd.v8f32(float %0, <8 x float>
+// FUSED: = shufflevector <8 x float> %{{.*}}, <4 x i32> <i32 0, i32 1, i32 2, i32 3>
+// FUSED: = fadd float %0
 // FUSED: = call float @llvm.fma.f32(
 
 func.func @off_site(%lhs: memref<?xf32>, %rhs: memref<?xf32>) -> f32 {

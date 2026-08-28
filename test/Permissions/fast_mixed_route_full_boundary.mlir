@@ -14,11 +14,12 @@
 // One declaration, two mechanisms in one function; the argument is in
 // docs/f32-contract-evidence.md.
 
-// Mechanism cardinality, not site identity.
-// ROUTE-COUNT-1: "vector.reduction"
-// ROUTE-NOT: "vector.reduction"
+// Mechanism cardinality, not site identity: the halving tree ends in one
+// R-recording scalar fold, so the record count is the mechanism count.
+// ROUTE-COUNT-1: ondsp.fast_used = ["rebuild_reduction_tree"]
+// ROUTE-NOT: ondsp.fast_used = ["rebuild_reduction_tree"]
 
-// RECORD-R: "vector.reduction"{{.*}}ondsp.fast_used = ["rebuild_reduction_tree"]
+// RECORD-R: "arith.addf"{{.*}}ondsp.fast_used = ["rebuild_reduction_tree"]{{.*}}(f32, f32) -> f32
 
 // Both fused events are scalar edge events; a compensating pair keeps the count.
 // SEP-TOTAL-COUNT-2: "math.fma"

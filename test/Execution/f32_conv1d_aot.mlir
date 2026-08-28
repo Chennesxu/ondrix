@@ -22,9 +22,9 @@
 // an integer sub-domain where every derivable regrouping is exact.
 //
 // SCHEDULE-LABEL: llvm.func @f32_conv1d_conv_fast
-// SCHEDULE-NOT: llvm.intr.vector.reduce.fadd
+// SCHEDULE-NOT: llvm.shufflevector %{{.*}} [0, 1, 2, 3] : vector<8xf32>
 // SCHEDULE-LABEL: llvm.func @f32_conv1d_corr_fast
-// SCHEDULE: llvm.intr.vector.reduce.fadd
+// SCHEDULE: llvm.shufflevector %{{.*}} [0, 1, 2, 3] : vector<8xf32>
 
 func.func @f32_conv1d_conv_off(%input: tensor<12xf32>, %kernel: tensor<4xf32>) -> tensor<9xf32>
     attributes {llvm.emit_c_interface} {

@@ -584,7 +584,7 @@ def VectorizeOndspFpFastMemRefReduce
                 "relaxation";
   let description = [{
     Splits a rank-1 f32 `ondsp.reduce_mac` under `contract = fast` into
-    W-lane partial sums, one cross-lane `vector.reduction <add>`, and a
+    W-lane partial sums, an explicit cross-lane halving tree, and a
     scalar tail. This is the transform that consumes the R permission the
     fast contract declares: rebuilding the reduction's additive tree across
     lanes is exactly the reordering a call site authorizes by writing
@@ -609,13 +609,15 @@ def VectorizeOndspFpFastMemRefReduce
     fold's accumulator, so it enters exactly once and nothing synthesizes a
     start value, and it stays the first leaf rather than moving among the
     terms. Below one full block there are no lanes to fill and the ordered
-    schedule is kept; that branch also covers the empty reduction. The final
-    fold is the ordered `llvm.vector.reduce.fadd`, a determined left-to-right
-    fold of the lane partials rather than a further permission, because
-    MLIR 17's `vector.reduction`
-    carries no fast-math attribute. The rewrite reorders reads only and
-    produces one scalar, so unlike the batching passes it carries no
-    aliasing obligation.
+    schedule is kept; that branch also covers the empty reduction. The
+    cross-lane fold is an explicit halving shuffle tree ending in one
+    R-recording scalar fold onto the initial value. A `vector.reduction`
+    would delegate the tree shape to the backend: flagless it lowers to the
+    ordered `llvm.vector.reduce.fadd`, and flagging it would hand the
+    backend the permission the record says the compiler spent — the emitted
+    object must stay flag-free with the schedule embodying the choice. The
+    rewrite reorders reads only and produces one scalar, so unlike the
+    batching passes it carries no aliasing obligation.
 
     `interleave = C` carries C independent partial-sum vectors through the
     block loop so the loop-carried dependence is one add per C blocks

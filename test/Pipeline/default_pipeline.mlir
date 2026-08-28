@@ -29,11 +29,12 @@ func.func @f32_filter(%input: tensor<40xf32>, %coeffs: tensor<8xf32>,
 }
 
 // A site that declared the fast relaxation gets the horizontal reduction the
-// exact contracts refuse: fused partial-sum lanes and one cross-lane fadd.
+// exact contracts refuse: fused partial-sum lanes and one halving lane tree
+// ending in the scalar fold (no reduction intrinsic, no backend flag).
 // CHECK: llvm.func @f32_filter_fast
-// CHECK: "llvm.intr.vector.reduce.fadd"
+// CHECK: llvm.shufflevector %{{.*}} [0, 1, 2, 3] : vector<8xf32>
 // SCALAR: llvm.func @f32_filter_fast
-// SCALAR-NOT: vector.reduce.fadd
+// SCALAR-NOT: llvm.shufflevector
 func.func @f32_filter_fast(%input: tensor<40xf32>, %coeffs: tensor<8xf32>,
                            %init: tensor<33xf32>) -> tensor<33xf32> {
   %result = ondrix.fir_filter %input, %coeffs, %init {

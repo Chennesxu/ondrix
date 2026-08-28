@@ -21,7 +21,8 @@
 // VECTOR-LABEL: func.func @f32_decimate
 // VECTOR-COUNT-2: vector.load {{.*}}vector<8xf32>
 // VECTOR: arith.mulf %{{[^ ]*}}, %{{[^ ]*}} : vector<8xf32>
-// VECTOR: vector.reduction <add>
+// VECTOR: vector.shuffle {{.*}} [0, 1, 2, 3] : vector<8xf32>, vector<8xf32>
+// VECTOR: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
 // VECTOR-NOT: ondsp.reduce_mac
 func.func @f32_decimate(
     %input: tensor<?xf32>, %coeffs: tensor<?xf32>, %init: tensor<?xf32>)

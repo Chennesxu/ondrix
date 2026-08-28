@@ -26,7 +26,8 @@
 // unvectorized kernel cannot satisfy the envelope by staying scalar.
 // VECTORIZED-LABEL: func.func @f32_dot_fast
 // VECTORIZED: arith.mulf %{{[^ ]*}}, %{{[^ ]*}} : vector<8xf32>
-// VECTORIZED: vector.reduction <add>
+// VECTORIZED: vector.shuffle {{.*}} [0, 1, 2, 3] : vector<8xf32>, vector<8xf32>
+// VECTORIZED: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
 
 // Dynamic extents on purpose: one object serves every trial length.
 func.func @f32_dot_fast(%lhs: memref<?xf32>, %rhs: memref<?xf32>) -> f32

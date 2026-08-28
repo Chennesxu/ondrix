@@ -174,9 +174,26 @@ public:
             builder.create<arith::AddFOp>(branchLoc, adaptor.getInitial(), partials.front()),
             ondrix::ondsp::FastPermission::RebuildReductionTree);
       }
+      // The lane fold is an explicit halving tree. A vector.reduction would
+      // delegate the tree shape to the backend: flagless it emits the ordered
+      // fold, and flagging it would hand the permission on. The schedule
+      // embodies the choice instead, so the emitted object stays flag-free.
+      Value lanes = partials.front();
+      for (int64_t width = vectorWidth; width > 2; width /= 2) {
+        SmallVector<int64_t> lowLanes, highLanes;
+        for (int64_t lane = 0; lane < width / 2; ++lane) {
+          lowLanes.push_back(lane);
+          highLanes.push_back(width / 2 + lane);
+        }
+        Value low = builder.create<vector::ShuffleOp>(branchLoc, lanes, lanes, lowLanes);
+        Value high = builder.create<vector::ShuffleOp>(branchLoc, lanes, lanes, highLanes);
+        lanes = builder.create<arith::AddFOp>(branchLoc, low, high);
+      }
+      Value evenLane = builder.create<vector::ExtractOp>(branchLoc, lanes, 0);
+      Value oddLane = builder.create<vector::ExtractOp>(branchLoc, lanes, 1);
+      Value laneSum = builder.create<arith::AddFOp>(branchLoc, evenLane, oddLane);
       Value folded = ondrix::ondsp::consumeFastPermission(
-          builder.create<vector::ReductionOp>(branchLoc, vector::CombiningKind::ADD,
-                                              partials.front(), adaptor.getInitial()),
+          builder.create<arith::AddFOp>(branchLoc, adaptor.getInitial(), laneSum),
           ondrix::ondsp::FastPermission::RebuildReductionTree);
       return createOrderedTail(branchLoc, adaptor, vectorEnd, bounds->upperBound, scalarStep,
                                folded, builder);
@@ -258,6 +275,11 @@ public:
     }
     if (vectorWidth > kMaxVectorWidth) {
       getOperation().emitError("vector-width must not exceed ") << kMaxVectorWidth;
+      signalPassFailure();
+      return;
+    }
+    if (vectorWidth > 1 && !llvm::isPowerOf2_64(vectorWidth)) {
+      getOperation().emitError("vector-width above one must be a power of two");
       signalPassFailure();
       return;
     }

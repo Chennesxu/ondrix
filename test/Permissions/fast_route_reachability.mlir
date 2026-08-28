@@ -23,7 +23,7 @@
 
 // Adapter shape 1, whole contiguous memref: the operands are the reduction.
 // CHECK-LABEL: llvm.func @shape_contiguous_dot
-// CHECK: llvm.intr.vector.reduce.fadd
+// CHECK: llvm.shufflevector %{{.*}} [0, 1, 2, 3] : vector<8xf32>
 func.func @shape_contiguous_dot(%lhs: memref<32xf32>, %rhs: memref<32xf32>) -> f32 {
   %r = ondrix.dot %lhs, %rhs {
     numeric = #ondsp.fp<format = f32, contract = fast>
@@ -32,7 +32,7 @@ func.func @shape_contiguous_dot(%lhs: memref<32xf32>, %rhs: memref<32xf32>) -> f
 }
 
 // CHECK-LABEL: llvm.func @shape_contiguous_fir
-// CHECK: llvm.intr.vector.reduce.fadd
+// CHECK: llvm.shufflevector %{{.*}} [0, 1, 2, 3] : vector<8xf32>
 func.func @shape_contiguous_fir(%window: memref<32xf32>, %coeffs: memref<32xf32>) -> f32 {
   %r = ondrix.fir %window, %coeffs {
     numeric = #ondsp.fp<format = f32, contract = fast>
@@ -42,7 +42,7 @@ func.func @shape_contiguous_fir(%window: memref<32xf32>, %coeffs: memref<32xf32>
 
 // Adapter shape 2, a sliding unit-stride window at a moving offset.
 // CHECK-LABEL: llvm.func @shape_sliding_window_filter
-// CHECK: llvm.intr.vector.reduce.fadd
+// CHECK: llvm.shufflevector %{{.*}} [0, 1, 2, 3] : vector<8xf32>
 func.func @shape_sliding_window_filter(%input: tensor<64xf32>, %coeffs: tensor<16xf32>)
     -> tensor<49xf32> {
   %init = tensor.empty() : tensor<49xf32>
@@ -56,7 +56,7 @@ func.func @shape_sliding_window_filter(%input: tensor<64xf32>, %coeffs: tensor<1
 // The decimated window is the same shape at a stride-D offset, which is why
 // it inherits the route rather than needing its own argument.
 // CHECK-LABEL: llvm.func @shape_sliding_window_decimate
-// CHECK: llvm.intr.vector.reduce.fadd
+// CHECK: llvm.shufflevector %{{.*}} [0, 1, 2, 3] : vector<8xf32>
 func.func @shape_sliding_window_decimate(%input: tensor<64xf32>, %coeffs: tensor<16xf32>)
     -> tensor<25xf32> {
   %init = tensor.empty() : tensor<25xf32>
@@ -68,7 +68,7 @@ func.func @shape_sliding_window_decimate(%input: tensor<64xf32>, %coeffs: tensor
 }
 
 // CHECK-LABEL: llvm.func @shape_sliding_window_correlation
-// CHECK: llvm.intr.vector.reduce.fadd
+// CHECK: llvm.shufflevector %{{.*}} [0, 1, 2, 3] : vector<8xf32>
 func.func @shape_sliding_window_correlation(%input: tensor<64xf32>, %kernel: tensor<16xf32>)
     -> tensor<49xf32> {
   %init = tensor.empty() : tensor<49xf32>
@@ -85,7 +85,7 @@ func.func @shape_sliding_window_correlation(%input: tensor<64xf32>, %kernel: ten
 // the composition a bufferization change could break silently.
 // CHECK-LABEL: llvm.func @shape_matrix_column_tile
 // CHECK: llvm.intr.fma{{.*}} -> vector<8xf32>
-// CHECK-NOT: llvm.intr.vector.reduce.fadd
+// CHECK-NOT: llvm.shufflevector %{{.*}} [0, 1, 2, 3] : vector<8xf32>
 func.func @shape_matrix_column_tile(%a: tensor<16x16xf32>, %b: tensor<16x16xf32>)
     -> tensor<16x16xf32> {
   %r = ondrix.matmul %a, %b {
@@ -96,7 +96,7 @@ func.func @shape_matrix_column_tile(%a: tensor<16x16xf32>, %b: tensor<16x16xf32>
 
 // Adapter shape 3, one operand used twice.
 // CHECK-LABEL: llvm.func @shape_self_product
-// CHECK: llvm.intr.vector.reduce.fadd
+// CHECK: llvm.shufflevector %{{.*}} [0, 1, 2, 3] : vector<8xf32>
 func.func @shape_self_product(%input: tensor<32xf32>) -> tensor<1xf32> {
   %r = ondrix.rms %input {
     numeric = #ondsp.fp<format = f32, contract = fast>
@@ -107,7 +107,7 @@ func.func @shape_self_product(%input: tensor<32xf32>) -> tensor<1xf32> {
 // Adapter shape 4, a reversed subview. Refused, so the route spends F on the
 // scalar fused chain instead — the one shape whose refusal is the point.
 // CHECK-LABEL: llvm.func @shape_reversed_subview
-// CHECK-NOT: llvm.intr.vector.reduce.fadd
+// CHECK-NOT: llvm.shufflevector %{{.*}} [0, 1, 2, 3] : vector<8xf32>
 func.func @shape_reversed_subview(%input: tensor<64xf32>, %kernel: tensor<16xf32>)
     -> tensor<49xf32> {
   %init = tensor.empty() : tensor<49xf32>

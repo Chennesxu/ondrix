@@ -26,9 +26,19 @@
 // CHECK: %[[PARTIAL:.*]] = scf.for {{.*}} iter_args(%[[ACC:.*]] = %[[SEED]]) -> (vector<8xf32>)
 // CHECK: %[[P:.*]] = arith.mulf %{{.*}}, %{{.*}} : vector<8xf32>
 // CHECK: arith.addf %[[ACC]], %[[P]] : vector<8xf32>
-// The fold's accumulator is the operation's own initial value, so no start
-// value is synthesized anywhere in the rebuilt tree.
-// CHECK: %[[REDUCED:.*]] = vector.reduction <add>, %[[PARTIAL]], %[[INIT:.*]] : vector<8xf32> into f32
+// The lane fold is an explicit halving tree ending in the R-recording fold
+// onto the operation's own initial value; no start value is synthesized and
+// no relaxation flag is handed to the backend.
+// CHECK: %[[L4:.*]] = vector.shuffle %[[PARTIAL]], %[[PARTIAL]] [0, 1, 2, 3] : vector<8xf32>, vector<8xf32>
+// CHECK: %[[H4:.*]] = vector.shuffle %[[PARTIAL]], %[[PARTIAL]] [4, 5, 6, 7] : vector<8xf32>, vector<8xf32>
+// CHECK: %[[S4:.*]] = arith.addf %[[L4]], %[[H4]] : vector<4xf32>
+// CHECK: %[[L2:.*]] = vector.shuffle %[[S4]], %[[S4]] [0, 1] : vector<4xf32>, vector<4xf32>
+// CHECK: %[[H2:.*]] = vector.shuffle %[[S4]], %[[S4]] [2, 3] : vector<4xf32>, vector<4xf32>
+// CHECK: %[[S2:.*]] = arith.addf %[[L2]], %[[H2]] : vector<2xf32>
+// CHECK: %[[E0:.*]] = vector.extract %[[S2]][0] : vector<2xf32>
+// CHECK: %[[E1:.*]] = vector.extract %[[S2]][1] : vector<2xf32>
+// CHECK: %[[LS:.*]] = arith.addf %[[E0]], %[[E1]] : f32
+// CHECK: %[[REDUCED:.*]] = arith.addf %[[INIT:.*]], %[[LS]] {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
 // CHECK: scf.for {{.*}} iter_args({{.*}} = %[[REDUCED]]) -> (f32)
 // Fewer than W elements has no lane to fill, so the ordered schedule is kept
 // rather than padded up to one block.
@@ -49,7 +59,8 @@ func.func @f32_dot_fast_dynamic(%lhs: memref<?xf32>, %rhs: memref<?xf32>, %init:
 // FUSED-NOT: fastmath
 
 // CHECK-LABEL: func.func @f32_dot_fast_static
-// CHECK: vector.reduction <add>
+// CHECK: vector.shuffle
+// CHECK: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
 func.func @f32_dot_fast_static(%lhs: memref<40xf32>, %rhs: memref<40xf32>) -> f32 {
   %zero = arith.constant 0.0 : f32
   %r = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fast>} : (f32, memref<40xf32>, memref<40xf32>) -> f32

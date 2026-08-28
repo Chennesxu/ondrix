@@ -30,7 +30,9 @@
 // CHECK: %[[M0:.*]] = arith.addf %[[LOOP]]#0, %[[LOOP]]#1 : vector<4xf32>
 // CHECK: %[[M1:.*]] = arith.addf %[[LOOP]]#2, %[[LOOP]]#3 : vector<4xf32>
 // CHECK: %[[TOP:.*]] = arith.addf %[[M0]], %[[M1]] : vector<4xf32>
-// CHECK: vector.reduction <add>, %[[TOP]], %{{.*}} : vector<4xf32> into f32
+// CHECK: vector.shuffle %[[TOP]], %[[TOP]] [0, 1] : vector<4xf32>, vector<4xf32>
+// CHECK: vector.shuffle %[[TOP]], %[[TOP]] [2, 3] : vector<4xf32>, vector<4xf32>
+// CHECK: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
 // The fused capability spends F per chained term, on the loop terms and on
 // the leftover blocks alike; the seeds stay raw products (nothing to fuse).
 // FUSED: module attributes {ondsp.fast_used = ["fuse_multiply_add", "rebuild_reduction_tree"]}
@@ -39,7 +41,7 @@
 // FUSED: scf.for
 // FUSED-COUNT-4: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<4xf32>
 // FUSED: scf.yield
-// FUSED: vector.reduction <add>
+// FUSED: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
 func.func @chains_divide_blocks(%lhs: memref<64xf32>, %rhs: memref<64xf32>, %init: f32) -> f32 {
   %r = ondsp.reduce_mac %init, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fast>} : (f32, memref<64xf32>, memref<64xf32>) -> f32
   return %r : f32
@@ -54,7 +56,7 @@ func.func @chains_divide_blocks(%lhs: memref<64xf32>, %rhs: memref<64xf32>, %ini
 // ODD-NEXT: %[[OC0:.*]] = arith.addf %[[OLOOP]]#0, %[[OL0]] : vector<4xf32>
 // ODD: %[[OM0:.*]] = arith.addf %[[OC0]], %[[OLOOP]]#1 : vector<4xf32>
 // ODD: %[[OTOP:.*]] = arith.addf %[[OM0]], %[[OLOOP]]#2 : vector<4xf32>
-// ODD: vector.reduction <add>, %[[OTOP]]
+// ODD: vector.shuffle %[[OTOP]], %[[OTOP]] [0, 1]
 // ODD: scf.for {{.*}} -> (f32)
 func.func @odd_chain_merge(%lhs: memref<29xf32>, %rhs: memref<29xf32>, %init: f32) -> f32 {
   %r = ondsp.reduce_mac %init, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fast>} : (f32, memref<29xf32>, memref<29xf32>) -> f32
@@ -70,7 +72,7 @@ func.func @odd_chain_merge(%lhs: memref<29xf32>, %rhs: memref<29xf32>, %init: f3
 // CHECK-NEXT: arith.addf %[[LLOOP]]#0, %[[L0]] : vector<4xf32>
 // CHECK: arith.addf %[[LLOOP]]#1, %{{.*}} : vector<4xf32>
 // CHECK: arith.addf %[[LLOOP]]#2, %{{.*}} : vector<4xf32>
-// CHECK: vector.reduction <add>
+// CHECK: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
 func.func @leftover_blocks_fold_per_chain(%lhs: memref<44xf32>, %rhs: memref<44xf32>, %init: f32) -> f32 {
   %r = ondsp.reduce_mac %init, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fast>} : (f32, memref<44xf32>, memref<44xf32>) -> f32
   return %r : f32
@@ -82,7 +84,7 @@ func.func @leftover_blocks_fold_per_chain(%lhs: memref<44xf32>, %rhs: memref<44x
 // CHECK: %[[C1:.*]] = arith.mulf {{.*}} : vector<4xf32>
 // CHECK: scf.for {{.*}} iter_args(%{{.*}} = %[[C0]], %{{.*}} = %[[C1]])
 // CHECK: arith.addf
-// CHECK: vector.reduction <add>
+// CHECK: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
 func.func @chains_clamped_to_blocks(%lhs: memref<8xf32>, %rhs: memref<8xf32>, %init: f32) -> f32 {
   %r = ondsp.reduce_mac %init, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = fast>} : (f32, memref<8xf32>, memref<8xf32>) -> f32
   return %r : f32
