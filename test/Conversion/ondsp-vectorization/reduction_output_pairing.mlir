@@ -155,3 +155,36 @@ func.func @leave_odd_web_unpaired(%arg0: memref<4xi16>) -> memref<4xi16> {
   memref.store %11, %alloc[%c2] : memref<4xi16>
   return %alloc : memref<4xi16>
 }
+
+// The stack budget accepts exactly 1024 bytes (8 pairs x 64 x i16); the
+// unmatched file refuses the next size up, so the boundary is pinned two-sided.
+// CHECK-LABEL: func.func @pair_at_exact_stack_budget
+// CHECK: memref.alloca() {alignment = 4 : i64} : memref<512xi16>
+// CHECK: lanes = 2
+func.func @pair_at_exact_stack_budget(%arg0: memref<2x32xi16>, %arg1: memref<32x16xi16>) -> memref<2x16xi16> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c16 = arith.constant 16 : index
+  %c32 = arith.constant 32 : index
+  %alloc = memref.alloc() {alignment = 64 : i64} : memref<2x16xi16>
+  %alloc_0 = memref.alloc() {alignment = 64 : i64} : memref<16x32xi16>
+  scf.for %arg2 = %c0 to %c16 step %c1 {
+    scf.for %arg3 = %c0 to %c32 step %c1 {
+      %0 = memref.load %arg1[%arg3, %arg2] : memref<32x16xi16>
+      memref.store %0, %alloc_0[%arg2, %arg3] : memref<16x32xi16>
+    }
+  }
+  scf.for %arg2 = %c0 to %c2 step %c1 {
+    %subview = memref.subview %arg0[%arg2, 0] [1, 32] [1, 1] : memref<2x32xi16> to memref<32xi16, strided<[1], offset: ?>>
+    scf.for %arg3 = %c0 to %c16 step %c1 {
+      %subview_1 = memref.subview %alloc_0[%arg3, 0] [1, 32] [1, 1] : memref<16x32xi16> to memref<32xi16, strided<[1], offset: ?>>
+      %0 = ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = saturate>
+      %1 = ondsp.reduce_mac %0, %subview, %subview_1 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<32xi16, strided<[1], offset: ?>>, memref<32xi16, strided<[1], offset: ?>>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+      %2 = ondsp.acc_export %1 {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<nearest_ties_positive>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+      memref.store %2, %alloc[%arg2, %arg3] : memref<2x16xi16>
+    }
+  }
+  memref.dealloc %alloc_0 : memref<16x32xi16>
+  return %alloc : memref<2x16xi16>
+}
