@@ -1,13 +1,16 @@
 // RUN: ondrix-opt %s --scalarize-ondsp-fixed-reduce-mac --split-input-file | FileCheck %s
 
-// The static fixed reduction becomes its definitional ordered mac loop.
+// A short static fixed reduction unrolls to its definitional straight-line
+// ordered mac chain: the loop form would pay an index update and a branch
+// per term.
 // CHECK-LABEL: func.func @expands_static(
-// CHECK: %[[LOOP:.*]] = scf.for %[[I:.*]] = %{{.*}} iter_args(%[[ACC:.*]] = %{{.*}}) -> (!ondsp.acc
-// CHECK: %[[X:.*]] = memref.load %{{.*}}[%[[I]]] : memref<5xi16>
-// CHECK: %[[C:.*]] = memref.load %{{.*}}[%[[I]]] : memref<5xi16>
-// CHECK: %[[NEXT:.*]] = ondsp.mac %[[ACC]], %[[X]], %[[C]] {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>}
-// CHECK: scf.yield %[[NEXT]]
-// CHECK: ondsp.acc_export %[[LOOP]]
+// CHECK-NOT: scf.for
+// CHECK: %[[X0:.*]] = memref.load %{{.*}}[%c0] : memref<5xi16>
+// CHECK: %[[C0:.*]] = memref.load %{{.*}}[%c0] : memref<5xi16>
+// CHECK: %[[M0:.*]] = ondsp.mac %{{.*}}, %[[X0]], %[[C0]] {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>}
+// CHECK-COUNT-4: ondsp.mac
+// CHECK-NOT: scf.for
+// CHECK: ondsp.acc_export
 // CHECK-NOT: ondsp.reduce_mac
 func.func @expands_static(%window: memref<5xi16>, %coefficients: memref<5xi16>) -> i16 {
   %z = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
@@ -28,6 +31,21 @@ func.func @expands_static(%window: memref<5xi16>, %coefficients: memref<5xi16>) 
 func.func @expands_dynamic(%window: memref<?xi16>, %coefficients: memref<?xi16>) -> i16 {
   %z = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
   %acc = ondsp.reduce_mac %z, %window, %coefficients {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<?xi16>, memref<?xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %out = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %out : i16
+}
+
+// -----
+
+// Past the unroll bound the static reduction keeps its ordered mac loop.
+// CHECK-LABEL: func.func @expands_long_static(
+// CHECK: scf.for %[[I:.*]] = %{{.*}} iter_args(%[[ACC:.*]] = %{{.*}}) -> (!ondsp.acc
+// CHECK: ondsp.mac
+// CHECK: scf.yield
+// CHECK-NOT: ondsp.reduce_mac
+func.func @expands_long_static(%window: memref<65xi16>, %coefficients: memref<65xi16>) -> i16 {
+  %z = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %acc = ondsp.reduce_mac %z, %window, %coefficients {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<65xi16>, memref<65xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
   %out = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
   return %out : i16
 }

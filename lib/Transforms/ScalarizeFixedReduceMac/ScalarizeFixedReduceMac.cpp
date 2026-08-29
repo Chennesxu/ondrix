@@ -42,6 +42,29 @@ struct ScalarizeOndspFixedReduceMac final
         continue;
 
       OpBuilder builder(reduce);
+      Location loc = reduce.getLoc();
+
+      // A short static reduction unrolls to a straight-line chain: the loop
+      // form pays an index update and a branch per term, which outweighs the
+      // term itself on the MAC capability (measured; 64 is the batcher's
+      // unroll bound).
+      auto lhsType = cast<MemRefType>(reduce.getLhs().getType());
+      auto rhsType = cast<MemRefType>(reduce.getRhs().getType());
+      if (!lhsType.isDynamicDim(0) && !rhsType.isDynamicDim(0) &&
+          lhsType.getDimSize(0) == rhsType.getDimSize(0) && lhsType.getDimSize(0) <= 64) {
+        Value chain = reduce.getInitial();
+        for (int64_t term = 0; term < lhsType.getDimSize(0); ++term) {
+          Value index = builder.create<arith::ConstantIndexOp>(loc, term);
+          Value sample = builder.create<memref::LoadOp>(loc, reduce.getLhs(), index);
+          Value coefficient = builder.create<memref::LoadOp>(loc, reduce.getRhs(), index);
+          chain = builder.create<MacOp>(loc, chain.getType(), chain, sample, coefficient, numeric,
+                                        *reduce.getProduct());
+        }
+        reduce.getResult().replaceAllUsesWith(chain);
+        reduce.erase();
+        continue;
+      }
+
       FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
           ondrix::conversion::createRankOneMemRefReductionBounds(
               reduce, reduce.getLhs(), reduce.getRhs(), numeric.getStorage(),
@@ -49,7 +72,6 @@ struct ScalarizeOndspFixedReduceMac final
       if (failed(bounds))
         return signalPassFailure();
 
-      Location loc = reduce.getLoc();
       Value step = builder.create<arith::ConstantIndexOp>(loc, 1);
       auto loop = builder.create<scf::ForOp>(
           loc, bounds->lowerBound, bounds->upperBound, step, ValueRange{reduce.getInitial()},
