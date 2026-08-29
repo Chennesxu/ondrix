@@ -16,6 +16,7 @@
 
 #include "llvm/ADT/SmallVector.h"
 
+#include <cmath>
 #include <optional>
 
 namespace ondrix {
@@ -543,7 +544,22 @@ void batchFpWindowSumOutputs(const FpWindowSumLoopShape &shape, int64_t vectorWi
   Value windowEnd = builder.create<arith::ConstantIndexOp>(loc, shape.windowLength);
   Value batchedEnd = builder.create<arith::ConstantIndexOp>(loc, batchedOutputs);
   Value batchStep = builder.create<arith::ConstantIndexOp>(loc, vectorWidth);
-  Value divisorLanes = builder.create<vector::SplatOp>(loc, laneType, shape.divisor);
+  // A power-of-two divisor's mean is realized as the exact reciprocal
+  // multiply: the two round identically for every f32 input, so no contract
+  // can distinguish them, and the multiply never waits on the divider.
+  FloatAttr divisorValue;
+  bool reciprocalExact = false;
+  double divisor = 0.0;
+  if (matchPattern(shape.divisor, m_Constant(&divisorValue))) {
+    divisor = divisorValue.getValue().convertToFloat();
+    int exponent = 0;
+    reciprocalExact = divisor > 0.0 && std::frexp(divisor, &exponent) == 0.5;
+  }
+  Value scale = shape.divisor;
+  if (reciprocalExact)
+    scale = builder.create<arith::ConstantOp>(
+        loc, builder.getF32FloatAttr(static_cast<float>(1.0 / divisor)));
+  Value divisorLanes = builder.create<vector::SplatOp>(loc, laneType, scale);
 
   bool unrolled = shape.windowLength <= kMaxUnrolledTerms;
   // The declared fast contract admits a rebuilt window sum; below four terms
@@ -603,7 +619,10 @@ void batchFpWindowSumOutputs(const FpWindowSumLoopShape &shape, int64_t vectorWi
               });
           sums = terms.getResult(0);
         }
-        Value means = blockBuilder.create<arith::DivFOp>(blockLoc, sums, divisorLanes);
+        Value means =
+            reciprocalExact
+                ? blockBuilder.create<arith::MulFOp>(blockLoc, sums, divisorLanes).getResult()
+                : blockBuilder.create<arith::DivFOp>(blockLoc, sums, divisorLanes).getResult();
         blockBuilder.create<vector::StoreOp>(blockLoc, means, shape.output, blockStart);
         blockBuilder.create<scf::YieldOp>(blockLoc);
       });

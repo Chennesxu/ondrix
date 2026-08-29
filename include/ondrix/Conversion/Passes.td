@@ -744,7 +744,10 @@ def VectorizeOndspFpFilterOutputs
     the latency payoff saturates while deeper cuts feed an in-order load
     burst (a measured policy); windows
     shorter than four terms stay ordered because every tree the round-robin
-    can build there is the declared left fold itself. Absence of the stamp
+    can build there is the declared left fold itself. A batched window's
+    power-of-two mean divisor is realized as its exact reciprocal multiply —
+    bitwise the same mean for every f32 input, so no contract distinguishes
+    the two — while any other divisor keeps its division. Absence of the stamp
     reads as exact and refuses the rebuild, so a dropped attribute costs
     only the schedule. Under `row-horizontal` a stamped fast output tile is
     rewritten the other way around: the value sequence hoists once into

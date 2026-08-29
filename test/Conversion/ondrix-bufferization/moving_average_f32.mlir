@@ -18,10 +18,13 @@
 // CHECK: %[[MEAN:.*]] = arith.divf %[[SUM]], %{{.*}} : f32
 // CHECK: memref.store %[[MEAN]], %[[OUT]][%[[N]]]
 
+// The power-of-two divisor is realized as its exact reciprocal multiply:
+// bitwise the same mean for every input, on the batched outputs only.
 // BATCHED-LABEL: func.func @f32_moving_average
+// BATCHED: arith.constant 1.250000e-01 : f32
 // BATCHED: vector.load {{.*}} : memref<64xf32>, vector<8xf32>
 // BATCHED-COUNT-7: arith.addf {{.*}} : vector<8xf32>
-// BATCHED: arith.divf {{.*}} : vector<8xf32>
+// BATCHED: arith.mulf {{.*}} : vector<8xf32>
 // BATCHED: vector.store {{.*}} : memref<57xf32>, vector<8xf32>
 // 57 outputs at width 8 leave one ordered output behind the 7 full blocks.
 // BATCHED: scf.for %{{.*}} = %c56
@@ -48,7 +51,7 @@ func.func @f32_moving_average(%input: tensor<64xf32>) -> tensor<57xf32> {
 // fold and records nothing.
 // BATCHED-LABEL: func.func @f32_moving_average_fast
 // BATCHED-NOT: ondsp.fast_used
-// BATCHED: arith.divf {{.*}} : vector<8xf32>
+// BATCHED: arith.mulf {{.*}} : vector<8xf32>
 
 // The declared fast contract admits the rebuilt window: two chains seeded
 // by the leading loads, alternating terms, one R-recording top fold.
@@ -68,7 +71,7 @@ func.func @f32_moving_average(%input: tensor<64xf32>) -> tensor<57xf32> {
 // CHAINED: %[[T7:.*]] = vector.load {{.*}} : memref<16xf32>, vector<4xf32>
 // CHAINED: %[[B2:.*]] = arith.addf %[[B1]], %[[T7]] : vector<4xf32>
 // CHAINED: arith.addf %[[A2]], %[[B2]] {ondsp.fast_used = ["rebuild_reduction_tree"]} : vector<4xf32>
-// CHAINED: arith.divf {{.*}} : vector<4xf32>
+// CHAINED: arith.mulf {{.*}} : vector<4xf32>
 // CHAINED: vector.store {{.*}} : memref<9xf32>, vector<4xf32>
 // 9 outputs at width 4 leave one ordered output behind the 2 full blocks.
 // CHAINED: scf.for %{{.*}} = %c8
@@ -81,8 +84,11 @@ func.func @f32_moving_average_fast(%input: tensor<16xf32>) -> tensor<9xf32> {
 }
 
 // Below four terms every chained tree is the declared left fold itself, so
-// the fast window stays ordered and no record is written.
+// the fast window stays ordered and no record is written. A window of three
+// has no exact reciprocal, so the batched mean keeps its division.
 // CHAINED-LABEL: func.func @f32_moving_average_fast_short
+// CHAINED-NOT: ondsp.fast_used
+// CHAINED: arith.divf {{.*}} : vector<4xf32>
 // CHAINED-NOT: ondsp.fast_used
 func.func @f32_moving_average_fast_short(%input: tensor<8xf32>) -> tensor<6xf32> {
   %result = ondrix.moving_average %input {
