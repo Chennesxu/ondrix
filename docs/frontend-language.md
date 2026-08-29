@@ -411,7 +411,10 @@ modes, because its operation contract has no realization gate for `fast`.
 The floating-point spellings name a contract where their
 fixed-point counterparts name a rounding mode, because a floating-point result
 has no requantization boundary to round; `rms(x, contract=...)` also accepts
-any extent in range rather than only powers of two. `gain` is the one builtin
+any extent in range rather than only powers of two. f32 `rms` additionally
+admits a scalar spelling — a static `buffer[f32, N]` operand returning a bare
+`f32` — which lowers to `dot(x, x)` plus one division and one root, so the
+result crosses the boundary without an owning allocation. `gain` is the one builtin
 whose three declarations denote the same event graph, since a lone multiply
 offers no tree to rebuild and no addend to fuse.
 

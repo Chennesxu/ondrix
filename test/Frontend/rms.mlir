@@ -33,3 +33,20 @@
 // F32-SAME: tensor<10xf32>) -> tensor<1xf32>
 // F32: ondrix.rms
 // F32-SAME: numeric = #ondsp.fp<format = f32, contract = off>
+
+// RUN: ondrix-compile %S/Inputs/f32_rms_scalar.ox | FileCheck %s --check-prefix=SCALAR
+// RUN: not ondrix-compile %S/Inputs/invalid_rms_scalar_q15.ox 2>&1 | FileCheck %s --check-prefix=SCALARQ15
+// RUN: not ondrix-compile %S/Inputs/invalid_rms_scalar_tensor.ox 2>&1 | FileCheck %s --check-prefix=SCALARBUF
+
+// The scalar spelling rides the dot route with the same buffer as both
+// operands; pinning both discriminates a two-operand dot substitution.
+// SCALAR-LABEL: func.func @f32_rms_scalar(
+// SCALAR-SAME: %[[X:.*]]: memref<10xf32>) -> f32
+// SCALAR: %[[SS:.*]] = ondrix.dot %[[X]], %[[X]] {numeric = #ondsp.fp<format = f32, contract = fast>}
+// SCALAR: %[[N:.*]] = arith.constant 1.000000e+01 : f32
+// SCALAR: %[[MEAN:.*]] = arith.divf %[[SS]], %[[N]] : f32
+// SCALAR: %[[ROOT:.*]] = math.sqrt %[[MEAN]] : f32
+// SCALAR: return %[[ROOT]] : f32
+
+// SCALARQ15: invalid_rms_scalar_q15.ox:2:10: error: scalar rms requires one f32 buffer operand
+// SCALARBUF: invalid_rms_scalar_tensor.ox:2:10: error: scalar rms requires one f32 buffer operand

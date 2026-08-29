@@ -178,6 +178,10 @@ At the default width, `supports-vector-fma=false`:
 | `gain` | base graph | {} | `f32_gain_lms_aot`, three objects agree |
 | `fir_filter`, `boundary = full` | mixed: guarded ordered edges, horizontal interior | {F} at each edge, {R} in the interior | `fp_fast_full_boundary_edge_aot`, executed edge skip |
 
+The scalar `rms` spelling (`buffer` operand, bare `f32` result) lowers to
+`dot(x, x)` followed by one division and one root, so it takes the `dot` row;
+the FS route audit pins it separately (`rms scalar` cases).
+
 What moves a route between rows:
 
 - **Kernel stride.** `conv1d` bufferizes both modes to the same

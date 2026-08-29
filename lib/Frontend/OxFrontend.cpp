@@ -11,6 +11,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
@@ -2847,6 +2848,29 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       diagnostics.error(ast.result.position, "goertzel currently binds only the f32 profile");
       return std::nullopt;
     }
+    // The scalar rms spelling mirrors scalar dot: one buffer operand reduced
+    // to a bare f32, so the boundary owns no allocation.
+    if (ast.result.kind == ReductionKind::Rms && !ast.primaryResult().tensor) {
+      if (!isFloat || constexprCount != 0 || !lhsParameter || lhsParameter->isTensor() ||
+          lhsParameter->isScalar()) {
+        diagnostics.error(ast.result.position, "scalar rms requires one f32 buffer operand");
+        return std::nullopt;
+      }
+      const std::optional<int64_t> &extent = getRankOneExtent(lhsParameter->shape);
+      if (!hasRank(lhsParameter->shape, 1) || !extent || *extent < 2 || *extent > 4096) {
+        diagnostics.error(ast.result.position,
+                          "rms currently requires an input extent in [2, 4096]");
+        return std::nullopt;
+      }
+      auto contract = parseFpContract(ast.result.fpContract);
+      if (!contract) {
+        diagnostics.error(ast.result.position,
+                          llvm::Twine("unsupported floating-point contract '") +
+                              ast.result.fpContract + "'");
+        return std::nullopt;
+      }
+      return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, *contract};
+    }
     if (constexprCount != 0 || !ast.primaryResult().tensor || !lhsParameter ||
         !lhsParameter->isTensor() ||
         (ast.primaryResult().type != SourceType::Q15 && !(admitsFloat && isFloat))) {
@@ -3160,8 +3184,8 @@ static Location getLocation(MLIRContext &context, llvm::StringRef sourceName,
 static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::StringRef sourceName,
                                             MLIRContext &context) {
   context.loadDialect<arith::ArithDialect, bufferization::BufferizationDialect, func::FuncDialect,
-                      memref::MemRefDialect, tensor::TensorDialect, ir::OndrixDialect,
-                      ondsp::OndspDialect>();
+                      math::MathDialect, memref::MemRefDialect, tensor::TensorDialect,
+                      ir::OndrixDialect, ondsp::OndspDialect>();
   OpBuilder builder(&context);
   Location kernelLocation = getLocation(context, sourceName, kernel.ast.position);
   OwningOpRef<ModuleOp> module = ModuleOp::create(kernelLocation);
@@ -3430,6 +3454,23 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
 
   Value lhs = arguments.lookup(*getParameterOperand(kernel.ast.result, 0));
+  if (kernel.ast.result.kind == ReductionKind::Rms && !isa<RankedTensorType>(resultType)) {
+    // Only the reduction is contract indexed, so the scalar spelling rides
+    // the dot route; the division and the root are single IEEE events.
+    auto numeric = ondsp::FpAttr::get(&context, elementType, *kernel.fpContract);
+    Value sumOfSquares = builder.create<ir::DotOp>(expressionLocation, elementType, lhs, lhs,
+                                                   numeric, ondsp::ProductAttr());
+    int64_t extent = cast<MemRefType>(lhs.getType()).getDimSize(0);
+    Value count = builder.create<arith::ConstantOp>(
+        expressionLocation, builder.getF32FloatAttr(static_cast<float>(extent)));
+    Value mean = builder.create<arith::DivFOp>(expressionLocation, sumOfSquares, count);
+    Value root = builder.create<math::SqrtOp>(expressionLocation, mean);
+    builder.create<func::ReturnOp>(expressionLocation, root);
+    module->push_back(function);
+    if (failed(verify(*module)))
+      return {};
+    return module;
+  }
   if (isUnaryTensorKind(kernel.ast.result.kind)) {
     auto outputType = cast<RankedTensorType>(resultType);
     ondsp::FixedAttr numeric;

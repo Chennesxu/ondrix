@@ -8,6 +8,7 @@ add_ondrix_library(OndrixFrontend
   MLIRBufferizationDialect
   MLIRFuncDialect
   MLIRIR
+  MLIRMathDialect
   MLIRMemRefDialect
   MLIRSupport
   MLIRTensorDialect
