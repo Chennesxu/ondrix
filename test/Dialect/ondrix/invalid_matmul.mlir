@@ -45,10 +45,10 @@ func.func @matmul_rank_one(%a: tensor<8xi16>, %b: tensor<8x3xi16>) -> tensor<3xi
 // -----
 
 func.func @matmul_wrong_rounding(%a: tensor<4x8xi16>, %b: tensor<8x3xi16>) -> tensor<4x3xi16> {
-  // expected-error @below {{matmul requires nearest_even rounding}}
+  // expected-error @below {{matmul rounding must be nearest_even, toward_negative, or nearest_ties_positive}}
   %c = ondrix.matmul %a, %b {
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
-    rounding = #ondsp.rounding<toward_negative>
+    rounding = #ondsp.rounding<toward_zero>
   } : (tensor<4x8xi16>, tensor<8x3xi16>) -> tensor<4x3xi16>
   return %c : tensor<4x3xi16>
 }
@@ -77,7 +77,7 @@ func.func @fp_matmul_element(%a: tensor<2x2xi16>, %b: tensor<2x2xi16>) -> tensor
 // -----
 
 func.func @fixed_matmul_without_rounding(%a: tensor<2x2xi16>, %b: tensor<2x2xi16>) -> tensor<2x2xi16> {
-  // expected-error @below {{matmul requires nearest_even rounding}}
+  // expected-error @below {{matmul rounding must be nearest_even, toward_negative, or nearest_ties_positive}}
   %c = ondrix.matmul %a, %b {
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
   } : (tensor<2x2xi16>, tensor<2x2xi16>) -> tensor<2x2xi16>

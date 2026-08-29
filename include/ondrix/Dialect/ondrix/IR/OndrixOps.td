@@ -1230,13 +1230,16 @@ def Ondrix_MatmulOp : Ondrix_Op<"matmul", [Pure]> {
     dimensions in `[1, 64]`, per output element:
 
     ```text
-    C[i][j] = sat_i16(round_half_even(sum_k A[i][k] * B[k][j] / 2^15))
+    C[i][j] = sat_i16(round(sum_k A[i][k] * B[k][j] / 2^15))
     ```
 
     Every full product and the K-term sum are exact in i64
     (`|sum| <= 64 * 2^30 = 2^36`), so the single observable boundary per
-    element is the final nearest-even saturating requantization — the same
-    contract shape as the FIR dot product, extended to a rank-2 result.
+    element is the final saturating requantization — the same contract
+    shape as the FIR dot product, extended to a rank-2 result. The
+    boundary's rounding is declared: `nearest_even` (the default),
+    `toward_negative`, or `nearest_ties_positive`, the modes the export
+    contract proves; each names a different function, never a hint.
     Saturation is declared and reachable (for example a full row of
     `-32768` against a matching column). Reassociating the exact K-sum is
     value-neutral by construction; moving or splitting the requantization

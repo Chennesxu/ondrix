@@ -77,3 +77,20 @@ func.func @matmul4x16x3_q15(%a: tensor<4x16xi16>, %b: tensor<16x3xi16>) -> tenso
 // DYNAMIC-LAYOUT: ondsp.reduce_mac
 // DYNAMIC-LAYOUT-NOT: vector.reduction
 // DYNAMIC-LAYOUT-NOT: vector.load
+
+// RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --widen-ondsp-exact-accumulators | FileCheck %s --check-prefix=WIDEN
+
+// The declared floor boundary rides the same acc form, and the widen pass
+// re-proves the K*2^30 headroom and retypes the wrap web to the saturating
+// target domain — the shape the private-leg selection admits.
+// WIDEN-LABEL: func.func @matmul_floor_q15(
+// WIDEN: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = saturate>
+// WIDEN: ondsp.reduce_mac
+// WIDEN: ondsp.acc_export {{.*}} rounding = #ondsp.rounding<toward_negative>{{.*}} -> i16
+func.func @matmul_floor_q15(%a: tensor<4x8xi16>, %b: tensor<8x3xi16>) -> tensor<4x3xi16> {
+  %c = ondrix.matmul %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<toward_negative>
+  } : (tensor<4x8xi16>, tensor<8x3xi16>) -> tensor<4x3xi16>
+  return %c : tensor<4x3xi16>
+}

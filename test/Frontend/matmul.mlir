@@ -11,6 +11,16 @@
 // CHECK-SAME: (tensor<4x8xi16>, tensor<8x3xi16>) -> tensor<4x3xi16>
 // CHECK: return %[[PRODUCT]] : tensor<4x3xi16>
 
+// RUN: ondrix-compile %S/Inputs/q15_matmul_floor.ox | FileCheck %s --check-prefix=FLOOR
+// RUN: not ondrix-compile %S/Inputs/invalid_matmul_rounding.ox 2>&1 | FileCheck %s --check-prefix=ROUNDING
+
+// The requantization boundary's declared mode routes to the op attribute;
+// omission keeps the nearest_even default the plain form pins above.
+// FLOOR-LABEL: func.func @q15_matmul_floor
+// FLOOR: ondrix.matmul
+// FLOOR-SAME: rounding = #ondsp.rounding<toward_negative>
+// ROUNDING: invalid_matmul_rounding.ox:2:10: error: matmul rounding must be nearest_even, toward_negative, or nearest_ties_positive
+
 // RANK: invalid_matmul_rank.ox:2:10: error: matmul requires rank-2 tensors
 // INNER: invalid_matmul_inner.ox:2:10: error: matmul inner extents must match: lhs columns and rhs rows
 // EXTENT: invalid_matmul_extent.ox:2:10: error: matmul currently requires all extents in [1, 64]

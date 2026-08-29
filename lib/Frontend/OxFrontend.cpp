@@ -1188,6 +1188,18 @@ public:
         if (!contract)
           return std::nullopt;
         call.fpContract = contract->spelling.str();
+      } else if (current.kind == TokenKind::Comma) {
+        // The one requantization boundary admits a declared rounding mode;
+        // omission keeps the nearest_even default. Bindings must expose
+        // every choice their contract admits.
+        if (!expect(TokenKind::Comma, "expected ',' before matmul rounding policy") ||
+            !expectIdentifier("rounding", "expected matmul rounding policy") ||
+            !expect(TokenKind::Equal, "expected '=' after rounding"))
+          return std::nullopt;
+        auto rounding = parseIdentifier("expected rounding mode");
+        if (!rounding)
+          return std::nullopt;
+        call.rounding = rounding->spelling.str();
       }
       if (!expect(TokenKind::RightParen, "expected ')' after matmul expression"))
         return std::nullopt;
@@ -2127,8 +2139,20 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, *contract};
     }
-    return CheckedKernel{std::move(ast), std::nullopt, ondsp::RoundingMode::NearestEven,
-                         std::nullopt, std::nullopt};
+    ondsp::RoundingMode rounding = ondsp::RoundingMode::NearestEven;
+    if (!ast.result.rounding.empty()) {
+      std::optional<ondsp::RoundingMode> parsed = parseRounding(ast.result.rounding);
+      if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven &&
+                      *parsed != ondsp::RoundingMode::TowardNegative &&
+                      *parsed != ondsp::RoundingMode::NearestTiesPositive)) {
+        diagnostics.error(ast.result.position,
+                          "matmul rounding must be nearest_even, toward_negative, or "
+                          "nearest_ties_positive");
+        return std::nullopt;
+      }
+      rounding = *parsed;
+    }
+    return CheckedKernel{std::move(ast), std::nullopt, rounding, std::nullopt, std::nullopt};
   }
   if (ast.result.kind == ReductionKind::Lms) {
     bool isFloat = ast.primaryResult().type == SourceType::F32;

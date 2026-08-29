@@ -1380,8 +1380,11 @@ LogicalResult MatmulOp::verify() {
   } else {
     if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
       return failure();
-    if (!getRounding() || *getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
-      return emitOpError("matmul requires nearest_even rounding");
+    if (!getRounding() || (*getRounding() != ondrix::ondsp::RoundingMode::NearestEven &&
+                           *getRounding() != ondrix::ondsp::RoundingMode::TowardNegative &&
+                           *getRounding() != ondrix::ondsp::RoundingMode::NearestTiesPositive))
+      return emitOpError(
+          "matmul rounding must be nearest_even, toward_negative, or nearest_ties_positive");
   }
   RankedTensorType lhsType = getLhs().getType();
   RankedTensorType rhsType = getRhs().getType();
