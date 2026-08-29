@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -547,18 +548,22 @@ void batchFpWindowSumOutputs(const FpWindowSumLoopShape &shape, int64_t vectorWi
   // A power-of-two divisor's mean is realized as the exact reciprocal
   // multiply: the two round identically for every f32 input, so no contract
   // can distinguish them, and the multiply never waits on the divider.
+  // The identity requires the reciprocal itself to be an exact finite f32 —
+  // 1/2^-149 overflows to +inf, where 0/x is 0 but 0*inf is NaN.
   FloatAttr divisorValue;
   bool reciprocalExact = false;
-  double divisor = 0.0;
+  llvm::APFloat reciprocal = llvm::APFloat::getZero(llvm::APFloat::IEEEsingle());
   if (matchPattern(shape.divisor, m_Constant(&divisorValue))) {
-    divisor = divisorValue.getValue().convertToFloat();
-    int exponent = 0;
-    reciprocalExact = divisor > 0.0 && std::frexp(divisor, &exponent) == 0.5;
+    const llvm::APFloat &divisor = divisorValue.getValue();
+    reciprocal = llvm::APFloat(divisor.getSemantics(), 1);
+    llvm::APFloat::opStatus status = reciprocal.divide(divisor, llvm::APFloat::rmNearestTiesToEven);
+    reciprocalExact = status == llvm::APFloat::opOK && divisor.isFiniteNonZero() &&
+                      !divisor.isNegative() && reciprocal.isFiniteNonZero();
   }
   Value scale = shape.divisor;
   if (reciprocalExact)
     scale = builder.create<arith::ConstantOp>(
-        loc, builder.getF32FloatAttr(static_cast<float>(1.0 / divisor)));
+        loc, builder.getFloatAttr(builder.getF32Type(), reciprocal));
   Value divisorLanes = builder.create<vector::SplatOp>(loc, laneType, scale);
 
   bool unrolled = shape.windowLength <= kMaxUnrolledTerms;
@@ -1170,23 +1175,29 @@ bool rewriteFpOutputTileRowsHorizontal(const FpOutputTileLoopShape &shape, int64
   // The `[output][term]` sibling: the same constant, transposed once here.
   std::string rowName = (tableGlobal.getSymName() + "_rows").str();
   auto rowType = MemRefType::get({shape.outputCount, shape.termCount}, builder.getF32Type());
-  if (auto existing = module.lookupSymbol<memref::GlobalOp>(rowName)) {
-    if (existing.getType() != rowType || !existing.getConstant())
+  auto values = initial.getValues<APFloat>();
+  SmallVector<APFloat> transposed(shape.outputCount * shape.termCount,
+                                  APFloat::getZero(APFloat::IEEEsingle()));
+  for (int64_t term = 0; term < shape.termCount; ++term)
+    for (int64_t output = 0; output < shape.outputCount; ++output)
+      transposed[output * shape.termCount + term] = values[term * shape.outputCount + output];
+  auto rowInitial = DenseElementsAttr::get(
+      RankedTensorType::get(rowType.getShape(), rowType.getElementType()), transposed);
+  // A symbol already holding the sibling name is reused only when it is
+  // indistinguishable from what this would emit; any other occupant refuses
+  // the rewrite rather than streaming a foreign table's contents.
+  if (Operation *existing = module.lookupSymbol(rowName)) {
+    auto existingGlobal = llvm::dyn_cast<memref::GlobalOp>(existing);
+    if (!existingGlobal || existingGlobal.getType() != rowType || !existingGlobal.getConstant() ||
+        SymbolTable::getSymbolVisibility(existing) != SymbolTable::Visibility::Private ||
+        existingGlobal.getInitialValueAttr() != rowInitial)
       return false;
   } else {
-    auto values = initial.getValues<APFloat>();
-    SmallVector<APFloat> transposed(shape.outputCount * shape.termCount,
-                                    APFloat::getZero(APFloat::IEEEsingle()));
-    for (int64_t term = 0; term < shape.termCount; ++term)
-      for (int64_t output = 0; output < shape.outputCount; ++output)
-        transposed[output * shape.termCount + term] = values[term * shape.outputCount + output];
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPoint(tableGlobal);
-    builder.create<memref::GlobalOp>(
-        tableGlobal.getLoc(), rowName, builder.getStringAttr("private"), rowType,
-        DenseElementsAttr::get(RankedTensorType::get(rowType.getShape(), rowType.getElementType()),
-                               transposed),
-        /*constant=*/true, /*alignment=*/nullptr);
+    builder.create<memref::GlobalOp>(tableGlobal.getLoc(), rowName,
+                                     builder.getStringAttr("private"), rowType, rowInitial,
+                                     /*constant=*/true, /*alignment=*/nullptr);
   }
 
   scf::ForOp loop = shape.loop;
