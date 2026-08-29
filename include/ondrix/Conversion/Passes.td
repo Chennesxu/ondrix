@@ -586,6 +586,75 @@ def VectorizeOndspFixedDecimateOutputs
   ];
 }
 
+def PairOndspFixedReductionOutputs
+    : Pass<"pair-ondsp-fixed-reduction-outputs", "::mlir::ModuleOp"> {
+  let summary = "Pair independent fixed reduction outputs into dual-lane "
+                "accumulator webs";
+  let description = [{
+    Rewrites PAIRS of independent single-lane ordered fixed reductions that
+    share one operand stream into one `lanes = 2` accumulator web with one
+    output per lane.
+
+    This is a vertical transformation. Each lane performs the identical
+    declared update sequence on its own accumulator, in the same increasing
+    index order the ordered reduction declared, so no reassociation occurs and
+    the rewrite needs no range or overflow proof — including for saturating
+    accumulators. That is the same mechanism class as vertical decimate output
+    batching, and the same contrast with the horizontal reduction passes,
+    whose lanes do change the fold order and therefore do require proofs.
+
+    One lane per OUTPUT is the only exact pairing available. Splitting one
+    output's sum across the two lanes and re-adding the halves would recombine
+    through the export boundary's 32-bit saturating readout, which the declared
+    contract does not admit, so that shape is never produced.
+
+    The shared stream becomes the multi-lane mac's scalar coefficient and the
+    two differing streams become the two vector lanes. When the shared stream
+    was the reduction's lhs this swaps the operand roles, which is exact
+    because the full Q15 product is commutative.
+
+    Two matchers reach the paired form. The straight-line matcher pairs
+    consecutive webs of one block whose differing streams are private constant
+    globals, and interleaves those two tables into a single `2K`-element pair
+    global. The column-loop matcher recognizes a transposed pack buffer feeding
+    a loop over the packed rows, adds a pack nest that writes adjacent output
+    columns interleaved, and rewrites the column loop over output pairs.
+
+    Both interleaved buffers carry `alignment = 4`, which is what lets the
+    backend merge each lane pair's two 16-bit loads into one aligned 32-bit
+    load. The column-loop matcher materializes its buffer as a small aligned
+    stack allocation and refuses shapes past the stack budget, because an
+    unaligned or heap-resident pair buffer forfeits the merged lane load the
+    pairing exists for.
+
+    Aliasing is a separately discharged legality obligation. The rewrite defers
+    the first web's store past the second web's loads, so it is refused unless
+    that store's storage is provably distinct from every source the paired web
+    loads: the shared stream and the differing stream of the second web. The
+    static rule is the shared `mayShareStorage` placement, which fails closed on
+    any base it cannot place.
+
+    Downstream consumers keep their own legality. This pass makes a schedule
+    choice and proves no target admissibility: a paired web no consumer
+    implements is still a well-formed accumulator web and stays on the generic
+    path. Everything the matchers cannot prove is left byte-identical — an
+    unpaired leftover web, a mismatched export policy, a pack buffer with a
+    user outside the recognized set, an oversize pair buffer, and an odd output
+    count all keep the single-lane schedule.
+
+    The pass is opt-in: it belongs to no registered pipeline and fires only
+    under its own flag.
+  }];
+  let constructor = "ondrix::createPairOndspFixedReductionOutputsPass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+}
+
 def VectorizeOndspFpFastMemRefReduce
     : Pass<"vectorize-ondsp-fp-fast-memref-reduce", "mlir::ModuleOp"> {
   let summary = "Vectorize f32 reductions whose call sites declared the fast "
