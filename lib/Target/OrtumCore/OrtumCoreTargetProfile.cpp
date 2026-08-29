@@ -31,15 +31,21 @@ bool OrtumCoreTargetProfile::supportsExport(const AccumulatorDomain &accumulator
   ExportDomain domain = getShiftedSaturatingI32ExportDomain();
   if (!supportsAccumulator(accumulator) || overflow != domain.overflow)
     return false;
+  // Beyond the capability's own range the readout composes: the max-shift
+  // floor readout is always exact from an i40 (|acc >> 15| < 2^24), and
+  // floor nests exactly over a base tail shift of at most 31.
+  int64_t composedMaxShift = int64_t(domain.maxShift) + 31;
   if (rounding == domain.rounding)
-    return shift >= 0 && shift <= int64_t(domain.maxShift);
-  // Ties-positive is realized as the floor readout at shift-1 followed by
-  // one increment-and-halve; exact only when the narrower readout provably
-  // cannot clip (shift >= width - 32 + 1), vacuous at shift 0.
+    return shift >= 0 && shift <= composedMaxShift;
+  // Ties-positive at shifts within the capability range is the floor
+  // readout at shift-1 followed by one increment-and-halve, exact only when
+  // the narrower readout provably cannot clip (shift >= width - 32 + 1);
+  // past the range the half-add commutes over the always-exact max-shift
+  // readout (2^maxShift divides 2^(shift-1)) and lands as a base add.
   if (rounding == ondsp::RoundingMode::NearestTiesPositive)
     return shift == 0 ||
            (shift >= int64_t(accumulator.storageWidth) - int64_t(domain.storageWidth) + 1 &&
-            shift <= int64_t(domain.maxShift));
+            shift <= composedMaxShift);
   return false;
 }
 

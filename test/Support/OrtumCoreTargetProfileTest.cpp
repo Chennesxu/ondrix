@@ -32,6 +32,25 @@ int main() {
                                                ProductSemantics{32, 30, ProductSelection::HighRaw}},
                                  targetAccumulator);
 
+  // The composed export ladder: shifts past 15 ride the always-exact
+  // shift-15 readout plus a base tail of at most 31; NTP inside (0, 9)
+  // has no exact composition and stays refused.
+  using ondrix::ondsp::RoundingMode;
+  passed &= profile.supportsExport(targetAccumulator, RoundingMode::TowardNegative,
+                                   OverflowMode::Saturate, 15);
+  passed &= profile.supportsExport(targetAccumulator, RoundingMode::TowardNegative,
+                                   OverflowMode::Saturate, 22);
+  passed &= profile.supportsExport(targetAccumulator, RoundingMode::TowardNegative,
+                                   OverflowMode::Saturate, 46);
+  passed &= !profile.supportsExport(targetAccumulator, RoundingMode::TowardNegative,
+                                    OverflowMode::Saturate, 47);
+  passed &= profile.supportsExport(targetAccumulator, RoundingMode::NearestTiesPositive,
+                                   OverflowMode::Saturate, 22);
+  passed &= !profile.supportsExport(targetAccumulator, RoundingMode::NearestTiesPositive,
+                                    OverflowMode::Saturate, 5);
+  passed &= !profile.supportsExport(targetAccumulator, RoundingMode::NearestEven,
+                                    OverflowMode::Saturate, 15);
+
   if (!passed) {
     llvm::errs() << "ortumcore target profile: FAIL\n";
     return 1;

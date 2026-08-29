@@ -1067,8 +1067,13 @@ public:
                                              "admissible");
     IntegerType i64 = rewriter.getIntegerType(64);
     unsigned stageCount = llvm::Log2_64(extent);
-    ondrix::ondsp::ScaleAttr scale =
-        getNearestEvenSaturatingShift(rewriter.getContext(), 16 + stageCount);
+    // The declared boundary rounding rides the same single round_shift;
+    // absence reads as the nearest_even default.
+    ondrix::ondsp::RoundingMode boundaryRounding =
+        op.getRounding() ? *op.getRounding() : ondrix::ondsp::RoundingMode::NearestEven;
+    ondrix::ondsp::ScaleAttr scale = ondrix::ondsp::ScaleAttr::get(
+        rewriter.getContext(), /*preShiftLeft=*/0, /*postShiftRight=*/16 + stageCount,
+        boundaryRounding, ondrix::ondsp::OverflowMode::Saturate, rewriter.getI16Type());
 
     SmallVector<Value> inputs;
     inputs.reserve(extent);

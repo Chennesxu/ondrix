@@ -205,8 +205,9 @@ public:
     if (!policy || !isa<IntegerType>(op.getResult().getType()))
       return op.emitOpError(
           "accumulator export is outside the proven readout capability (saturating i32 or "
-          "i16 destination; toward_negative at shifts [0, 15], or nearest_ties_positive at "
-          "shift 0 or shifts where the narrower readout cannot clip)");
+          "i16 destination; toward_negative at shifts [0, 46], or nearest_ties_positive at "
+          "shift 0 or shifts where the narrower readout cannot clip; shifts past 15 compose "
+          "the max-shift readout with an exact base tail)");
 
     if (!isa<ondrix::ortumcore::AccumType>(adaptor.getAcc().getType()))
       return op.emitOpError("export lowering requires a converted target accumulator operand");

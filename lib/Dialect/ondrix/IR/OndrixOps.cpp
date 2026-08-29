@@ -1197,9 +1197,16 @@ LogicalResult DctOp::verify() {
     // name the same format.
     if (getOutputNumeric() != getInputNumeric())
       return emitOpError("floating-point DCT output_numeric must equal input_numeric");
+    if (getRounding())
+      return emitOpError("floating-point DCT has no requantization boundary to round");
   } else if (failed(verifySignedFixedFormat(getOperation(), getInputNumeric(), 16, 15,
                                             "input_numeric"))) {
     return failure();
+  } else if (getRounding() && *getRounding() != ondrix::ondsp::RoundingMode::NearestEven &&
+             *getRounding() != ondrix::ondsp::RoundingMode::TowardNegative &&
+             *getRounding() != ondrix::ondsp::RoundingMode::NearestTiesPositive) {
+    return emitOpError(
+        "DCT rounding must be nearest_even, toward_negative, or nearest_ties_positive");
   }
   RankedTensorType inputType = getInput().getType();
   RankedTensorType resultType = getResult().getType();

@@ -121,3 +121,18 @@ func.func @dct4_q15(%input: tensor<4xi16>) -> tensor<4xi16> {
 // DYNAMIC-LAYOUT: ondsp.reduce_mac
 // DYNAMIC-LAYOUT-LABEL: func.func @dct4_q15(
 // DYNAMIC-LAYOUT: ondsp.reduce_mac
+
+// A declared floor boundary folds into one direct acc_export at the composed
+// shift (dst frac 14 - m); no arithmetic round_shift remains on the path.
+// CHECK-LABEL: func.func @dct8_floor_q15(
+// CHECK: ondsp.reduce_mac
+// CHECK: ondsp.acc_export %{{.*}} {dst = #ondsp.fixed<signed, storage = i16, frac = 11>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<toward_negative>}
+// CHECK-NOT: ondsp.round_shift
+func.func @dct8_floor_q15(%input: tensor<8xi16>) -> tensor<8xi16> {
+  %result = ondrix.dct %input {
+    input_numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_numeric = #ondsp.fixed<signed, storage = i16, frac = 11>,
+    rounding = #ondsp.rounding<toward_negative>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return %result : tensor<8xi16>
+}

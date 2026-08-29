@@ -66,3 +66,16 @@ func.func @moving_average_odd_q15(%input: tensor<12xi16>) -> tensor<10xi16> {
   } : (tensor<12xi16>) -> tensor<10xi16>
   return %result : tensor<10xi16>
 }
+
+// The declared floor boundary rides the same single round_shift per output.
+// CHECK-LABEL: func.func @dct8_floor_q15
+// CHECK-COUNT-8: ondsp.round_shift {{.*}}post_shift_right = 19, rounding = toward_negative, overflow = saturate, saturate_to = i16{{.*}} (i64) -> i16
+// CHECK-NOT: ondsp.round_shift
+func.func @dct8_floor_q15(%input: tensor<8xi16>) -> tensor<8xi16> {
+  %result = ondrix.dct %input {
+    input_numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_numeric = #ondsp.fixed<signed, storage = i16, frac = 11>,
+    rounding = #ondsp.rounding<toward_negative>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return %result : tensor<8xi16>
+}

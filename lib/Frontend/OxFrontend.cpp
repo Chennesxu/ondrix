@@ -1057,6 +1057,17 @@ public:
         if (!contract)
           return std::nullopt;
         call.fpContract = contract->spelling.str();
+      } else if (call.kind == ReductionKind::Dct && current.kind == TokenKind::Comma) {
+        // The export boundary admits a declared rounding mode; omission
+        // keeps the nearest_even default.
+        if (!expect(TokenKind::Comma, "expected ',' before dct rounding policy") ||
+            !expectIdentifier("rounding", "expected dct rounding policy") ||
+            !expect(TokenKind::Equal, "expected '=' after rounding"))
+          return std::nullopt;
+        auto rounding = parseIdentifier("expected rounding mode");
+        if (!rounding)
+          return std::nullopt;
+        call.rounding = rounding->spelling.str();
       }
       if (call.kind == ReductionKind::Rms && policyType == SourceType::F32) {
         if (!expect(TokenKind::Comma, "expected ',' before rms contract policy") ||
@@ -3044,9 +3055,20 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     // nearest_even.
     bool isGain = ast.result.kind == ReductionKind::Gain;
     bool isCic = ast.result.kind == ReductionKind::CicDecimate;
+    bool isDct = ast.result.kind == ReductionKind::Dct;
     ondsp::RoundingMode rounding = isGain || isCic ? ondsp::RoundingMode::NearestTiesPositive
                                                    : ondsp::RoundingMode::NearestEven;
-    if (!ast.result.rounding.empty()) {
+    if (!ast.result.rounding.empty() && isDct) {
+      std::optional<ondsp::RoundingMode> parsed = parseRounding(ast.result.rounding);
+      if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven &&
+                      *parsed != ondsp::RoundingMode::TowardNegative &&
+                      *parsed != ondsp::RoundingMode::NearestTiesPositive)) {
+        diagnostics.error(ast.result.position, "dct rounding must be nearest_even, "
+                                               "toward_negative, or nearest_ties_positive");
+        return std::nullopt;
+      }
+      rounding = *parsed;
+    } else if (!ast.result.rounding.empty()) {
       ondsp::RoundingMode alternative = isGain || isCic ? ondsp::RoundingMode::NearestTiesPositive
                                                         : ondsp::RoundingMode::TowardNegative;
       std::optional<ondsp::RoundingMode> parsed = parseRounding(ast.result.rounding);
@@ -3507,13 +3529,19 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     if (kernel.ast.result.kind == ReductionKind::Dct) {
       if (kernel.fpContract) {
         auto fp = ondsp::FpAttr::get(&context, elementType, *kernel.fpContract);
-        result = builder.create<ir::DctOp>(expressionLocation, outputType, lhs, fp, fp);
+        result = builder.create<ir::DctOp>(expressionLocation, outputType, lhs, fp, fp,
+                                           ondsp::RoundingModeAttr());
       } else {
         unsigned stageCount = llvm::Log2_64(outputType.getDimSize(0));
         auto outputNumeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType,
                                                    14 - stageCount);
-        result =
-            builder.create<ir::DctOp>(expressionLocation, outputType, lhs, numeric, outputNumeric);
+        // Omission keeps the nearest_even default; only a departing
+        // declaration is materialized.
+        auto declared = *kernel.rounding != ondsp::RoundingMode::NearestEven
+                            ? ondsp::RoundingModeAttr::get(&context, *kernel.rounding)
+                            : ondsp::RoundingModeAttr();
+        result = builder.create<ir::DctOp>(expressionLocation, outputType, lhs, numeric,
+                                           outputNumeric, declared);
       }
     } else if (kernel.ast.result.kind == ReductionKind::MovingAverage) {
       result = builder.create<ir::MovingAverageOp>(

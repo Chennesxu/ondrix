@@ -847,6 +847,12 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
         context, /*preShiftLeft=*/0, /*postShiftRight=*/16 + llvm::Log2_64(extent),
         ondrix::ondsp::RoundingMode::NearestEven, ondrix::ondsp::OverflowMode::Saturate, i16);
 
+    // A declared non-default rounding is the whole boundary in one export:
+    // dst frac 14 - m puts the shift at 16 + m, the composed readout range.
+    ondrix::ondsp::RoundingMode boundaryRounding =
+        op.getRounding() ? *op.getRounding() : ondrix::ondsp::RoundingMode::NearestEven;
+    auto outputNumeric = cast<ondrix::ondsp::FixedAttr>(op.getOutputNumeric());
+
     // Unrolled over the output index, matching the tensor-form authority: the
     // verifier admits at most 64 rows.
     for (int64_t k = 0; k < extent; ++k) {
@@ -857,10 +863,17 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
       Value initial = rewriter.create<ondrix::ondsp::AccZeroOp>(loc, accumulatorType);
       Value reduced = rewriter.create<ondrix::ondsp::ReduceMacOp>(loc, accumulatorType, initial,
                                                                   *input, row, numeric, product);
-      Value raw = rewriter.create<ondrix::ondsp::AccExportOp>(
-          loc, i64, reduced, rawFormat, ondrix::ondsp::RoundingMode::NearestEven,
-          ondrix::ondsp::OverflowMode::Saturate);
-      Value element = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, i16, raw, exportScale);
+      Value element;
+      if (boundaryRounding == ondrix::ondsp::RoundingMode::NearestEven) {
+        Value raw = rewriter.create<ondrix::ondsp::AccExportOp>(
+            loc, i64, reduced, rawFormat, ondrix::ondsp::RoundingMode::NearestEven,
+            ondrix::ondsp::OverflowMode::Saturate);
+        element = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, i16, raw, exportScale);
+      } else {
+        element = rewriter.create<ondrix::ondsp::AccExportOp>(
+            loc, i16, reduced, outputNumeric, boundaryRounding,
+            ondrix::ondsp::OverflowMode::Saturate);
+      }
       Value position = rewriter.create<arith::ConstantIndexOp>(loc, k);
       rewriter.create<memref::StoreOp>(loc, element, *output, position);
     }

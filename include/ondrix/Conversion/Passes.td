@@ -90,8 +90,16 @@ def ConvertOndspToOrtumCore
     the true value, whereas the post-readout increment sees the saturated
     accumulator exactly as the ondsp reference does. The increment and
     halve run at i64 because the readout can be exactly INT32_MAX (s = 9,
-    accumulator at the rail), where an i32 increment would wrap. Every
-    other export policy fails closed.
+    accumulator at the rail), where an i32 increment would wrap.
+
+    Shifts past the capability's 15 compose, up to 15 + 31: the shift-15
+    floor readout is always exact from an i40 (|acc >> 15| < 2^24, no
+    clip), and floor nests exactly over a base tail shift, so
+    `toward_negative` appends one arithmetic tail shift; for
+    `nearest_ties_positive` the half-add commutes over the shift-15 floor
+    (2^15 divides 2^(s-1) whenever s > 15) and lands as one base add on
+    the 25-bit readout before the same tail. Every other export policy
+    fails closed.
   }];
   let constructor = "ondrix::createConvertOndspToOrtumCorePass()";
   let dependentDialects = [

@@ -114,3 +114,30 @@ func.func @ntp_export_raw(
   %0 = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i32, frac = 30>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i32
   return %0 : i32
 }
+
+// Shifts past the capability's 15 compose: the always-exact shift-15 floor
+// readout plus one arithmetic base tail; the ties-positive half-add commutes
+// over that readout and lands as one base add before the same tail.
+// CHECK-LABEL: func.func @q15_export_composed_floor(
+// CHECK: %[[OUT:.*]] = ortumcore.acc_out %{{.*}} {shift = 15 : i64} : (!ortumcore.acc) -> i32
+// CHECK: %[[AMT:.*]] = arith.constant 1 : i32
+// CHECK: arith.shrsi %[[OUT]], %[[AMT]] : i32
+// CHECK: arith.trunci %{{.*}} : i32 to i16
+func.func @q15_export_composed_floor(
+    %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16 {
+  %0 = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i16, frac = 14>, rounding = #ondsp.rounding<toward_negative>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %0 : i16
+}
+
+// CHECK-LABEL: func.func @q15_export_composed_ntp(
+// CHECK: %[[OUT:.*]] = ortumcore.acc_out %{{.*}} {shift = 15 : i64} : (!ortumcore.acc) -> i32
+// CHECK: %[[HALF:.*]] = arith.constant 64 : i32
+// CHECK: %[[SUM:.*]] = arith.addi %[[OUT]], %[[HALF]] : i32
+// CHECK: %[[AMT:.*]] = arith.constant 7 : i32
+// CHECK: arith.shrsi %[[SUM]], %[[AMT]] : i32
+// CHECK: arith.trunci %{{.*}} : i32 to i16
+func.func @q15_export_composed_ntp(
+    %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16 {
+  %0 = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i16, frac = 8>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %0 : i16
+}

@@ -918,8 +918,10 @@ def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
     the guard remains the fail-closed backstop). Products and the sum are
     exact in i64 — `|sum| <= N * 32767 * 32768 <= 2^36 - 2^21` — so the reduction has no
     reachable intermediate overflow and its association is value-neutral;
-    the single explicit boundary is the final nearest-even
-    `ondsp.round_shift` by `16 + m`. The output reading is the
+    the single explicit boundary is the final saturating shift by
+    `16 + m`, whose rounding is declared: absent or `nearest_even` (the
+    default), `toward_negative`, or `nearest_ties_positive` — each names
+    a different function, never a hint. The output reading is the
     unnormalized transform at `frac = 14 - m` (for example Q5.11 at
     `N = 8`). The exported value lies in `[-16384, 16383]` — the negative
     bound is reached exactly once, by the all-minimum input on the `k = 0`
@@ -956,7 +958,8 @@ def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_NumericAttr:$input_numeric,
-                   Ondsp_NumericAttr:$output_numeric);
+                   Ondsp_NumericAttr:$output_numeric,
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

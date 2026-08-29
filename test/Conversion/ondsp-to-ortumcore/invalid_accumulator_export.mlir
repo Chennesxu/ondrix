@@ -20,12 +20,13 @@ func.func @rejects_wrap_destination(%acc: !ondsp.acc<storage = i40, frac = 30, s
 
 // -----
 
-// frac 14 needs shift 16, one past the readout's mode-register range.
-func.func @rejects_shift_beyond_range(%acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16 {
+// Ties-positive strictly between the vacuous shift and the no-clip
+// threshold (0 < s-1 < 40-32) fails closed: neither composition is exact.
+func.func @rejects_ntp_low_shift(%acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i32 {
   // expected-error @+2 {{accumulator export is outside the proven readout capability}}
   // expected-error @+1 {{failed to legalize operation 'ondsp.acc_export'}}
-  %0 = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i16, frac = 14>, rounding = #ondsp.rounding<toward_negative>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
-  return %0 : i16
+  %0 = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i32, frac = 26>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i32
+  return %0 : i32
 }
 
 // -----
