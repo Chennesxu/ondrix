@@ -303,6 +303,37 @@ def ScalarizeOndspFixedReduceMac
   ];
 }
 
+def UnrollOndspFixedMacLoops
+    : Pass<"unroll-ondsp-fixed-mac-loops", "::mlir::ModuleOp"> {
+  let summary = "Unroll short static accumulator-carried mac loops into straight-line chains";
+  let description = [{
+    Fully unrolls an `scf.for` whose single iteration argument is a
+    single-lane fixed accumulator advanced through `ondsp.mac`, when the
+    trip count is a compile-time constant of at most 64. Unrolling is the
+    identity on the declared update sequence — every iteration body executes
+    unchanged, in the same order, at a constant induction value — so no
+    numeric proof is involved. The motive is the target path shared with
+    `scalarize-ondsp-fixed-reduce-mac`'s straight-line form: the loop form
+    pays an index update and a branch per term, which outweighs the term
+    itself on the MAC capability, and 64 is that same measured bound. This
+    reaches the accumulator loops that never pass through `reduce_mac`,
+    such as the tensor-form FIR lowering's tap loop.
+
+    Everything else keeps its form and every downstream consumer's
+    legality: dynamic or non-positive bounds, trip counts past the bound,
+    more than one iteration argument, multi-lane accumulators, and loops
+    whose body contains no mac. A static extent read through `tensor.dim`
+    counts as a compile-time constant, which is how the tap loop presents
+    its bound before any folding.
+  }];
+  let constructor = "ondrix::createUnrollOndspFixedMacLoopsPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::scf::SCFDialect",
+    "ondrix::ondsp::OndspDialect",
+  ];
+}
+
 def WidenOndspExactAccumulators
     : Pass<"widen-ondsp-exact-accumulators", "::mlir::ModuleOp"> {
   let summary = "Retype provably exact wrap accumulators to the saturating target domain";

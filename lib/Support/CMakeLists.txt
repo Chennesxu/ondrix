@@ -49,6 +49,7 @@ add_ondrix_library(OndrixSupport
   OndrixEvaluateFirDesign
   OndrixForwardInsertExtract
   OndrixScalarizeFixedReduceMac
+  OndrixUnrollFixedMacLoops
   OndrixWidenExactAccumulators
   OndrixFuseGainIntoFir
   OndrixFuseElementwiseChains
