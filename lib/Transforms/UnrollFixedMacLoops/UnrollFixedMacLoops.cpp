@@ -11,6 +11,8 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 
+#include "llvm/Support/MathExtras.h"
+
 namespace ondrix {
 #define GEN_PASS_DEF_UNROLLONDSPFIXEDMACLOOPS
 #include "ondrix/Transforms/Passes.h.inc"
@@ -40,14 +42,21 @@ std::optional<int64_t> getStaticIndex(Value value) {
   return type.getDimSize(*index);
 }
 
+// Every intermediate here can overflow i64 for legal extreme bounds, and a
+// wrapped trip count once deleted a one-iteration loop outright; anything
+// that overflows is refused instead.
 std::optional<int64_t> getUnrollableTripCount(scf::ForOp loop) {
   std::optional<int64_t> lower = getStaticIndex(loop.getLowerBound());
   std::optional<int64_t> upper = getStaticIndex(loop.getUpperBound());
   std::optional<int64_t> step = getStaticIndex(loop.getStep());
   if (!lower || !upper || !step || *step <= 0 || *upper <= *lower)
     return std::nullopt;
-  int64_t trip = (*upper - *lower + *step - 1) / *step;
-  if (trip > kMaxUnrolledTrip)
+  int64_t span, biased, lastOffset, lastIndex;
+  if (llvm::SubOverflow(*upper, *lower, span) || llvm::AddOverflow(span, *step - 1, biased))
+    return std::nullopt;
+  int64_t trip = biased / *step;
+  if (trip > kMaxUnrolledTrip || llvm::MulOverflow(trip - 1, *step, lastOffset) ||
+      llvm::AddOverflow(*lower, lastOffset, lastIndex))
     return std::nullopt;
   return trip;
 }

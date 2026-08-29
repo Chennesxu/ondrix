@@ -45,6 +45,49 @@ func.func @keeps_dynamic_bound(%samples: memref<64xi16>, %coefficients: memref<6
 
 // -----
 
+// Exactly the measured bound unrolls: 64 is accepted, not just 65 refused.
+// CHECK-LABEL: func.func @unrolls_at_bound(
+// CHECK-NOT: scf.for
+// CHECK-COUNT-64: ondsp.mac
+// CHECK-NOT: scf.for
+func.func @unrolls_at_bound(%samples: memref<64xi16>, %coefficients: memref<64xi16>) -> i16 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c64 = arith.constant 64 : index
+  %z = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %acc = scf.for %i = %c0 to %c64 step %c1 iter_args(%chain = %z) -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) {
+    %sample = memref.load %samples[%i] : memref<64xi16>
+    %coefficient = memref.load %coefficients[%i] : memref<64xi16>
+    %next = ondsp.mac %chain, %sample, %coefficient {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    scf.yield %next : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  }
+  %out = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %out : i16
+}
+
+// -----
+
+// A legal one-iteration loop at extreme bounds must survive, not vanish: the
+// wrapped trip count once deleted it outright.
+// CHECK-LABEL: func.func @keeps_overflowing_trip_arithmetic(
+// CHECK: scf.for
+// CHECK: ondsp.mac
+func.func @keeps_overflowing_trip_arithmetic(%samples: memref<64xi16>, %coefficients: memref<64xi16>) -> i16 {
+  %c0 = arith.constant 0 : index
+  %cmax = arith.constant 9223372036854775807 : index
+  %z = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %acc = scf.for %i = %c0 to %cmax step %cmax iter_args(%chain = %z) -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) {
+    %sample = memref.load %samples[%c0] : memref<64xi16>
+    %coefficient = memref.load %coefficients[%c0] : memref<64xi16>
+    %next = ondsp.mac %chain, %sample, %coefficient {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    scf.yield %next : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  }
+  %out = ondsp.acc_export %acc {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %out : i16
+}
+
+// -----
+
 // One term past the measured straight-line bound keeps the loop form.
 // CHECK-LABEL: func.func @keeps_trip_past_bound(
 // CHECK: scf.for
