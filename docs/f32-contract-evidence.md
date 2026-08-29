@@ -170,7 +170,7 @@ At the default width, `supports-vector-fma=false`:
 | `dot`, `fir`, `fir_filter`, `rms`, `fir_decimate` | horizontal, separate | {R} | mechanism only (`fp_fast_reduce_aot`) |
 | `matmul` | column tile; the fused body is refused without the vector fused multiply-add, so this configuration keeps the scalar fused chain. Under `supports-vector-fma=true` the tile batches, and its unrolled inner axis rebuilds into interleaved chains, adding {R} | {F} | `fs_f32_solver` route audit, `matmul_f32.mlir` |
 | `conv1d` correlation, K ≥ W | horizontal, separate | {R} | `f32_conv1d_aot`, term conservation |
-| `conv1d` convolution | scalar fused | {F} | `f32_conv1d_aot`, selection pinned |
+| `conv1d` convolution | batched over the reversed taps; at `K >= 4` the declared-fast fold rebuilds into interleaved chains, adding {R}; below four taps each lane keeps its left fold, and outputs too few to batch keep the scalar fused chain | {F} or {F, R} by `K` | `fs_f32_solver` route audit (K=3 and K=8), `fp_filter_output_batching.mlir`, `f32_conv1d_aot` |
 | `dct` | 128-bit: batched output tile, scalar fused rows, {F}; 256-bit: per-row horizontal rebuild over the transposed sibling table, adding {R} per row | {F} or {F, R} by width | `fs_f32_solver` route audit (N=8 and N=16 w256), `dct_f32.mlir` |
 | `lms`, `fir_interpolate` | scalar fused | {F} | selection pinned |
 | `goertzel` | scalar fused | {F} | `f32_goertzel_aot`, bitwise against `fma` plus a `.ll` permission pin |

@@ -1,5 +1,6 @@
 // RUN: ondrix-opt %s --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries allow-return-allocs function-boundary-type-conversion=identity-layout-map" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=8" | FileCheck %s
 // RUN: ondrix-opt %s --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries allow-return-allocs function-boundary-type-conversion=identity-layout-map" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=8 supports-vector-fma=true" | FileCheck %s --check-prefix=FUSEDFAST
+// RUN: ondrix-opt %s --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries allow-return-allocs function-boundary-type-conversion=identity-layout-map" --canonicalize --vectorize-ondsp-fp-filter-outputs="vector-width=8 supports-vector-fma=true interleave=4" | FileCheck %s --check-prefix=CHAINED
 
 // Order-preserving f32 output batching: W independent outputs ride one
 // vector, each lane running its declared event graph verbatim, and the
@@ -9,6 +10,10 @@
 
 // The fma profile: one fused event per lane per tap, taps unrolled with the
 // eight coefficient splats hoisted above the batched loop.
+// The exact contracts refuse the chain rebuild whatever interleave asks for.
+// CHAINED-LABEL: func.func @fma_filter
+// CHAINED-NOT: arith.mulf
+// CHAINED-NOT: rebuild_reduction_tree
 // CHECK-LABEL: func.func @fma_filter
 // CHECK-COUNT-8: vector.splat
 // CHECK: scf.for %{{.*}} = %c0{{.*}} to %c32{{.*}} step %c8
@@ -28,6 +33,9 @@ func.func @fma_filter(%input: tensor<40xf32>, %coeffs: tensor<8xf32>,
 
 // The off profile: separate ordered product and accumulation events per lane,
 // with no fused operation anywhere in the batched body.
+// CHAINED-LABEL: func.func @off_filter
+// CHAINED-NOT: math.fma
+// CHAINED-NOT: rebuild_reduction_tree
 // CHECK-LABEL: func.func @off_filter
 // CHECK: vector.load {{.*}} : memref<40xf32>, vector<8xf32>
 // CHECK: arith.mulf {{.*}} : vector<8xf32>
@@ -57,6 +65,19 @@ func.func @off_filter(%input: tensor<40xf32>, %coeffs: tensor<8xf32>,
 // FUSEDFAST-LABEL: func.func @fast_filter
 // FUSEDFAST: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<8xf32>
 // FUSEDFAST-NOT: rebuild_reduction_tree
+// With interleave the declared fast fold rebuilds: the +0.0 seed stays chain
+// zero's first leaf, chains one to three seed on their own product, and one
+// top fold records R.
+// CHAINED-LABEL: func.func @fast_filter
+// CHAINED: %[[S0:.*]] = math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<8xf32>
+// CHAINED: %[[S1:.*]] = arith.mulf {{.*}} : vector<8xf32>
+// CHAINED: %[[S2:.*]] = arith.mulf {{.*}} : vector<8xf32>
+// CHAINED: %[[S3:.*]] = arith.mulf {{.*}} : vector<8xf32>
+// CHAINED-COUNT-4: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<8xf32>
+// CHAINED: %[[M0:.*]] = arith.addf %{{.*}}, %{{.*}} : vector<8xf32>
+// CHAINED: %[[M1:.*]] = arith.addf %{{.*}}, %{{.*}} : vector<8xf32>
+// CHAINED: arith.addf %[[M0]], %[[M1]] {ondsp.fast_used = ["rebuild_reduction_tree"]} : vector<8xf32>
+// CHAINED: vector.store
 func.func @fast_filter(%input: tensor<40xf32>, %coeffs: tensor<8xf32>,
                        %init: tensor<33xf32>) -> tensor<33xf32> {
   %result = ondrix.fir_filter %input, %coeffs, %init {
@@ -110,6 +131,39 @@ func.func @conv_reversed_off(%signal: tensor<64xf32>, %kernel: tensor<8xf32>,
     numeric = #ondsp.fp<format = f32, contract = off>
   } : (tensor<64xf32>, tensor<8xf32>, tensor<57xf32>) -> tensor<57xf32>
   return %result : tensor<57xf32>
+}
+
+// The chains partition the declared reversed tap order, so the rebuild rides
+// the convolution coefficient view unchanged.
+// CHAINED-LABEL: func.func @conv_reversed_fast
+// CHAINED: memref.subview %{{.*}}[7] [8] [-1]
+// CHAINED: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<8xf32>
+// CHAINED-COUNT-3: arith.mulf {{.*}} : vector<8xf32>
+// CHAINED: arith.addf %{{.*}}, %{{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : vector<8xf32>
+// CHAINED: vector.store
+func.func @conv_reversed_fast(%signal: tensor<64xf32>, %kernel: tensor<8xf32>,
+                              %init: tensor<57xf32>) -> tensor<57xf32> {
+  %result = ondrix.conv1d %signal, %kernel, %init {
+    mode = #ondrix.conv1d_mode<convolution>,
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (tensor<64xf32>, tensor<8xf32>, tensor<57xf32>) -> tensor<57xf32>
+  return %result : tensor<57xf32>
+}
+
+// Below four taps every tree the round-robin can build is the declared left
+// fold, so the ordered chain stands and records no R.
+// CHAINED-LABEL: func.func @fast_filter_short
+// CHAINED-NOT: arith.mulf
+// CHAINED-COUNT-3: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<8xf32>
+// CHAINED-NOT: rebuild_reduction_tree
+// CHAINED: vector.store
+func.func @fast_filter_short(%input: tensor<40xf32>, %coeffs: tensor<3xf32>,
+                             %init: tensor<38xf32>) -> tensor<38xf32> {
+  %result = ondrix.fir_filter %input, %coeffs, %init {
+    boundary = #ondrix.fir_boundary<valid>,
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (tensor<40xf32>, tensor<3xf32>, tensor<38xf32>) -> tensor<38xf32>
+  return %result : tensor<38xf32>
 }
 
 // The matmul column axis: W columns of one output row ride one vector, the

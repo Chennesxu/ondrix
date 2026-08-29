@@ -50,8 +50,8 @@ struct FpFilterLoopShape {
   Value coefficients;
   Value output;
   /// The declared evaluation policy. The exact contracts pin each lane's
-  /// event graph verbatim; fast admits both members and never needs R here
-  /// because the batch is order-preserving.
+  /// event graph verbatim; fast additionally admits the chained per-lane
+  /// rebuild, which records R at its top fold.
   ondrix::ondsp::FpContractMode contract = ondrix::ondsp::FpContractMode::Off;
 };
 
@@ -254,10 +254,10 @@ FailureOr<FpFilterLoopShape> matchFpFilterLoop(scf::ForOp loop, int64_t vectorWi
 
 /// Replaces the leading full blocks of an ordered f32 filter loop with a
 /// batched loop over `vectorWidth` outputs at a time and moves the ordered
-/// loop's lower bound past them. Each lane runs the declared per-output event
-/// graph unchanged — tap order, one product and one accumulation event per
-/// tap, +0.0 initial value — so the authorization is structural (per-lane
-/// event-graph identity), not algebraic, and holds for both exact contracts.
+/// loop's lower bound past them. Under the exact contracts each lane runs the
+/// declared per-output event graph unchanged, so that authorization is
+/// structural; under the declared fast contract the unrolled per-lane fold
+/// may additionally rebuild into `interleave` chains, recording R.
 /// One per-term lane update in the caller's declared operand order; the fast
 /// member selection and its F spend live here so every batcher agrees.
 Value createLaneUpdate(OpBuilder &builder, Location loc, Value lhs, Value rhs, Value accumulator,
@@ -265,8 +265,8 @@ Value createLaneUpdate(OpBuilder &builder, Location loc, Value lhs, Value rhs, V
   if (contract == ondrix::ondsp::FpContractMode::Fma)
     return builder.create<math::FmaOp>(loc, lhs, rhs, accumulator);
   if (contract == ondrix::ondsp::FpContractMode::Fast && fuseFast) {
-    // fast admits both members; selecting the fused one spends F, and the
-    // order-preserving batch never spends R.
+    // fast admits both members; selecting the fused one spends F, and any
+    // chain rebuild records its own R at the top fold, never per term.
     return ondrix::ondsp::consumeFastPermission(
         builder.create<math::FmaOp>(loc, lhs, rhs, accumulator),
         ondrix::ondsp::FastPermission::FuseMultiplyAdd);
@@ -283,8 +283,8 @@ Value createTermBase(OpBuilder &builder, Location loc, Value blockStart, int64_t
   return builder.create<arith::AddIOp>(loc, blockStart, offset);
 }
 
-void batchFpFilterOutputs(const FpFilterLoopShape &shape, int64_t vectorWidth, bool fuseFast,
-                          OpBuilder &builder) {
+void batchFpFilterOutputs(const FpFilterLoopShape &shape, int64_t vectorWidth, int64_t interleave,
+                          bool fuseFast, OpBuilder &builder) {
   scf::ForOp loop = shape.loop;
   Location loc = loop.getLoc();
   int64_t fullBlocks = shape.outputLength / vectorWidth;
@@ -315,19 +315,51 @@ void batchFpFilterOutputs(const FpFilterLoopShape &shape, int64_t vectorWidth, b
     }
   }
 
+  // Under the declared fast contract the unrolled fold rebuilds into chains:
+  // the +0.0 seed stays chain zero's first leaf, other chains seed on their
+  // own product, and below four taps the chained tree is the left fold.
+  int64_t chains = 1;
+  if (shape.contract == ondrix::ondsp::FpContractMode::Fast && unrolled &&
+      shape.coefficientLength >= 4)
+    chains = std::min<int64_t>(interleave, shape.coefficientLength);
+
   builder.create<scf::ForOp>(
       loc, zeroIndex, batchedEnd, batchStep, ValueRange{},
       [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
         Value lanes;
-        if (unrolled) {
-          lanes = laneZero;
-          for (int64_t tap = 0; tap < shape.coefficientLength; ++tap) {
-            Value base = createTermBase(blockBuilder, blockLoc, blockStart, tap);
-            Value values = blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.input,
-                                                               ValueRange{base});
-            lanes = createLaneUpdate(blockBuilder, blockLoc, values, tapSplats[tap], lanes,
-                                     shape.contract, fuseFast);
+        auto loadTap = [&](int64_t tap) {
+          Value base = createTermBase(blockBuilder, blockLoc, blockStart, tap);
+          return blockBuilder.create<vector::LoadOp>(blockLoc, laneType, shape.input,
+                                                     ValueRange{base});
+        };
+        if (unrolled && chains > 1) {
+          SmallVector<Value> partials;
+          partials.push_back(createLaneUpdate(blockBuilder, blockLoc, loadTap(0), tapSplats[0],
+                                              laneZero, shape.contract, fuseFast));
+          for (int64_t chain = 1; chain < chains; ++chain)
+            partials.push_back(
+                blockBuilder.create<arith::MulFOp>(blockLoc, loadTap(chain), tapSplats[chain]));
+          for (int64_t tap = chains; tap < shape.coefficientLength; ++tap)
+            partials[tap % chains] =
+                createLaneUpdate(blockBuilder, blockLoc, loadTap(tap), tapSplats[tap],
+                                 partials[tap % chains], shape.contract, fuseFast);
+          while (partials.size() > 1) {
+            SmallVector<Value> merged;
+            for (size_t i = 0; i + 1 < partials.size(); i += 2)
+              merged.push_back(
+                  blockBuilder.create<arith::AddFOp>(blockLoc, partials[i], partials[i + 1]));
+            if (partials.size() % 2 != 0)
+              merged.push_back(partials.back());
+            partials = std::move(merged);
           }
+          lanes = ondrix::ondsp::consumeFastPermission(
+              partials.front().getDefiningOp(),
+              ondrix::ondsp::FastPermission::RebuildReductionTree);
+        } else if (unrolled) {
+          lanes = laneZero;
+          for (int64_t tap = 0; tap < shape.coefficientLength; ++tap)
+            lanes = createLaneUpdate(blockBuilder, blockLoc, loadTap(tap), tapSplats[tap], lanes,
+                                     shape.contract, fuseFast);
         } else {
           auto taps = blockBuilder.create<scf::ForOp>(
               blockLoc, zeroIndex, tapEnd, oneIndex, ValueRange{laneZero},
@@ -1325,7 +1357,7 @@ public:
     for (scf::ForOp loop : candidates) {
       if (FailureOr<FpFilterLoopShape> shape = matchFpFilterLoop(loop, vectorWidth);
           succeeded(shape)) {
-        batchFpFilterOutputs(*shape, vectorWidth, supportsVectorFma, builder);
+        batchFpFilterOutputs(*shape, vectorWidth, interleave, supportsVectorFma, builder);
         continue;
       }
       if (FailureOr<FpWindowSumLoopShape> shape = matchFpWindowSumLoop(loop, vectorWidth);

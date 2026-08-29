@@ -717,7 +717,13 @@ def VectorizeOndspFpFilterOutputs
     order-preserving batch is inside every declared set, so the batching
     itself never needs R. Its taps select between the two admitted members
     by the declared `supports-vector-fma` capability, and selecting the
-    fused one spends F. Adjacent full blocks of one matmul output
+    fused one spends F. A fast filter fold of at least four unrolled taps
+    additionally rebuilds into `interleave` per-lane chains — the +0.0 seed
+    staying chain zero's first leaf, every other chain seeded by its own
+    real product, merged pairwise into one R-recording top fold — under the
+    contract its `ondsp.reduce_mac` still declares in place; below four
+    taps every tree the round-robin can build is the declared left fold,
+    so the ordered form stays. Adjacent full blocks of one matmul output
     row may group into a single pass (`column-group`, default one): the row
     splats are shared, one term's group loads are contiguous in the right
     operand, and each block keeps its own accumulator, so every lane's
@@ -801,9 +807,9 @@ def VectorizeOndspFpFilterOutputs
            "fused multiply-add. Decides which member a fast site's taps "
            "select. Never inferred from the host">,
     Option<"interleave", "interleave", "int64_t", /*default=*/"1",
-           "Number of independent per-lane chains carried over the column "
-           "tile's unrolled inner axis; above one applies only where the "
-           "loop carries the declared fast contract">,
+           "Number of independent per-lane chains carried over the filter "
+           "fold and the column tile's unrolled inner axis; above one "
+           "applies only where the loop carries the declared fast contract">,
     Option<"columnGroup", "column-group", "int64_t", /*default=*/"1",
            "Adjacent full column blocks of one matmul output row grouped "
            "into a single pass; a measured per-target schedule policy, "
