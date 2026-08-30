@@ -83,6 +83,13 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
                         options.supportsF32VectorFma ? "true" : "false");
   }
 
+  // Straight-line short chains are ILP, not lane count: dropping the per-term
+  // index update and branch pays on a core with no usable lanes, so like the
+  // chain rebuild above this is not gated on the SIMD stage. Both run after
+  // the batchers, so a rewritten body can never hide a shape they match; what
+  // reaches them is the residue no batcher claimed.
+  os << "scalarize-ondsp-fixed-reduce-mac,unroll-ondsp-fixed-mac-loops,";
+
   // Lowering tail down to the LLVM dialect. The declared-off reduction batches
   // its products at the target width; the fold order is untouched, so this is
   // reached whether or not the schedule stage ran.

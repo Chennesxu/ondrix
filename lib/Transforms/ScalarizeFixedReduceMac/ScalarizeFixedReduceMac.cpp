@@ -27,6 +27,21 @@ bool isRankOneMemRefOf(Type type, Type element) {
   return memref && memref.getRank() == 1 && memref.getElementType() == element;
 }
 
+/// Static extent of a rank-1 memref operand, resolved through the casts
+/// bufferization inserts to state the runtime equal-length contract: the
+/// erased size is still the one the allocation was built with.
+std::optional<int64_t> getStaticExtent(Value operand) {
+  while (true) {
+    auto type = llvm::dyn_cast<MemRefType>(operand.getType());
+    if (type && type.getRank() == 1 && !type.isDynamicDim(0))
+      return type.getDimSize(0);
+    auto castOp = operand.getDefiningOp<memref::CastOp>();
+    if (!castOp)
+      return std::nullopt;
+    operand = castOp.getSource();
+  }
+}
+
 struct ScalarizeOndspFixedReduceMac final
     : ondrix::impl::ScalarizeOndspFixedReduceMacBase<ScalarizeOndspFixedReduceMac> {
   void runOnOperation() override {
@@ -48,12 +63,11 @@ struct ScalarizeOndspFixedReduceMac final
       // form pays an index update and a branch per term, which outweighs the
       // term itself on the MAC capability (measured; 64 is the batcher's
       // unroll bound).
-      auto lhsType = cast<MemRefType>(reduce.getLhs().getType());
-      auto rhsType = cast<MemRefType>(reduce.getRhs().getType());
-      if (!lhsType.isDynamicDim(0) && !rhsType.isDynamicDim(0) &&
-          lhsType.getDimSize(0) == rhsType.getDimSize(0) && lhsType.getDimSize(0) <= 64) {
+      std::optional<int64_t> lhsExtent = getStaticExtent(reduce.getLhs());
+      std::optional<int64_t> rhsExtent = getStaticExtent(reduce.getRhs());
+      if (lhsExtent && rhsExtent && *lhsExtent == *rhsExtent && *lhsExtent <= 64) {
         Value chain = reduce.getInitial();
-        for (int64_t term = 0; term < lhsType.getDimSize(0); ++term) {
+        for (int64_t term = 0; term < *lhsExtent; ++term) {
           Value index = builder.create<arith::ConstantIndexOp>(loc, term);
           Value sample = builder.create<memref::LoadOp>(loc, reduce.getLhs(), index);
           Value coefficient = builder.create<memref::LoadOp>(loc, reduce.getRhs(), index);
