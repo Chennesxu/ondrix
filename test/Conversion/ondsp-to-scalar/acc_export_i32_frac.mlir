@@ -49,10 +49,8 @@ func.func @export_mean_floor_saturate(
 // CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[INCREMENT]] : i64
 // CHECK: %[[MIN:.*]] = arith.constant -2147483648 : i64
 // CHECK: %[[MAX:.*]] = arith.constant 2147483647 : i64
-// CHECK: %[[BELOW:.*]] = arith.cmpi slt, %[[ROUNDED]], %[[MIN]] : i64
-// CHECK: %[[OVER:.*]] = arith.cmpi sgt, %[[ROUNDED]], %[[MAX]] : i64
-// CHECK: %[[LOWER:.*]] = arith.select %[[BELOW]], %[[MIN]], %[[ROUNDED]] : i64
-// CHECK: %[[CLAMPED:.*]] = arith.select %[[OVER]], %[[MAX]], %[[LOWER]] : i64
+// CHECK: %[[LOWER:.*]] = arith.maxsi %[[ROUNDED]], %[[MIN]] : i64
+// CHECK: %[[CLAMPED:.*]] = arith.minsi %[[LOWER]], %[[MAX]] : i64
 // CHECK: %[[RESULT:.*]] = arith.trunci %[[CLAMPED]] : i64 to i32
 // CHECK: return %[[RESULT]] : i32
 
@@ -61,8 +59,8 @@ func.func @export_mean_floor_saturate(
 // CHECK-SAME: %[[FLOOR_ACC:.*]]: i64) -> i32
 // CHECK: %[[FLOOR_SHIFT:.*]] = arith.constant 1 : i64
 // CHECK: %[[FLOOR_ROUNDED:.*]] = arith.shrsi %[[FLOOR_ACC]], %[[FLOOR_SHIFT]] : i64
-// CHECK: arith.select
-// CHECK: %[[FLOOR_CLAMPED:.*]] = arith.select
+// CHECK: arith.maxsi
+// CHECK: %[[FLOOR_CLAMPED:.*]] = arith.minsi
 // CHECK: %[[FLOOR_RESULT:.*]] = arith.trunci %[[FLOOR_CLAMPED]] : i64 to i32
 // CHECK: return %[[FLOOR_RESULT]] : i32
 // CHECK-NOT: ondsp.

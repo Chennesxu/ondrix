@@ -32,10 +32,8 @@ func.func @mac_sub_wrap(
 // CHECK: %[[UPDATED:.*]] = arith.addi %[[ACC_EXT]], %[[PRODUCT_EXT]] : i41
 // CHECK: %[[MIN:.*]] = arith.constant -549755813888 : i41
 // CHECK: %[[MAX:.*]] = arith.constant 549755813887 : i41
-// CHECK: %[[BELOW:.*]] = arith.cmpi slt, %[[UPDATED]], %[[MIN]] : i41
-// CHECK: %[[ABOVE:.*]] = arith.cmpi sgt, %[[UPDATED]], %[[MAX]] : i41
-// CHECK: %[[LOWER:.*]] = arith.select %[[BELOW]], %[[MIN]], %[[UPDATED]] : i41
-// CHECK: %[[CLAMPED:.*]] = arith.select %[[ABOVE]], %[[MAX]], %[[LOWER]] : i41
+// CHECK: %[[LOWER:.*]] = arith.maxsi %[[UPDATED]], %[[MIN]] : i41
+// CHECK: %[[CLAMPED:.*]] = arith.minsi %[[LOWER]], %[[MAX]] : i41
 // CHECK: %[[RESULT:.*]] = arith.trunci %[[CLAMPED]] : i41 to i40
 // CHECK: return %[[RESULT]] : i40
 

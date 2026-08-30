@@ -39,10 +39,8 @@ func.func @lane_lifecycle_saturate(%value: vector<8xi16>, %coefficient: i16) -> 
 // The accumulator clamp bounds are the single-lane i40 bounds, splatted.
 // CHECK: %[[MIN:.*]] = arith.constant dense<-549755813888> : vector<8xi41>
 // CHECK: %[[MAX:.*]] = arith.constant dense<549755813887> : vector<8xi41>
-// CHECK: %[[BELOW:.*]] = arith.cmpi slt, %[[UPDATED]], %[[MIN]] : vector<8xi41>
-// CHECK: %[[ABOVE:.*]] = arith.cmpi sgt, %[[UPDATED]], %[[MAX]] : vector<8xi41>
-// CHECK: %[[LOWER:.*]] = arith.select %[[BELOW]], %[[MIN]], %[[UPDATED]] : vector<8xi1>, vector<8xi41>
-// CHECK: %[[CLAMPED:.*]] = arith.select %[[ABOVE]], %[[MAX]], %[[LOWER]] : vector<8xi1>, vector<8xi41>
+// CHECK: %[[LOWER:.*]] = arith.maxsi %[[UPDATED]], %[[MIN]] : vector<8xi41>
+// CHECK: %[[CLAMPED:.*]] = arith.minsi %[[LOWER]], %[[MAX]] : vector<8xi41>
 // CHECK: %[[ACC:.*]] = arith.trunci %[[CLAMPED]] : vector<8xi41> to vector<8xi40>
 // The export is the same nearest-even shift by 15 in quotient/remainder form.
 // CHECK: %[[SHIFT:.*]] = arith.constant dense<15> : vector<8xi40>
@@ -63,10 +61,8 @@ func.func @lane_lifecycle_saturate(%value: vector<8xi16>, %coefficient: i16) -> 
 // The destination clamp is the signed Q15 range, per lane.
 // CHECK: %[[DST_MIN:.*]] = arith.constant dense<-32768> : vector<8xi40>
 // CHECK: %[[DST_MAX:.*]] = arith.constant dense<32767> : vector<8xi40>
-// CHECK: %[[DST_BELOW:.*]] = arith.cmpi slt, %[[ROUNDED]], %[[DST_MIN]] : vector<8xi40>
-// CHECK: %[[DST_ABOVE:.*]] = arith.cmpi sgt, %[[ROUNDED]], %[[DST_MAX]] : vector<8xi40>
-// CHECK: %[[DST_LOWER:.*]] = arith.select %[[DST_BELOW]], %[[DST_MIN]], %[[ROUNDED]] : vector<8xi1>, vector<8xi40>
-// CHECK: %[[DST_CLAMPED:.*]] = arith.select %[[DST_ABOVE]], %[[DST_MAX]], %[[DST_LOWER]] : vector<8xi1>, vector<8xi40>
+// CHECK: %[[DST_LOWER:.*]] = arith.maxsi %[[ROUNDED]], %[[DST_MIN]] : vector<8xi40>
+// CHECK: %[[DST_CLAMPED:.*]] = arith.minsi %[[DST_LOWER]], %[[DST_MAX]] : vector<8xi40>
 // CHECK: %[[RESULT:.*]] = arith.trunci %[[DST_CLAMPED]] : vector<8xi40> to vector<8xi16>
 // CHECK: return %[[RESULT]] : vector<8xi16>
 

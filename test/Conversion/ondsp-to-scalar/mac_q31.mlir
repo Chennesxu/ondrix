@@ -43,8 +43,8 @@ func.func @q15_in_mixed_module(
 // CHECK: %[[UPDATED:.*]] = arith.addi %[[ACC_EXT]], %[[PRODUCT_EXT]] : i65
 // CHECK: %[[MIN:.*]] = arith.constant -9223372036854775808 : i65
 // CHECK: %[[MAX:.*]] = arith.constant 9223372036854775807 : i65
-// CHECK: %[[BELOW:.*]] = arith.cmpi slt, %[[UPDATED]], %[[MIN]] : i65
-// CHECK: %[[ABOVE:.*]] = arith.cmpi sgt, %[[UPDATED]], %[[MAX]] : i65
+// CHECK: %[[LOWER:.*]] = arith.maxsi %[[UPDATED]], %[[MIN]] : i65
+// CHECK: arith.minsi %[[LOWER]], %[[MAX]] : i65
 // CHECK: %[[RESULT:.*]] = arith.trunci {{.*}} : i65 to i64
 // CHECK: return %[[RESULT]] : i64
 

@@ -23,8 +23,8 @@ func.func @reduce_q15_saturate(
 // CHECK: %[[PRODUCT:.*]] = arith.muli %[[LHS_EXT]], %[[RHS_EXT]] : i32
 // CHECK: arith.extsi %[[ACC]] : i40 to i41
 // CHECK: arith.extsi %[[PRODUCT]] : i32 to i41
-// CHECK: arith.cmpi slt
-// CHECK: arith.cmpi sgt
+// CHECK: arith.maxsi
+// CHECK: arith.minsi
 // CHECK: scf.yield {{.*}} : i40
 // CHECK: return %[[RESULT]] : i40
 // CHECK-NOT: ondsp.

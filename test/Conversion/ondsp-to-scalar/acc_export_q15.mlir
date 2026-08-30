@@ -61,10 +61,8 @@ func.func @export_same_width_saturate(
 // CHECK: %[[ROUNDED:.*]] = arith.shrsi %[[ACC]], %[[SHIFT]] : i40
 // CHECK: %[[MIN:.*]] = arith.constant -32768 : i40
 // CHECK: %[[MAX:.*]] = arith.constant 32767 : i40
-// CHECK: %[[BELOW:.*]] = arith.cmpi slt, %[[ROUNDED]], %[[MIN]] : i40
-// CHECK: %[[ABOVE:.*]] = arith.cmpi sgt, %[[ROUNDED]], %[[MAX]] : i40
-// CHECK: %[[LOWER:.*]] = arith.select %[[BELOW]], %[[MIN]], %[[ROUNDED]] : i40
-// CHECK: %[[CLAMPED:.*]] = arith.select %[[ABOVE]], %[[MAX]], %[[LOWER]] : i40
+// CHECK: %[[LOWER:.*]] = arith.maxsi %[[ROUNDED]], %[[MIN]] : i40
+// CHECK: %[[CLAMPED:.*]] = arith.minsi %[[LOWER]], %[[MAX]] : i40
 // CHECK: %[[RESULT:.*]] = arith.trunci %[[CLAMPED]] : i40 to i16
 // CHECK: return %[[RESULT]] : i16
 

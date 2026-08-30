@@ -254,20 +254,16 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
     return builder.create<arith::TruncIOp>(loc, accumulatorType, updated);
   case ondrix::ondsp::OverflowMode::Saturate: {
     // Clamp in the exact update width before narrowing to the accumulator.
-    // The comparison and select vectorize elementwise, so every lane
-    // saturates independently against the same accumulator bounds.
+    // Signed min/max rather than a compare/select pair: the same function
+    // either way, but this is the form that reaches cmov and packed min/max.
     llvm::APInt minimum =
         llvm::APInt::getSignedMinValue(accumulatorElement.getWidth()).sext(intermediateWidth);
     llvm::APInt maximum =
         llvm::APInt::getSignedMaxValue(accumulatorElement.getWidth()).sext(intermediateWidth);
     Value minimumValue = createIntegerConstant(loc, intermediateType, minimum, builder);
     Value maximumValue = createIntegerConstant(loc, intermediateType, maximum, builder);
-    Value belowMinimum =
-        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, updated, minimumValue);
-    Value aboveMaximum =
-        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, updated, maximumValue);
-    Value lowerClamped = builder.create<arith::SelectOp>(loc, belowMinimum, minimumValue, updated);
-    Value clamped = builder.create<arith::SelectOp>(loc, aboveMaximum, maximumValue, lowerClamped);
+    Value lowerClamped = builder.create<arith::MaxSIOp>(loc, updated, minimumValue);
+    Value clamped = builder.create<arith::MinSIOp>(loc, lowerClamped, maximumValue);
     return builder.create<arith::TruncIOp>(loc, accumulatorType, clamped);
   }
   }
@@ -352,12 +348,8 @@ static Value narrowSignedValue(Location loc, Value input, Type destinationType,
                               .sext(inputElementType.getWidth());
     Value minimumValue = createIntegerConstant(loc, inputType, minimum, rewriter);
     Value maximumValue = createIntegerConstant(loc, inputType, maximum, rewriter);
-    Value belowMinimum =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, input, minimumValue);
-    Value aboveMaximum =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, input, maximumValue);
-    Value lowerClamped = rewriter.create<arith::SelectOp>(loc, belowMinimum, minimumValue, input);
-    Value clamped = rewriter.create<arith::SelectOp>(loc, aboveMaximum, maximumValue, lowerClamped);
+    Value lowerClamped = rewriter.create<arith::MaxSIOp>(loc, input, minimumValue);
+    Value clamped = rewriter.create<arith::MinSIOp>(loc, lowerClamped, maximumValue);
     return rewriter.create<arith::TruncIOp>(loc, destinationType, clamped);
   }
   }

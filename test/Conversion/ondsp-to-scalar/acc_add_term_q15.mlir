@@ -13,9 +13,8 @@ func.func @acc_add_term_q15(
 // CHECK: arith.extsi {{.*}} : i40 to i41
 // CHECK: arith.extsi {{.*}} : i32 to i41
 // CHECK: arith.addi
-// CHECK: arith.cmpi slt
-// CHECK: arith.cmpi sgt
-// CHECK: arith.select
+// CHECK: arith.maxsi
+// CHECK: arith.minsi
 // CHECK: arith.trunci {{.*}} : i41 to i40
 // CHECK-NOT: ondsp.
 
@@ -48,7 +47,7 @@ func.func @acc_add_inferred_width_q15(
 // CHECK: arith.extsi {{.*}} : i48 to i65
 // CHECK: arith.extsi {{.*}} : i64 to i65
 // CHECK: arith.addi
-// CHECK: arith.cmpi slt
-// CHECK: arith.cmpi sgt
+// CHECK: arith.maxsi
+// CHECK: arith.minsi
 // CHECK: arith.trunci {{.*}} : i65 to i48
 // CHECK-NOT: ondsp.
