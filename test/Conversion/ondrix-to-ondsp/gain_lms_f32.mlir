@@ -25,8 +25,13 @@ func.func @f32_gain_fast(%input: tensor<8xf32>) -> tensor<8xf32> {
 
 // Two sites are contract indexed: the tap reduction and each weight update.
 // The error and the step scaling are single IEEE operations in every mode.
+// The sample loop peels at min(K - 1, N) so the second region fetches taps
+// without the prehistory guard.
 // CHECK-LABEL: func.func @f32_lms_off
-// CHECK: scf.for
+// CHECK-DAG: %[[N:.*]] = arith.constant 8 : index
+// CHECK: %[[PRE:.*]]:2 = scf.for
+// CHECK: arith.cmpi sge
+// CHECK: arith.select
 // CHECK: arith.mulf
 // CHECK: arith.addf
 // CHECK: arith.subf
@@ -36,6 +41,13 @@ func.func @f32_gain_fast(%input: tensor<8xf32>) -> tensor<8xf32> {
 // CHECK: arith.addf
 // CHECK-NOT: ondsp.round_shift
 // CHECK-NOT: ondsp.sat_cast
+// CHECK: %[[MAIN:.*]]:2 = scf.for %{{.*}} to %[[N]] step %{{.*}} iter_args(%{{.*}} = %[[PRE]]#0, %{{.*}} = %[[PRE]]#1)
+// CHECK-NOT: arith.cmpi
+// CHECK-NOT: arith.maxsi
+// CHECK-NOT: arith.select
+// CHECK-NOT: ondsp.round_shift
+// CHECK-NOT: ondsp.sat_cast
+// CHECK: return %[[MAIN]]#1, %[[MAIN]]#0
 func.func @f32_lms_off(%input: tensor<8xf32>, %desired: tensor<8xf32>, %weights: tensor<2xf32>)
     -> (tensor<8xf32>, tensor<2xf32>) {
   %error, %adapted = ondrix.lms %input, %desired, %weights {

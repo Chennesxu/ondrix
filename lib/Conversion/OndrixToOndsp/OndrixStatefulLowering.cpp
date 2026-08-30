@@ -475,6 +475,11 @@ public:
       Value value = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), clamped);
       return builder.create<arith::SelectOp>(loc, valid, value, zeroElement);
     };
+    // The same fetch where k <= K - 1 <= n already proves n - k in range.
+    auto unguardedInput = [&](OpBuilder &builder, Location loc, Value sample, Value tap) -> Value {
+      Value offset = builder.create<arith::SubIOp>(loc, sample, tap);
+      return builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), offset);
+    };
 
     // Copy the initial weights into a fresh tensor before adapting: the
     // recursion mutates its weight state per sample, and inserting into
@@ -490,96 +495,133 @@ public:
         });
 
     Value errorsEmpty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{samples}, element);
-    if (fp) {
-      auto fpLoop = rewriter.create<scf::ForOp>(
-          loc, zero, sampleCount, one, ValueRange{copyLoop.getResult(0), errorsEmpty},
-          [&](OpBuilder &builder, Location loc, Value sample, ValueRange iterArgs) {
-            Value weights = iterArgs[0];
-            auto accLoop = builder.create<scf::ForOp>(
-                loc, zero, tapCount, one, ValueRange{zeroElement},
-                [&](OpBuilder &builder, Location loc, Value tap, ValueRange accArgs) {
-                  Value term = guardedInput(builder, loc, sample, tap);
-                  Value weight = builder.create<tensor::ExtractOp>(loc, weights, tap);
-                  Value updated =
-                      createFpAccumulatorUpdate(loc, weight, term, accArgs.front(), fp, builder);
-                  builder.create<scf::YieldOp>(loc, updated);
-                });
-            Value desired = builder.create<tensor::ExtractOp>(loc, adaptor.getDesired(), sample);
-            Value error = builder.create<arith::SubFOp>(loc, desired, accLoop.getResult(0));
-            Value nextErrors = builder.create<tensor::InsertOp>(loc, error, iterArgs[1], sample);
-            Value step = createFpMultiply(loc, mu, error, builder);
 
-            auto updateLoop = builder.create<scf::ForOp>(
-                loc, zero, tapCount, one, ValueRange{weights},
-                [&](OpBuilder &builder, Location loc, Value tap, ValueRange updateArgs) {
-                  Value term = guardedInput(builder, loc, sample, tap);
-                  Value weight = builder.create<tensor::ExtractOp>(loc, updateArgs.front(), tap);
-                  Value updated = createFpAccumulatorUpdate(loc, step, term, weight, fp, builder);
-                  Value inserted =
-                      builder.create<tensor::InsertOp>(loc, updated, updateArgs.front(), tap);
-                  builder.create<scf::YieldOp>(loc, inserted);
-                });
-            builder.create<scf::YieldOp>(loc, ValueRange{updateLoop.getResult(0), nextErrors});
-          });
-      rewriter.replaceOp(op, {fpLoop.getResult(1), fpLoop.getResult(0)});
+    // The guard can fire only while n < K - 1, so the sample loop splits at
+    // min(K - 1, N) into a guarded and an unguarded region running the same
+    // body over the same state. An empty region is not emitted.
+    int64_t peel = std::min(taps - 1, samples);
+    Value peelPoint = zero;
+    if (peel == samples)
+      peelPoint = sampleCount;
+    else if (peel > 0)
+      peelPoint = rewriter.create<arith::ConstantIndexOp>(loc, peel);
+
+    auto emitSampleRegions = [&](SampleBody body) -> SmallVector<Value> {
+      SmallVector<Value> state{copyLoop.getResult(0), errorsEmpty};
+      if (peel > 0) {
+        auto guarded = rewriter.create<scf::ForOp>(
+            loc, zero, peelPoint, one, state,
+            [&](OpBuilder &builder, Location loc, Value sample, ValueRange iterArgs) {
+              body(builder, loc, sample, iterArgs, guardedInput);
+            });
+        state.assign(guarded.getResults().begin(), guarded.getResults().end());
+      }
+      if (peel < samples) {
+        auto settled = rewriter.create<scf::ForOp>(
+            loc, peelPoint, sampleCount, one, state,
+            [&](OpBuilder &builder, Location loc, Value sample, ValueRange iterArgs) {
+              body(builder, loc, sample, iterArgs, unguardedInput);
+            });
+        state.assign(settled.getResults().begin(), settled.getResults().end());
+      }
+      return state;
+    };
+
+    if (fp) {
+      auto fpSample = [&](OpBuilder &builder, Location loc, Value sample, ValueRange iterArgs,
+                          TapFetch fetch) {
+        Value weights = iterArgs[0];
+        auto accLoop = builder.create<scf::ForOp>(
+            loc, zero, tapCount, one, ValueRange{zeroElement},
+            [&](OpBuilder &builder, Location loc, Value tap, ValueRange accArgs) {
+              Value term = fetch(builder, loc, sample, tap);
+              Value weight = builder.create<tensor::ExtractOp>(loc, weights, tap);
+              Value updated =
+                  createFpAccumulatorUpdate(loc, weight, term, accArgs.front(), fp, builder);
+              builder.create<scf::YieldOp>(loc, updated);
+            });
+        Value desired = builder.create<tensor::ExtractOp>(loc, adaptor.getDesired(), sample);
+        Value error = builder.create<arith::SubFOp>(loc, desired, accLoop.getResult(0));
+        Value nextErrors = builder.create<tensor::InsertOp>(loc, error, iterArgs[1], sample);
+        Value step = createFpMultiply(loc, mu, error, builder);
+
+        auto updateLoop = builder.create<scf::ForOp>(
+            loc, zero, tapCount, one, ValueRange{weights},
+            [&](OpBuilder &builder, Location loc, Value tap, ValueRange updateArgs) {
+              Value term = fetch(builder, loc, sample, tap);
+              Value weight = builder.create<tensor::ExtractOp>(loc, updateArgs.front(), tap);
+              Value updated = createFpAccumulatorUpdate(loc, step, term, weight, fp, builder);
+              Value inserted =
+                  builder.create<tensor::InsertOp>(loc, updated, updateArgs.front(), tap);
+              builder.create<scf::YieldOp>(loc, inserted);
+            });
+        builder.create<scf::YieldOp>(loc, ValueRange{updateLoop.getResult(0), nextErrors});
+      };
+      SmallVector<Value> adapted = emitSampleRegions(fpSample);
+      rewriter.replaceOp(op, {adapted[1], adapted[0]});
       return success();
     }
 
     Value zero64 = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
-    auto sampleLoop = rewriter.create<scf::ForOp>(
-        loc, zero, sampleCount, one, ValueRange{copyLoop.getResult(0), errorsEmpty},
-        [&](OpBuilder &builder, Location loc, Value sample, ValueRange iterArgs) {
-          Value weights = iterArgs[0];
-          Value errors = iterArgs[1];
+    auto fixedSample = [&](OpBuilder &builder, Location loc, Value sample, ValueRange iterArgs,
+                           TapFetch fetch) {
+      Value weights = iterArgs[0];
+      Value errors = iterArgs[1];
 
-          auto accLoop = builder.create<scf::ForOp>(
-              loc, zero, tapCount, one, ValueRange{zero64},
-              [&](OpBuilder &builder, Location loc, Value tap, ValueRange accArgs) {
-                Value term = guardedInput(builder, loc, sample, tap);
-                Value termWide = builder.create<arith::ExtSIOp>(loc, i64, term);
-                Value weight = builder.create<tensor::ExtractOp>(loc, weights, tap);
-                Value weightWide = builder.create<arith::ExtSIOp>(loc, i64, weight);
-                Value product = builder.create<arith::MulIOp>(loc, weightWide, termWide);
-                Value sum = builder.create<arith::AddIOp>(loc, accArgs.front(), product);
-                builder.create<scf::YieldOp>(loc, sum);
-              });
-          Value output =
-              builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, accLoop.getResult(0), scale);
+      auto accLoop = builder.create<scf::ForOp>(
+          loc, zero, tapCount, one, ValueRange{zero64},
+          [&](OpBuilder &builder, Location loc, Value tap, ValueRange accArgs) {
+            Value term = fetch(builder, loc, sample, tap);
+            Value termWide = builder.create<arith::ExtSIOp>(loc, i64, term);
+            Value weight = builder.create<tensor::ExtractOp>(loc, weights, tap);
+            Value weightWide = builder.create<arith::ExtSIOp>(loc, i64, weight);
+            Value product = builder.create<arith::MulIOp>(loc, weightWide, termWide);
+            Value sum = builder.create<arith::AddIOp>(loc, accArgs.front(), product);
+            builder.create<scf::YieldOp>(loc, sum);
+          });
+      Value output =
+          builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, accLoop.getResult(0), scale);
 
-          Value desired = builder.create<tensor::ExtractOp>(loc, adaptor.getDesired(), sample);
-          Value desiredWide = builder.create<arith::ExtSIOp>(loc, i32, desired);
-          Value outputWide = builder.create<arith::ExtSIOp>(loc, i32, output);
-          Value difference = builder.create<arith::SubIOp>(loc, desiredWide, outputWide);
-          Value error = builder.create<ondrix::ondsp::SatCastOp>(loc, i16, difference, numeric);
-          Value nextErrors = builder.create<tensor::InsertOp>(loc, error, errors, sample);
+      Value desired = builder.create<tensor::ExtractOp>(loc, adaptor.getDesired(), sample);
+      Value desiredWide = builder.create<arith::ExtSIOp>(loc, i32, desired);
+      Value outputWide = builder.create<arith::ExtSIOp>(loc, i32, output);
+      Value difference = builder.create<arith::SubIOp>(loc, desiredWide, outputWide);
+      Value error = builder.create<ondrix::ondsp::SatCastOp>(loc, i16, difference, numeric);
+      Value nextErrors = builder.create<tensor::InsertOp>(loc, error, errors, sample);
 
-          Value errorWide = builder.create<arith::ExtSIOp>(loc, i64, error);
-          Value stepProduct = builder.create<arith::MulIOp>(loc, mu, errorWide);
-          Value step = builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, stepProduct, scale);
-          Value stepWide = builder.create<arith::ExtSIOp>(loc, i64, step);
+      Value errorWide = builder.create<arith::ExtSIOp>(loc, i64, error);
+      Value stepProduct = builder.create<arith::MulIOp>(loc, mu, errorWide);
+      Value step = builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, stepProduct, scale);
+      Value stepWide = builder.create<arith::ExtSIOp>(loc, i64, step);
 
-          auto updateLoop = builder.create<scf::ForOp>(
-              loc, zero, tapCount, one, ValueRange{weights},
-              [&](OpBuilder &builder, Location loc, Value tap, ValueRange updateArgs) {
-                Value term = guardedInput(builder, loc, sample, tap);
-                Value termWide = builder.create<arith::ExtSIOp>(loc, i64, term);
-                Value product = builder.create<arith::MulIOp>(loc, stepWide, termWide);
-                Value delta = builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, product, scale);
-                Value weight = builder.create<tensor::ExtractOp>(loc, updateArgs.front(), tap);
-                Value weightWide = builder.create<arith::ExtSIOp>(loc, i32, weight);
-                Value deltaWide = builder.create<arith::ExtSIOp>(loc, i32, delta);
-                Value updated = builder.create<arith::AddIOp>(loc, weightWide, deltaWide);
-                Value saturated =
-                    builder.create<ondrix::ondsp::SatCastOp>(loc, i16, updated, numeric);
-                Value inserted =
-                    builder.create<tensor::InsertOp>(loc, saturated, updateArgs.front(), tap);
-                builder.create<scf::YieldOp>(loc, inserted);
-              });
-          builder.create<scf::YieldOp>(loc, ValueRange{updateLoop.getResult(0), nextErrors});
-        });
-    rewriter.replaceOp(op, {sampleLoop.getResult(1), sampleLoop.getResult(0)});
+      auto updateLoop = builder.create<scf::ForOp>(
+          loc, zero, tapCount, one, ValueRange{weights},
+          [&](OpBuilder &builder, Location loc, Value tap, ValueRange updateArgs) {
+            Value term = fetch(builder, loc, sample, tap);
+            Value termWide = builder.create<arith::ExtSIOp>(loc, i64, term);
+            Value product = builder.create<arith::MulIOp>(loc, stepWide, termWide);
+            Value delta = builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, product, scale);
+            Value weight = builder.create<tensor::ExtractOp>(loc, updateArgs.front(), tap);
+            Value weightWide = builder.create<arith::ExtSIOp>(loc, i32, weight);
+            Value deltaWide = builder.create<arith::ExtSIOp>(loc, i32, delta);
+            Value updated = builder.create<arith::AddIOp>(loc, weightWide, deltaWide);
+            Value saturated = builder.create<ondrix::ondsp::SatCastOp>(loc, i16, updated, numeric);
+            Value inserted =
+                builder.create<tensor::InsertOp>(loc, saturated, updateArgs.front(), tap);
+            builder.create<scf::YieldOp>(loc, inserted);
+          });
+      builder.create<scf::YieldOp>(loc, ValueRange{updateLoop.getResult(0), nextErrors});
+    };
+    SmallVector<Value> adapted = emitSampleRegions(fixedSample);
+    rewriter.replaceOp(op, {adapted[1], adapted[0]});
     return success();
   }
+
+private:
+  // x[n - k] for one sample and tap, and the per-sample recursion step that
+  // both peeled regions share so their arithmetic cannot drift.
+  using TapFetch = llvm::function_ref<Value(OpBuilder &, Location, Value, Value)>;
+  using SampleBody = llvm::function_ref<void(OpBuilder &, Location, Value, ValueRange, TapFetch)>;
 };
 
 } // namespace
