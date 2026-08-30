@@ -14,7 +14,7 @@
 // The steady-state update loads the span forward and reverses the lanes onto
 // the backward sample walk; the harness is what proves that order.
 // BATCHED: vector.shuffle %{{.*}} [7, 6, 5, 4, 3, 2, 1, 0] : vector<8xi16>, vector<8xi16>
-// BATCHED: ondsp.round_shift %{{.*}} : (vector<8xi64>) -> vector<8xi16>
+// BATCHED: ondsp.round_shift %{{.*}} : (vector<8xi32>) -> vector<8xi16>
 // BATCHED: ondsp.sat_cast %{{.*}} : (vector<8xi32>) -> vector<8xi16>
 // BATCHED: vector.store %{{.*}} : memref<11xi16>, vector<8xi16>
 // BATCHED: scf.for

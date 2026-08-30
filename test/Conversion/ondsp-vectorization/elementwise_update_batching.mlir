@@ -19,7 +19,9 @@
 // CHECK: %[[LAST:.*]] = arith.constant 7 : index
 // CHECK: %[[END:.*]] = arith.constant 8 : index
 // CHECK: %[[STEP:.*]] = arith.constant 8 : index
-// CHECK: %[[LANES:.*]] = vector.splat %{{.*}} : vector<8xi64>
+// Both factors are sign extensions of i16, so the exact product fits the
+// narrower carrier; the control below keeps i64 on an unextended step.
+// CHECK: %[[LANES:.*]] = vector.splat %{{.*}} : vector<8xi32>
 // CHECK: scf.for %[[BLOCK:.*]] = %{{.*}} to %[[END]] step %[[STEP]] {
 // The sample walk runs backward, so the block loads the span forward from its
 // last tap and reverses the lanes onto the ordered tap order.
@@ -27,8 +29,8 @@
 // CHECK: %[[BASE:.*]] = arith.subi %[[TOP]], %[[LAST]] : index
 // CHECK: %[[SPAN:.*]] = vector.load %{{.*}}[%[[BASE]]] : memref<40xi16>, vector<8xi16>
 // CHECK: vector.shuffle %[[SPAN]], %[[SPAN]] [7, 6, 5, 4, 3, 2, 1, 0] : vector<8xi16>, vector<8xi16>
-// CHECK: arith.muli %[[LANES]], %{{.*}} : vector<8xi64>
-// CHECK: ondsp.round_shift %{{.*}} : (vector<8xi64>) -> vector<8xi16>
+// CHECK: arith.muli %[[LANES]], %{{.*}} : vector<8xi32>
+// CHECK: ondsp.round_shift %{{.*}} : (vector<8xi32>) -> vector<8xi16>
 // CHECK: vector.load %{{.*}}[%[[BLOCK]]] : memref<11xi16>, vector<8xi16>
 // CHECK: arith.addi %{{.*}} : vector<8xi32>
 // CHECK: ondsp.sat_cast %{{.*}} : (vector<8xi32>) -> vector<8xi16>
@@ -43,6 +45,16 @@
 // deviation each; batching it here is what makes those diffs discriminate.
 // CHECK-LABEL: func.func @batch_hand_written_control
 // CHECK: vector.shuffle %{{.*}} [7, 6, 5, 4, 3, 2, 1, 0] : vector<8xi16>, vector<8xi16>
+// Its step arrives as an opaque i64 argument rather than a sign extension, so
+// no width bounds the product and the declared carrier stays.
+// CHECK: arith.muli %{{.*}} : vector<8xi64>
+// CHECK: vector.store %{{.*}} : memref<11xi16>, vector<8xi16>
+
+// One bit past what the narrowed carrier holds: i16 x i17 needs 33 bits, so
+// this batches with the declared carrier while @lms_q15's i16 x i16 narrows.
+// CHECK-LABEL: func.func @batch_step_one_bit_too_wide
+// CHECK: vector.shuffle %{{.*}} [7, 6, 5, 4, 3, 2, 1, 0] : vector<8xi16>, vector<8xi16>
+// CHECK: arith.muli %{{.*}} : vector<8xi64>
 // CHECK: vector.store %{{.*}} : memref<11xi16>, vector<8xi16>
 
 func.func @lms_q15(%x: tensor<40xi16>, %d: tensor<40xi16>, %w: tensor<11xi16>)
@@ -60,6 +72,28 @@ func.func @batch_hand_written_control(%samples: memref<40xi16>, %state: memref<1
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %c11 = arith.constant 11 : index
+  scf.for %tap = %c0 to %c11 step %c1 {
+    %index = arith.subi %base, %tap : index
+    %sample = memref.load %samples[%index] : memref<40xi16>
+    %wide = arith.extsi %sample : i16 to i64
+    %product = arith.muli %step, %wide : i64
+    %scaled = ondsp.round_shift %product {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (i64) -> i16
+    %element = memref.load %state[%tap] : memref<11xi16>
+    %element32 = arith.extsi %element : i16 to i32
+    %scaled32 = arith.extsi %scaled : i16 to i32
+    %sum = arith.addi %element32, %scaled32 : i32
+    %updated = ondsp.sat_cast %sum {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i32) -> i16
+    memref.store %updated, %state[%tap] : memref<11xi16>
+  }
+  return
+}
+
+func.func @batch_step_one_bit_too_wide(%samples: memref<40xi16>, %state: memref<11xi16>,
+                                       %base: index, %narrow: i17) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c11 = arith.constant 11 : index
+  %step = arith.extsi %narrow : i17 to i64
   scf.for %tap = %c0 to %c11 step %c1 {
     %index = arith.subi %base, %tap : index
     %sample = memref.load %samples[%index] : memref<40xi16>

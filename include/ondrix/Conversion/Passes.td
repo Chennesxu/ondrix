@@ -631,6 +631,21 @@ def VectorizeOndspFixedElementwiseUpdates
     gave index `k`. The span is the set the ordered block already read, so
     nothing widens and no new element is touched.
 
+    The batched product may run in a carrier narrower than the declared one.
+    The declared carrier is sized for the ordered chain, not for a single
+    product; when both factors are sign extensions, the exact product of an
+    A-bit and a B-bit signed value needs A + B bits, and `ondsp.round_shift`
+    is defined on the value of its input rather than on its storage width, so
+    a carrier that holds the product exactly yields the same result per lane.
+    Its `pre_shift_left` is lowered inside the input carrier and is therefore
+    counted against the same budget. Narrowing is refused whenever a factor's
+    width is not bounded that way, which keeps a step of unknown magnitude on
+    the declared carrier. This matters beyond code size: a Q15 update batched
+    at the declared 64-bit carrier needs two machine vectors per value and no
+    packed 64-bit multiply or arithmetic shift exists on the common targets,
+    so the unnarrowed form is slower than the ordered loop it replaces on a
+    128-bit target, while the narrowed form is faster than it on both.
+
     The canonical pipeline runs this pass inside its schedule stage; the
     standalone flag remains an ablation and oracle interface. It fires only for
     a loop whose body is exactly that shape, with a static trip count, a

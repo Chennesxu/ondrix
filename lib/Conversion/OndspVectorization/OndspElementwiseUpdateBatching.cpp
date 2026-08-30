@@ -35,6 +35,10 @@ constexpr int64_t kMaxVectorWidth = 4096;
 /// can be hiding in the loop.
 constexpr size_t kUpdateBodyOperations = 11;
 
+/// Carrier the batched product narrows to when the declared one is provably
+/// wider than the exact product needs.
+constexpr unsigned kNarrowProductWidth = 32;
+
 /// Everything the matcher recovered from one bufferized elementwise update
 /// loop. The loop is rewritten only when every field is present and
 /// consistent, so a partially understood loop is never left behind.
@@ -62,7 +66,21 @@ struct ElementwiseUpdateLoopShape {
   IntegerType scaledElement;
   IntegerType stateElement;
   IntegerType sumElement;
+  /// Carrier the batched product runs in, and the pre-extension step it pairs
+  /// with. Both are the declared ones unless the narrowing below applies.
+  IntegerType productLaneElement;
+  Value stepSource;
 };
+
+/// Whether a signed `sourceWidth`-bit value times a signed `factorWidth`-bit
+/// value, shifted left by `preShiftLeft`, is exactly representable in
+/// `carrierWidth` bits. The extreme product is 2^(A+B-2) at both factors'
+/// minima, so A + B + preShiftLeft bits are necessary and sufficient.
+bool productFitsCarrier(unsigned sourceWidth, unsigned factorWidth, int64_t preShiftLeft,
+                        unsigned carrierWidth) {
+  return preShiftLeft >= 0 &&
+         uint64_t{sourceWidth} + factorWidth + uint64_t(preShiftLeft) <= carrierWidth;
+}
 
 /// Rank-1 memref with a static extent, a contiguous layout, and a memory space
 /// the Vector to LLVM lowering accepts.
@@ -191,6 +209,22 @@ FailureOr<ElementwiseUpdateLoopShape> matchUpdateLoop(scf::ForOp loop, int64_t v
       !shape.scaledElement || !shape.sumElement)
     return failure();
 
+  // The declared product carrier is sized for the ordered chain, not for one
+  // product. When both factors are sign extensions the exact product needs
+  // only their widths, and `round_shift` reads a value rather than a storage
+  // width, so the narrower carrier is value-identical for every lane. Its
+  // pre-shift is lowered in the input carrier, so it is counted here too.
+  shape.productLaneElement = shape.productElement;
+  auto stepExtend = shape.step.getDefiningOp<arith::ExtSIOp>();
+  auto stepSource = stepExtend ? dyn_cast<IntegerType>(stepExtend.getIn().getType()) : nullptr;
+  if (stepSource && shape.productElement.getWidth() > kNarrowProductWidth &&
+      productFitsCarrier(shape.sampleElement.getWidth(), stepSource.getWidth(),
+                         shape.scale.getPreShiftLeft(), kNarrowProductWidth) &&
+      isAvailableAtLoop(loop, stepExtend.getIn())) {
+    shape.productLaneElement = IntegerType::get(loop.getContext(), kNarrowProductWidth);
+    shape.stepSource = stepExtend.getIn();
+  }
+
   // The rewrite defers a block's stores past all of that block's sample loads,
   // so it is only sound when the two sequences are distinct storage; the
   // refusal set and the residual precondition are in the pass description.
@@ -224,7 +258,7 @@ void batchElementwiseUpdates(const ElementwiseUpdateLoopShape &shape, int64_t ve
   int64_t batchedUpdates = fullBlocks * vectorWidth;
 
   auto sampleLanes = VectorType::get({vectorWidth}, shape.sampleElement);
-  auto productLanes = VectorType::get({vectorWidth}, shape.productElement);
+  auto productLanes = VectorType::get({vectorWidth}, shape.productLaneElement);
   auto scaledLanes = VectorType::get({vectorWidth}, shape.scaledElement);
   auto stateLanes = VectorType::get({vectorWidth}, shape.stateElement);
   auto sumLanes = VectorType::get({vectorWidth}, shape.sumElement);
@@ -240,7 +274,17 @@ void batchElementwiseUpdates(const ElementwiseUpdateLoopShape &shape, int64_t ve
   Value lastLane = builder.create<arith::ConstantIndexOp>(loc, vectorWidth - 1);
   Value batchedEnd = builder.create<arith::ConstantIndexOp>(loc, batchedUpdates);
   Value batchStep = builder.create<arith::ConstantIndexOp>(loc, vectorWidth);
-  Value stepLanes = builder.create<vector::SplatOp>(loc, productLanes, shape.step);
+  // Narrowing re-extends the step from its own source rather than truncating
+  // the declared one, so the lane value is the source value by construction.
+  Value step = shape.step;
+  if (shape.stepSource) {
+    unsigned sourceWidth = cast<IntegerType>(shape.stepSource.getType()).getWidth();
+    step = sourceWidth == shape.productLaneElement.getWidth()
+               ? shape.stepSource
+               : builder.create<arith::ExtSIOp>(loc, shape.productLaneElement, shape.stepSource)
+                     .getResult();
+  }
+  Value stepLanes = builder.create<vector::SplatOp>(loc, productLanes, step);
 
   builder.create<scf::ForOp>(
       loc, zeroIndex, batchedEnd, batchStep, ValueRange{},
