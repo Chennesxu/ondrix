@@ -109,3 +109,78 @@ func.func @batch_step_one_bit_too_wide(%samples: memref<40xi16>, %state: memref<
   }
   return
 }
+
+// Holding the exact product is not sufficient: the carrier is also what
+// the declared boundary lowers on, and 31 is the last shift i32 admits.
+// CHECK-LABEL: func.func @batch_shift_at_carrier_limit
+// CHECK: arith.muli %{{.*}} : vector<8xi32>
+// CHECK-LABEL: func.func @batch_shift_past_carrier_limit
+// CHECK: arith.muli %{{.*}} : vector<8xi64>
+// CHECK-LABEL: func.func @batch_destination_wider_than_carrier
+// CHECK: arith.muli %{{.*}} : vector<8xi64>
+
+func.func @batch_shift_at_carrier_limit(%samples: memref<40xi16>, %state: memref<11xi16>,
+              %base: index, %narrow: i16) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c11 = arith.constant 11 : index
+  %step = arith.extsi %narrow : i16 to i64
+  scf.for %tap = %c0 to %c11 step %c1 {
+    %index = arith.subi %base, %tap : index
+    %sample = memref.load %samples[%index] : memref<40xi16>
+    %wide = arith.extsi %sample : i16 to i64
+    %product = arith.muli %step, %wide : i64
+    %scaled = ondsp.round_shift %product {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 31, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (i64) -> i16
+    %element = memref.load %state[%tap] : memref<11xi16>
+    %element64 = arith.extsi %element : i16 to i64
+    %scaled64 = arith.extsi %scaled : i16 to i64
+    %sum = arith.addi %element64, %scaled64 : i64
+    %updated = ondsp.sat_cast %sum {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i64) -> i16
+    memref.store %updated, %state[%tap] : memref<11xi16>
+  }
+  return
+}
+
+func.func @batch_shift_past_carrier_limit(%samples: memref<40xi16>, %state: memref<11xi16>,
+              %base: index, %narrow: i16) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c11 = arith.constant 11 : index
+  %step = arith.extsi %narrow : i16 to i64
+  scf.for %tap = %c0 to %c11 step %c1 {
+    %index = arith.subi %base, %tap : index
+    %sample = memref.load %samples[%index] : memref<40xi16>
+    %wide = arith.extsi %sample : i16 to i64
+    %product = arith.muli %step, %wide : i64
+    %scaled = ondsp.round_shift %product {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 32, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (i64) -> i16
+    %element = memref.load %state[%tap] : memref<11xi16>
+    %element64 = arith.extsi %element : i16 to i64
+    %scaled64 = arith.extsi %scaled : i16 to i64
+    %sum = arith.addi %element64, %scaled64 : i64
+    %updated = ondsp.sat_cast %sum {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i64) -> i16
+    memref.store %updated, %state[%tap] : memref<11xi16>
+  }
+  return
+}
+
+func.func @batch_destination_wider_than_carrier(%samples: memref<40xi16>, %state: memref<11xi48>,
+              %base: index, %narrow: i16) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c11 = arith.constant 11 : index
+  %step = arith.extsi %narrow : i16 to i64
+  scf.for %tap = %c0 to %c11 step %c1 {
+    %index = arith.subi %base, %tap : index
+    %sample = memref.load %samples[%index] : memref<40xi16>
+    %wide = arith.extsi %sample : i16 to i64
+    %product = arith.muli %step, %wide : i64
+    %scaled = ondsp.round_shift %product {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i48>} : (i64) -> i48
+    %element = memref.load %state[%tap] : memref<11xi48>
+    %element64 = arith.extsi %element : i48 to i64
+    %scaled64 = arith.extsi %scaled : i48 to i64
+    %sum = arith.addi %element64, %scaled64 : i64
+    %updated = ondsp.sat_cast %sum {numeric = #ondsp.fixed<signed, storage = i48, frac = 15>} : (i64) -> i48
+    memref.store %updated, %state[%tap] : memref<11xi48>
+  }
+  return
+}

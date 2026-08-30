@@ -121,3 +121,28 @@ func.func @dynamic_sample_extent_refused(%samples: memref<?xi16>, %coeffs: memre
   }
   return %sum : i64
 }
+
+// The candidate carrier is clamped to the accumulator: i4 x i4 fits the
+// narrow carrier but extending i32 down to i8 would not even be valid IR.
+// CHECK-LABEL: func.func @batch_narrow_accumulator
+// CHECK: arith.muli %{{.*}} : vector<8xi8>
+// CHECK-NOT: arith.extsi %{{.*}} : vector<8xi32> to vector<8xi8>
+// CHECK: vector.reduction <add>, %{{.*}} : vector<8xi8> into i8
+func.func @batch_narrow_accumulator(%samples: memref<40xi4>, %coeffs: memref<8xi4>,
+                                    %base: index) -> i8 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c8 = arith.constant 8 : index
+  %seed = arith.constant 0 : i8
+  %sum = scf.for %k = %c0 to %c8 step %c1 iter_args(%acc = %seed) -> (i8) {
+    %i = arith.subi %base, %k : index
+    %s = memref.load %samples[%i] : memref<40xi4>
+    %c = memref.load %coeffs[%k] : memref<8xi4>
+    %sw = arith.extsi %s : i4 to i8
+    %cw = arith.extsi %c : i4 to i8
+    %p = arith.muli %cw, %sw : i8
+    %n = arith.addi %acc, %p : i8
+    scf.yield %n : i8
+  }
+  return %sum : i8
+}

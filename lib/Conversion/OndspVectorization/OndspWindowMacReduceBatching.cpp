@@ -167,14 +167,18 @@ FailureOr<WindowMacReduceShape> matchWindowMacReduce(scf::ForOp loop, int64_t ve
   // all — two's-complement addition is associative and commutative, so any
   // fold order of the same terms yields the same wrapped value — but a product
   // carrier only holds the exact product when it has both factors' widths.
+  // The candidate is clamped to the accumulator, which the lane sum extends
+  // to: a narrower declared accumulator would otherwise ask for a truncating
+  // `extsi` and the rewrite would emit invalid IR.
   uint64_t exactProductWidth =
       uint64_t{shape.sampleElement.getWidth()} + shape.coefficientElement.getWidth();
-  if (exactProductWidth <= kNarrowProductWidth)
-    shape.productElement = IntegerType::get(loop.getContext(), kNarrowProductWidth);
-  else if (exactProductWidth <= accumulator.getWidth())
-    shape.productElement = accumulator;
-  else
+  unsigned accumulatorWidth = accumulator.getWidth();
+  if (exactProductWidth > accumulatorWidth)
     return failure();
+  shape.productElement =
+      accumulatorWidth > kNarrowProductWidth && exactProductWidth <= kNarrowProductWidth
+          ? IntegerType::get(loop.getContext(), kNarrowProductWidth)
+          : accumulator;
 
   int64_t fullBlocks = shape.termCount / vectorWidth;
   if (fullBlocks < 1)

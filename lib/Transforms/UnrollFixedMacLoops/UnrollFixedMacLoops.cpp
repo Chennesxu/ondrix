@@ -75,6 +75,42 @@ bool isSingleLaneAccLoop(scf::ForOp loop) {
   return hasMac;
 }
 
+bool isUnrollCandidate(scf::ForOp loop) {
+  return isSingleLaneAccLoop(loop) && getUnrollableTripCount(loop).has_value();
+}
+
+int64_t countMacs(Operation *op) {
+  int64_t macs = 0;
+  op->walk([&](MacOp) { ++macs; });
+  return macs;
+}
+
+// Cost is what unrolling PRODUCES, not what one level of it carries: a trip
+// count alone undercounts every nested candidate and every body a previous
+// pass already expanded, which is how a 128-term budget once admitted 4096.
+std::optional<int64_t> getUnrolledMacCost(scf::ForOp loop) {
+  std::optional<int64_t> trip = getUnrollableTripCount(loop);
+  if (!trip)
+    return std::nullopt;
+  int64_t body = 0;
+  for (Operation &op : loop.getBody()->without_terminator()) {
+    std::optional<int64_t> cost;
+    auto nested = dyn_cast<scf::ForOp>(&op);
+    if (isa<MacOp>(op))
+      cost = 1;
+    else if (nested && isUnrollCandidate(nested))
+      cost = getUnrolledMacCost(nested);
+    else
+      cost = countMacs(&op);
+    if (!cost || llvm::AddOverflow(body, *cost, body))
+      return std::nullopt;
+  }
+  int64_t total;
+  if (llvm::MulOverflow(*trip, body, total))
+    return std::nullopt;
+  return total;
+}
+
 void unrollAccLoop(scf::ForOp loop, int64_t lower, int64_t step, int64_t trip) {
   OpBuilder builder(loop);
   Location loc = loop.getLoc();
@@ -110,9 +146,23 @@ struct UnrollOndspFixedMacLoops final
     llvm::DenseSet<Operation *> overBudget;
     if (maxUnrolledTerms > 0) {
       llvm::DenseMap<Operation *, int64_t> totals;
-      for (scf::ForOp loop : candidates)
-        if (auto function = loop->getParentOfType<func::FuncOp>())
-          totals[function] += *getUnrollableTripCount(loop);
+      for (scf::ForOp loop : candidates) {
+        auto function = loop->getParentOfType<func::FuncOp>();
+        if (!function)
+          continue;
+        // Only outermost candidates are charged: a nested one is already a
+        // factor of its parent's product, and charging both double counts.
+        bool nested = false;
+        for (Operation *parent = loop->getParentOp(); parent && !nested;
+             parent = parent->getParentOp())
+          if (auto enclosing = dyn_cast<scf::ForOp>(parent))
+            nested = isUnrollCandidate(enclosing);
+        if (nested)
+          continue;
+        std::optional<int64_t> cost = getUnrolledMacCost(loop);
+        if (!cost || llvm::AddOverflow(totals[function], *cost, totals[function]))
+          overBudget.insert(function);
+      }
       for (auto [function, total] : totals)
         if (total > maxUnrolledTerms)
           overBudget.insert(function);

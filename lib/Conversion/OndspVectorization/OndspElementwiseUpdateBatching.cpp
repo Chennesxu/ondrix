@@ -82,6 +82,17 @@ bool productFitsCarrier(unsigned sourceWidth, unsigned factorWidth, int64_t preS
          uint64_t{sourceWidth} + factorWidth + uint64_t(preShiftLeft) <= carrierWidth;
 }
 
+/// Whether the registered scalar lowering of `round_shift` admits this scale
+/// on a `carrierWidth`-bit input. Holding the exact product is necessary but
+/// not sufficient: a narrower carrier can take a declared boundary out of the
+/// subset that lowering implements, which would turn a program that compiles
+/// today into a legalization failure. The conditions are that lowering's, and
+/// must be read against it.
+bool carrierAdmitsScale(ondrix::ondsp::ScaleAttr scale, unsigned carrierWidth) {
+  return scale.getPreShiftLeft() == 0 && uint64_t(scale.getPostShiftRight()) < carrierWidth &&
+         cast<IntegerType>(scale.getSaturateTo()).getWidth() <= carrierWidth;
+}
+
 /// Rank-1 memref with a static extent, a contiguous layout, and a memory space
 /// the Vector to LLVM lowering accepts.
 bool isBatchableRankOneMemRef(Value value) {
@@ -220,6 +231,7 @@ FailureOr<ElementwiseUpdateLoopShape> matchUpdateLoop(scf::ForOp loop, int64_t v
   if (stepSource && shape.productElement.getWidth() > kNarrowProductWidth &&
       productFitsCarrier(shape.sampleElement.getWidth(), stepSource.getWidth(),
                          shape.scale.getPreShiftLeft(), kNarrowProductWidth) &&
+      carrierAdmitsScale(shape.scale, kNarrowProductWidth) &&
       isAvailableAtLoop(loop, stepExtend.getIn())) {
     shape.productLaneElement = IntegerType::get(loop.getContext(), kNarrowProductWidth);
     shape.stepSource = stepExtend.getIn();
