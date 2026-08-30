@@ -28,6 +28,23 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
     bit-identical to the default recursive lowering; only the code shape
     changes (object footprint and compile time versus unrolled constant
     propagation). It is mutually exclusive with vectorize-static-cfft.
+
+    A fixed DF-II SOS cascade emits its sections straight-line inside the
+    sample loop, instead of as an inner `scf.for`, when the coefficient,
+    scale, and state operands all declare the same static section count of
+    at most eight. Every section keeps its declared arithmetic in the
+    declared order — same macs, same accumulator, same export boundaries,
+    same state write order, sections still increasing — so the straight-line
+    form is the identity on the observable sequence and carries no numeric
+    obligation. The motive is that constant section indices let a backend
+    disambiguate the per-section state slots that the computed section
+    stride hid, and keep the coefficient addressing off the index update.
+    Eight is a measured bound rather than a shape limit: the straight-line
+    form still pays at twelve sections and is already slower at sixteen,
+    where the instruction count keeps falling but the body stops fitting
+    the fetch path. A dynamic count, a count past the bound, or operands
+    whose static counts disagree keep the loop and its runtime shape
+    assert.
   }];
   let constructor = "ondrix::createConvertOndrixToOndspPass()";
   let dependentDialects = [

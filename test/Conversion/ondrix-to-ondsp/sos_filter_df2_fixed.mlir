@@ -62,3 +62,68 @@ func.func @q31_static(
       -> (tensor<4xi32>, tensor<2x2xi32>)
   return %output, %next : tensor<4xi32>, tensor<2x2xi32>
 }
+
+// Two acc_zero per section, so the loop form has exactly two at any count.
+// CHECK-LABEL: func.func @q15_eight_sections_straight_line
+// CHECK: scf.for
+// CHECK-COUNT-16: ondsp.acc_zero
+// CHECK-NOT: ondsp.acc_zero
+func.func @q15_eight_sections_straight_line(
+    %input: tensor<4xi16>, %coeffs: tensor<8x5xi16>,
+    %scales: tensor<8xi16>, %state: tensor<8x2xi16>)
+    -> (tensor<4xi16>, tensor<8x2xi16>) {
+  %output, %next = ondrix.sos_filter_df2_fixed %input, %coeffs, %scales, %state {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_overflow = #ondsp.overflow<saturate>,
+    output_rounding = #ondsp.rounding<nearest_ties_positive>, product = #ondsp.product<full>,
+    state_overflow = #ondsp.overflow<saturate>,
+    state_rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<4xi16>, tensor<8x5xi16>, tensor<8xi16>, tensor<8x2xi16>)
+      -> (tensor<4xi16>, tensor<8x2xi16>)
+  return %output, %next : tensor<4xi16>, tensor<8x2xi16>
+}
+
+// CHECK-LABEL: func.func @q15_nine_sections_keeps_the_loop
+// CHECK: scf.for
+// CHECK: scf.for
+// CHECK-COUNT-2: ondsp.acc_zero
+// CHECK-NOT: ondsp.acc_zero
+func.func @q15_nine_sections_keeps_the_loop(
+    %input: tensor<4xi16>, %coeffs: tensor<9x5xi16>,
+    %scales: tensor<9xi16>, %state: tensor<9x2xi16>)
+    -> (tensor<4xi16>, tensor<9x2xi16>) {
+  %output, %next = ondrix.sos_filter_df2_fixed %input, %coeffs, %scales, %state {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_overflow = #ondsp.overflow<saturate>,
+    output_rounding = #ondsp.rounding<nearest_ties_positive>, product = #ondsp.product<full>,
+    state_overflow = #ondsp.overflow<saturate>,
+    state_rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<4xi16>, tensor<9x5xi16>, tensor<9xi16>, tensor<9x2xi16>)
+      -> (tensor<4xi16>, tensor<9x2xi16>)
+  return %output, %next : tensor<4xi16>, tensor<9x2xi16>
+}
+
+// Only the coefficients declare the count, so the loop bound and the runtime
+// assert are still what keep the scale and state indices in range.
+// CHECK-LABEL: func.func @q15_partly_static_sections_keeps_the_loop
+// CHECK: scf.for
+// CHECK: scf.for
+// CHECK-COUNT-2: ondsp.acc_zero
+// CHECK-NOT: ondsp.acc_zero
+func.func @q15_partly_static_sections_keeps_the_loop(
+    %input: tensor<4xi16>, %coeffs: tensor<2x5xi16>,
+    %scales: tensor<?xi16>, %state: tensor<2x2xi16>)
+    -> (tensor<4xi16>, tensor<2x2xi16>) {
+  %output, %next = ondrix.sos_filter_df2_fixed %input, %coeffs, %scales, %state {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_overflow = #ondsp.overflow<saturate>,
+    output_rounding = #ondsp.rounding<nearest_ties_positive>, product = #ondsp.product<full>,
+    state_overflow = #ondsp.overflow<saturate>,
+    state_rounding = #ondsp.rounding<nearest_ties_positive>
+  } : (tensor<4xi16>, tensor<2x5xi16>, tensor<?xi16>, tensor<2x2xi16>)
+      -> (tensor<4xi16>, tensor<2x2xi16>)
+  return %output, %next : tensor<4xi16>, tensor<2x2xi16>
+}

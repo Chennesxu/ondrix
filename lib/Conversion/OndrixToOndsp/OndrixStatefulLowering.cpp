@@ -20,6 +20,8 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <tuple>
+#include <utility>
 
 using namespace mlir;
 using namespace ondrix::conversion;
@@ -118,6 +120,23 @@ public:
   }
 };
 
+/// Longest cascade emitted straight-line; the measured argument is the
+/// `convert-ondrix-to-ondsp` pass description's.
+constexpr int64_t kMaxStraightLineSections = 8;
+
+/// The cascade length, when all three sectioned operands carry the same static
+/// count. A count only the coefficients declare is not one: the loop bound and
+/// the runtime assert are what keep the other two operands in range.
+static std::optional<int64_t> getStraightLineSectionCount(ondrix::ir::SosFilterDf2FixedOp op) {
+  int64_t sections = op.getCoeffs().getType().getDimSize(0);
+  if (ShapedType::isDynamic(sections) || sections > kMaxStraightLineSections)
+    return std::nullopt;
+  if (op.getScales().getType().getDimSize(0) != sections ||
+      op.getState().getType().getDimSize(0) != sections)
+    return std::nullopt;
+  return sections;
+}
+
 class SosFilterDf2FixedOpLowering final
     : public OpConversionPattern<ondrix::ir::SosFilterDf2FixedOp> {
 public:
@@ -146,62 +165,81 @@ public:
                                                   rhs, op.getNumeric(), op.getProduct());
     };
 
+    auto emitSection = [&](OpBuilder &sectionBuilder, Location sectionLoc, Value section,
+                           Value sectionInput, Value state) -> std::pair<Value, Value> {
+      auto extractCoefficient = [&](Value column) {
+        return sectionBuilder.create<tensor::ExtractOp>(sectionLoc, adaptor.getCoeffs(),
+                                                        ValueRange{section, column});
+      };
+      Value scale = sectionBuilder.create<tensor::ExtractOp>(sectionLoc, adaptor.getScales(),
+                                                             ValueRange{section});
+      Value b0 = extractCoefficient(zero);
+      Value b1 = extractCoefficient(one);
+      Value b2 = extractCoefficient(two);
+      Value a1 = extractCoefficient(three);
+      Value a2 = extractCoefficient(four);
+      Value d1 =
+          sectionBuilder.create<tensor::ExtractOp>(sectionLoc, state, ValueRange{section, zero});
+      Value d2 =
+          sectionBuilder.create<tensor::ExtractOp>(sectionLoc, state, ValueRange{section, one});
+
+      Value stateAccumulator =
+          sectionBuilder.create<ondrix::ondsp::AccZeroOp>(sectionLoc, op.getAccumulator());
+      stateAccumulator =
+          createMac(sectionBuilder, sectionLoc, stateAccumulator, sectionInput, scale);
+      stateAccumulator = createMac(sectionBuilder, sectionLoc, stateAccumulator, d1, a1);
+      stateAccumulator = createMac(sectionBuilder, sectionLoc, stateAccumulator, d2, a2);
+      Value nextD1 = sectionBuilder.create<ondrix::ondsp::AccExportOp>(
+          sectionLoc, op.getNumeric().getStorage(), stateAccumulator, op.getNumeric(),
+          op.getStateRounding(), op.getStateOverflow());
+
+      Value outputAccumulator =
+          sectionBuilder.create<ondrix::ondsp::AccZeroOp>(sectionLoc, op.getAccumulator());
+      outputAccumulator = createMac(sectionBuilder, sectionLoc, outputAccumulator, nextD1, b0);
+      outputAccumulator = createMac(sectionBuilder, sectionLoc, outputAccumulator, d1, b1);
+      outputAccumulator = createMac(sectionBuilder, sectionLoc, outputAccumulator, d2, b2);
+      Value output = sectionBuilder.create<ondrix::ondsp::AccExportOp>(
+          sectionLoc, op.getNumeric().getStorage(), outputAccumulator, op.getNumeric(),
+          op.getOutputRounding(), op.getOutputOverflow());
+
+      Value stateWithD1 = sectionBuilder.create<tensor::InsertOp>(sectionLoc, nextD1, state,
+                                                                  ValueRange{section, zero});
+      Value nextState = sectionBuilder.create<tensor::InsertOp>(sectionLoc, d1, stateWithD1,
+                                                                ValueRange{section, one});
+      return {output, nextState};
+    };
+
+    std::optional<int64_t> straightLineSections = getStraightLineSectionCount(op);
+    auto emitCascade = [&](OpBuilder &builder, Location sampleLoc, Value sample,
+                           Value state) -> std::pair<Value, Value> {
+      if (straightLineSections) {
+        Value carried = sample;
+        for (int64_t index = 0; index < *straightLineSections; ++index) {
+          Value section = builder.create<arith::ConstantIndexOp>(sampleLoc, index);
+          std::tie(carried, state) = emitSection(builder, sampleLoc, section, carried, state);
+        }
+        return {carried, state};
+      }
+      auto sectionLoop = builder.create<scf::ForOp>(
+          sampleLoc, zero, coefficientSections, one, ValueRange{sample, state},
+          [&](OpBuilder &sectionBuilder, Location sectionLoc, Value section,
+              ValueRange sectionArgs) {
+            auto [output, nextState] =
+                emitSection(sectionBuilder, sectionLoc, section, sectionArgs[0], sectionArgs[1]);
+            sectionBuilder.create<scf::YieldOp>(sectionLoc, ValueRange{output, nextState});
+          });
+      return {sectionLoop.getResult(0), sectionLoop.getResult(1)};
+    };
+
     auto sampleLoop = rewriter.create<scf::ForOp>(
         loc, zero, inputLength, one, ValueRange{emptyOutput, adaptor.getState()},
         [&](OpBuilder &builder, Location sampleLoc, Value sampleIndex, ValueRange sampleArgs) {
           Value sample = builder.create<tensor::ExtractOp>(sampleLoc, adaptor.getInput(),
                                                            ValueRange{sampleIndex});
-          auto sectionLoop = builder.create<scf::ForOp>(
-              sampleLoc, zero, coefficientSections, one, ValueRange{sample, sampleArgs[1]},
-              [&](OpBuilder &sectionBuilder, Location sectionLoc, Value section,
-                  ValueRange sectionArgs) {
-                auto extractCoefficient = [&](Value column) {
-                  return sectionBuilder.create<tensor::ExtractOp>(sectionLoc, adaptor.getCoeffs(),
-                                                                  ValueRange{section, column});
-                };
-                Value scale = sectionBuilder.create<tensor::ExtractOp>(
-                    sectionLoc, adaptor.getScales(), ValueRange{section});
-                Value b0 = extractCoefficient(zero);
-                Value b1 = extractCoefficient(one);
-                Value b2 = extractCoefficient(two);
-                Value a1 = extractCoefficient(three);
-                Value a2 = extractCoefficient(four);
-                Value d1 = sectionBuilder.create<tensor::ExtractOp>(sectionLoc, sectionArgs[1],
-                                                                    ValueRange{section, zero});
-                Value d2 = sectionBuilder.create<tensor::ExtractOp>(sectionLoc, sectionArgs[1],
-                                                                    ValueRange{section, one});
-
-                Value stateAccumulator = sectionBuilder.create<ondrix::ondsp::AccZeroOp>(
-                    sectionLoc, op.getAccumulator());
-                stateAccumulator =
-                    createMac(sectionBuilder, sectionLoc, stateAccumulator, sectionArgs[0], scale);
-                stateAccumulator = createMac(sectionBuilder, sectionLoc, stateAccumulator, d1, a1);
-                stateAccumulator = createMac(sectionBuilder, sectionLoc, stateAccumulator, d2, a2);
-                Value nextD1 = sectionBuilder.create<ondrix::ondsp::AccExportOp>(
-                    sectionLoc, op.getNumeric().getStorage(), stateAccumulator, op.getNumeric(),
-                    op.getStateRounding(), op.getStateOverflow());
-
-                Value outputAccumulator = sectionBuilder.create<ondrix::ondsp::AccZeroOp>(
-                    sectionLoc, op.getAccumulator());
-                outputAccumulator =
-                    createMac(sectionBuilder, sectionLoc, outputAccumulator, nextD1, b0);
-                outputAccumulator =
-                    createMac(sectionBuilder, sectionLoc, outputAccumulator, d1, b1);
-                outputAccumulator =
-                    createMac(sectionBuilder, sectionLoc, outputAccumulator, d2, b2);
-                Value output = sectionBuilder.create<ondrix::ondsp::AccExportOp>(
-                    sectionLoc, op.getNumeric().getStorage(), outputAccumulator, op.getNumeric(),
-                    op.getOutputRounding(), op.getOutputOverflow());
-
-                Value stateWithD1 = sectionBuilder.create<tensor::InsertOp>(
-                    sectionLoc, nextD1, sectionArgs[1], ValueRange{section, zero});
-                Value nextState = sectionBuilder.create<tensor::InsertOp>(
-                    sectionLoc, d1, stateWithD1, ValueRange{section, one});
-                sectionBuilder.create<scf::YieldOp>(sectionLoc, ValueRange{output, nextState});
-              });
-          Value nextOutput = builder.create<tensor::InsertOp>(
-              sampleLoc, sectionLoop.getResult(0), sampleArgs[0], ValueRange{sampleIndex});
-          builder.create<scf::YieldOp>(sampleLoc, ValueRange{nextOutput, sectionLoop.getResult(1)});
+          auto [cascaded, nextState] = emitCascade(builder, sampleLoc, sample, sampleArgs[1]);
+          Value nextOutput = builder.create<tensor::InsertOp>(sampleLoc, cascaded, sampleArgs[0],
+                                                              ValueRange{sampleIndex});
+          builder.create<scf::YieldOp>(sampleLoc, ValueRange{nextOutput, nextState});
         });
 
     rewriter.replaceOp(op, sampleLoop.getResults());
