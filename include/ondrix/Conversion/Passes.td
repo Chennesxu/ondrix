@@ -586,6 +586,71 @@ def VectorizeOndspFixedDecimateOutputs
   ];
 }
 
+def VectorizeOndspFixedElementwiseUpdates
+    : Pass<"vectorize-ondsp-fixed-elementwise-updates", "::mlir::ModuleOp"> {
+  let summary = "Batch elementwise fixed-point state updates across vector lanes";
+  let description = [{
+    Rewrite the leading full blocks of a bufferized elementwise fixed-point
+    state-update loop to update `vector-width` state elements at a time, and
+    leave the remaining elements on the untouched ordered loop. The adaptive
+    filter weight update is the shape this serves: at index `k`, one declared
+    product of a loop-invariant step with a sample, one declared rounding
+    boundary, and one declared saturating add into `state[k]`.
+
+    This is a vertical transformation: each lane carries its own independent
+    state element and applies the identical declared update — the same product,
+    the same rounding boundary, the same saturating add — so no reassociation
+    occurs and the rewrite needs no range or overflow proof, saturating states
+    included. That is the same mechanism class as
+    `vectorize-ondsp-fixed-decimate-outputs`, and the same contrast with the
+    horizontal reduction passes, whose lanes do change the fold order. State to
+    state there is no dependence at all: lane `k` reads and writes only
+    `state[k]`, so the block's lanes are the ordered updates themselves.
+
+    The sample walk runs BACKWARD: index `k` reads `sample[base - k]`, so one
+    block of `vector-width` indices covers a contiguous span read in decreasing
+    order. The block issues one contiguous load of that span and one lane
+    reversal, which places on lane `k` exactly the element the ordered schedule
+    gave index `k`. The span is the set the ordered block already read, so
+    nothing widens and no new element is touched.
+
+    The canonical pipeline runs this pass inside its schedule stage; the
+    standalone flag remains an ablation and oracle interface. It fires only for
+    a loop whose body is exactly that shape, with a static trip count, a
+    loop-invariant walk base and step, contiguous statically shaped rank-1
+    operand layouts in the default memory space, and no other operation in the
+    body — a guarded body, a dynamic extent, a non-unit stride, a nonzero
+    memory space, or one extra operation all fail closed. Every other loop is
+    left byte-identical, so an unmatched program keeps the ordered schedule
+    rather than a partially batched one.
+
+    Aliasing is a separately discharged legality obligation, not an aside. The
+    rewrite widens a block's loads and defers that block's stores past them, so
+    an ordered store into `state[k]` that a later index's sample load would
+    have observed must not exist. The state buffer is therefore required to be
+    provably distinct storage from the sample buffer, by the same analysis,
+    refusal set, and residual precondition the decimate batching states: the
+    static half fails closed on every base it cannot place — an opaque producer
+    can return storage another operand already names — and the remaining half,
+    two distinct function entry arguments or an entry argument against a
+    global, is a PRECONDITION this pass asserts on the caller's behalf,
+    inherited from the `bufferize-function-boundaries` ABI and never
+    established by it.
+  }];
+  let constructor = "ondrix::createVectorizeOndspFixedElementwiseUpdatesPass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
+           "Number of independent state elements updated per vector">,
+  ];
+}
+
 def PairOndspFixedReductionOutputs
     : Pass<"pair-ondsp-fixed-reduction-outputs", "::mlir::ModuleOp"> {
   let summary = "Pair independent fixed reduction outputs into dual-lane "

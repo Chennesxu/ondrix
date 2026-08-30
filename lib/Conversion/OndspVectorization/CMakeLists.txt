@@ -1,5 +1,6 @@
 add_ondrix_library(OndspVectorization
   OndspDecimateOutputBatching.cpp
+  OndspElementwiseUpdateBatching.cpp
   OndspFpFastMemRefReduce.cpp
   OndspFpFilterOutputBatching.cpp
   OndspReductionOutputPairing.cpp
