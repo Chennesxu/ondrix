@@ -683,6 +683,55 @@ def VectorizeOndspFixedElementwiseUpdates
   ];
 }
 
+def VectorizeOndspFixedWindowMacReduce
+    : Pass<"vectorize-ondsp-fixed-window-mac-reduce", "::mlir::ModuleOp"> {
+  let summary = "Fold a backward-window fixed MAC reduction across vector lanes";
+  let description = [{
+    Fold the leading full blocks of a convolution-shaped fixed-point MAC
+    reduction across `vector-width` lanes and seed the untouched ordered
+    remainder with their sum. The shape this serves is the one a genuine
+    convolution lowers to and which the `reduce_mac` routes cannot express:
+    term `k` reads `samples[base - k]` against `coefficients[k]`, so the two
+    operands walk in OPPOSITE directions while `ondsp.reduce_mac` pairs its
+    operands in increasing index order on both sides.
+
+    Reassociating the accumulate carries NO range obligation. The declared
+    accumulate is `arith.addi`, and two's-complement addition is associative
+    and commutative, so every fold order of the same term multiset yields the
+    same wrapped value — including the orders that wrap. That is a stronger
+    authorization than the horizontal `reduce_mac` routes need, and it is why
+    this pass needs no never-wraps proof and no constant-coefficient
+    certificate. What it does need is that the batched product carrier holds
+    the EXACT product: a carrier is accepted only when it has at least both
+    factors' widths, which is what makes the narrowed carrier equal to the
+    declared one on every term.
+
+    The sample walk runs backward, so a block issues one contiguous load of
+    the span it already read plus one lane reversal, which places on lane `k`
+    exactly the element the ordered schedule gave term `k`. The span is the
+    set the ordered block already read, so nothing widens. The rewrite reads
+    both operands and writes neither, and it moves no store, so unlike the
+    output and state batchings it discharges no aliasing obligation at all.
+
+    It fires only for a loop whose body is exactly that shape, with a static
+    trip count, a loop-invariant walk base, contiguous statically shaped
+    rank-1 operand layouts in the default memory space, and no other operation
+    in the body. Every other loop is left byte-identical.
+  }];
+  let constructor = "ondrix::createVectorizeOndspFixedWindowMacReducePass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
+           "Number of reduction terms folded per vector">,
+  ];
+}
+
 def PairOndspFixedReductionOutputs
     : Pass<"pair-ondsp-fixed-reduction-outputs", "::mlir::ModuleOp"> {
   let summary = "Pair independent fixed reduction outputs into dual-lane "

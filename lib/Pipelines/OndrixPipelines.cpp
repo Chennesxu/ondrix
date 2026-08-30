@@ -65,6 +65,10 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
                         lanes, options.supportsF32VectorFma ? "true" : "false", chainDepth);
     os << llvm::formatv("vectorize-ondsp-fixed-decimate-outputs{{vector-width={0}},", lanes);
     os << llvm::formatv("vectorize-ondsp-fixed-elementwise-updates{{vector-width={0}},", lanes);
+    // The convolution-shaped reduction its operands walk in opposite
+    // directions cannot reach the reduce_mac routes below, which pair their
+    // operands in increasing index order on both sides.
+    os << llvm::formatv("vectorize-ondsp-fixed-window-mac-reduce{{vector-width={0}},", lanes);
     // Four machine vectors per certified chunk: like the interleave above this
     // is a host-class heuristic, not a target fact. Both ladders fall back per
     // reduction, so the only thing a wrong guess costs is a narrower chunk.
