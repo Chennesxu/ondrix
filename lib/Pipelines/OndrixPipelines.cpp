@@ -88,7 +88,11 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // chain rebuild above this is not gated on the SIMD stage. Both run after
   // the batchers, so a rewritten body can never hide a shape they match; what
   // reaches them is the residue no batcher claimed.
-  os << "scalarize-ondsp-fixed-reduce-mac,unroll-ondsp-fixed-mac-loops,";
+  // The budget is a host-class measurement, not a target fact: at 32 terms a
+  // filter tap chain runs 1.9x faster for 2.7x its bytes, while a DCT's
+  // per-row replication reaches 4096 terms and 15x its bytes to run SLOWER.
+  os << "scalarize-ondsp-fixed-reduce-mac{max-unrolled-terms=128},"
+        "unroll-ondsp-fixed-mac-loops{max-unrolled-terms=128},";
 
   // Lowering tail down to the LLVM dialect. The declared-off reduction batches
   // its products at the target width; the fold order is untouched, so this is

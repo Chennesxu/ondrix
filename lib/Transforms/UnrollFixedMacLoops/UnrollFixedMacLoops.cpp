@@ -5,12 +5,15 @@
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/MathExtras.h"
 
 namespace ondrix {
@@ -100,7 +103,24 @@ struct UnrollOndspFixedMacLoops final
       if (isSingleLaneAccLoop(loop) && getUnrollableTripCount(loop))
         candidates.push_back(loop);
     });
+
+    // Over-budget functions keep every loop, so one function never mixes the
+    // two shapes and this pass never re-expands what the reduction scalarizer
+    // declined for the same budget.
+    llvm::DenseSet<Operation *> overBudget;
+    if (maxUnrolledTerms > 0) {
+      llvm::DenseMap<Operation *, int64_t> totals;
+      for (scf::ForOp loop : candidates)
+        if (auto function = loop->getParentOfType<func::FuncOp>())
+          totals[function] += *getUnrollableTripCount(loop);
+      for (auto [function, total] : totals)
+        if (total > maxUnrolledTerms)
+          overBudget.insert(function);
+    }
+
     for (scf::ForOp loop : candidates) {
+      if (overBudget.contains(loop->getParentOfType<func::FuncOp>()))
+        continue;
       int64_t lower = *getStaticIndex(loop.getLowerBound());
       int64_t step = *getStaticIndex(loop.getStep());
       unrollAccLoop(loop, lower, step, *getUnrollableTripCount(loop));

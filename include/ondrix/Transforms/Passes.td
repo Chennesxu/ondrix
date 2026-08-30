@@ -292,7 +292,20 @@ def ScalarizeOndspFixedReduceMac
     target capability selection. Floating-point, vector-operand, and
     multi-lane reductions are left untouched for their own consumers, and
     anything this pass does not expand still fails closed downstream.
+
+    `max-unrolled-terms` bounds the straight-line form by the terms a whole
+    function would emit, not by one reduction's length: a lowering that has
+    already replicated its reductions (one per output row, as the DCT does)
+    multiplies a per-reduction bound by that replication and buys instruction
+    count with instruction cache. Past the budget every reduction in that
+    function keeps the loop form, so the shape stays uniform. Zero disables
+    the budget, which is what a target selecting the capability wants.
   }];
+  let options = [
+    Option<"maxUnrolledTerms", "max-unrolled-terms", "int64_t", /*default=*/"0",
+           "Per-function budget of straight-line reduction terms; 0 leaves the "
+           "straight-line form unbounded">,
+  ];
   let constructor = "ondrix::createScalarizeOndspFixedReduceMacPass()";
   let dependentDialects = [
     "mlir::arith::ArithDialect",
@@ -325,7 +338,19 @@ def UnrollOndspFixedMacLoops
     whose body contains no mac. A static extent read through `tensor.dim`
     counts as a compile-time constant, which is how the tap loop presents
     its bound before any folding.
+
+    `max-unrolled-terms` bounds the iterations a whole function may unroll,
+    the same budget and for the same reason as
+    `scalarize-ondsp-fixed-reduce-mac`: a lowering that already replicated
+    its loops multiplies a per-loop bound by that replication. The two
+    budgets must agree, or this pass re-expands what the other declined.
+    Zero disables the budget.
   }];
+  let options = [
+    Option<"maxUnrolledTerms", "max-unrolled-terms", "int64_t", /*default=*/"0",
+           "Per-function budget of unrolled iterations; 0 leaves unrolling "
+           "unbounded">,
+  ];
   let constructor = "ondrix::createUnrollOndspFixedMacLoopsPass()";
   let dependentDialects = [
     "mlir::arith::ArithDialect",

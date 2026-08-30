@@ -1,4 +1,6 @@
 // RUN: ondrix-opt %s --scalarize-ondsp-fixed-reduce-mac --split-input-file | FileCheck %s
+// RUN: ondrix-opt %s --scalarize-ondsp-fixed-reduce-mac=max-unrolled-terms=10 --split-input-file | FileCheck %s --check-prefix=FITS
+// RUN: ondrix-opt %s --scalarize-ondsp-fixed-reduce-mac=max-unrolled-terms=9 --split-input-file | FileCheck %s --check-prefix=OVER
 
 // A short static fixed reduction unrolls to its definitional straight-line
 // ordered mac chain: the loop form would pay an index update and a branch
@@ -59,4 +61,24 @@ func.func @keeps_fp(%lhs: memref<8xf32>, %rhs: memref<8xf32>) -> f32 {
   %zero = arith.constant 0.0 : f32
   %r = ondsp.reduce_mac %zero, %lhs, %rhs {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, memref<8xf32>, memref<8xf32>) -> f32
   return %r : f32
+}
+
+// -----
+
+// The budget counts what a whole FUNCTION would emit, so a lowering that
+// already replicated its reductions cannot multiply past it.
+// FITS-LABEL: func.func @two_five_term_reductions(
+// FITS-NOT: scf.for
+// FITS-COUNT-10: ondsp.mac
+// OVER-LABEL: func.func @two_five_term_reductions(
+// OVER: scf.for
+// OVER: scf.for
+func.func @two_five_term_reductions(%window: memref<5xi16>, %coefficients: memref<5xi16>) -> (i16, i16) {
+  %z0 = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %a0 = ondsp.reduce_mac %z0, %window, %coefficients {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<5xi16>, memref<5xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %o0 = ondsp.acc_export %a0 {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  %z1 = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %a1 = ondsp.reduce_mac %z1, %window, %coefficients {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<5xi16>, memref<5xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %o1 = ondsp.acc_export %a1 {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %o0, %o1 : i16, i16
 }
