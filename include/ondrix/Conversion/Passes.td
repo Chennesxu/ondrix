@@ -504,7 +504,19 @@ def VectorizeOndspFixedMemRefReduce
     remain unchanged for scalar or target-specific lowering; invalid integer
     spaces are rejected. Memrefs without a statically known unit minor stride
     also remain unchanged.
-  }];
+
+    A reversed operand is admitted, and read rather than refused. A genuine
+    convolution states its kernel reversal in the LAYOUT, because this
+    operation pairs both operands in increasing index order on both sides:
+    the bufferized form is a stride -1 subview, which every contiguous vector
+    load has to reject. Such a chunk is instead loaded forward from the view's
+    source and its lanes reversed, which delivers exactly the elements the
+    ordered schedule read, in the order it read them, so the admitted set
+    widens with no new numeric obligation. Only a plain reversal qualifies:
+    the stride must be -1 and its origin static, both reached through the
+    casts bufferization inserts, and the span must lie inside a contiguous
+    source. Any other stride keeps the ordered schedule.
+}];
   let constructor = "ondrix::createVectorizeOndspFixedMemRefReducePass()";
   let dependentDialects = [
     "ondrix::ondsp::OndspDialect",

@@ -123,3 +123,54 @@ func.func @wider_than_i64_accumulator_fallback(
 // CHECK-LABEL: func.func @wider_than_i64_accumulator_fallback
 // CHECK: ondsp.reduce_mac
 // CHECK-NOT: vector.load
+
+// -----
+
+// A genuine convolution reverses its kernel in the LAYOUT, because reduce_mac
+// pairs both operands in increasing index order. The chunk reads that view by
+// loading its span forward and reversing the lanes.
+// CHECK-LABEL: func.func @reversed_kernel_view
+// CHECK: %[[SUB:.*]] = memref.subview %{{.*}}[31] [32] [-1]
+// CHECK: scf.for
+// The span ends at origin 31 minus the last lane, so the forward base is 28.
+// CHECK: %[[END:.*]] = arith.constant 28 : index
+// CHECK: %[[SPAN:.*]] = arith.subi %[[END]], %{{.*}} : index
+// CHECK: vector.load %{{.*}}[%[[SPAN]]] : memref<32xi16>, vector<4xi16>
+// CHECK: vector.shuffle %{{.*}} [3, 2, 1, 0] : vector<4xi16>, vector<4xi16>
+func.func @reversed_kernel_view(%window: memref<32xi16>, %kernel: memref<32xi16>)
+    -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap> {
+  %seed = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+  %view = memref.subview %kernel[31] [32] [-1]
+      : memref<32xi16> to memref<32xi16, strided<[-1], offset: 31>>
+  %cast = memref.cast %view
+      : memref<32xi16, strided<[-1], offset: 31>> to memref<?xi16, strided<[-1], offset: ?>>
+  %win = memref.cast %window : memref<32xi16> to memref<?xi16>
+  %r = ondsp.reduce_mac %seed, %win, %cast {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>,
+       memref<?xi16>, memref<?xi16, strided<[-1], offset: ?>>)
+      -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+  return %r : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+}
+
+// -----
+
+// A stride of -2 is not a reversal this pass can undo: the span it would load
+// is not the set the ordered schedule read.
+// CHECK-LABEL: func.func @strided_view_refused
+// CHECK-NOT: vector.shuffle
+func.func @strided_view_refused(%window: memref<32xi16>, %kernel: memref<64xi16>)
+    -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap> {
+  %seed = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+  %view = memref.subview %kernel[63] [32] [-2]
+      : memref<64xi16> to memref<32xi16, strided<[-2], offset: 63>>
+  %cast = memref.cast %view
+      : memref<32xi16, strided<[-2], offset: 63>> to memref<?xi16, strided<[-2], offset: ?>>
+  %win = memref.cast %window : memref<32xi16> to memref<?xi16>
+  %r = ondsp.reduce_mac %seed, %win, %cast {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>,
+       memref<?xi16>, memref<?xi16, strided<[-2], offset: ?>>)
+      -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+  return %r : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+}

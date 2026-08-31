@@ -86,19 +86,102 @@ bool hasInvalidLLVMIntegerMemorySpace(ondrix::ondsp::ReduceMacOp op) {
          (rhsType && hasInvalidLLVMIntegerMemorySpace(rhsType));
 }
 
-bool isSupportedMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
+/// How one rank-1 reduction operand is read for a vector chunk. A view whose
+/// only stride is -1 is the shape a genuine convolution's reversed kernel
+/// takes: `ondsp.reduce_mac` pairs its operands in increasing index order on
+/// both sides, so the reversal lives in the layout rather than in the
+/// operation. The span is read forward and the lanes reversed, which delivers
+/// exactly the elements the ordered schedule read, in the order it read them.
+struct ChunkAccess {
+  Value memref;
+  /// Present only for a reversed view: view index `i` is `memref[origin - i]`.
+  std::optional<int64_t> origin;
+};
+
+std::optional<ChunkAccess> getChunkAccess(Value operand) {
+  auto type = dyn_cast<MemRefType>(operand.getType());
+  if (!type || type.getRank() != 1 || !hasDefaultLLVMVectorMemorySpace(type))
+    return std::nullopt;
+  if (isLastMemrefDimUnitStride(type))
+    return ChunkAccess{operand, std::nullopt};
+
+  // Only a subview states a reversal this pass can undo, and bufferization
+  // casts that subview to the dynamic runtime contract on the way in, which
+  // erases the very offset the reversal is measured from. Walk back to the
+  // subview and read its own static result type.
+  Value source = operand;
+  while (auto cast = source.getDefiningOp<memref::CastOp>())
+    source = cast.getSource();
+  auto subview = source.getDefiningOp<memref::SubViewOp>();
+  if (!subview)
+    return std::nullopt;
+  auto viewType = dyn_cast<MemRefType>(subview.getType());
+  if (!viewType || viewType.getRank() != 1 || viewType.isDynamicDim(0))
+    return std::nullopt;
+  SmallVector<int64_t> strides;
+  int64_t offset = 0;
+  if (failed(getStridesAndOffset(viewType, strides, offset)) || strides.size() != 1 ||
+      strides[0] != -1 || ShapedType::isDynamic(offset))
+    return std::nullopt;
+  auto sourceType = dyn_cast<MemRefType>(subview.getSource().getType());
+  if (!sourceType || sourceType.getRank() != 1 || sourceType.isDynamicDim(0) ||
+      !isLastMemrefDimUnitStride(sourceType) || !hasDefaultLLVMVectorMemorySpace(sourceType))
+    return std::nullopt;
+  // The reversed span must lie inside the source: view index i reads
+  // `source[offset - i]`, so the last index read is `offset - (size - 1)`.
+  if (offset < 0 || offset >= sourceType.getDimSize(0) || viewType.getDimSize(0) > offset + 1)
+    return std::nullopt;
+  return ChunkAccess{subview.getSource(), offset};
+}
+
+/// Loads one chunk of the operand starting at view index `base`.
+Value loadReductionChunk(const ChunkAccess &access, Value base, VectorType vectorType, Location loc,
+                         OpBuilder &builder) {
+  if (!access.origin)
+    return builder.create<vector::LoadOp>(loc, vectorType, access.memref, base);
+  // View index i is source index origin - i, so a chunk covering view
+  // [base, base + W) is the source span ending at origin - base. The load runs
+  // forward from that span's start and lane i then takes span element W-1-i.
+  int64_t lanes = vectorType.getNumElements();
+  Value spanEnd = builder.create<arith::ConstantIndexOp>(loc, *access.origin - (lanes - 1));
+  Value spanBase = builder.create<arith::SubIOp>(loc, spanEnd, base);
+  Value span = builder.create<vector::LoadOp>(loc, vectorType, access.memref, spanBase);
+  SmallVector<int64_t> reversed;
+  for (int64_t lane = 0; lane < lanes; ++lane)
+    reversed.push_back(lanes - 1 - lane);
+  return builder.create<vector::ShuffleOp>(loc, span, span, reversed);
+}
+
+bool hasSupportedReductionShape(ondrix::ondsp::ReduceMacOp op, bool allowReversedLayout) {
   auto accumulator = dyn_cast<ondrix::ondsp::AccType>(op.getInitial().getType());
   auto numeric = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
   auto lhsType = dyn_cast<MemRefType>(op.getLhs().getType());
   auto rhsType = dyn_cast<MemRefType>(op.getRhs().getType());
+  bool layoutOk = allowReversedLayout ? getChunkAccess(op.getLhs()).has_value() &&
+                                            getChunkAccess(op.getRhs()).has_value()
+                                      : lhsType && rhsType && isLastMemrefDimUnitStride(lhsType) &&
+                                            isLastMemrefDimUnitStride(rhsType);
   return accumulator && numeric && op.getProduct() && lhsType && rhsType &&
          lhsType.getRank() == 1 && rhsType.getRank() == 1 &&
          lhsType.getElementType() == numeric.getStorage() &&
          rhsType.getElementType() == numeric.getStorage() &&
          hasDefaultLLVMVectorMemorySpace(lhsType) && hasDefaultLLVMVectorMemorySpace(rhsType) &&
-         isLastMemrefDimUnitStride(lhsType) && isLastMemrefDimUnitStride(rhsType) &&
+         layoutOk &&
          ondrix::conversion::isSupportedFixedVectorMacDomain(accumulator, numeric,
                                                              *op.getProduct());
+}
+
+/// The strict shape. The constant-saturating route keeps it because its prefix
+/// certificate reads the coefficient sequence itself, and a reversed view
+/// would present that sequence in the wrong order to the analysis.
+bool isSupportedMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
+  return hasSupportedReductionShape(op, /*allowReversedLayout=*/false);
+}
+
+/// The exact-modulo route additionally admits a reversed operand: it reads the
+/// elements, never their order, and the reversal is undone in the load.
+bool isVectorizableMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
+  return hasSupportedReductionShape(op, /*allowReversedLayout=*/true);
 }
 
 Value createHorizontalAccumulatorUpdate(ondrix::ondsp::ReduceMacOp op, Value accumulator, Value lhs,
@@ -487,7 +570,7 @@ public:
     if (hasInvalidLLVMIntegerMemorySpace(op))
       return op.emitOpError(
           "integer memory space must be nonnegative and fit in an unsigned LLVM address space");
-    if (!isSupportedMemRefReduction(op))
+    if (!isVectorizableMemRefReduction(op))
       return failure();
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     auto elementType = cast<IntegerType>(numeric.getStorage());
@@ -516,8 +599,10 @@ public:
     auto vectorLoop = rewriter.create<scf::ForOp>(
         loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{adaptor.getInitial()},
         [&](OpBuilder &builder, Location bodyLoc, Value base, ValueRange iterArgs) {
-          Value lhs = builder.create<vector::LoadOp>(bodyLoc, vectorType, adaptor.getLhs(), base);
-          Value rhs = builder.create<vector::LoadOp>(bodyLoc, vectorType, adaptor.getRhs(), base);
+          Value lhs = loadReductionChunk(*getChunkAccess(adaptor.getLhs()), base, vectorType,
+                                         bodyLoc, builder);
+          Value rhs = loadReductionChunk(*getChunkAccess(adaptor.getRhs()), base, vectorType,
+                                         bodyLoc, builder);
           Value next = builder.create<ondrix::ondsp::ReduceMacOp>(
               bodyLoc, iterArgs.front().getType(), iterArgs.front(), lhs, rhs, numeric,
               *op.getProduct());
@@ -570,7 +655,7 @@ public:
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, memref::MemRefDialect,
                            ondrix::ondsp::OndspDialect, scf::SCFDialect, vector::VectorDialect>();
     target.addDynamicallyLegalOp<ondrix::ondsp::ReduceMacOp>([](ondrix::ondsp::ReduceMacOp op) {
-      return !hasInvalidLLVMIntegerMemorySpace(op) && !isSupportedMemRefReduction(op);
+      return !hasInvalidLLVMIntegerMemorySpace(op) && !isVectorizableMemRefReduction(op);
     });
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
