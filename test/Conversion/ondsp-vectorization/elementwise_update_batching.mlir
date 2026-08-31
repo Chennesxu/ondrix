@@ -1,10 +1,15 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries allow-return-allocs function-boundary-type-conversion=identity-layout-map" --cse --canonicalize > %t.ordered.mlir
 // RUN: ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-elementwise-updates="vector-width=8" | FileCheck %s
+// RUN: ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-elementwise-updates="vector-width=8" --convert-ondsp-fixed-to-scalar | FileCheck %s --check-prefix=LOWERED --implicit-check-not=ondsp.
 // RUN: not ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-elementwise-updates="vector-width=1" 2>&1 | FileCheck %s --check-prefix=WIDTH
 // RUN: not ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-elementwise-updates="vector-width=4294967296" 2>&1 | FileCheck %s --check-prefix=WIDE
 
 // Vertical state batching is order preserving — lane k reads and writes only
 // state[k] (the pass description carries the full argument).
+
+// Every carrier this pass accepts must still finalize: the narrowed one is
+// what the declared boundary is lowered on, so this run is the drift guard.
+// LOWERED: func.func @lms_q15
 
 // WIDTH: vector-width must be greater than one
 // WIDE: vector-width must not exceed 4096

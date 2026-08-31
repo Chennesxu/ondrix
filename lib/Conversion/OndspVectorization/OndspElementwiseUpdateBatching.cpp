@@ -86,8 +86,9 @@ bool productFitsCarrier(unsigned sourceWidth, unsigned factorWidth, int64_t preS
 /// on a `carrierWidth`-bit input. Holding the exact product is necessary but
 /// not sufficient: a narrower carrier can take a declared boundary out of the
 /// subset that lowering implements, which would turn a program that compiles
-/// today into a legalization failure. The conditions are that lowering's, and
-/// must be read against it.
+/// today into a legalization failure. These conditions are that lowering's; the
+/// batching test finalizes every carrier this accepts, so narrowing the
+/// lowering's subset fails there rather than silently here.
 bool carrierAdmitsScale(ondrix::ondsp::ScaleAttr scale, unsigned carrierWidth) {
   return scale.getPreShiftLeft() == 0 && uint64_t(scale.getPostShiftRight()) < carrierWidth &&
          cast<IntegerType>(scale.getSaturateTo()).getWidth() <= carrierWidth;

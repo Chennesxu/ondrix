@@ -82,3 +82,25 @@ func.func @two_five_term_reductions(%window: memref<5xi16>, %coefficients: memre
   %o1 = ondsp.acc_export %a1 {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_ties_positive>, overflow = #ondsp.overflow<saturate>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
   return %o0, %o1 : i16, i16
 }
+
+// -----
+
+// The budget prescan must ask the same question the rewrite asks. A reduction
+// the rewrite will skip must not be priced, or it declines work never counted.
+// CHECK-LABEL: func.func @budget_ignores_skipped_reductions
+// CHECK-NOT: scf.for
+// CHECK-COUNT-8: ondsp.mac
+// The f32 reduction is eight terms the rewrite skips; only a prescan that
+// counts them too would price this function at sixteen and refuse at nine.
+// OVER-LABEL: func.func @budget_ignores_skipped_reductions
+// OVER-NOT: scf.for
+// OVER-COUNT-8: ondsp.mac
+func.func @budget_ignores_skipped_reductions(
+    %li: memref<8xi16>, %ri: memref<8xi16>,
+    %lf: memref<8xf32>, %rf: memref<8xf32>) -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, f32) {
+  %s = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+  %fixed = ondsp.reduce_mac %s, %li, %ri {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, memref<8xi16>, memref<8xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+  %z = arith.constant 0.0 : f32
+  %fp = ondsp.reduce_mac %z, %lf, %rf {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, memref<8xf32>, memref<8xf32>) -> f32
+  return %fixed, %fp : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, f32
+}

@@ -49,6 +49,18 @@ std::optional<int64_t> getStaticExtent(Value operand) {
   }
 }
 
+/// Whether the rewrite below would actually put this reduction in
+/// straight-line form. The budget prescan must ask exactly this: pricing a
+/// reduction it will then skip declines work that was never going to be
+/// emitted, and the unroll pass downstream never sees those terms at all.
+bool isStraightLineCandidate(ReduceMacOp reduce) {
+  auto accumulator = llvm::dyn_cast<AccType>(reduce.getInitial().getType());
+  auto numeric = llvm::dyn_cast<FixedAttr>(reduce.getNumeric());
+  return accumulator && numeric && reduce.getProduct() && isSingleLaneAccumulator(accumulator) &&
+         isRankOneMemRefOf(reduce.getLhs().getType(), numeric.getStorage()) &&
+         isRankOneMemRefOf(reduce.getRhs().getType(), numeric.getStorage());
+}
+
 /// Terms the straight-line form would emit for this reduction, or nothing
 /// when it does not qualify for that form at all.
 std::optional<int64_t> getStraightLineTerms(ReduceMacOp reduce) {
@@ -73,6 +85,8 @@ struct ScalarizeOndspFixedReduceMac final
       auto function = op->getParentOfType<func::FuncOp>();
       if (!function)
         return;
+      if (!isStraightLineCandidate(op))
+        return;
       if (std::optional<int64_t> terms = getStraightLineTerms(op))
         totals[function] += *terms;
     });
@@ -86,13 +100,9 @@ struct ScalarizeOndspFixedReduceMac final
     SmallVector<ReduceMacOp> candidates;
     getOperation()->walk([&](ReduceMacOp op) { candidates.push_back(op); });
     for (ReduceMacOp reduce : candidates) {
-      auto accumulator = llvm::dyn_cast<AccType>(reduce.getInitial().getType());
-      auto numeric = llvm::dyn_cast<FixedAttr>(reduce.getNumeric());
-      if (!accumulator || !numeric || !reduce.getProduct() ||
-          !isSingleLaneAccumulator(accumulator) ||
-          !isRankOneMemRefOf(reduce.getLhs().getType(), numeric.getStorage()) ||
-          !isRankOneMemRefOf(reduce.getRhs().getType(), numeric.getStorage()))
+      if (!isStraightLineCandidate(reduce))
         continue;
+      auto numeric = llvm::cast<FixedAttr>(reduce.getNumeric());
 
       OpBuilder builder(reduce);
       Location loc = reduce.getLoc();

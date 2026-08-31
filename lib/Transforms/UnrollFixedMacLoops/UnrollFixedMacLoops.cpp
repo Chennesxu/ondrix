@@ -79,37 +79,58 @@ bool isUnrollCandidate(scf::ForOp loop) {
   return isSingleLaneAccLoop(loop) && getUnrollableTripCount(loop).has_value();
 }
 
-int64_t countMacs(Operation *op) {
-  int64_t macs = 0;
-  op->walk([&](MacOp) { ++macs; });
-  return macs;
-}
+/// Static macs an operation leaves behind once unrolling has run over
+/// everything inside it. Cost is what the transform PRODUCES: a trip count
+/// alone undercounts every nested candidate, which is how a 128-term budget
+/// once admitted 4096. Every region is entered, because a candidate reached
+/// through an `scf.if` or any other region op still multiplies.
+struct MacCostCache {
+  llvm::DenseMap<Operation *, std::optional<int64_t>> costs;
 
-// Cost is what unrolling PRODUCES, not what one level of it carries: a trip
-// count alone undercounts every nested candidate and every body a previous
-// pass already expanded, which is how a 128-term budget once admitted 4096.
-std::optional<int64_t> getUnrolledMacCost(scf::ForOp loop) {
-  std::optional<int64_t> trip = getUnrollableTripCount(loop);
-  if (!trip)
-    return std::nullopt;
-  int64_t body = 0;
-  for (Operation &op : loop.getBody()->without_terminator()) {
-    std::optional<int64_t> cost;
-    auto nested = dyn_cast<scf::ForOp>(&op);
-    if (isa<MacOp>(op))
-      cost = 1;
-    else if (nested && isUnrollCandidate(nested))
-      cost = getUnrolledMacCost(nested);
-    else
-      cost = countMacs(&op);
-    if (!cost || llvm::AddOverflow(body, *cost, body))
-      return std::nullopt;
+  std::optional<int64_t> regionCost(Region &region) {
+    int64_t total = 0;
+    for (Block &block : region)
+      for (Operation &op : block) {
+        std::optional<int64_t> cost = operationCost(&op);
+        if (!cost || llvm::AddOverflow(total, *cost, total))
+          return std::nullopt;
+      }
+    return total;
   }
-  int64_t total;
-  if (llvm::MulOverflow(*trip, body, total))
-    return std::nullopt;
-  return total;
-}
+
+  std::optional<int64_t> operationCost(Operation *op) {
+    auto cached = costs.find(op);
+    if (cached != costs.end())
+      return cached->second;
+    std::optional<int64_t> result = 1;
+    if (!isa<MacOp>(op)) {
+      int64_t body = 0;
+      for (Region &region : op->getRegions()) {
+        std::optional<int64_t> cost = regionCost(region);
+        if (!cost || llvm::AddOverflow(body, *cost, body)) {
+          body = 0;
+          result = std::nullopt;
+          break;
+        }
+      }
+      if (result) {
+        result = body;
+        // Only a candidate loop multiplies: a loop this pass will not unroll
+        // keeps its body once, but whatever unrolls INSIDE it still expands.
+        auto loop = dyn_cast<scf::ForOp>(op);
+        if (loop && isUnrollCandidate(loop)) {
+          int64_t total;
+          if (llvm::MulOverflow(*getUnrollableTripCount(loop), body, total))
+            result = std::nullopt;
+          else
+            result = total;
+        }
+      }
+    }
+    costs[op] = result;
+    return result;
+  }
+};
 
 void unrollAccLoop(scf::ForOp loop, int64_t lower, int64_t step, int64_t trip) {
   OpBuilder builder(loop);
@@ -145,6 +166,7 @@ struct UnrollOndspFixedMacLoops final
     // declined for the same budget.
     llvm::DenseSet<Operation *> overBudget;
     if (maxUnrolledTerms > 0) {
+      MacCostCache cache;
       llvm::DenseMap<Operation *, int64_t> totals;
       for (scf::ForOp loop : candidates) {
         auto function = loop->getParentOfType<func::FuncOp>();
@@ -159,7 +181,7 @@ struct UnrollOndspFixedMacLoops final
             nested = isUnrollCandidate(enclosing);
         if (nested)
           continue;
-        std::optional<int64_t> cost = getUnrolledMacCost(loop);
+        std::optional<int64_t> cost = cache.operationCost(loop);
         if (!cost || llvm::AddOverflow(totals[function], *cost, totals[function]))
           overBudget.insert(function);
       }

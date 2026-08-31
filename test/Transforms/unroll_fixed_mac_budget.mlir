@@ -44,3 +44,35 @@ func.func @scalarize_then_unroll(%lhs: memref<4xi16>, %rhs: memref<4xi16>) -> !o
   }
   return %outer : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
 }
+
+// A candidate reached through a region op still multiplies: pricing the
+// enclosing op by its raw mac count reads this 4 x 4 nest as 4.
+// ADMIT-LABEL: func.func @nested_behind_region_op
+// ADMIT-NOT: scf.for
+// ADMIT-COUNT-16: ondsp.mac
+// REFUSE-LABEL: func.func @nested_behind_region_op
+// REFUSE: scf.for
+// REFUSE: scf.for
+// COMBINED-LABEL: func.func @nested_behind_region_op
+// COMBINED: scf.for
+func.func @nested_behind_region_op(%lhs: memref<64xi16>, %rhs: memref<64xi16>, %p: i1) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  %seed = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+  %outer = scf.for %i = %c0 to %c4 step %c1 iter_args(%oa = %seed) -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>) {
+    %g = scf.if %p -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>) {
+      %inner = scf.for %j = %c0 to %c4 step %c1 iter_args(%ia = %oa) -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>) {
+        %a = memref.load %lhs[%j] : memref<64xi16>
+        %b = memref.load %rhs[%j] : memref<64xi16>
+        %m = ondsp.mac %ia, %a, %b {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+        scf.yield %m : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+      }
+      scf.yield %inner : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+    } else {
+      scf.yield %oa : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+    }
+    scf.yield %g : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+  }
+  return %outer : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+}
