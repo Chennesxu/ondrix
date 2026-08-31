@@ -1,6 +1,7 @@
 // RUN: ondrix-opt %s --unroll-ondsp-fixed-mac-loops=max-unrolled-terms=16 | FileCheck %s --check-prefix=ADMIT
 // RUN: ondrix-opt %s --unroll-ondsp-fixed-mac-loops=max-unrolled-terms=15 | FileCheck %s --check-prefix=REFUSE
 // RUN: ondrix-opt %s --scalarize-ondsp-fixed-reduce-mac=max-unrolled-terms=8 --unroll-ondsp-fixed-mac-loops=max-unrolled-terms=8 | FileCheck %s --check-prefix=COMBINED
+// RUN: ondrix-opt %s --scalarize-ondsp-fixed-reduce-mac=max-unrolled-terms=16 --unroll-ondsp-fixed-mac-loops=max-unrolled-terms=16 | FileCheck %s --check-prefix=PAIRED
 
 // The budget prices what unrolling PRODUCES. A nested candidate multiplies
 // rather than adds, so this pair costs 4 x 4, not the 4 + 4 a trip sum claims.
@@ -75,4 +76,23 @@ func.func @nested_behind_region_op(%lhs: memref<64xi16>, %rhs: memref<64xi16>, %
     scf.yield %g : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
   }
   return %outer : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+}
+
+// The scalarizer recovers a static extent through the casts bufferization
+// inserts, so this function costs sixteen and both reductions are declined.
+// Unroll must recover the same extent from the memref.dim bound the refused
+// path emits, or it re-expands the direct one and mixes the two shapes.
+// COMBINED-LABEL: func.func @direct_and_cast_reductions
+// COMBINED-COUNT-2: ondsp.mac
+// COMBINED-NOT: ondsp.mac
+// PAIRED-LABEL: func.func @direct_and_cast_reductions
+// PAIRED-NOT: scf.for
+// PAIRED-COUNT-16: ondsp.mac
+func.func @direct_and_cast_reductions(%l: memref<8xi16>, %r: memref<8xi16>) -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>) {
+  %s = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+  %direct = ondsp.reduce_mac %s, %l, %r {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, memref<8xi16>, memref<8xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+  %lc = memref.cast %l : memref<8xi16> to memref<?xi16>
+  %rc = memref.cast %r : memref<8xi16> to memref<?xi16>
+  %cast = ondsp.reduce_mac %s, %lc, %rc {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, memref<?xi16>, memref<?xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+  return %direct, %cast : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
 }

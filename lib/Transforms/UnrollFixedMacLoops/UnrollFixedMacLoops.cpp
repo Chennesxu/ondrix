@@ -6,6 +6,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -30,19 +31,37 @@ namespace {
 /// argument is the pass description's.
 constexpr int64_t kMaxUnrolledTrip = 64;
 
-/// A compile-time index value, seen either directly or through `tensor.dim`
-/// of a statically shaped tensor.
+/// A compile-time index value, seen directly, through `tensor.dim` of a
+/// statically shaped tensor, or through `memref.dim` of one whose extent the
+/// casts bufferization inserts have erased. The reduction scalarizer prices
+/// the same site by the same recovery, and the two must agree or one pass
+/// re-expands what the other declined for the same budget.
 std::optional<int64_t> getStaticIndex(Value value) {
   if (std::optional<int64_t> constant = getConstantIntValue(value))
     return constant;
-  auto dim = value.getDefiningOp<tensor::DimOp>();
+  if (auto dim = value.getDefiningOp<tensor::DimOp>()) {
+    auto type = dyn_cast<RankedTensorType>(dim.getSource().getType());
+    std::optional<int64_t> index = dim.getConstantIndex();
+    if (!type || !index || type.isDynamicDim(*index))
+      return std::nullopt;
+    return type.getDimSize(*index);
+  }
+  auto dim = value.getDefiningOp<memref::DimOp>();
   if (!dim)
     return std::nullopt;
-  auto type = dyn_cast<RankedTensorType>(dim.getSource().getType());
   std::optional<int64_t> index = dim.getConstantIndex();
-  if (!type || !index || type.isDynamicDim(*index))
+  if (!index || *index < 0)
     return std::nullopt;
-  return type.getDimSize(*index);
+  Value source = dim.getSource();
+  while (true) {
+    auto type = dyn_cast<MemRefType>(source.getType());
+    if (type && *index < type.getRank() && !type.isDynamicDim(*index))
+      return type.getDimSize(*index);
+    auto cast = source.getDefiningOp<memref::CastOp>();
+    if (!cast)
+      return std::nullopt;
+    source = cast.getSource();
+  }
 }
 
 // Every intermediate here can overflow i64 for legal extreme bounds, and a
@@ -70,9 +89,7 @@ bool isSingleLaneAccLoop(scf::ForOp loop) {
   auto accumulator = dyn_cast<AccType>(loop.getRegionIterArgs().front().getType());
   if (!accumulator || !isSingleLaneAccumulator(accumulator))
     return false;
-  bool hasMac = false;
-  loop.getBody()->walk([&](MacOp) { hasMac = true; });
-  return hasMac;
+  return loop.getBody()->walk([](MacOp) { return WalkResult::interrupt(); }).wasInterrupted();
 }
 
 bool isUnrollCandidate(scf::ForOp loop) {
@@ -84,8 +101,22 @@ bool isUnrollCandidate(scf::ForOp loop) {
 /// alone undercounts every nested candidate, which is how a 128-term budget
 /// once admitted 4096. Every region is entered, because a candidate reached
 /// through an `scf.if` or any other region op still multiplies.
+///
+/// Each operation is classified and costed once; the classification walks a
+/// body, so caching it is what keeps a deep nest from being re-walked per
+/// enclosing level.
 struct MacCostCache {
   llvm::DenseMap<Operation *, std::optional<int64_t>> costs;
+  llvm::DenseMap<Operation *, bool> candidates;
+
+  bool isCandidate(scf::ForOp loop) {
+    auto cached = candidates.find(loop);
+    if (cached != candidates.end())
+      return cached->second;
+    bool result = isUnrollCandidate(loop);
+    candidates[loop] = result;
+    return result;
+  }
 
   std::optional<int64_t> regionCost(Region &region) {
     int64_t total = 0;
@@ -118,7 +149,7 @@ struct MacCostCache {
         // Only a candidate loop multiplies: a loop this pass will not unroll
         // keeps its body once, but whatever unrolls INSIDE it still expands.
         auto loop = dyn_cast<scf::ForOp>(op);
-        if (loop && isUnrollCandidate(loop)) {
+        if (loop && isCandidate(loop)) {
           int64_t total;
           if (llvm::MulOverflow(*getUnrollableTripCount(loop), body, total))
             result = std::nullopt;
@@ -178,7 +209,7 @@ struct UnrollOndspFixedMacLoops final
         for (Operation *parent = loop->getParentOp(); parent && !nested;
              parent = parent->getParentOp())
           if (auto enclosing = dyn_cast<scf::ForOp>(parent))
-            nested = isUnrollCandidate(enclosing);
+            nested = cache.isCandidate(enclosing);
         if (nested)
           continue;
         std::optional<int64_t> cost = cache.operationCost(loop);
