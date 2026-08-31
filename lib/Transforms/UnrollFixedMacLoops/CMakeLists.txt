@@ -7,7 +7,6 @@ add_ondrix_library(OndrixUnrollFixedMacLoops
   LINK_LIBS PUBLIC
   MLIRArithDialect
   MLIRIR
-  MLIRMemRefDialect
   MLIRPass
   MLIRSCFDialect
   MLIRTensorDialect
