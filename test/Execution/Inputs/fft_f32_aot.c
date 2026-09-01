@@ -24,6 +24,7 @@ extern void _mlir_ciface_cfft64_fma(MemRefF32 *, MemRefF32 *);
 extern void _mlir_ciface_rfft16_off(MemRefF32 *, MemRefF32 *);
 extern void _mlir_ciface_irfft16_off(MemRefF32 *, MemRefF32 *);
 extern void _mlir_ciface_f32_cfft_round_trip(MemRefF32 *, MemRefF32 *);
+extern void _mlir_ciface_f32_cfft_round_trip_loops(MemRefF32 *, MemRefF32 *);
 
 enum { kMaxExtent = 64 };
 
@@ -222,6 +223,28 @@ static int checkSourceRoundTrip(const float *interleaved) {
   return failures;
 }
 
+/* `--fft-loops` is an explicit schedule choice, so it must change the code
+ * shape and NOT the values. The shape half is checked in
+ * test/Frontend/fft_loops_flag.mlir; this is the value half, on the same
+ * source compiled both ways. */
+static int checkSourceShapesAgree(const float *interleaved) {
+  enum { kPoints = 16 };
+  float unrolledIn[2 * kPoints], loopedIn[2 * kPoints];
+  memcpy(unrolledIn, interleaved, sizeof(unrolledIn));
+  memcpy(loopedIn, interleaved, sizeof(loopedIn));
+  MemRefF32 unrolledRef = {unrolledIn, unrolledIn, 0, {2 * kPoints}, {1}};
+  MemRefF32 loopedRef = {loopedIn, loopedIn, 0, {2 * kPoints}, {1}};
+  MemRefF32 unrolled, looped;
+  _mlir_ciface_f32_cfft_round_trip(&unrolled, &unrolledRef);
+  _mlir_ciface_f32_cfft_round_trip_loops(&looped, &loopedRef);
+  int failures = 0;
+  for (int i = 0; i < 2 * kPoints; ++i)
+    failures += report("ox_loops", i, resultAt(&unrolled, i), resultAt(&looped, i));
+  free(unrolled.allocated);
+  free(looped.allocated);
+  return failures;
+}
+
 int main(void) {
   float signal[2 * kMaxExtent];
   for (int i = 0; i < 2 * kMaxExtent; ++i)
@@ -236,6 +259,7 @@ int main(void) {
   failures += checkRfft(signal, 16);
   failures += checkIrfft(signal, 16);
   failures += checkSourceRoundTrip(signal);
+  failures += checkSourceShapesAgree(signal);
   failures += checkContractsDiffer(signal);
 
   if (failures != 0) {

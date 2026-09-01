@@ -47,6 +47,13 @@ cl::opt<int64_t> vectorBits("vector-bits",
                                      "sites ordered and scalar; fast reductions still carry "
                                      "scalar chains)"),
                             cl::init(0));
+cl::opt<bool> fftLoops("fft-loops",
+                       cl::desc("Schedule choice, not a target fact: lower static "
+                                "CFFT/RFFT/IRFFT as stage loops over in-memory twiddle tables "
+                                "instead of unrolled butterflies. Smaller object, and slower at "
+                                "the extents where the unrolled form still compiles"),
+                       cl::init(false));
+
 cl::opt<bool> supportsF32VectorFma("supports-f32-vector-fma",
                                    cl::desc("Declared target capability: the target has an f32 "
                                             "vector fused multiply-add"),
@@ -73,11 +80,16 @@ void emitManifest(mlir::ModuleOp module, const ondrix::OndrixDefaultPipelineOpti
 
   const int64_t vectorBitsValue = options.vectorBits;
   const bool fmaValue = options.supportsF32VectorFma;
+  const bool fftLoopsValue = options.fftLoops;
   llvm::json::Object manifest{
       {"llvm_version", LLVM_VERSION_STRING},
       {"pipeline", ondrix::getOndrixDefaultPipelineText(options)},
       {"declared_target_facts",
        llvm::json::Object{{"vector_bits", vectorBitsValue}, {"supports_f32_vector_fma", fmaValue}}},
+      // Separate from the target facts on purpose: this one is a code-shape
+      // decision the caller makes, and no target description determines it.
+      {"declared_schedule_choices",
+       llvm::json::Object{{"fft_lowering", fftLoopsValue ? "loops" : "unrolled"}}},
       {"fast_permissions_used", std::move(permissions)},
       // Declared, not observed: the numeric model states these and every
       // reference is built to match them.
@@ -129,6 +141,7 @@ int main(int argc, char **argv) {
     ondrix::OndrixDefaultPipelineOptions options;
     options.vectorBits = vectorBits.getValue();
     options.supportsF32VectorFma = supportsF32VectorFma.getValue();
+    options.fftLoops = fftLoops.getValue();
     ondrix::buildOndrixDefaultPipeline(passManager, options);
     if (failed(passManager.run(*module)))
       return 1;

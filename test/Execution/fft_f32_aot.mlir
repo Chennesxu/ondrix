@@ -10,11 +10,14 @@
 // RUN: ondrix-compile --emit=contracts %S/../Frontend/Inputs/f32_cfft_round_trip.ox | ondrix-opt --ondrix-default-pipeline="vector-bits=256" > %t.ox.mlir
 // RUN: ondrix-translate %t.ox.mlir --mlir-to-llvmir > %t.ox.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ox.ll -o %t.ox.o
-// RUN: cc -ffp-contract=off %S/Inputs/fft_f32_aot.c %t.o %t.ox.o -lm -o %t
+// RUN: ondrix-compile --emit=llvm --fft-loops %S/../Frontend/Inputs/f32_cfft_round_trip_loops.ox --vector-bits=256 > %t.oxloops.mlir
+// RUN: ondrix-translate %t.oxloops.mlir --mlir-to-llvmir > %t.oxloops.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.oxloops.ll -o %t.oxloops.o
+// RUN: cc -ffp-contract=off %S/Inputs/fft_f32_aot.c %t.o %t.ox.o %t.oxloops.o -lm -o %t
 // RUN: %t
-// RUN: cc -ffp-contract=off %S/Inputs/fft_f32_aot.c %t.canonical.o %t.ox.o -lm -o %t.canonical
+// RUN: cc -ffp-contract=off %S/Inputs/fft_f32_aot.c %t.canonical.o %t.ox.o %t.oxloops.o -lm -o %t.canonical
 // RUN: %t.canonical
-// RUN: cc -ffp-contract=off %S/Inputs/fft_f32_aot.c %t.loops.o %t.ox.o -lm -o %t.loops
+// RUN: cc -ffp-contract=off %S/Inputs/fft_f32_aot.c %t.loops.o %t.ox.o %t.oxloops.o -lm -o %t.loops
 // RUN: %t.loops
 
 // The interleaved f32 transform has no requantization boundary, so this gate

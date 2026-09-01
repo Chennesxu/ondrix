@@ -12,10 +12,11 @@ class OpPassManager;
 
 namespace ondrix {
 
-/// Options of the canonical Ondrix pipeline. Every knob here is a declared
-/// target fact rather than a user preference, and none of them is inferred
-/// from the machine running the compiler: a cross compiler that reads its own
-/// host would silently produce a schedule for the wrong target.
+/// Options of the canonical Ondrix pipeline. The target facts here are
+/// declared rather than a user preference, and none of them is inferred from
+/// the machine running the compiler: a cross compiler that reads its own host
+/// would silently produce a schedule for the wrong target. `fftLoops` is the
+/// one option that is NOT a target fact, and it says so at its declaration.
 struct OndrixDefaultPipelineOptions
     : public mlir::PassPipelineOptions<OndrixDefaultPipelineOptions> {
   /// Vector register width in bits, from which each transform's lane count is
@@ -36,6 +37,23 @@ struct OndrixDefaultPipelineOptions
       llvm::cl::desc("Declared target capability: the target has an f32 vector fused "
                      "multiply-add"),
       llvm::cl::init(false)};
+  /// Which code shape the static transforms take. This is an explicit
+  /// SCHEDULE CHOICE, not a target fact, and it must not be derived from a
+  /// target description: whether the instruction memory holds the unrolled
+  /// transform depends on the extent and on which functions the module
+  /// contains, so no global value is right for a module holding both a
+  /// size-8 transform (4128 bytes unrolled, and 2.47x faster that way) and a
+  /// size-64 one (69352 bytes). It is also not a profitability question the
+  /// pipeline could settle: measured on the host class the packed loop form
+  /// costs about 2.5x the cycles at extents 8 and 64, while the unrolled form
+  /// does not compile at all at extent 1024. Deriving it would need a real
+  /// capacity budget and a per-operation decision, which is the cost model
+  /// this project refuses.
+  Option<bool> fftLoops{*this, "fft-loops",
+                        llvm::cl::desc("Schedule choice: lower static CFFT/RFFT/IRFFT as stage "
+                                       "loops over in-memory twiddle tables instead of unrolled "
+                                       "butterflies (smaller object, slower at small extents)"),
+                        llvm::cl::init(false)};
 };
 
 /// Appends the canonical Ondrix flow to `pm`: design evaluation, contract
