@@ -1879,13 +1879,16 @@ LogicalResult CxPhaseOp::verify() {
   return success();
 }
 
-// The one design-window contract every window op shares: Q1.15 coefficients
-// at a static extent in [2, 4096].
+// The one design-window contract every window op shares: uniform-Q
+// coefficients at a static extent in [2, 4096]. The window value itself is
+// width-free, so only the quantization boundary moves.
 static LogicalResult verifyWindowDesign(Operation *op, Attribute numeric,
                                         RankedTensorType coefficientsType) {
-  if (failed(verifySignedFixedFormat(op, numeric, 16, 15, "numeric")))
-    return failure();
-  return verifyDesignCoefficientTensor(op, coefficientsType, 2, 4096);
+  std::optional<unsigned> storageWidth = getUniformQStorageWidth(numeric);
+  if (!storageWidth)
+    return op->emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                           "#ondsp.fixed<signed, storage = i32, frac = 31>");
+  return verifyDesignCoefficientTensor(op, coefficientsType, 2, 4096, *storageWidth);
 }
 
 LogicalResult WindowHammingOp::verify() {

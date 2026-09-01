@@ -183,3 +183,60 @@ func.func @lowpass_quarter_q31() -> tensor<9xi32> {
   } : tensor<9xi32>
   return %coefficients : tensor<9xi32>
 }
+
+// The four Q31 window tables below were each verified coefficient by
+// coefficient against 50-digit mpmath, the Kaiser Bessel series included.
+
+func.func @window_hamming_even_q31() -> tensor<8xi32> {
+  // CHECK-LABEL: func.func @window_hamming_even_q31
+  // CHECK-NOT: ondrix.window_hamming
+  // CHECK: arith.constant
+  // CHECK-SAME: kind = "window_hamming"
+  // CHECK-SAME: saturated = 0
+  // CHECK-SAME: dense<[171798692, 543731459, 1379456801, 2049656489, 2049656489, 1379456801, 543731459, 171798692]> : tensor<8xi32>
+  %window = ondrix.window_hamming {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+  } : tensor<8xi32>
+  return %window : tensor<8xi32>
+}
+
+func.func @window_hann_odd_q31() -> tensor<9xi32> {
+  // The exact +1.0 center saturates at the wider width exactly as at Q15,
+  // and both endpoints are exactly zero.
+  // CHECK-LABEL: func.func @window_hann_odd_q31
+  // CHECK: arith.constant
+  // CHECK-SAME: kind = "window_hann"
+  // CHECK-SAME: saturated = 1
+  // CHECK-SAME: dense<[0, 314491699, 1073741824, 1832991949, 2147483647, 1832991949, 1073741824, 314491699, 0]> : tensor<9xi32>
+  %window = ondrix.window_hann {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+  } : tensor<9xi32>
+  return %window : tensor<9xi32>
+}
+
+func.func @window_blackman_even_q31() -> tensor<8xi32> {
+  // CHECK-LABEL: func.func @window_blackman_even_q31
+  // CHECK: arith.constant
+  // CHECK-SAME: kind = "window_blackman"
+  // CHECK-SAME: saturated = 0
+  // CHECK-SAME: dense<[0, 194247250, 986087893, 1976465820, 1976465820, 986087893, 194247250, 0]> : tensor<8xi32>
+  %window = ondrix.window_blackman {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+  } : tensor<8xi32>
+  return %window : tensor<8xi32>
+}
+
+func.func @window_kaiser_odd_q31() -> tensor<9xi32> {
+  // CHECK-LABEL: func.func @window_kaiser_odd_q31
+  // CHECK: arith.constant
+  // CHECK-SAME: beta_den = 1
+  // CHECK-SAME: beta_num = 6
+  // CHECK-SAME: kind = "window_kaiser"
+  // CHECK-SAME: saturated = 1
+  // CHECK-SAME: dense<[31940248, 351344570, 1037139267, 1805356748, 2147483647, 1805356748, 1037139267, 351344570, 31940248]> : tensor<9xi32>
+  %window = ondrix.window_kaiser {
+    beta_num = 6 : i64, beta_den = 1 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+  } : tensor<9xi32>
+  return %window : tensor<9xi32>
+}

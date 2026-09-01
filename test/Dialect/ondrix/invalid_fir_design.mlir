@@ -145,3 +145,25 @@ func.func @kaiser_maximum_numerator_unit_denominator() -> tensor<9xi16> {
   } : tensor<9xi16>
   return %window : tensor<9xi16>
 }
+
+// -----
+
+// The width now reaches the coefficient tensor check, so a Q31 numeric on
+// an i16 result is what fails rather than the numeric alone.
+func.func @window_q31_numeric_narrow_tensor() -> tensor<8xi16> {
+  // expected-error@+1 {{requires a static rank-1 i32 coefficient tensor}}
+  %window = ondrix.window_hamming {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+  } : tensor<8xi16>
+  return %window : tensor<8xi16>
+}
+
+// -----
+
+func.func @window_non_uniform_q31() -> tensor<8xi32> {
+  // expected-error@+1 {{numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or #ondsp.fixed<signed, storage = i32, frac = 31>}}
+  %window = ondrix.window_hamming {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 28>
+  } : tensor<8xi32>
+  return %window : tensor<8xi32>
+}

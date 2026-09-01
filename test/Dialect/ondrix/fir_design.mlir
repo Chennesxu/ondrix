@@ -57,3 +57,24 @@ func.func @kaiser_maximum_ratio_beta() -> tensor<9xi16> {
   } : tensor<9xi16>
   return %window : tensor<9xi16>
 }
+
+func.func @window_hamming_q31() -> tensor<8xi32> {
+  // CHECK: ondrix.window_hamming
+  // CHECK-SAME: numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+  // CHECK-SAME: tensor<8xi32>
+  %window = ondrix.window_hamming {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+  } : tensor<8xi32>
+  return %window : tensor<8xi32>
+}
+
+func.func @window_kaiser_q31() -> tensor<9xi32> {
+  // CHECK: ondrix.window_kaiser
+  // CHECK-SAME: numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+  // CHECK-SAME: tensor<9xi32>
+  %window = ondrix.window_kaiser {
+    beta_num = 6 : i64, beta_den = 1 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+  } : tensor<9xi32>
+  return %window : tensor<9xi32>
+}

@@ -1747,16 +1747,29 @@ def Ondrix_WindowHammingOp : Ondrix_Op<"window_hamming", [Pure]> {
     w[n] = 27/50 - (23/50) * cos(2*pi*n / (N-1)),  n = 0..N-1
     ```
 
-    Each real coefficient is quantized once to signed Q1.15 with
-    round-half-even and declared saturation at the +1.0 window center. The
-    operation is a compile-time design intent with no runtime form: the
-    opt-in `evaluate-ondrix-fir-design` pass replaces it with a constant
-    coefficient tensor, and generation fails closed when any coefficient
-    is closer than `2^-20` Q15 LSB to a rounding tie, so the emitted table
-    provably equals the real-valued definition and is exactly symmetric.
+    Each real coefficient is quantized once to signed Q1.(W-1), for W of 16
+    or 32, with round-half-even and declared saturation at the +1.0 window
+    center. The window value itself is width-free, so the width moves the
+    quantization boundary and nothing else. The operation is a compile-time
+    design intent with no runtime form: the opt-in
+    `evaluate-ondrix-fir-design` pass replaces it with a constant
+    coefficient tensor, and generation fails closed when any coefficient is
+    closer to a rounding tie than the guard for its width, so the emitted
+    table provably equals the real-valued definition and is exactly
+    symmetric.
 
-    The result is a static rank-1 `tensor<Nxi16>` with `2 <= N <= 4096` and
-    `numeric = #ondsp.fixed<signed, storage = i16, frac = 15>`.
+    At Q31 that refusal is common enough that the rate belongs in the
+    contract. Swept over every extent, the `2^-13` LSB guard refuses 20.1%
+    of Hamming extents, 15.9% of Hann and 22.4% of Blackman; Kaiser runs
+    1.2% to 5.1% depending on beta. No extent below 225 is refused for any
+    of the three cosine windows, so the short designs are unaffected. The
+    Q15 figures are 0.20%, 0.17% and 0.07%. The difference is the guard and
+    not the arithmetic -- binary64 evaluates these windows to about
+    `3e-06` Q31 LSB, forty times inside the guard -- and the guard is one
+    cross-operation contract rather than this operation's to loosen.
+
+    The result is a static rank-1 `tensor<NxiW>` with `2 <= N <= 4096` and a
+    matching uniform-Q `numeric`.
   }];
   let arguments = (ins Ondsp_NumericAttr:$numeric);
   let results = (outs AnyRankedTensor:$coefficients);
@@ -1775,12 +1788,13 @@ def Ondrix_WindowHannOp : Ondrix_Op<"window_hann", [Pure]> {
     ```
 
     The endpoints are exactly zero and the +1.0 center of odd lengths
-    saturates to 32767 by declared convention. Quantization, the
-    fail-closed `2^-20` tie guard, symmetry, and the
-    `evaluate-ondrix-fir-design` consumer follow `ondrix.window_hamming`.
+    saturates to the format maximum by declared convention. Quantization,
+    the width choice, the fail-closed tie guard and its measured Q31
+    refusal rate, symmetry, and the `evaluate-ondrix-fir-design` consumer
+    all follow `ondrix.window_hamming`.
 
-    The result is a static rank-1 `tensor<Nxi16>` with `2 <= N <= 4096` and
-    `numeric = #ondsp.fixed<signed, storage = i16, frac = 15>`.
+    The result is a static rank-1 `tensor<NxiW>` with `2 <= N <= 4096` and a
+    matching uniform-Q `numeric`.
   }];
   let arguments = (ins Ondsp_NumericAttr:$numeric);
   let results = (outs AnyRankedTensor:$coefficients);
@@ -1800,11 +1814,12 @@ def Ondrix_WindowBlackmanOp : Ondrix_Op<"window_blackman", [Pure]> {
     ```
 
     The endpoints are exactly zero (21/50 - 1/2 + 2/25 = 0). Quantization,
-    the fail-closed `2^-20` tie guard, symmetry, and the
-    `evaluate-ondrix-fir-design` consumer follow `ondrix.window_hamming`.
+    the width choice, the fail-closed tie guard and its measured Q31
+    refusal rate, symmetry, and the `evaluate-ondrix-fir-design` consumer
+    all follow `ondrix.window_hamming`.
 
-    The result is a static rank-1 `tensor<Nxi16>` with `2 <= N <= 4096` and
-    `numeric = #ondsp.fixed<signed, storage = i16, frac = 15>`.
+    The result is a static rank-1 `tensor<NxiW>` with `2 <= N <= 4096` and a
+    matching uniform-Q `numeric`.
   }];
   let arguments = (ins Ondsp_NumericAttr:$numeric);
   let results = (outs AnyRankedTensor:$coefficients);
@@ -1826,13 +1841,16 @@ def Ondrix_WindowKaiserOp : Ondrix_Op<"window_kaiser", [Pure]> {
 
     `I0` is the zeroth-order modified Bessel function of the first kind,
     evaluated at compile time by its power series to a documented
-    binary64 error budget; the fail-closed `2^-20` quantization tie guard
-    backstops the whole evaluation chain exactly as for the other window
-    designs. The endpoints are `1 / I0(beta)` (nonzero) and the +1.0
-    center of odd lengths saturates to 32767 by declared convention.
+    binary64 error budget; the fail-closed quantization tie guard for the
+    declared width backstops the whole evaluation chain exactly as for the
+    other window designs. Its Q31 refusal rate is the lowest of the four,
+    1.2% to 5.1% of extents depending on beta, because the series terms are
+    all positive and never cancel. The endpoints are `1 / I0(beta)`
+    (nonzero) and the +1.0 center of odd lengths saturates to the format
+    maximum by declared convention.
 
-    The result is a static rank-1 `tensor<Nxi16>` with `2 <= N <= 4096`
-    and `numeric = #ondsp.fixed<signed, storage = i16, frac = 15>`.
+    The result is a static rank-1 `tensor<NxiW>` with `2 <= N <= 4096`
+    and a matching uniform-Q `numeric`.
   }];
   let arguments = (ins I64Attr:$beta_num,
                    I64Attr:$beta_den,
