@@ -1734,9 +1734,7 @@ def Ondrix_CxPhaseOp : Ondrix_Op<"cx_phase", [Pure]> {
     exact under two's-complement wraparound. The result reading is the
     unsigned `Q0.16` turn and is declared in its own attribute.
 
-    That reading does NOT follow the component width, and the asymmetry is
-    the point: the turn is the format `ondrix.sine` consumes, so a `Q0.32`
-    turn would be an angle with no consumer in this catalog. What the wider
+    That reading does NOT follow the component width. What the wider
     components buy is a more accurate ratio `r`, hence a more accurate turn
     in the same format -- not a finer format. Only the absolute values and
     the ratio numerator follow the width, and they run one bit wider than
@@ -1744,6 +1742,13 @@ def Ondrix_CxPhaseOp : Ondrix_Op<"cx_phase", [Pure]> {
     an absolute value. The 129-entry arctangent table is a 16-bit
     quantization either way, so its tie-guard argument carries over
     unchanged.
+
+    That was originally justified by there being no consumer for a `Q0.32`
+    turn, and since `ondrix.sine` gained its Q31 profile that is no longer
+    true. The `Q0.16` output is therefore unfinished width rather than a
+    contract, and reaching `Q0.32` means what the Q31 sine needed: the
+    129-entry table read by linear interpolation is about `2^-16` from the
+    real arctangent, which no `Q0.32` reading can inherit.
 
     ```text
     (re, im) == (0, 0)  ->  0                the declared value at the origin
