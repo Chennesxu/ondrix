@@ -2563,15 +2563,18 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       return ComposedType{SourceType::Q15, inputExtent - tapCount + 1};
     };
-    // The elementwise family: Q15 in, Q15 out, extents equal. Only the two
-    // boundary attributes vary between members, so one checker covers all
-    // seven and a new member cannot forget a rule.
+    // The elementwise family: one uniform-Q width in, the same width out,
+    // extents equal. Only the two boundary attributes vary between members,
+    // so one checker covers all seven and a new member cannot forget a rule.
+    // The two attribute ranges follow the width because they are raw values
+    // in the declared format, not abstract quantities.
     auto checkElementwise = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       std::optional<ComposedType> lhs = checkComposedExpression(call.operands.front());
       if (!lhs)
         return std::nullopt;
-      if (lhs->elementType != SourceType::Q15) {
-        diagnostics.error(call.position, "elementwise builtins require Q15 operand elements");
+      if (lhs->elementType != SourceType::Q15 && lhs->elementType != SourceType::Q31) {
+        diagnostics.error(call.position, "elementwise builtins require q15 or q31 operand "
+                                         "elements");
         return std::nullopt;
       }
       if (lhs->extent < 1 || lhs->extent > 4096) {
@@ -2579,23 +2582,31 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                           "elementwise builtins currently require an extent in [1, 4096]");
         return std::nullopt;
       }
+      int64_t fractionalBits = lhs->elementType == SourceType::Q31 ? 31 : 15;
       if (isBinaryElementwiseKind(call.kind)) {
         std::optional<ComposedType> rhs = checkComposedExpression(call.operands[1]);
         if (!rhs)
           return std::nullopt;
-        if (rhs->elementType != SourceType::Q15 || rhs->extent != lhs->extent) {
-          diagnostics.error(call.position,
-                            "binary elementwise builtins require operands of the same Q15 extent");
+        if (rhs->elementType != lhs->elementType || rhs->extent != lhs->extent) {
+          diagnostics.error(call.position, "binary elementwise builtins require operands of the "
+                                           "same element type and extent");
           return std::nullopt;
         }
       }
-      if (call.kind == ReductionKind::Offset && (call.bias < -32768 || call.bias > 32767)) {
-        diagnostics.error(call.position,
-                          "offset bias must be a raw signed Q1.15 value in [-32768, 32767]");
+      int64_t biasBound = int64_t(1) << fractionalBits;
+      if (call.kind == ReductionKind::Offset &&
+          (call.bias < -biasBound || call.bias > biasBound - 1)) {
+        diagnostics.error(call.position, llvm::Twine("offset bias must be a raw signed Q1.") +
+                                             llvm::Twine(fractionalBits) + " value in [" +
+                                             llvm::Twine(-biasBound) + ", " +
+                                             llvm::Twine(biasBound - 1) + "]");
         return std::nullopt;
       }
-      if (call.kind == ReductionKind::Shift && (call.amount < -15 || call.amount > 15)) {
-        diagnostics.error(call.position, "shift amount must lie in [-15, 15]");
+      if (call.kind == ReductionKind::Shift &&
+          (call.amount < -fractionalBits || call.amount > fractionalBits)) {
+        diagnostics.error(call.position, llvm::Twine("shift amount must lie in [-") +
+                                             llvm::Twine(fractionalBits) + ", " +
+                                             llvm::Twine(fractionalBits) + "]");
         return std::nullopt;
       }
       if (call.rounding.empty())
@@ -3676,29 +3687,34 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         auto rounding = ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding));
         auto overflow =
             ondsp::OverflowModeAttr::get(&context, *parseOverflow(call.destinationOverflow));
+        // Sema proved every operand carries the same declared width, so the
+        // operand storage is what selects the profile.
+        ondsp::FixedAttr elementwise =
+            inputType.getElementType().isSignlessInteger(32) ? q31Numeric : numeric;
         if (isBinaryElementwiseKind(call.kind)) {
           const ExpressionAst &second = call.operands[1];
           Value rhs = second.isParameterReference() ? arguments.lookup(second.parameter)
                                                     : emitComposedCall(*second.call);
           if (call.kind == ReductionKind::Add)
-            return builder.create<ir::AddOp>(callLocation, inputType, input, rhs, numeric,
+            return builder.create<ir::AddOp>(callLocation, inputType, input, rhs, elementwise,
                                              overflow);
           if (call.kind == ReductionKind::Sub)
-            return builder.create<ir::SubOp>(callLocation, inputType, input, rhs, numeric,
+            return builder.create<ir::SubOp>(callLocation, inputType, input, rhs, elementwise,
                                              overflow);
-          return builder.create<ir::MultOp>(callLocation, inputType, input, rhs, numeric, rounding,
-                                            overflow);
+          return builder.create<ir::MultOp>(callLocation, inputType, input, rhs, elementwise,
+                                            rounding, overflow);
         }
         if (call.kind == ReductionKind::Abs)
-          return builder.create<ir::AbsOp>(callLocation, inputType, input, numeric, overflow);
+          return builder.create<ir::AbsOp>(callLocation, inputType, input, elementwise, overflow);
         if (call.kind == ReductionKind::Negate)
-          return builder.create<ir::NegateOp>(callLocation, inputType, input, numeric, overflow);
+          return builder.create<ir::NegateOp>(callLocation, inputType, input, elementwise,
+                                              overflow);
         if (call.kind == ReductionKind::Offset)
           return builder.create<ir::OffsetOp>(callLocation, inputType, input,
-                                              builder.getI64IntegerAttr(call.bias), numeric,
+                                              builder.getI64IntegerAttr(call.bias), elementwise,
                                               overflow);
         return builder.create<ir::ShiftOp>(callLocation, inputType, input,
-                                           builder.getI64IntegerAttr(call.amount), numeric,
+                                           builder.getI64IntegerAttr(call.amount), elementwise,
                                            rounding, overflow);
       }
       Location callLocation = getLocation(context, sourceName, call.position);

@@ -1907,12 +1907,15 @@ def Ondrix_FirDesignWindowedSincOp
   let assemblyFormat = "attr-dict `:` type($coefficients)";
 }
 
-// The elementwise family. Every member maps a static rank-1 signed-Q1.15
-// tensor (`N` in [1, 4096]) elementwise and states the same thing about
-// itself: what the exact result of the operation is over the integers, and
-// what the declared boundary does to it. The exactness claim is what makes
-// the boundary the only place a value can change, so these operations
-// compose without a rewrite having to reconstruct where rounding happened.
+// The elementwise family. Every member maps a static rank-1 uniform-Q
+// `tensor<NxiW>` (`W` of 16 or 32, `N` in [1, 4096]) elementwise and states
+// the same thing about itself: what the exact result of the operation is
+// over the integers, and what the declared boundary does to it. The
+// exactness claim is what makes the boundary the only place a value can
+// change, so these operations compose without a rewrite having to
+// reconstruct where rounding happened. The exact body therefore runs at
+// twice the storage, and the two members carrying a raw attribute take the
+// range the declared format actually has rather than a pinned one.
 class Ondrix_ElementwiseOp<string mnemonic> : Ondrix_Op<mnemonic, [Pure]> {
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
@@ -1921,17 +1924,17 @@ class Ondrix_ElementwiseOp<string mnemonic> : Ondrix_Op<mnemonic, [Pure]> {
 
 class Ondrix_ExactCombineOp<string mnemonic, string noun, string symbol>
     : Ondrix_ElementwiseOp<mnemonic> {
-  let summary = "Elementwise Q15 " # noun # " with one declared overflow";
+  let summary = "Elementwise uniform-Q " # noun # " with one declared overflow";
   let description = [{
     ```text
-    y[i] = narrow_i16(x[i] }] # symbol # [{ z[i])      the sum is exact in i17
+    y[i] = narrow_iW(x[i] }] # symbol # [{ z[i])    the sum is exact one bit wider
     ```
 
     No information is lost below the least significant bit, so there is no
-    rounding boundary and none is declared. The }] # noun # [{ leaves Q1.15
-    exactly when the operands have the same sign and enough magnitude, which
-    the declared `overflow` resolves: `saturate` clamps to the rail and
-    `wrap` returns the exact value modulo `2^16`.
+    rounding boundary and none is declared. The }] # noun # [{ leaves
+    `Q1.(W-1)` exactly when the operands have the same sign and enough
+    magnitude, which the declared `overflow` resolves: `saturate` clamps to
+    the rail and `wrap` returns the exact value modulo `2^W`.
   }];
   let arguments = (ins AnyRankedTensor:$lhs,
                    AnyRankedTensor:$rhs,
@@ -1943,17 +1946,18 @@ def Ondrix_AddOp : Ondrix_ExactCombineOp<"add", "sum", "+">;
 def Ondrix_SubOp : Ondrix_ExactCombineOp<"sub", "difference", "-">;
 
 def Ondrix_MultOp : Ondrix_ElementwiseOp<"mult"> {
-  let summary = "Elementwise Q15 product with one explicit requantization";
+  let summary = "Elementwise uniform-Q product with one explicit requantization";
   let description = [{
     ```text
-    y[i] = narrow_i16(round(x[i] * z[i] / 2^15))    the product is exact
+    y[i] = narrow_iW(round(x[i] * z[i] / 2^(W-1)))    the product is exact
     ```
 
     This is `ondrix.gain` with a tensor in place of the constant, and it has
-    the same two boundaries in the same order: the exact Q30 product loses
-    fifteen bits under the declared tie rule, and the result is narrowed
-    under the declared overflow. Saturation is reachable only at
-    `x = z = -32768`, where the product is exactly `+1.0`.
+    the same two boundaries in the same order: the exact `Q(2W-2)` product
+    loses `W-1` bits under the declared tie rule, and the result is narrowed
+    under the declared overflow. The product needs a `2W`-bit carrier to be
+    exact, which is what the lowering uses. Saturation is reachable only at
+    the two storage minima, where the product is exactly `+1.0`.
 
     All four declared tie rules are admissible, and they genuinely disagree:
     the rules split on halfway products, and among those `nearest_even` and
@@ -1971,18 +1975,19 @@ def Ondrix_MultOp : Ondrix_ElementwiseOp<"mult"> {
 
 class Ondrix_ExactUnaryOp<string mnemonic, string noun, string formula>
     : Ondrix_ElementwiseOp<mnemonic> {
-  let summary = "Elementwise Q15 " # noun # " with one declared overflow";
+  let summary = "Elementwise uniform-Q " # noun # " with one declared overflow";
   let description = [{
     ```text
-    y[i] = narrow_i16(}] # formula # [{)
+    y[i] = narrow_iW(}] # formula # [{)
     ```
 
     The }] # noun # [{ is exact over the integers and there is no rounding
     boundary. Its whole finite-precision content is one asymmetry: the signed
-    Q1.15 range is `[-32768, 32767]`, so `-32768` is the single input whose
-    result is unrepresentable. The declared `overflow` says what happens
-    there — `saturate` gives `32767` and `wrap` gives `-32768` back — and
-    every other input is unaffected by the choice.
+    `Q1.(W-1)` range is `[-2^(W-1), 2^(W-1)-1]`, so the storage minimum is
+    the single input whose result is unrepresentable. Producing its magnitude
+    at all needs a carrier wider than the storage. The declared `overflow`
+    says what happens there — `saturate` gives the maximum and `wrap` gives
+    the minimum back — and every other input is unaffected by the choice.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_NumericAttr:$numeric,
@@ -1993,15 +1998,16 @@ def Ondrix_AbsOp : Ondrix_ExactUnaryOp<"abs", "absolute value", "|x[i]|">;
 def Ondrix_NegateOp : Ondrix_ExactUnaryOp<"negate", "negation", "-x[i]">;
 
 def Ondrix_OffsetOp : Ondrix_ElementwiseOp<"offset"> {
-  let summary = "Elementwise Q15 constant bias with one declared overflow";
+  let summary = "Elementwise uniform-Q constant bias with one declared overflow";
   let description = [{
     ```text
-    y[i] = narrow_i16(x[i] + bias)      the sum is exact in i17
+    y[i] = narrow_iW(x[i] + bias)    the sum is exact one bit wider
     ```
 
     The constant form of `ondrix.add`, with the same exactness and the same
-    single declared boundary. `bias` is a raw signed Q1.15 value in
-    `[-32768, 32767]`.
+    single declared boundary. `bias` is a raw signed `Q1.(W-1)` value in
+    `[-2^(W-1), 2^(W-1)-1]`; it is a raw value in the declared format, so
+    the same integer names a different real number at the two widths.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    I64Attr:$bias,
@@ -2010,14 +2016,15 @@ def Ondrix_OffsetOp : Ondrix_ElementwiseOp<"offset"> {
 }
 
 def Ondrix_ShiftOp : Ondrix_ElementwiseOp<"shift"> {
-  let summary = "Elementwise Q15 binary scaling by a declared power of two";
+  let summary = "Elementwise uniform-Q binary scaling by a declared power of two";
   let description = [{
     ```text
-    amount >= 0:  y[i] = narrow_i16(x[i] * 2^amount)          exact, no tie
-    amount <  0:  y[i] = narrow_i16(round(x[i] / 2^-amount))  one tie rule
+    amount >= 0:  y[i] = narrow_iW(x[i] * 2^amount)          exact, no tie
+    amount <  0:  y[i] = narrow_iW(round(x[i] / 2^-amount))  one tie rule
     ```
 
-    `amount` is in `[-15, 15]`. The two directions are not the same kind of
+    `amount` is in `[-(W-1), W-1]`, so the left shift stays exact inside the
+    `2W`-bit carrier. The two directions are not the same kind of
     operation and the contract does not pretend they are: a left shift can
     only overflow and a right shift can only round. That is why the rounding
     mode is declared even when it is vacuous — the sign of one attribute must

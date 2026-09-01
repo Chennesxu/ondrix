@@ -244,6 +244,21 @@ static LogicalResult verifyFixedTransformAttributes(Operation *op, Attribute pro
   return success();
 }
 
+// The two admitted uniform-Q profiles. Both operations whose fixed contract
+// spans them read the width from here rather than pinning one.
+static std::optional<unsigned> getUniformQStorageWidth(Attribute numeric) {
+  auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric);
+  if (!fixed || fixed.getSignedness() != ondrix::ondsp::Signedness::Signed)
+    return std::nullopt;
+  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
+  if (!storage || !storage.isSignless())
+    return std::nullopt;
+  unsigned width = storage.getWidth();
+  if ((width != 16 && width != 32) || fixed.getFrac() != width - 1)
+    return std::nullopt;
+  return width;
+}
+
 static LogicalResult verifySignedFixedFormat(Operation *op, Attribute numeric, unsigned width,
                                              unsigned frac, StringRef name) {
   auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric);
@@ -943,12 +958,14 @@ LogicalResult FirDecimateOp::verify() {
 }
 
 // One shape and format rule for the whole elementwise family: matching static
-// rank-1 Q15 tensors. Passing every operand keeps a binary member from
-// checking only its left side.
-static LogicalResult verifyElementwiseQ15Domain(Operation *op, Attribute numeric,
-                                                llvm::ArrayRef<RankedTensorType> types) {
-  if (failed(verifySignedFixedFormat(op, numeric, 16, 15, "numeric")))
-    return failure();
+// rank-1 uniform-Q tensors at the declared width. Passing every operand keeps
+// a binary member from checking only its left side.
+static FailureOr<unsigned> verifyElementwiseDomain(Operation *op, Attribute numeric,
+                                                   llvm::ArrayRef<RankedTensorType> types) {
+  std::optional<unsigned> storageWidth = getUniformQStorageWidth(numeric);
+  if (!storageWidth)
+    return op->emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                           "#ondsp.fixed<signed, storage = i32, frac = 31>");
   if (failed(verifyUnencodedTensorTypes(op, types)))
     return failure();
   int64_t extent =
@@ -956,21 +973,27 @@ static LogicalResult verifyElementwiseQ15Domain(Operation *op, Attribute numeric
   bool ok = extent != ShapedType::kDynamic && extent >= 1 && extent <= 4096;
   for (RankedTensorType type : types)
     ok &= type.getRank() == 1 && type.getDimSize(0) == extent &&
-          type.getElementType().isSignlessInteger(16);
+          type.getElementType().isSignlessInteger(*storageWidth);
   if (!ok)
-    return op->emitOpError("executable elementwise operations require matching static "
-                           "tensor<Nxi16> operands and result with N in [1, 4096]");
-  return success();
+    return op->emitOpError() << "executable elementwise operations require matching static "
+                                "tensor<Nxi"
+                             << *storageWidth << "> operands and result with N in [1, 4096]";
+  return *storageWidth;
+}
+
+static LogicalResult verifyElementwiseDomainOnly(Operation *op, Attribute numeric,
+                                                 llvm::ArrayRef<RankedTensorType> types) {
+  return success(succeeded(verifyElementwiseDomain(op, numeric, types)));
 }
 
 LogicalResult AddOp::verify() {
-  return verifyElementwiseQ15Domain(
+  return verifyElementwiseDomainOnly(
       getOperation(), getNumeric(),
       {getLhs().getType(), getRhs().getType(), getResult().getType()});
 }
 
 LogicalResult SubOp::verify() {
-  return verifyElementwiseQ15Domain(
+  return verifyElementwiseDomainOnly(
       getOperation(), getNumeric(),
       {getLhs().getType(), getRhs().getType(), getResult().getType()});
 }
@@ -978,52 +1001,46 @@ LogicalResult SubOp::verify() {
 LogicalResult MultOp::verify() {
   if (failed(verifyDeclaredRounding(getOperation(), getRounding(), "mult")))
     return failure();
-  return verifyElementwiseQ15Domain(
+  return verifyElementwiseDomainOnly(
       getOperation(), getNumeric(),
       {getLhs().getType(), getRhs().getType(), getResult().getType()});
 }
 
 LogicalResult AbsOp::verify() {
-  return verifyElementwiseQ15Domain(getOperation(), getNumeric(),
-                                    {getInput().getType(), getResult().getType()});
+  return verifyElementwiseDomainOnly(getOperation(), getNumeric(),
+                                     {getInput().getType(), getResult().getType()});
 }
 
 LogicalResult NegateOp::verify() {
-  return verifyElementwiseQ15Domain(getOperation(), getNumeric(),
-                                    {getInput().getType(), getResult().getType()});
+  return verifyElementwiseDomainOnly(getOperation(), getNumeric(),
+                                     {getInput().getType(), getResult().getType()});
 }
 
+// Both remaining members carry an attribute whose admissible range is the
+// declared width's, so the domain runs FIRST and hands the width back.
 LogicalResult OffsetOp::verify() {
+  FailureOr<unsigned> storageWidth = verifyElementwiseDomain(
+      getOperation(), getNumeric(), {getInput().getType(), getResult().getType()});
+  if (failed(storageWidth))
+    return failure();
   int64_t bias = getBiasAttr().getInt();
-  if (bias < -32768 || bias > 32767)
-    return emitOpError("offset bias must be a raw signed Q1.15 value in [-32768, 32767]");
-  return verifyElementwiseQ15Domain(getOperation(), getNumeric(),
-                                    {getInput().getType(), getResult().getType()});
+  int64_t bound = int64_t(1) << (*storageWidth - 1);
+  if (bias < -bound || bias > bound - 1)
+    return emitOpError() << "offset bias must be a raw signed Q1." << (*storageWidth - 1)
+                         << " value in [" << -bound << ", " << (bound - 1) << "]";
+  return success();
 }
 
 LogicalResult ShiftOp::verify() {
-  int64_t amount = getAmountAttr().getInt();
-  if (amount < -15 || amount > 15)
-    return emitOpError("shift amount must lie in [-15, 15]");
-  if (failed(verifyDeclaredRounding(getOperation(), getRounding(), "shift")))
+  FailureOr<unsigned> storageWidth = verifyElementwiseDomain(
+      getOperation(), getNumeric(), {getInput().getType(), getResult().getType()});
+  if (failed(storageWidth))
     return failure();
-  return verifyElementwiseQ15Domain(getOperation(), getNumeric(),
-                                    {getInput().getType(), getResult().getType()});
-}
-
-// The two admitted uniform-Q profiles. Both operations whose fixed contract
-// spans them read the width from here rather than pinning one.
-static std::optional<unsigned> getUniformQStorageWidth(Attribute numeric) {
-  auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric);
-  if (!fixed || fixed.getSignedness() != ondrix::ondsp::Signedness::Signed)
-    return std::nullopt;
-  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
-  if (!storage || !storage.isSignless())
-    return std::nullopt;
-  unsigned width = storage.getWidth();
-  if ((width != 16 && width != 32) || fixed.getFrac() != width - 1)
-    return std::nullopt;
-  return width;
+  int64_t amount = getAmountAttr().getInt();
+  int64_t bound = *storageWidth - 1;
+  if (amount < -bound || amount > bound)
+    return emitOpError() << "shift amount must lie in [-" << bound << ", " << bound << "]";
+  return verifyDeclaredRounding(getOperation(), getRounding(), "shift");
 }
 
 int64_t CicDecimateOp::getGrowthBits() {

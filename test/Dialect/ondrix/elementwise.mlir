@@ -64,3 +64,29 @@ func.func @shift_left_still_declares_a_tie_rule(%a: tensor<4096xi16>) -> tensor<
   } : (tensor<4096xi16>) -> tensor<4096xi16>
   return %0 : tensor<4096xi16>
 }
+
+// CHECK-LABEL: func.func @elementwise_family_q31
+// CHECK: ondrix.add
+// CHECK-SAME: storage = i32, frac = 31
+// CHECK: ondrix.offset
+// CHECK-SAME: bias = -2147483648
+// CHECK: ondrix.shift
+// CHECK-SAME: amount = 31
+func.func @elementwise_family_q31(%a: tensor<8xi32>, %b: tensor<8xi32>) -> tensor<8xi32> {
+  %0 = ondrix.add %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<8xi32>, tensor<8xi32>) -> tensor<8xi32>
+  %1 = ondrix.offset %0 {
+    bias = -2147483648 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<8xi32>) -> tensor<8xi32>
+  %2 = ondrix.shift %1 {
+    amount = 31 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<8xi32>) -> tensor<8xi32>
+  return %2 : tensor<8xi32>
+}

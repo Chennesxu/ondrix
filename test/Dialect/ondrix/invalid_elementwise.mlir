@@ -80,3 +80,55 @@ func.func @negate_rejects_memref(%a: memref<8xi16>) -> tensor<8xi16> {
   } : (memref<8xi16>) -> tensor<8xi16>
   return %0 : tensor<8xi16>
 }
+
+// -----
+
+// The declared width reaches the element type, so a Q31 numeric on i16
+// operands is what fails rather than the numeric alone.
+func.func @add_q31_numeric_narrow_elements(%a: tensor<8xi16>, %b: tensor<8xi16>) -> tensor<8xi16> {
+  // expected-error @below {{executable elementwise operations require matching static tensor<Nxi32> operands and result}}
+  %0 = ondrix.add %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<8xi16>, tensor<8xi16>) -> tensor<8xi16>
+  return %0 : tensor<8xi16>
+}
+
+// -----
+
+// Both raw attributes follow the width: 32 is one past the Q31 edge exactly
+// as 16 is one past the Q15 edge above.
+func.func @shift_q31_amount_out_of_range(%a: tensor<8xi32>) -> tensor<8xi32> {
+  // expected-error @below {{shift amount must lie in [-31, 31]}}
+  %0 = ondrix.shift %a {
+    amount = 32 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<8xi32>) -> tensor<8xi32>
+  return %0 : tensor<8xi32>
+}
+
+// -----
+
+func.func @offset_q31_bias_out_of_range(%a: tensor<8xi32>) -> tensor<8xi32> {
+  // expected-error @below {{offset bias must be a raw signed Q1.31 value in [-2147483648, 2147483647]}}
+  %0 = ondrix.offset %a {
+    bias = 2147483648 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<8xi32>) -> tensor<8xi32>
+  return %0 : tensor<8xi32>
+}
+
+// -----
+
+func.func @mult_non_uniform_q31(%a: tensor<8xi32>, %b: tensor<8xi32>) -> tensor<8xi32> {
+  // expected-error @below {{numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or #ondsp.fixed<signed, storage = i32, frac = 31>}}
+  %0 = ondrix.mult %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 28>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<8xi32>, tensor<8xi32>) -> tensor<8xi32>
+  return %0 : tensor<8xi32>
+}
