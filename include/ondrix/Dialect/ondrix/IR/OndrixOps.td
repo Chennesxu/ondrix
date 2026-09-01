@@ -971,9 +971,33 @@ def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
     is provably unreachable. Normalization conventions are the consumer's
     explicit follow-up quantization, not part of this contract.
 
-    The executable profile pins `input_numeric` to signed Q1.15 and
-    `output_numeric` to signed i16 with `frac = 14 - m` derived from the
-    result extent.
+    The executable profile admits signed Q1.15 and signed Q1.31 for
+    `input_numeric`; `output_numeric` is the same storage with
+    `frac = W - 2 - m` derived from the result extent, because one sign bit
+    and `m` integer bits are spent on the unnormalized growth at either
+    width.
+
+    At Q31 the row sum does not fit i64 and the boundary moves onto the
+    product, as it does for `ondrix.matmul`: the exact products of `2^m`
+    Q1.31 terms would need `62 + m` bits, so each term is requantized by the
+    derived smallest shift `p = max(0, 2*(W-1) + floor(log2 N) - 62)`, which
+    is `m` at every admitted Q31 extent and `0` at every Q15 one. Its
+    rounding is declared through `product_rounding`, required exactly where
+    the boundary exists and refused where it does not. The narrowing absorbs
+    the extent dependence, so the export shift is a constant 32 at Q31 while
+    it is `16 + m` at Q15, and the exported value lies in `[-2^30, 2^30)`
+    just as the Q15 reading lies in `[-2^14, 2^14)`.
+
+    Q31 coefficients are quantized under a WIDER admissibility guard than
+    Q15, `2^-13` LSB against `2^-20`, and that is not a relaxation. The
+    binary64 representation granularity measured in LSB units grows with the
+    format, so the Q15 constant would stand a single bit above it at Q31 and
+    prove nothing. The angle is range-reduced first -- `(2n+1)*k` modulo
+    `4N`, exact because `cos(pi*x)` has period 2 in `x` -- which holds the
+    evaluation error at `7.6e-07` LSB; the worst tie margin over all 5456
+    coefficients of the supported extents is `4.9e-03` LSB, so the guard sits
+    160x above the error and 40x below the closest coefficient. The reduction
+    changes no emitted Q15, Q31 or f32 coefficient.
 
     The f32 profile maps `tensor<Nxf32>` to `tensor<Nxf32>` over the same
     coefficient matrix with the export boundary removed. Both numeric
@@ -1001,6 +1025,7 @@ def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_NumericAttr:$input_numeric,
                    Ondsp_NumericAttr:$output_numeric,
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$product_rounding,
                    OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;

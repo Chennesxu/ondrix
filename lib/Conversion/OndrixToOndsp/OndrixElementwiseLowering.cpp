@@ -5,7 +5,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
-#include "ondrix/Support/GuardedQ15Quantization.h"
+#include "ondrix/Support/GuardedFixedQuantization.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"

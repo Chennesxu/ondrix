@@ -1092,16 +1092,27 @@ public:
           return std::nullopt;
         call.fpContract = contract->spelling.str();
       } else if (call.kind == ReductionKind::Dct && current.kind == TokenKind::Comma) {
-        // The export boundary admits a declared rounding mode; omission
-        // keeps the nearest_even default.
-        if (!expect(TokenKind::Comma, "expected ',' before dct rounding policy") ||
-            !expectIdentifier("rounding", "expected dct rounding policy") ||
-            !expect(TokenKind::Equal, "expected '=' after rounding"))
-          return std::nullopt;
-        auto rounding = parseIdentifier("expected rounding mode");
-        if (!rounding)
-          return std::nullopt;
-        call.rounding = rounding->spelling.str();
+        // Each parameter names the boundary it rounds: the export exists at
+        // both widths, the per-product boundary only where the row sum would
+        // leave i64, which is every Q31 extent. Omission keeps nearest_even.
+        while (current.kind == TokenKind::Comma) {
+          if (!expect(TokenKind::Comma, "expected ',' before a rounding policy"))
+            return std::nullopt;
+          std::optional<Token> name = parseIdentifier("expected a rounding policy name");
+          if (!name)
+            return std::nullopt;
+          bool isExport = name->spelling == "rounding";
+          if (!isExport && name->spelling != "product_rounding") {
+            diagnostics.error(name->position, "dct accepts rounding and product_rounding");
+            return std::nullopt;
+          }
+          if (!expect(TokenKind::Equal, "expected '=' after a rounding policy name"))
+            return std::nullopt;
+          auto rounding = parseIdentifier("expected rounding mode");
+          if (!rounding)
+            return std::nullopt;
+          (isExport ? call.rounding : call.inputRounding) = rounding->spelling.str();
+        }
       }
       if (call.kind == ReductionKind::Rms && policyType == SourceType::F32) {
         if (!expect(TokenKind::Comma, "expected ',' before rms contract policy") ||
@@ -3060,9 +3071,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         ast.result.kind == ReductionKind::Dct || ast.result.kind == ReductionKind::Gain ||
         ast.result.kind == ReductionKind::Goertzel;
     bool isFloat = ast.primaryResult().type == SourceType::F32;
-    // Only rms carries a Q31 profile so far; the others still hardcode Q15
-    // widths in their verifiers.
-    bool admitsQ31 = ast.result.kind == ReductionKind::Rms;
+    // rms and dct carry Q31 profiles; the others still hardcode Q15 widths in
+    // their verifiers.
+    bool admitsQ31 = ast.result.kind == ReductionKind::Rms || ast.result.kind == ReductionKind::Dct;
     bool isQ31 = ast.primaryResult().type == SourceType::Q31;
     // The Q15 goertzel energy is tensor<1xi64>, a storage width no source
     // type names, so only the f32 profile has a spelling here.
@@ -3120,9 +3131,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       return std::nullopt;
     }
     if (ast.result.kind == ReductionKind::Dct) {
-      // The source type system only names the i16 storage: the declared
-      // result reads as q15 while the emitted operation carries the
-      // derived frac = 14 - log2(N) output reading in its attribute. The
+      // The source type system only names the storage: the declared result
+      // reads as q15 or q31 while the emitted operation carries the derived
+      // frac = W - 2 - log2(N) output reading in its attribute. The
       // projection is lossy but currently safe — dct does not compose, so
       // no in-language consumer can misread the scale.
       if (*inputExtent < 4 || *inputExtent > 64 || !llvm::isPowerOf2_64(*inputExtent)) {
@@ -3297,27 +3308,41 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     // not fit i64, so the binding declares its rounding exactly there and
     // refuses it everywhere else.
     std::optional<ondsp::RoundingMode> inputRounding;
+    std::optional<ondsp::RoundingMode> productRounding;
+    // dct rounds a PRODUCT where rms rounds an INPUT, so the shared source
+    // slot resolves to different checked fields and different admitted modes.
+    bool hasProductShift =
+        isDct && !isFloat && ir::getReductionProductShift(isQ31 ? 32 : 16, *inputExtent) > 0;
     bool hasPreShift = ast.result.kind == ReductionKind::Rms && !isFloat &&
                        ir::getRmsInputPreShift(isQ31 ? 32 : 16, *inputExtent) > 0;
     if (!ast.result.inputRounding.empty()) {
-      if (!hasPreShift) {
+      if (!hasPreShift && !hasProductShift) {
         diagnostics.error(ast.result.position,
-                          "rms at this width and extent has no pre-shift boundary to round");
+                          isDct
+                              ? "dct at this width and extent has no product boundary to round"
+                              : "rms at this width and extent has no pre-shift boundary to round");
         return std::nullopt;
       }
       std::optional<ondsp::RoundingMode> parsed = parseRounding(ast.result.inputRounding);
-      if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven &&
-                      *parsed != ondsp::RoundingMode::TowardNegative)) {
+      bool admitted = parsed && (*parsed == ondsp::RoundingMode::NearestEven ||
+                                 *parsed == ondsp::RoundingMode::TowardNegative ||
+                                 (isDct && *parsed == ondsp::RoundingMode::NearestTiesPositive));
+      if (!admitted) {
         diagnostics.error(ast.result.position,
-                          "rms input_rounding must be nearest_even or toward_negative");
+                          isDct ? "dct product_rounding must be nearest_even, toward_negative, or "
+                                  "nearest_ties_positive"
+                                : "rms input_rounding must be nearest_even or toward_negative");
         return std::nullopt;
       }
-      inputRounding = *parsed;
+      (isDct ? productRounding : inputRounding) = *parsed;
     } else if (hasPreShift) {
       inputRounding = ondsp::RoundingMode::NearestEven;
+    } else if (hasProductShift) {
+      productRounding = ondsp::RoundingMode::NearestEven;
     }
     CheckedKernel checked{std::move(ast), std::nullopt, rounding, std::nullopt, std::nullopt};
     checked.inputRounding = inputRounding;
+    checked.productRounding = productRounding;
     return checked;
   } else {
     if (ast.primaryResult().tensor) {
@@ -3792,18 +3817,26 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       if (kernel.fpContract) {
         auto fp = ondsp::FpAttr::get(&context, elementType, *kernel.fpContract);
         result = builder.create<ir::DctOp>(expressionLocation, outputType, lhs, fp, fp,
-                                           ondsp::RoundingModeAttr());
+                                           ondsp::RoundingModeAttr(), ondsp::RoundingModeAttr());
       } else {
+        unsigned storageWidth = cast<IntegerType>(elementType).getWidth();
         unsigned stageCount = llvm::Log2_64(outputType.getDimSize(0));
         auto outputNumeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType,
-                                                   14 - stageCount);
+                                                   storageWidth - 2 - stageCount);
         // Omission keeps the nearest_even default; only a departing
         // declaration is materialized.
         auto declared = *kernel.rounding != ondsp::RoundingMode::NearestEven
                             ? ondsp::RoundingModeAttr::get(&context, *kernel.rounding)
                             : ondsp::RoundingModeAttr();
+        // Required exactly where the row sum would leave i64, which is every
+        // Q31 extent and no Q15 one.
+        auto product =
+            ir::getReductionProductShift(storageWidth, outputType.getDimSize(0)) > 0
+                ? ondsp::RoundingModeAttr::get(
+                      &context, kernel.productRounding.value_or(ondsp::RoundingMode::NearestEven))
+                : ondsp::RoundingModeAttr();
         result = builder.create<ir::DctOp>(expressionLocation, outputType, lhs, numeric,
-                                           outputNumeric, declared);
+                                           outputNumeric, product, declared);
       }
     } else if (kernel.ast.result.kind == ReductionKind::MovingAverage) {
       result = builder.create<ir::MovingAverageOp>(

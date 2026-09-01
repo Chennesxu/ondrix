@@ -1285,8 +1285,30 @@ LogicalResult RfftSplitOp::verify() {
   return verifyRfftSplitValueDomain(*this);
 }
 
+// The two admitted uniform-Q profiles. Both operations whose fixed contract
+// spans them read the width from here rather than pinning one.
+static std::optional<unsigned> getUniformQStorageWidth(Attribute numeric) {
+  auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric);
+  if (!fixed || fixed.getSignedness() != ondrix::ondsp::Signedness::Signed)
+    return std::nullopt;
+  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
+  if (!storage || !storage.isSignless())
+    return std::nullopt;
+  unsigned width = storage.getWidth();
+  if ((width != 16 && width != 32) || fixed.getFrac() != width - 1)
+    return std::nullopt;
+  return width;
+}
+
+static bool isMatmulRounding(ondrix::ondsp::RoundingMode mode) {
+  return mode == ondrix::ondsp::RoundingMode::NearestEven ||
+         mode == ondrix::ondsp::RoundingMode::TowardNegative ||
+         mode == ondrix::ondsp::RoundingMode::NearestTiesPositive;
+}
+
 LogicalResult DctOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getInputNumeric());
+  std::optional<unsigned> storageWidth;
   if (fp) {
     if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "DCT")))
       return failure();
@@ -1296,33 +1318,51 @@ LogicalResult DctOp::verify() {
       return emitOpError("floating-point DCT output_numeric must equal input_numeric");
     if (getRounding())
       return emitOpError("floating-point DCT has no requantization boundary to round");
-  } else if (failed(verifySignedFixedFormat(getOperation(), getInputNumeric(), 16, 15,
-                                            "input_numeric"))) {
-    return failure();
-  } else if (getRounding() && *getRounding() != ondrix::ondsp::RoundingMode::NearestEven &&
-             *getRounding() != ondrix::ondsp::RoundingMode::TowardNegative &&
-             *getRounding() != ondrix::ondsp::RoundingMode::NearestTiesPositive) {
-    return emitOpError(
-        "DCT rounding must be nearest_even, toward_negative, or nearest_ties_positive");
+    if (getProductRounding())
+      return emitOpError("floating-point DCT has no product boundary to round");
+  } else {
+    storageWidth = getUniformQStorageWidth(getInputNumeric());
+    if (!storageWidth)
+      return emitOpError("input_numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> "
+                         "or #ondsp.fixed<signed, storage = i32, frac = 31>");
+    if (getRounding() && !isMatmulRounding(*getRounding()))
+      return emitOpError(
+          "DCT rounding must be nearest_even, toward_negative, or nearest_ties_positive");
+    if (getProductRounding() && !isMatmulRounding(*getProductRounding()))
+      return emitOpError("DCT product_rounding must be nearest_even, toward_negative, or "
+                         "nearest_ties_positive");
   }
   RankedTensorType inputType = getInput().getType();
   RankedTensorType resultType = getResult().getType();
   if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
     return failure();
   int64_t extent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
-  Type element = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), 16));
+  Type element = fp ? Type(fp.getFormat())
+                    : Type(cast<ondrix::ondsp::FixedAttr>(getInputNumeric()).getStorage());
   if (extent < 4 || extent > 64 || !llvm::isPowerOf2_64(extent) || inputType != resultType ||
       inputType.getElementType() != element) {
-    llvm::StringRef name = fp ? "f32" : "i16";
+    std::string name = fp ? std::string("f32") : ("i" + llvm::utostr(*storageWidth));
     return emitOpError() << "executable DCT requires matching tensor<Nx" << name
                          << "> input and result with power-of-two N in [4, 64]";
   }
   if (fp)
     return success();
+  // One sign bit and m integer bits are spent on the unnormalized growth at
+  // every width, so the reading is W - 2 - m: Q5.11 at Q15/N=8, Q21.11 at
+  // Q31/N=8.
   unsigned stageCount = llvm::Log2_64(extent);
-  if (failed(verifySignedFixedFormat(getOperation(), getOutputNumeric(), 16, 14 - stageCount,
-                                     "output_numeric")))
+  if (failed(verifySignedFixedFormat(getOperation(), getOutputNumeric(), *storageWidth,
+                                     *storageWidth - 2 - stageCount, "output_numeric")))
     return failure();
+  // The product boundary exists exactly when an exact N-sum of the row would
+  // not fit i64. Q15 never needs one; Q31 needs one at every admitted extent.
+  unsigned shift = ondrix::ir::getReductionProductShift(*storageWidth, extent);
+  if (shift > 0 && !getProductRounding())
+    return emitOpError() << "a row sum of " << extent << " Q" << (*storageWidth - 1)
+                         << " products requantizes each product by " << shift
+                         << " and must declare product_rounding";
+  if (shift == 0 && getProductRounding())
+    return emitOpError("DCT at this width and extent has no product boundary to round");
   return success();
 }
 
@@ -1472,27 +1512,6 @@ LogicalResult GoertzelOp::verify() {
   if (bin < 0 || bin > extent / 2)
     return emitOpError("goertzel bin must lie in [0, N/2]");
   return success();
-}
-
-// The two admitted uniform-Q profiles. Both operations whose fixed contract
-// spans them read the width from here rather than pinning one.
-static std::optional<unsigned> getUniformQStorageWidth(Attribute numeric) {
-  auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric);
-  if (!fixed || fixed.getSignedness() != ondrix::ondsp::Signedness::Signed)
-    return std::nullopt;
-  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
-  if (!storage || !storage.isSignless())
-    return std::nullopt;
-  unsigned width = storage.getWidth();
-  if ((width != 16 && width != 32) || fixed.getFrac() != width - 1)
-    return std::nullopt;
-  return width;
-}
-
-static bool isMatmulRounding(ondrix::ondsp::RoundingMode mode) {
-  return mode == ondrix::ondsp::RoundingMode::NearestEven ||
-         mode == ondrix::ondsp::RoundingMode::TowardNegative ||
-         mode == ondrix::ondsp::RoundingMode::NearestTiesPositive;
 }
 
 LogicalResult MatmulOp::verify() {

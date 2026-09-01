@@ -7,7 +7,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Support/DctCoefficients.h"
 #include "ondrix/Support/F32TwiddleTables.h"
-#include "ondrix/Support/GuardedQ15Quantization.h"
+#include "ondrix/Support/GuardedFixedQuantization.h"
 #include "ondrix/Support/Q30SplitTwiddleTables.h"
 #include "ondrix/Support/Q31TwiddleTables.h"
 
@@ -53,7 +53,7 @@ public:
   }
 };
 
-// Guard argument in GuardedQ15Quantization.h. +1.0 saturates to 32767 by
+// Guard argument in GuardedFixedQuantization.h. +1.0 saturates to 32767 by
 // declared convention; -1.0 is exact. A 50-digit sweep of every stage
 // twiddle component for power-of-two sizes up to 1024 shows a worst-case
 // margin of 0.0036 LSB, so all supported extents are admissible; the guard
@@ -1511,18 +1511,30 @@ public:
       rewriter.replaceOp(op, output);
       return success();
     }
-    if (!ondrix::hasAdmissibleDctCoefficients(extent))
+    auto storage =
+        cast<IntegerType>(cast<ondrix::ondsp::FixedAttr>(op.getInputNumeric()).getStorage());
+    unsigned storageWidth = storage.getWidth();
+    if (!ondrix::hasAdmissibleDctCoefficients(extent, storageWidth))
       return rewriter.notifyMatchFailure(op, "DCT coefficient quantization is not tie-guard "
                                              "admissible");
     IntegerType i64 = rewriter.getIntegerType(64);
     unsigned stageCount = llvm::Log2_64(extent);
+    unsigned productShift = ondrix::ir::getReductionProductShift(storageWidth, extent);
     // The declared boundary rounding rides the same single round_shift;
     // absence reads as the nearest_even default.
     ondrix::ondsp::RoundingMode boundaryRounding =
         op.getRounding() ? *op.getRounding() : ondrix::ondsp::RoundingMode::NearestEven;
+    // Accumulator frac 2*(W-1)-p down to the declared reading W-2-m, so the
+    // export absorbs what the product narrowing already took.
     ondrix::ondsp::ScaleAttr scale = ondrix::ondsp::ScaleAttr::get(
-        rewriter.getContext(), /*preShiftLeft=*/0, /*postShiftRight=*/16 + stageCount,
-        boundaryRounding, ondrix::ondsp::OverflowMode::Saturate, rewriter.getI16Type());
+        rewriter.getContext(), /*preShiftLeft=*/0,
+        /*postShiftRight=*/storageWidth + stageCount - productShift, boundaryRounding,
+        ondrix::ondsp::OverflowMode::Saturate, storage);
+    ondrix::ondsp::ScaleAttr productScale;
+    if (productShift > 0)
+      productScale = ondrix::ondsp::ScaleAttr::get(rewriter.getContext(), /*preShiftLeft=*/0,
+                                                   productShift, *op.getProductRounding(),
+                                                   ondrix::ondsp::OverflowMode::Saturate, i64);
 
     SmallVector<Value> inputs;
     inputs.reserve(extent);
@@ -1536,19 +1548,20 @@ public:
     Value result =
         rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
     for (int64_t k = 0; k < extent; ++k) {
-      // Products and the sum are exact in i64 (|sum| <= N * 2^30 < 2^36),
-      // so this reduction has no observable association; the single
-      // boundary is the final round_shift.
+      // At Q15 products and the sum are exact in i64 (|sum| <= N * 2^30 <
+      // 2^36) and the export is the only boundary. At Q31 each product is
+      // narrowed first, which is what keeps the N-term sum inside 2^62.
       Value sum;
       for (int64_t n = 0; n < extent; ++n) {
-        int64_t coefficient = *ondrix::getDctCoefficientQ15(extent, k, n);
+        int64_t coefficient = *ondrix::getDctCoefficientFixed(storageWidth, extent, k, n);
         Value constant =
             rewriter.create<arith::ConstantOp>(loc, i64, rewriter.getIntegerAttr(i64, coefficient));
         Value product = rewriter.create<arith::MulIOp>(loc, inputs[n], constant);
+        if (productScale)
+          product = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, i64, product, productScale);
         sum = sum ? rewriter.create<arith::AddIOp>(loc, sum, product).getResult() : product;
       }
-      Value exported =
-          rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, rewriter.getI16Type(), sum, scale);
+      Value exported = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, storage, sum, scale);
       Value position = rewriter.create<arith::ConstantIndexOp>(loc, k);
       result = rewriter.create<tensor::InsertOp>(loc, exported, result, position);
     }

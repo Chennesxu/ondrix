@@ -54,12 +54,11 @@ public:
     // lowers them to the reduce_mac loops the schedule stage authorizes over,
     // which the scalar tensor lowering here would preempt.
     if (preserveBufferizableReductions) {
-      target.addLegalOp<ondrix::ir::FirFilterOp, ondrix::ir::FirDecimateOp, ondrix::ir::Conv1DOp,
-                        ondrix::ir::DctOp>();
+      target.addLegalOp<ondrix::ir::FirFilterOp, ondrix::ir::FirDecimateOp, ondrix::ir::Conv1DOp>();
       // Only the profiles whose reduction bufferizes to a reduce_mac stay in
-      // contract form. A Q31 matmul or rms narrows each term by a shift the
-      // extent derives, which reduce_mac has no vocabulary for, so those keep
-      // the scalar tensor lowering until it does.
+      // contract form. A Q31 matmul, rms or DCT narrows each term by a shift
+      // the extent derives, which reduce_mac has no vocabulary for, so those
+      // keep the scalar tensor lowering until it does.
       auto bufferizableReduction = [](Attribute numeric) {
         if (isa<ondrix::ondsp::FpAttr>(numeric))
           return true;
@@ -70,6 +69,8 @@ public:
           [&](ondrix::ir::MatmulOp op) { return bufferizableReduction(op.getNumeric()); });
       target.addDynamicallyLegalOp<ondrix::ir::RmsOp>(
           [&](ondrix::ir::RmsOp op) { return bufferizableReduction(op.getNumeric()); });
+      target.addDynamicallyLegalOp<ondrix::ir::DctOp>(
+          [&](ondrix::ir::DctOp op) { return bufferizableReduction(op.getInputNumeric()); });
       // The f32 moving average bufferizes to the windowed-sum loop the
       // schedule stage batches; the fixed profile keeps its tensor lowering.
       target.addDynamicallyLegalOp<ondrix::ir::MovingAverageOp>([](ondrix::ir::MovingAverageOp op) {

@@ -2,7 +2,7 @@
 
 #include "ondrix/Dialect/ondrix/IR/OndrixDialect.h"
 #include "ondrix/Dialect/ondrix/IR/OndrixOps.h"
-#include "ondrix/Support/GuardedQ15Quantization.h"
+#include "ondrix/Support/GuardedFixedQuantization.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -32,7 +32,7 @@ struct QuantizedTable {
   int64_t saturated = 0;
 };
 
-// Guard argument in GuardedQ15Quantization.h. Under the declared evaluation
+// Guard argument in GuardedFixedQuantization.h. Under the declared evaluation
 // error budget an emitted table equals the quantization of the real-valued
 // definition and inherits its exact symmetry.
 FailureOr<QuantizedTable> quantizeSignedQ15(Operation *op, llvm::ArrayRef<double> reals) {
