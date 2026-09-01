@@ -6,6 +6,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspEnums.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
+#include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -361,6 +362,7 @@ struct BuiltinCallAst {
   bool accumulatorAuto = false;
   std::string updateOverflow;
   std::string rounding;
+  std::string inputRounding;
   std::string destinationOverflow;
   std::string stateRounding;
   std::string stateOverflow;
@@ -858,18 +860,23 @@ public:
       if (!operand)
         return std::nullopt;
       call.operands.push_back(std::move(*operand));
-      if (current.kind == TokenKind::Comma) {
-        // The magnitude contract admits a declared root rounding mode;
-        // omission keeps the nearest_even default. The parameter names the
-        // ROOT boundary — the sum of squares stays exact.
-        if (!expect(TokenKind::Comma, "expected ',' before root rounding policy") ||
-            !expectIdentifier("root_rounding", "expected root rounding policy") ||
-            !expect(TokenKind::Equal, "expected '=' after root_rounding"))
+      // Two boundaries, two parameters, each optional and each defaulting to
+      // nearest_even: the component pre-shift the wider widths carry, and the
+      // root. Sema decides which of them the operand's width actually has.
+      while (current.kind == TokenKind::Comma) {
+        advance();
+        bool isRoot = isIdentifier("root_rounding");
+        if (!isRoot && !isIdentifier("input_rounding")) {
+          diagnostics.error(current.position, "expected root_rounding or input_rounding policy");
+          return std::nullopt;
+        }
+        advance();
+        if (!expect(TokenKind::Equal, "expected '=' after the magnitude rounding policy"))
           return std::nullopt;
         auto rounding = parseIdentifier("expected rounding mode");
         if (!rounding)
           return std::nullopt;
-        call.rounding = rounding->spelling.str();
+        (isRoot ? call.rounding : call.inputRounding) = rounding->spelling.str();
       }
       if (!expect(TokenKind::RightParen, "expected ')' after magnitude operand"))
         return std::nullopt;
@@ -1010,6 +1017,20 @@ public:
         if (!stepSize)
           return std::nullopt;
         call.stepSize = *stepSize;
+        // The Q31 tap sum carries a per-product boundary; its rounding is
+        // declared here, beside the step size, and refused where the sum
+        // already fits. Bindings must expose every choice their contract
+        // admits.
+        if (current.kind == TokenKind::Comma) {
+          if (!expect(TokenKind::Comma, "expected ',' before lms product rounding policy") ||
+              !expectIdentifier("product_rounding", "expected lms product rounding policy") ||
+              !expect(TokenKind::Equal, "expected '=' after product_rounding"))
+            return std::nullopt;
+          auto rounding = parseIdentifier("expected rounding mode");
+          if (!rounding)
+            return std::nullopt;
+          call.inputRounding = rounding->spelling.str();
+        }
       }
       if (!expect(TokenKind::RightParen, "expected ')' after lms expression"))
         return std::nullopt;
@@ -1079,19 +1100,29 @@ public:
           return std::nullopt;
         call.fpContract = contract->spelling.str();
       } else if (call.kind == ReductionKind::Rms && current.kind == TokenKind::Comma) {
-        // The rms contract admits a declared root rounding mode while the
-        // mean boundary stays nearest even; omission keeps the nearest_even
-        // default. The parameter names the specific boundary (`root_`)
-        // because rms carries two rounding boundaries. Bindings must expose
-        // every choice their contract admits.
-        if (!expect(TokenKind::Comma, "expected ',' before root rounding policy") ||
-            !expectIdentifier("root_rounding", "expected root rounding policy") ||
-            !expect(TokenKind::Equal, "expected '=' after root_rounding"))
-          return std::nullopt;
-        auto rounding = parseIdentifier("expected rounding mode");
-        if (!rounding)
-          return std::nullopt;
-        call.rounding = rounding->spelling.str();
+        // Each parameter names the specific boundary it rounds, because rms
+        // carries two of them at Q15 and three at Q31, where the input is
+        // requantized before squaring. The mean boundary stays nearest even.
+        // Omission keeps the default. Bindings must expose every choice their
+        // contract admits.
+        while (current.kind == TokenKind::Comma) {
+          if (!expect(TokenKind::Comma, "expected ',' before a rounding policy"))
+            return std::nullopt;
+          std::optional<Token> name = parseIdentifier("expected a rounding policy name");
+          if (!name)
+            return std::nullopt;
+          bool isRoot = name->spelling == "root_rounding";
+          if (!isRoot && name->spelling != "input_rounding") {
+            diagnostics.error(name->position, "rms accepts root_rounding and input_rounding");
+            return std::nullopt;
+          }
+          if (!expect(TokenKind::Equal, "expected '=' after a rounding policy name"))
+            return std::nullopt;
+          auto rounding = parseIdentifier("expected rounding mode");
+          if (!rounding)
+            return std::nullopt;
+          (isRoot ? call.rounding : call.inputRounding) = rounding->spelling.str();
+        }
       }
       if (!expect(TokenKind::RightParen, llvm::Twine("expected ')' after ") + builtin + " operand"))
         return std::nullopt;
@@ -1200,17 +1231,28 @@ public:
           return std::nullopt;
         call.fpContract = contract->spelling.str();
       } else if (current.kind == TokenKind::Comma) {
-        // The one requantization boundary admits a declared rounding mode;
-        // omission keeps the nearest_even default. Bindings must expose
+        // The export boundary always admits a declared rounding; the Q31
+        // profile adds a product boundary whose rounding is declared beside
+        // it. Omission keeps the nearest_even default. Bindings must expose
         // every choice their contract admits.
-        if (!expect(TokenKind::Comma, "expected ',' before matmul rounding policy") ||
-            !expectIdentifier("rounding", "expected matmul rounding policy") ||
-            !expect(TokenKind::Equal, "expected '=' after rounding"))
-          return std::nullopt;
-        auto rounding = parseIdentifier("expected rounding mode");
-        if (!rounding)
-          return std::nullopt;
-        call.rounding = rounding->spelling.str();
+        while (current.kind == TokenKind::Comma) {
+          if (!expect(TokenKind::Comma, "expected ',' before a matmul rounding policy"))
+            return std::nullopt;
+          std::optional<Token> name = parseIdentifier("expected a matmul rounding policy name");
+          if (!name)
+            return std::nullopt;
+          bool isExport = name->spelling == "rounding";
+          if (!isExport && name->spelling != "product_rounding") {
+            diagnostics.error(name->position, "matmul accepts rounding and product_rounding");
+            return std::nullopt;
+          }
+          if (!expect(TokenKind::Equal, "expected '=' after a matmul rounding policy name"))
+            return std::nullopt;
+          auto rounding = parseIdentifier("expected rounding mode");
+          if (!rounding)
+            return std::nullopt;
+          (isExport ? call.rounding : call.inputRounding) = rounding->spelling.str();
+        }
       }
       if (!expect(TokenKind::RightParen, "expected ')' after matmul expression"))
         return std::nullopt;
@@ -1742,6 +1784,11 @@ struct CheckedKernel {
   std::optional<ondsp::FpContractMode> fpContract = std::nullopt;
   std::optional<ondsp::RoundingMode> stateRounding = std::nullopt;
   std::optional<ondsp::OverflowMode> stateOverflow = std::nullopt;
+  std::optional<ondsp::RoundingMode> inputRounding = std::nullopt;
+  // Distinct from inputRounding: matmul and lms round a PRODUCT, not an
+  // input, and one field for both boundaries made a later reader assume the
+  // magnitude component pre-shift was already covered when it was not.
+  std::optional<ondsp::RoundingMode> productRounding = std::nullopt;
 };
 
 static std::optional<ondsp::OverflowMode> parseOverflow(llvm::StringRef value) {
@@ -2099,13 +2146,14 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   }
   if (ast.result.kind == ReductionKind::Matmul) {
     bool isFloat = ast.primaryResult().type == SourceType::F32;
+    bool isQ31 = ast.primaryResult().type == SourceType::Q31;
     if (ast.results.size() != 1 || !ast.primaryResult().tensor ||
-        (ast.primaryResult().type != SourceType::Q15 && !isFloat) || !lhsParameter ||
+        (ast.primaryResult().type != SourceType::Q15 && !isFloat && !isQ31) || !lhsParameter ||
         !rhsParameter || constexprCount != 0 ||
         llvm::any_of(ast.parameters,
                      [](const ParameterAst &parameter) { return !parameter.isTensor(); })) {
       diagnostics.error(ast.result.position,
-                        "matmul requires two Q15 or f32 tensor parameters and a matching "
+                        "matmul requires two Q15, Q31 or f32 tensor parameters and a matching "
                         "tensor result");
       return std::nullopt;
     }
@@ -2163,18 +2211,46 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       rounding = *parsed;
     }
-    return CheckedKernel{std::move(ast), std::nullopt, rounding, std::nullopt, std::nullopt};
+    // The product boundary exists only where an exact K-sum would not fit i64,
+    // so the binding declares its rounding exactly there and refuses it
+    // elsewhere. K is the inner extent, already validated as static above.
+    std::optional<ondsp::RoundingMode> productRounding;
+    bool hasProductBoundary =
+        ir::getReductionProductShift(isQ31 ? 32 : 16, *lhsParameter->shape[1]) > 0;
+    if (!ast.result.inputRounding.empty()) {
+      if (!hasProductBoundary) {
+        diagnostics.error(ast.result.position,
+                          "matmul at this width and inner extent has no product boundary to round");
+        return std::nullopt;
+      }
+      std::optional<ondsp::RoundingMode> parsed = parseRounding(ast.result.inputRounding);
+      if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven &&
+                      *parsed != ondsp::RoundingMode::TowardNegative &&
+                      *parsed != ondsp::RoundingMode::NearestTiesPositive)) {
+        diagnostics.error(ast.result.position,
+                          "matmul product_rounding must be nearest_even, toward_negative, or "
+                          "nearest_ties_positive");
+        return std::nullopt;
+      }
+      productRounding = *parsed;
+    } else if (hasProductBoundary) {
+      productRounding = ondsp::RoundingMode::NearestEven;
+    }
+    CheckedKernel checked{std::move(ast), std::nullopt, rounding, std::nullopt, std::nullopt};
+    checked.productRounding = productRounding;
+    return checked;
   }
   if (ast.result.kind == ReductionKind::Lms) {
     bool isFloat = ast.primaryResult().type == SourceType::F32;
+    bool isQ31 = ast.primaryResult().type == SourceType::Q31;
     if (ast.results.size() != 2 || !ast.primaryResult().tensor || !ast.results[1].tensor ||
-        (ast.primaryResult().type != SourceType::Q15 && !isFloat) || !lhsParameter ||
+        (ast.primaryResult().type != SourceType::Q15 && !isFloat && !isQ31) || !lhsParameter ||
         !rhsParameter || !thirdParameter || constexprCount != 0 ||
         llvm::any_of(ast.parameters,
                      [](const ParameterAst &parameter) { return !parameter.isTensor(); })) {
-      diagnostics.error(
-          ast.result.position,
-          "lms requires three Q15 or f32 tensor parameters and two matching tensor results");
+      diagnostics.error(ast.result.position,
+                        "lms requires three Q15, Q31 or f32 tensor parameters and two matching "
+                        "tensor results");
       return std::nullopt;
     }
     if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
@@ -2232,13 +2308,40 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, *contract};
     }
-    if (ast.result.stepSize < 0 || ast.result.stepSize > 32767) {
-      diagnostics.error(ast.result.position,
-                        "lms step size must be a raw signed Q1.15 value in [0, 32767]");
+    unsigned storageWidth = isQ31 ? 32u : 16u;
+    int64_t stepCeiling = (int64_t(1) << (storageWidth - 1)) - 1;
+    if (ast.result.stepSize < 0 || ast.result.stepSize > stepCeiling) {
+      diagnostics.error(ast.result.position, llvm::Twine("lms step size must be a raw signed Q1.") +
+                                                 llvm::Twine(storageWidth - 1) + " value in [0, " +
+                                                 llvm::Twine(stepCeiling) + "]");
       return std::nullopt;
     }
-    return CheckedKernel{std::move(ast), std::nullopt, ondsp::RoundingMode::NearestEven,
-                         std::nullopt, std::nullopt};
+    // Only the tap sum can leave i64, so the product boundary and its declared
+    // rounding exist exactly where that sum would.
+    std::optional<ondsp::RoundingMode> productRounding;
+    bool hasProductBoundary =
+        ir::getReductionProductShift(storageWidth, *thirdParameter->shape[0]) > 0;
+    if (!ast.result.inputRounding.empty()) {
+      if (!hasProductBoundary) {
+        diagnostics.error(ast.result.position,
+                          "lms at this width and tap count has no product boundary to round");
+        return std::nullopt;
+      }
+      std::optional<ondsp::RoundingMode> parsed = parseRounding(ast.result.inputRounding);
+      if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven &&
+                      *parsed != ondsp::RoundingMode::TowardNegative)) {
+        diagnostics.error(ast.result.position,
+                          "lms product_rounding must be nearest_even or toward_negative");
+        return std::nullopt;
+      }
+      productRounding = *parsed;
+    } else if (hasProductBoundary) {
+      productRounding = ondsp::RoundingMode::NearestEven;
+    }
+    CheckedKernel checked{std::move(ast), std::nullopt, ondsp::RoundingMode::NearestEven,
+                          std::nullopt, std::nullopt};
+    checked.productRounding = productRounding;
+    return checked;
   }
   if (llvm::any_of(ast.parameters,
                    [](const ParameterAst &parameter) {
@@ -2502,8 +2605,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return ComposedType{SourceType::Q15, input->extent};
       }
       if (call.kind == ReductionKind::Magnitude) {
-        if (input->elementType != SourceType::ComplexQ15) {
-          diagnostics.error(call.position, "magnitude requires complex_q15 operand elements");
+        bool complexQ31 = input->elementType == SourceType::ComplexQ31;
+        if (input->elementType != SourceType::ComplexQ15 && !complexQ31) {
+          diagnostics.error(call.position,
+                            "magnitude requires complex_q15 or complex_q31 operand elements");
           return std::nullopt;
         }
         if (input->extent < 1 || input->extent > 4096) {
@@ -2520,7 +2625,24 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
             return std::nullopt;
           }
         }
-        return ComposedType{SourceType::Q15, input->extent};
+        // The component pre-shift exists only where the squares leave i64, so
+        // naming its rounding at a width that has no such boundary is refused
+        // rather than ignored.
+        if (!call.inputRounding.empty()) {
+          if (!complexQ31) {
+            diagnostics.error(call.position,
+                              "magnitude at this width has no component pre-shift to round");
+            return std::nullopt;
+          }
+          std::optional<ondsp::RoundingMode> parsed = parseRounding(call.inputRounding);
+          if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven &&
+                          *parsed != ondsp::RoundingMode::TowardNegative)) {
+            diagnostics.error(call.position,
+                              "magnitude input_rounding must be nearest_even or toward_negative");
+            return std::nullopt;
+          }
+        }
+        return ComposedType{complexQ31 ? SourceType::Q31 : SourceType::Q15, input->extent};
       }
       if (isCfftKind(call.kind)) {
         if (input->elementType != SourceType::ComplexQ15 &&
@@ -2877,6 +2999,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         ast.result.kind == ReductionKind::Dct || ast.result.kind == ReductionKind::Gain ||
         ast.result.kind == ReductionKind::Goertzel;
     bool isFloat = ast.primaryResult().type == SourceType::F32;
+    // Only rms carries a Q31 profile so far; the others still hardcode Q15
+    // widths in their verifiers.
+    bool admitsQ31 = ast.result.kind == ReductionKind::Rms;
+    bool isQ31 = ast.primaryResult().type == SourceType::Q31;
     // The Q15 goertzel energy is tensor<1xi64>, a storage width no source
     // type names, so only the f32 profile has a spelling here.
     if (ast.result.kind == ReductionKind::Goertzel && !isFloat) {
@@ -2908,12 +3034,16 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     }
     if (constexprCount != 0 || !ast.primaryResult().tensor || !lhsParameter ||
         !lhsParameter->isTensor() ||
-        (ast.primaryResult().type != SourceType::Q15 && !(admitsFloat && isFloat))) {
+        (ast.primaryResult().type != SourceType::Q15 && !(admitsFloat && isFloat) &&
+         !(admitsQ31 && isQ31))) {
       diagnostics.error(ast.result.position,
-                        llvm::Twine(builtin) + (admitsFloat ? " requires a Q15 or f32 tensor input "
-                                                              "and a matching result"
-                                                            : " requires a Q15 tensor input and "
-                                                              "result"));
+                        llvm::Twine(builtin) +
+                            (admitsQ31     ? " requires a Q15, Q31 or f32 tensor input and a "
+                                             "matching result"
+                             : admitsFloat ? " requires a Q15 or f32 tensor input "
+                                             "and a matching result"
+                                           : " requires a Q15 tensor input and "
+                                             "result"));
       return std::nullopt;
     }
     if (!hasRank(lhsParameter->shape, 1) || !hasRank(ast.primaryResult().shape, 1)) {
@@ -3102,7 +3232,32 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, *contract};
     }
-    return CheckedKernel{std::move(ast), std::nullopt, rounding, std::nullopt, std::nullopt};
+    // The pre-shift boundary exists only where an exact sum of squares would
+    // not fit i64, so the binding declares its rounding exactly there and
+    // refuses it everywhere else.
+    std::optional<ondsp::RoundingMode> inputRounding;
+    bool hasPreShift = ast.result.kind == ReductionKind::Rms && !isFloat &&
+                       ir::getRmsInputPreShift(isQ31 ? 32 : 16, *inputExtent) > 0;
+    if (!ast.result.inputRounding.empty()) {
+      if (!hasPreShift) {
+        diagnostics.error(ast.result.position,
+                          "rms at this width and extent has no pre-shift boundary to round");
+        return std::nullopt;
+      }
+      std::optional<ondsp::RoundingMode> parsed = parseRounding(ast.result.inputRounding);
+      if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven &&
+                      *parsed != ondsp::RoundingMode::TowardNegative)) {
+        diagnostics.error(ast.result.position,
+                          "rms input_rounding must be nearest_even or toward_negative");
+        return std::nullopt;
+      }
+      inputRounding = *parsed;
+    } else if (hasPreShift) {
+      inputRounding = ondsp::RoundingMode::NearestEven;
+    }
+    CheckedKernel checked{std::move(ast), std::nullopt, rounding, std::nullopt, std::nullopt};
+    checked.inputRounding = inputRounding;
+    return checked;
   } else {
     if (ast.primaryResult().tensor) {
       diagnostics.error(ast.result.position, "dot and fir return scalar values");
@@ -3438,14 +3593,29 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
             ondsp::RoundingModeAttr::get(&context, ondsp::RoundingMode::NearestEven));
       }
       if (call.kind == ReductionKind::Magnitude) {
-        auto outputType = RankedTensorType::get({inputType.getDimSize(0)}, builder.getI16Type());
-        // The declared root rounding was validated in sema; omission keeps
-        // the nearest_even default.
+        // The packed container the operand carries selects the profile, and
+        // the Q31 sum of squares takes the pre-shift boundary its width
+        // forces.
+        bool packedQ31 = inputType.getElementType().isSignlessInteger(64);
+        ondsp::CxLayoutAttr magnitudeLayout = packedQ31 ? q31Layout : layout;
+        Attribute magnitudeNumeric = packedQ31 ? Attribute(q31Numeric) : Attribute(numeric);
+        unsigned componentWidth =
+            ondsp::getPackedComplexProfile(magnitudeLayout.getLayout())->storageWidth;
+        auto outputType = RankedTensorType::get({inputType.getDimSize(0)},
+                                                builder.getIntegerType(componentWidth));
+        // Both roundings were validated in sema; omission keeps the
+        // nearest_even default, and the pre-shift attribute exists exactly
+        // where the width derives a pre-shift.
+        ondsp::RoundingModeAttr inputRounding;
+        if (ir::getRmsInputPreShift(componentWidth, /*extent=*/2) > 0)
+          inputRounding = ondsp::RoundingModeAttr::get(
+              &context, call.inputRounding.empty() ? ondsp::RoundingMode::NearestEven
+                                                   : *parseRounding(call.inputRounding));
         ondsp::RoundingMode rootRounding = ondsp::RoundingMode::NearestEven;
         if (!call.rounding.empty())
           rootRounding = *parseRounding(call.rounding);
         return builder.create<ir::CxMagnitudeOp>(
-            callLocation, outputType, input, layout, numeric,
+            callLocation, outputType, input, magnitudeLayout, magnitudeNumeric, inputRounding,
             ondsp::RoundingModeAttr::get(&context, rootRounding));
       }
       if (isCfftKind(call.kind)) {
@@ -3522,7 +3692,8 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     ondsp::FixedAttr numeric;
     ondsp::RoundingModeAttr rounding;
     if (!kernel.fpContract) {
-      numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
+      numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType,
+                                      cast<IntegerType>(elementType).getWidth() - 1);
       rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
     }
     Value result;
@@ -3590,12 +3761,17 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     } else if (kernel.ast.result.kind == ReductionKind::Cosine) {
       result = builder.create<ir::CosineOp>(expressionLocation, outputType, lhs, numeric, rounding);
     } else {
+      // The pre-shift boundary exists only where an exact sum of squares would
+      // not fit i64, so the binding declares its rounding exactly there.
+      ondsp::RoundingModeAttr inputRounding =
+          kernel.inputRounding ? ondsp::RoundingModeAttr::get(&context, *kernel.inputRounding)
+                               : ondsp::RoundingModeAttr();
       result = builder.create<ir::RmsOp>(
           expressionLocation, outputType, lhs,
           kernel.fpContract
               ? Attribute(ondsp::FpAttr::get(&context, elementType, *kernel.fpContract))
               : Attribute(numeric),
-          kernel.fpContract ? ondsp::RoundingModeAttr() : rounding);
+          inputRounding, kernel.fpContract ? ondsp::RoundingModeAttr() : rounding);
     }
     builder.create<func::ReturnOp>(expressionLocation, result);
     module->push_back(function);
@@ -3682,14 +3858,19 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
 
   if (kernel.ast.result.kind == ReductionKind::Matmul) {
     Attribute numeric =
-        kernel.fpContract ? Attribute(ondsp::FpAttr::get(&context, elementType, *kernel.fpContract))
-                          : Attribute(ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed,
-                                                            elementType, 15));
+        kernel.fpContract
+            ? Attribute(ondsp::FpAttr::get(&context, elementType, *kernel.fpContract))
+            : Attribute(ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType,
+                                              cast<IntegerType>(elementType).getWidth() - 1));
     ondsp::RoundingModeAttr rounding;
     if (!kernel.fpContract)
       rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
-    auto product = builder.create<ir::MatmulOp>(
-        expressionLocation, cast<RankedTensorType>(resultType), lhs, rhs, numeric, rounding);
+    ondsp::RoundingModeAttr productRounding =
+        kernel.productRounding ? ondsp::RoundingModeAttr::get(&context, *kernel.productRounding)
+                               : ondsp::RoundingModeAttr();
+    auto product =
+        builder.create<ir::MatmulOp>(expressionLocation, cast<RankedTensorType>(resultType), lhs,
+                                     rhs, numeric, productRounding, rounding);
     builder.create<func::ReturnOp>(expressionLocation, product.getResult());
     module->push_back(function);
     if (failed(verify(*module)))
@@ -3699,17 +3880,21 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   if (kernel.ast.result.kind == ReductionKind::Lms) {
     Value weights = arguments.lookup(*getParameterOperand(kernel.ast.result, 2));
     Attribute numeric =
-        kernel.fpContract ? Attribute(ondsp::FpAttr::get(&context, elementType, *kernel.fpContract))
-                          : Attribute(ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed,
-                                                            elementType, 15));
+        kernel.fpContract
+            ? Attribute(ondsp::FpAttr::get(&context, elementType, *kernel.fpContract))
+            : Attribute(ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType,
+                                              cast<IntegerType>(elementType).getWidth() - 1));
     ondsp::RoundingModeAttr rounding;
     if (!kernel.fpContract)
       rounding = ondsp::RoundingModeAttr::get(&context, *kernel.rounding);
+    ondsp::RoundingModeAttr productRounding =
+        kernel.productRounding ? ondsp::RoundingModeAttr::get(&context, *kernel.productRounding)
+                               : ondsp::RoundingModeAttr();
     auto lms = builder.create<ir::LmsOp>(
         expressionLocation, resultTypes[0], resultTypes[1], lhs, rhs, weights,
         kernel.fpContract ? IntegerAttr() : builder.getI64IntegerAttr(kernel.ast.result.stepSize),
         kernel.fpContract ? builder.getF32FloatAttr(kernel.ast.result.fpConstant) : FloatAttr(),
-        numeric, rounding);
+        productRounding, numeric, rounding);
     builder.create<func::ReturnOp>(expressionLocation,
                                    ValueRange{lms.getError(), lms.getAdapted()});
     module->push_back(function);

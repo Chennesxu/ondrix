@@ -484,18 +484,41 @@ public:
     IntegerType i64 = rewriter.getIntegerType(64);
     Attribute numeric = op.getNumeric();
     auto fp = dyn_cast<ondrix::ondsp::FpAttr>(numeric);
-    Type element = fp ? Type(fp.getFormat()) : Type(i16);
-    // Every fixed rounding boundary of the recursion is one nearest-even
-    // saturating round_shift by 15; the error and weight updates use
-    // explicit saturating casts. The f32 profile has no boundary at any of
-    // them. The whole recursion is loop-form either way: the weight state
-    // flows sample to sample as an iter_arg.
-    ondrix::ondsp::ScaleAttr scale;
+    IntegerType storage = i16;
+    if (!fp)
+      storage = cast<IntegerType>(cast<ondrix::ondsp::FixedAttr>(numeric).getStorage());
+    // The saturating difference and the weight update need one carrier wider
+    // than the storage, not a pinned i32: at Q31 that is i64.
+    IntegerType wide = rewriter.getIntegerType(2 * storage.getWidth());
+    Type element = fp ? Type(fp.getFormat()) : Type(storage);
+    // The error and weight updates use explicit saturating casts; every other
+    // fixed boundary is a nearest-even saturating round_shift. The step and
+    // the update are each a single product, so only the TAP SUM can leave i64
+    // and only it carries a per-product boundary -- none at Q15, where the sum
+    // already fits. `outputScale` absorbs that shift; `unitScale` is the
+    // single-product one. The f32 profile has no boundary at any of them. The
+    // whole recursion is loop-form either way: the weight state flows sample
+    // to sample as an iter_arg.
+    ondrix::ondsp::ScaleAttr unitScale;
+    ondrix::ondsp::ScaleAttr outputScale;
+    ondrix::ondsp::ScaleAttr productScale;
     Value mu;
     if (fp) {
       mu = rewriter.create<arith::ConstantOp>(loc, op.getFpStepSizeAttr());
     } else {
-      scale = getNearestEvenSaturatingShift(rewriter.getContext(), 15);
+      MLIRContext *context = rewriter.getContext();
+      unsigned width = storage.getWidth();
+      unsigned productShift = ondrix::ir::getReductionProductShift(width, taps);
+      auto saturating = [&](unsigned shift, ondrix::ondsp::RoundingMode rounding,
+                            Type destination) {
+        return ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, shift, rounding,
+                                             ondrix::ondsp::OverflowMode::Saturate, destination);
+      };
+      unitScale = saturating(width - 1, ondrix::ondsp::RoundingMode::NearestEven, storage);
+      outputScale =
+          saturating(width - 1 - productShift, ondrix::ondsp::RoundingMode::NearestEven, storage);
+      if (productShift > 0)
+        productScale = saturating(productShift, *op.getProductRounding(), i64);
       mu = rewriter.create<arith::ConstantIntOp>(loc, op.getStepSizeAttr().getInt(), 64);
     }
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
@@ -614,22 +637,26 @@ public:
             Value weight = builder.create<tensor::ExtractOp>(loc, weights, tap);
             Value weightWide = builder.create<arith::ExtSIOp>(loc, i64, weight);
             Value product = builder.create<arith::MulIOp>(loc, weightWide, termWide);
+            if (productScale)
+              product =
+                  builder.create<ondrix::ondsp::RoundShiftOp>(loc, i64, product, productScale);
             Value sum = builder.create<arith::AddIOp>(loc, accArgs.front(), product);
             builder.create<scf::YieldOp>(loc, sum);
           });
-      Value output =
-          builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, accLoop.getResult(0), scale);
+      Value output = builder.create<ondrix::ondsp::RoundShiftOp>(loc, storage, accLoop.getResult(0),
+                                                                 outputScale);
 
       Value desired = builder.create<tensor::ExtractOp>(loc, adaptor.getDesired(), sample);
-      Value desiredWide = builder.create<arith::ExtSIOp>(loc, i32, desired);
-      Value outputWide = builder.create<arith::ExtSIOp>(loc, i32, output);
+      Value desiredWide = builder.create<arith::ExtSIOp>(loc, wide, desired);
+      Value outputWide = builder.create<arith::ExtSIOp>(loc, wide, output);
       Value difference = builder.create<arith::SubIOp>(loc, desiredWide, outputWide);
-      Value error = builder.create<ondrix::ondsp::SatCastOp>(loc, i16, difference, numeric);
+      Value error = builder.create<ondrix::ondsp::SatCastOp>(loc, storage, difference, numeric);
       Value nextErrors = builder.create<tensor::InsertOp>(loc, error, errors, sample);
 
       Value errorWide = builder.create<arith::ExtSIOp>(loc, i64, error);
       Value stepProduct = builder.create<arith::MulIOp>(loc, mu, errorWide);
-      Value step = builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, stepProduct, scale);
+      Value step =
+          builder.create<ondrix::ondsp::RoundShiftOp>(loc, storage, stepProduct, unitScale);
       Value stepWide = builder.create<arith::ExtSIOp>(loc, i64, step);
 
       auto updateLoop = builder.create<scf::ForOp>(
@@ -638,12 +665,14 @@ public:
             Value term = fetch(builder, loc, sample, tap);
             Value termWide = builder.create<arith::ExtSIOp>(loc, i64, term);
             Value product = builder.create<arith::MulIOp>(loc, stepWide, termWide);
-            Value delta = builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, product, scale);
+            Value delta =
+                builder.create<ondrix::ondsp::RoundShiftOp>(loc, storage, product, unitScale);
             Value weight = builder.create<tensor::ExtractOp>(loc, updateArgs.front(), tap);
-            Value weightWide = builder.create<arith::ExtSIOp>(loc, i32, weight);
-            Value deltaWide = builder.create<arith::ExtSIOp>(loc, i32, delta);
+            Value weightWide = builder.create<arith::ExtSIOp>(loc, wide, weight);
+            Value deltaWide = builder.create<arith::ExtSIOp>(loc, wide, delta);
             Value updated = builder.create<arith::AddIOp>(loc, weightWide, deltaWide);
-            Value saturated = builder.create<ondrix::ondsp::SatCastOp>(loc, i16, updated, numeric);
+            Value saturated =
+                builder.create<ondrix::ondsp::SatCastOp>(loc, storage, updated, numeric);
             Value inserted =
                 builder.create<tensor::InsertOp>(loc, saturated, updateArgs.front(), tap);
             builder.create<scf::YieldOp>(loc, inserted);

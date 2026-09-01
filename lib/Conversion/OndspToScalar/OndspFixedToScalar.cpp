@@ -1004,16 +1004,24 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::SqrtFixedOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    // The registered lowering implements only the proven profile: a scalar
-    // i64 sum of two Q1.15 squares (at most 2^31) to an i16 root. Other
-    // widths and vector forms fail closed until a real consumer defines
+    // Two registered profiles, both from a scalar i64 non-negative input: an
+    // i16 root for the Q15 consumers and an i32 root for the Q31 rms mean.
+    // Vector forms and other widths fail closed until a real consumer defines
     // their exact semantics and range proofs.
     auto inputType = dyn_cast<IntegerType>(adaptor.getInput().getType());
     if (!inputType || !inputType.isSignlessInteger(64))
       return op.emitOpError("fixed scalar lowering supports scalar i64 sqrt_fixed input");
     auto resultType = dyn_cast<IntegerType>(op.getResult().getType());
-    if (!resultType || !resultType.isSignlessInteger(16))
-      return op.emitOpError("fixed scalar lowering supports scalar i16 sqrt_fixed results");
+    if (!resultType || (!resultType.isSignlessInteger(16) && !resultType.isSignlessInteger(32)))
+      return op.emitOpError("fixed scalar lowering supports scalar i16 or i32 sqrt_fixed results");
+    unsigned resultWidth = resultType.getWidth();
+    // Every candidate square stays inside i64: the ceiling caps the estimate
+    // at 2^31 and the exact search starts at bit 30, so no candidate reaches
+    // 2^32 and no square reaches 2^63. A root at or above the ceiling
+    // saturates to the destination maximum under either definition.
+    int64_t rootCeiling = int64_t(1) << std::min<unsigned>(resultWidth, 31);
+    int topCandidateBit = static_cast<int>(std::min<unsigned>(resultWidth - 1, 30));
+    int64_t rootMaximum = (int64_t(1) << (resultWidth - 1)) - 1;
 
     // The value domain is non-negative, but that producer obligation is not
     // decidable for arbitrary SSA input. The lowering therefore rejects an
@@ -1031,12 +1039,11 @@ public:
     Value input = rewriter.create<arith::MaxSIOp>(loc, adaptor.getInput(), zero);
     Value root;
     if (sqrtEstimate) {
-      // The correction argument is the sqrt-estimate paragraph of this pass's
-      // description; it covers inputs below 2^32, where the binary64
-      // conversion is exact. At or above 2^32 the ceiling below pins the
-      // candidate at 2^16, whose square never exceeds the input, so the
-      // downward corrections cannot fire and the export saturates to 32767
-      // under either definition — an inexact conversion never reaches output.
+      // The binary64 conversion is exact below 2^53 and carries relative
+      // error at most 2^-53 above it. A square root halves that, and the
+      // root is at most 2^31, so the estimate lands within one of the exact
+      // floor root over the whole i64 domain and the two corrections below
+      // cover it. The ceiling keeps every correction square inside i64.
       Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
       Value asFloat = rewriter.create<arith::SIToFPOp>(loc, rewriter.getF64Type(), input);
       Value estimate = rewriter.create<math::SqrtOp>(loc, asFloat);
@@ -1044,7 +1051,7 @@ public:
       // Clamp the estimate before squaring: every root of at least 2^16
       // saturates to 32767 anyway, and the clamp keeps the correction
       // squares far from i64 overflow for the whole i64 input domain.
-      Value ceiling = rewriter.create<arith::ConstantIntOp>(loc, 65536, 64);
+      Value ceiling = rewriter.create<arith::ConstantIntOp>(loc, rootCeiling, 64);
       Value overCeiling =
           rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, root, ceiling);
       root = rewriter.create<arith::SelectOp>(loc, overCeiling, ceiling, root);
@@ -1063,9 +1070,9 @@ public:
       }
     } else {
       root = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
-      // Exact bit-by-bit integer square root: the root of an input bounded by
-      // 2^31 fits in 16 bits, so 16 unrolled candidate bits suffice.
-      for (int bit = 15; bit >= 0; --bit) {
+      // Exact bit-by-bit integer square root, unrolled from the highest bit
+      // the destination can hold.
+      for (int bit = topCandidateBit; bit >= 0; --bit) {
         Value candidateBit = rewriter.create<arith::ConstantIntOp>(loc, int64_t(1) << bit, 64);
         Value candidate = rewriter.create<arith::AddIOp>(loc, root, candidateBit);
         Value square = rewriter.create<arith::MulIOp>(loc, candidate, candidate);
@@ -1084,11 +1091,10 @@ public:
       Value incremented = rewriter.create<arith::AddIOp>(loc, root, one);
       root = rewriter.create<arith::SelectOp>(loc, roundUp, incremented, root);
     }
-    Value maximum = rewriter.create<arith::ConstantIntOp>(loc, 32767, 64);
+    Value maximum = rewriter.create<arith::ConstantIntOp>(loc, rootMaximum, 64);
     Value overflows = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, root, maximum);
     Value clamped = rewriter.create<arith::SelectOp>(loc, overflows, maximum, root);
-    rewriter.replaceOp(
-        op, rewriter.create<arith::TruncIOp>(loc, rewriter.getI16Type(), clamped).getResult());
+    rewriter.replaceOp(op, rewriter.create<arith::TruncIOp>(loc, resultType, clamped).getResult());
     return success();
   }
 

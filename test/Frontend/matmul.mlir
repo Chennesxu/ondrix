@@ -1,4 +1,7 @@
 // RUN: ondrix-compile %S/Inputs/q15_matmul.ox | FileCheck %s
+// RUN: ondrix-compile %S/Inputs/q31_matmul.ox | FileCheck %s --check-prefix=Q31
+// RUN: ondrix-compile %S/Inputs/q31_matmul_floor.ox | FileCheck %s --check-prefix=Q31FLOOR
+// RUN: not ondrix-compile %S/Inputs/invalid_matmul_product_rounding.ox 2>&1 | FileCheck %s --check-prefix=PRODBOUND
 // RUN: not ondrix-compile %S/Inputs/invalid_matmul_rank.ox 2>&1 | FileCheck %s --check-prefix=RANK
 // RUN: not ondrix-compile %S/Inputs/invalid_matmul_inner.ox 2>&1 | FileCheck %s --check-prefix=INNER
 // RUN: not ondrix-compile %S/Inputs/invalid_matmul_extent.ox 2>&1 | FileCheck %s --check-prefix=EXTENT
@@ -32,3 +35,17 @@
 // F32: ondrix.matmul
 // F32-SAME: numeric = #ondsp.fp<format = f32, contract = fma>
 // CONTRACT: error: unsupported floating-point contract 'exact'
+
+// The binding supplies the product boundary the inner extent forces and lets a
+// call site round the two boundaries independently.
+// Q31-LABEL: func.func @q31_matmul(
+// Q31: ondrix.matmul
+// Q31-SAME: numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+// Q31-SAME: product_rounding = #ondsp.rounding<nearest_even>
+
+// Q31FLOOR-LABEL: func.func @q31_matmul_floor(
+// Q31FLOOR: ondrix.matmul
+// Q31FLOOR-SAME: product_rounding = #ondsp.rounding<toward_negative>
+// Q31FLOOR-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
+
+// PRODBOUND: matmul at this width and inner extent has no product boundary to round

@@ -1,7 +1,7 @@
 // RUN: ondrix-opt %s --split-input-file --verify-diagnostics
 
 func.func @wrong_layout(%input: tensor<5xi32>) -> tensor<5xi16> {
-  // expected-error@+1 {{executable magnitude requires packed_i16_imag_hi_real_lo layout}}
+  // expected-error@+1 {{executable magnitude requires packed_i16_imag_hi_real_lo or packed_i32_imag_hi_real_lo layout}}
   %magnitudes = ondrix.cx_magnitude %input {
     layout = #ondsp.cx_layout<interleaved>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
@@ -54,4 +54,29 @@ func.func @sqrt_wrong_rounding(%input: i64) -> i16 {
     rounding = #ondsp.rounding<toward_zero>
   } : (i64) -> i16
   return %root : i16
+}
+
+// -----
+
+func.func @q31_magnitude_without_input_rounding(%input: tensor<5xi64>) -> tensor<5xi32> {
+  // expected-error @below {{requantizes each component by 1 before squaring and must declare input_rounding}}
+  %magnitudes = ondrix.cx_magnitude %input {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<5xi64>) -> tensor<5xi32>
+  return %magnitudes : tensor<5xi32>
+}
+
+// -----
+
+func.func @q15_magnitude_with_input_rounding(%input: tensor<5xi32>) -> tensor<5xi16> {
+  // expected-error @below {{magnitude at this width has no pre-shift boundary to round}}
+  %magnitudes = ondrix.cx_magnitude %input {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    input_rounding = #ondsp.rounding<nearest_even>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<5xi32>) -> tensor<5xi16>
+  return %magnitudes : tensor<5xi16>
 }

@@ -143,8 +143,9 @@ def Ondsp_SqrtFixedOp : Ondsp_Op<"sqrt_fixed", [Pure]> {
     clamps the runtime value to zero from below: an out-of-domain input
     deterministically yields 0 (never an undefined value), and an input
     that is provably negative at compile time fails closed in conversion.
-    The first executable profile takes `i64` input to `i16` result under
-    the two listed rounding modes; other widths fail closed in lowering.
+    The executable profiles take `i64` input to an `i16` or `i32` result
+    under the two listed rounding modes; other widths fail closed in
+    lowering. A root the destination cannot hold saturates to its maximum.
   }];
   let arguments = (ins AnyType:$input, Ondsp_RoundingModeAttr:$rounding);
   let results = (outs AnyType:$result);

@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 
 using namespace mlir;
@@ -1115,30 +1116,59 @@ public:
   LogicalResult matchAndRewrite(ondrix::ir::CxMagnitudeOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
-    IntegerType i16 = rewriter.getI16Type();
+    MLIRContext *context = rewriter.getContext();
     IntegerType i64 = rewriter.getIntegerType(64);
-    auto roundingAttr =
-        ondrix::ondsp::RoundingModeAttr::get(rewriter.getContext(), op.getRounding());
+    auto roundingAttr = ondrix::ondsp::RoundingModeAttr::get(context, op.getRounding());
+    ondrix::ondsp::PackedComplexProfile profile =
+        *ondrix::ondsp::getPackedComplexProfile(op.getLayout().getLayout());
+    IntegerType component = rewriter.getIntegerType(profile.storageWidth);
+    // Two Q15 squares stay exact; two Q31 squares reach 2^63 and do not, so the
+    // components carry a one-bit declared boundary and the root restores it.
+    unsigned preShift = ondrix::ir::getRmsInputPreShift(profile.storageWidth, /*extent=*/2);
+    ondrix::ondsp::ScaleAttr componentScale;
+    if (preShift > 0)
+      componentScale = ondrix::ondsp::ScaleAttr::get(
+          context, /*preShiftLeft=*/0, preShift, *op.getInputRounding(),
+          ondrix::ondsp::OverflowMode::Saturate, component);
 
     int64_t extent = op.getInput().getType().getDimSize(0);
-    Value shift = rewriter.create<arith::ConstantIntOp>(loc, 16, 32);
+    Value shift =
+        rewriter.create<arith::ConstantIntOp>(loc, profile.storageWidth, profile.containerWidth);
     RankedTensorType resultType = op.getResult().getType();
     Value result =
         rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
     for (int64_t index = 0; index < extent; ++index) {
       Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
       Value packed = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
-      Value real = rewriter.create<arith::TruncIOp>(loc, i16, packed);
+      Value real = rewriter.create<arith::TruncIOp>(loc, component, packed);
       Value high = rewriter.create<arith::ShRUIOp>(loc, packed, shift);
-      Value imaginary = rewriter.create<arith::TruncIOp>(loc, i16, high);
+      Value imaginary = rewriter.create<arith::TruncIOp>(loc, component, high);
+      if (componentScale) {
+        real = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, component, real, componentScale);
+        imaginary =
+            rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, component, imaginary, componentScale);
+      }
       Value realWide = rewriter.create<arith::ExtSIOp>(loc, i64, real);
       Value imaginaryWide = rewriter.create<arith::ExtSIOp>(loc, i64, imaginary);
       Value realSquare = rewriter.create<arith::MulIOp>(loc, realWide, realWide);
       Value imaginarySquare = rewriter.create<arith::MulIOp>(loc, imaginaryWide, imaginaryWide);
       Value sum = rewriter.create<arith::AddIOp>(loc, realSquare, imaginarySquare);
-      Value magnitude = rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, i16, sum, roundingAttr);
+      if (preShift > 0) {
+        // Unlike rms, magnitude never divides the sum, so the restored value
+        // needs 2*(W-1)+1 bits whatever the pre-shift is -- 63 at Q31, one
+        // past the i64 maximum. The clamp is inert rather than lossy: the
+        // smallest sum it bites already exports a saturated magnitude.
+        int64_t ceiling = std::numeric_limits<int64_t>::max() >> (2 * preShift);
+        Value limit = rewriter.create<arith::ConstantIntOp>(loc, ceiling, 64);
+        sum = rewriter.create<arith::MinSIOp>(loc, sum, limit);
+        Value restore = rewriter.create<arith::ConstantIntOp>(loc, 2 * preShift, 64);
+        sum = rewriter.create<arith::ShLIOp>(loc, sum, restore);
+      }
+      Value magnitude =
+          rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, component, sum, roundingAttr);
       result = rewriter.create<tensor::InsertOp>(loc, magnitude, result, position);
     }
+
     rewriter.replaceOp(op, result);
     return success();
   }

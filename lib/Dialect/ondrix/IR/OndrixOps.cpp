@@ -1377,21 +1377,48 @@ LogicalResult GoertzelOp::verify() {
   return success();
 }
 
+// The two admitted uniform-Q profiles. Both operations whose fixed contract
+// spans them read the width from here rather than pinning one.
+static std::optional<unsigned> getUniformQStorageWidth(Attribute numeric) {
+  auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric);
+  if (!fixed || fixed.getSignedness() != ondrix::ondsp::Signedness::Signed)
+    return std::nullopt;
+  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
+  if (!storage || !storage.isSignless())
+    return std::nullopt;
+  unsigned width = storage.getWidth();
+  if ((width != 16 && width != 32) || fixed.getFrac() != width - 1)
+    return std::nullopt;
+  return width;
+}
+
+static bool isMatmulRounding(ondrix::ondsp::RoundingMode mode) {
+  return mode == ondrix::ondsp::RoundingMode::NearestEven ||
+         mode == ondrix::ondsp::RoundingMode::TowardNegative ||
+         mode == ondrix::ondsp::RoundingMode::NearestTiesPositive;
+}
+
 LogicalResult MatmulOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
+  std::optional<unsigned> storageWidth;
   if (fp) {
     if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "matmul")))
       return failure();
     if (getRounding())
       return emitOpError("floating-point matmul has no requantization boundary to round");
+    if (getProductRounding())
+      return emitOpError("floating-point matmul has no product boundary to round");
   } else {
-    if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-      return failure();
-    if (!getRounding() || (*getRounding() != ondrix::ondsp::RoundingMode::NearestEven &&
-                           *getRounding() != ondrix::ondsp::RoundingMode::TowardNegative &&
-                           *getRounding() != ondrix::ondsp::RoundingMode::NearestTiesPositive))
+    storageWidth = getUniformQStorageWidth(getNumeric());
+    if (!storageWidth)
+      return emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                         "#ondsp.fixed<signed, storage = i32, frac = 31>");
+    if (!getRounding() || !isMatmulRounding(*getRounding()))
       return emitOpError(
           "matmul rounding must be nearest_even, toward_negative, or nearest_ties_positive");
+    if (getProductRounding() && !isMatmulRounding(*getProductRounding()))
+      return emitOpError("matmul product_rounding must be nearest_even, toward_negative, or "
+                         "nearest_ties_positive");
   }
   RankedTensorType lhsType = getLhs().getType();
   RankedTensorType rhsType = getRhs().getType();
@@ -1409,27 +1436,61 @@ LogicalResult MatmulOp::verify() {
       resultType.getDimSize(0) != lhsType.getDimSize(0) ||
       resultType.getDimSize(1) != rhsType.getDimSize(1) || !inRange(lhsType.getDimSize(0)) ||
       !inRange(lhsType.getDimSize(1)) || !inRange(rhsType.getDimSize(1))) {
-    llvm::StringRef name = fp ? "f32" : "i16";
+    std::string name = fp ? std::string("f32") : ("i" + llvm::utostr(*storageWidth));
     return emitOpError() << "executable matmul requires static tensor<MxKx" << name
                          << "> x tensor<KxNx" << name << "> -> tensor<MxNx" << name
                          << "> with M, K, N in [1, 64]";
   }
+  // The product boundary exists exactly when an exact K-sum would not fit
+  // i64, so its rounding is required there and refused where there is none.
+  if (storageWidth) {
+    unsigned shift = ondrix::ir::getReductionProductShift(*storageWidth, lhsType.getDimSize(1));
+    if (shift > 0 && !getProductRounding())
+      return emitOpError() << "a K-sum of " << lhsType.getDimSize(1) << " Q" << (*storageWidth - 1)
+                           << " products requantizes each product by " << shift
+                           << " and must declare product_rounding";
+    if (shift == 0 && getProductRounding())
+      return emitOpError("matmul at this width and inner extent has no product boundary to round");
+  }
   return success();
+}
+
+unsigned ondrix::ir::getReductionProductShift(unsigned storageWidth, int64_t inner) {
+  // floor, not ceil: K terms each bounded by 2^(2*(W-1)-p) sum below
+  // 2^(2*(W-1)-p+floor(log2 K)+1), so the floor already fits i64 and a ceil
+  // would spend a bit of precision at every K that is not a power of two.
+  unsigned productBits = 2 * (storageWidth - 1);
+  unsigned exact = productBits + llvm::Log2_64(static_cast<uint64_t>(inner));
+  return exact <= 62 ? 0 : exact - 62;
+}
+
+unsigned ondrix::ir::getRmsInputPreShift(unsigned storageWidth, int64_t extent) {
+  unsigned m = llvm::Log2_64(extent);
+  unsigned exact = 2 * (storageWidth - 1) + m;
+  return exact <= 62 ? 0 : (exact - 62 + 1) / 2;
 }
 
 LogicalResult RmsOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
+  std::optional<unsigned> storageWidth;
   if (fp) {
     if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "rms")))
       return failure();
     if (getRounding())
       return emitOpError("floating-point rms rounds at no declared boundary of its own");
+    if (getInputRounding())
+      return emitOpError("floating-point rms has no pre-shift boundary to round");
   } else {
-    if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-      return failure();
+    storageWidth = getUniformQStorageWidth(getNumeric());
+    if (!storageWidth)
+      return emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                         "#ondsp.fixed<signed, storage = i32, frac = 31>");
     if (!getRounding() || (*getRounding() != ondrix::ondsp::RoundingMode::TowardNegative &&
                            *getRounding() != ondrix::ondsp::RoundingMode::NearestEven))
       return emitOpError("rms supports toward_negative or nearest_even rounding");
+    if (getInputRounding() && *getInputRounding() != ondrix::ondsp::RoundingMode::TowardNegative &&
+        *getInputRounding() != ondrix::ondsp::RoundingMode::NearestEven)
+      return emitOpError("rms input_rounding supports toward_negative or nearest_even");
   }
   RankedTensorType inputType = getInput().getType();
   RankedTensorType resultType = getResult().getType();
@@ -1438,16 +1499,28 @@ LogicalResult RmsOp::verify() {
   int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
-  Type element = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), 16));
+  Type element = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), *storageWidth));
   // The power-of-two extent exists so the fixed-point mean is a shift; an f32
   // mean divides by a representable constant at any admitted extent.
   if (inputExtent == ShapedType::kDynamic || inputExtent < 2 || inputExtent > 4096 ||
       (!fp && !llvm::isPowerOf2_64(inputExtent)) || resultExtent != 1 ||
       inputType.getElementType() != element || resultType.getElementType() != element) {
-    llvm::StringRef name = fp ? "f32" : "i16";
+    std::string name = fp ? std::string("f32") : ("i" + llvm::utostr(*storageWidth));
     return emitOpError() << "executable rms requires static tensor<Nx" << name << "> input with "
                          << (fp ? "N" : "power-of-two N") << " in [2, 4096] and tensor<1x" << name
                          << "> result";
+  }
+  // The pre-shift boundary exists exactly when the exact sum of squares would
+  // not fit i64, so its rounding is required there and refused where there is
+  // none to round.
+  if (storageWidth) {
+    unsigned preShift = ondrix::ir::getRmsInputPreShift(*storageWidth, inputExtent);
+    if (preShift > 0 && !getInputRounding())
+      return emitOpError() << "rms over " << inputExtent << " Q" << (*storageWidth - 1)
+                           << " samples requantizes each input by " << preShift
+                           << " before squaring and must declare input_rounding";
+    if (preShift == 0 && getInputRounding())
+      return emitOpError("rms at this width and extent has no pre-shift boundary to round");
   }
   return success();
 }
@@ -1494,6 +1567,7 @@ LogicalResult GainOp::verify() {
 
 LogicalResult LmsOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
+  std::optional<unsigned> storageWidth;
   if (fp) {
     if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "lms")))
       return failure();
@@ -1507,15 +1581,25 @@ LogicalResult LmsOp::verify() {
     // NaN step size fails this comparison with it.
     if (!(getFpStepSize()->convertToFloat() >= 0.0f))
       return emitOpError("floating-point lms step size must not be negative");
+    if (getProductRounding())
+      return emitOpError("floating-point lms has no product boundary to round");
   } else {
-    if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-      return failure();
+    storageWidth = getUniformQStorageWidth(getNumeric());
+    if (!storageWidth)
+      return emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                         "#ondsp.fixed<signed, storage = i32, frac = 31>");
     if (getFpStepSize())
       return emitOpError("fixed lms must not specify a floating-point step size");
     if (!getRounding() || *getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
       return emitOpError("lms requires nearest_even rounding");
-    if (!getStepSize() || getStepSizeAttr().getInt() < 0 || getStepSizeAttr().getInt() > 32767)
-      return emitOpError("lms step size must be a raw signed Q1.15 value in [0, 32767]");
+    if (getProductRounding() && *getProductRounding() != ondrix::ondsp::RoundingMode::NearestEven &&
+        *getProductRounding() != ondrix::ondsp::RoundingMode::TowardNegative)
+      return emitOpError("lms product_rounding supports toward_negative or nearest_even");
+    int64_t stepCeiling = (int64_t(1) << (*storageWidth - 1)) - 1;
+    if (!getStepSize() || getStepSizeAttr().getInt() < 0 ||
+        getStepSizeAttr().getInt() > stepCeiling)
+      return emitOpError() << "lms step size must be a raw signed Q1." << (*storageWidth - 1)
+                           << " value in [0, " << stepCeiling << "]";
   }
   RankedTensorType inputType = getInput().getType();
   RankedTensorType desiredType = getDesired().getType();
@@ -1525,8 +1609,8 @@ LogicalResult LmsOp::verify() {
   if (failed(verifyUnencodedTensorTypes(
           getOperation(), {inputType, desiredType, weightsType, errorType, adaptedType})))
     return failure();
-  Type element = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), 16));
-  llvm::StringRef name = fp ? "f32" : "i16";
+  Type element = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), *storageWidth));
+  std::string name = fp ? std::string("f32") : ("i" + llvm::utostr(*storageWidth));
   auto staticExtent = [&](RankedTensorType type) {
     return type.getRank() == 1 && type.getElementType() == element ? type.getDimSize(0)
                                                                    : ShapedType::kDynamic;
@@ -1540,14 +1624,42 @@ LogicalResult LmsOp::verify() {
   if (taps == ShapedType::kDynamic || taps < 1 || taps > 64 || staticExtent(adaptedType) != taps)
     return emitOpError() << "executable lms requires matching static tensor<Kx" << name
                          << "> weights and adapted weights with K in [1, 64]";
+  // Only the tap sum can leave i64; the step and the update are each a single
+  // product. So the product boundary exists exactly where that sum would.
+  if (storageWidth) {
+    unsigned shift = ondrix::ir::getReductionProductShift(*storageWidth, taps);
+    if (shift > 0 && !getProductRounding())
+      return emitOpError() << "a tap sum of " << taps << " Q" << (*storageWidth - 1)
+                           << " products requantizes each product by " << shift
+                           << " and must declare product_rounding";
+    if (shift == 0 && getProductRounding())
+      return emitOpError("lms at this width and tap count has no product boundary to round");
+  }
   return success();
 }
 
 LogicalResult CxMagnitudeOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+  std::optional<ondrix::ondsp::PackedComplexProfile> profile =
+      ondrix::ondsp::getPackedComplexProfile(getLayout().getLayout());
+  if (!profile)
+    return emitOpError("executable magnitude requires packed_i16_imag_hi_real_lo or "
+                       "packed_i32_imag_hi_real_lo layout");
+  unsigned componentWidth = profile->storageWidth;
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), componentWidth,
+                                     componentWidth - 1, "numeric")))
     return failure();
-  if (getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
-    return emitOpError("executable magnitude requires packed_i16_imag_hi_real_lo layout");
+  // Two Q15 squares reach 2^31 and stay exact; two Q31 squares reach 2^63 and
+  // do not, so the components are pre-shifted and their rounding declared.
+  unsigned preShift = ondrix::ir::getRmsInputPreShift(componentWidth, /*extent=*/2);
+  if (preShift > 0 && !getInputRounding())
+    return emitOpError() << "a Q" << (componentWidth - 1)
+                         << " magnitude requantizes each component by " << preShift
+                         << " before squaring and must declare input_rounding";
+  if (preShift == 0 && getInputRounding())
+    return emitOpError("magnitude at this width has no pre-shift boundary to round");
+  if (getInputRounding() && *getInputRounding() != ondrix::ondsp::RoundingMode::TowardNegative &&
+      *getInputRounding() != ondrix::ondsp::RoundingMode::NearestEven)
+    return emitOpError("cx_magnitude input_rounding supports toward_negative or nearest_even");
   ondrix::ondsp::RoundingMode rounding = getRounding();
   if (rounding != ondrix::ondsp::RoundingMode::TowardNegative &&
       rounding != ondrix::ondsp::RoundingMode::NearestEven)
@@ -1560,10 +1672,11 @@ LogicalResult CxMagnitudeOp::verify() {
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
   if (inputExtent == ShapedType::kDynamic || inputExtent < 1 || inputExtent > 4096 ||
-      resultExtent != inputExtent || !inputType.getElementType().isSignlessInteger(32) ||
-      !resultType.getElementType().isSignlessInteger(16))
-    return emitOpError("executable magnitude requires tensor<Nxi32> to tensor<Nxi16> "
-                       "with static N in [1, 4096]");
+      resultExtent != inputExtent ||
+      !inputType.getElementType().isSignlessInteger(profile->containerWidth) ||
+      !resultType.getElementType().isSignlessInteger(componentWidth))
+    return emitOpError() << "executable magnitude requires tensor<Nxi" << profile->containerWidth
+                         << "> to tensor<Nxi" << componentWidth << "> with static N in [1, 4096]";
   return success();
 }
 

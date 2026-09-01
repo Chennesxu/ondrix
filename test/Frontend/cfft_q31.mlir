@@ -36,4 +36,6 @@
 
 // FROZEN: invalid_cfft_q31_rounding.ox:2:10: error: the packed-Q31 cfft profile is frozen to toward_negative saturating stages
 // EXTENT: invalid_cfft_q31_extent.ox:2:10: error: a complex_q31 cfft currently supports power-of-two extents in [4, 64]
-// CONSUMER: invalid_q31_complex_consumer.ox:2:10: error: magnitude requires complex_q15 operand elements
+// magnitude now consumes complex_q31 and returns Q31, so the refusal left here
+// is the declared result width, not the absence of a consumer.
+// CONSUMER: invalid_q31_complex_consumer.ox:2:10: error: declared result type does not match the builtin expression

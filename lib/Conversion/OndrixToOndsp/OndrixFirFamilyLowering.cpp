@@ -709,12 +709,29 @@ public:
     RankedTensorType rhsType = op.getRhs().getType();
     IntegerType i64 = rewriter.getIntegerType(64);
     auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
-    // Exact i64 K-sum per element (|sum| <= 64 * 2^30), one nearest-even
-    // saturating boundary. Loop-form over all three dimensions. The f32
-    // profile runs the same nest over its declared per-term events and has
-    // no boundary after the sum.
-    ondrix::ondsp::ScaleAttr scale =
-        fp ? ondrix::ondsp::ScaleAttr() : getNearestEvenSaturatingShift(rewriter.getContext(), 15);
+    // Loop-form over all three dimensions. The K-sum is exact in i64 once each
+    // product is narrowed by the shift the inner extent forces -- zero at Q15,
+    // where the sum already fits -- and the export is the second boundary. The
+    // f32 profile runs the same nest over its declared per-term events and has
+    // no boundary after the sum. Both boundaries take the rounding the
+    // operation declares; neither is pinned here.
+    MLIRContext *context = rewriter.getContext();
+    ondrix::ondsp::ScaleAttr scale;
+    ondrix::ondsp::ScaleAttr productScale;
+    IntegerType storage;
+    if (!fp) {
+      auto fixed = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+      storage = cast<IntegerType>(fixed.getStorage());
+      unsigned productShift =
+          ondrix::ir::getReductionProductShift(storage.getWidth(), lhsType.getDimSize(1));
+      scale = ondrix::ondsp::ScaleAttr::get(
+          context, /*preShiftLeft=*/0, storage.getWidth() - 1 - productShift, *op.getRounding(),
+          ondrix::ondsp::OverflowMode::Saturate, storage);
+      if (productShift > 0)
+        productScale = ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, productShift,
+                                                     *op.getProductRounding(),
+                                                     ondrix::ondsp::OverflowMode::Saturate, i64);
+    }
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     Value rows = rewriter.create<arith::ConstantIndexOp>(loc, lhsType.getDimSize(0));
@@ -750,13 +767,16 @@ public:
                       Value leftWide = builder.create<arith::ExtSIOp>(loc, i64, left);
                       Value rightWide = builder.create<arith::ExtSIOp>(loc, i64, right);
                       Value product = builder.create<arith::MulIOp>(loc, leftWide, rightWide);
+                      if (productScale)
+                        product = builder.create<ondrix::ondsp::RoundShiftOp>(loc, i64, product,
+                                                                              productScale);
                       Value sum = builder.create<arith::AddIOp>(loc, accArgs.front(), product);
                       builder.create<scf::YieldOp>(loc, sum);
                     });
                 Value element = accLoop.getResult(0);
                 if (!fp)
-                  element = builder.create<ondrix::ondsp::RoundShiftOp>(loc, builder.getI16Type(),
-                                                                        element, scale);
+                  element =
+                      builder.create<ondrix::ondsp::RoundShiftOp>(loc, storage, element, scale);
                 Value inserted = builder.create<tensor::InsertOp>(loc, element, columnArgs.front(),
                                                                   ValueRange{row, column});
                 builder.create<scf::YieldOp>(loc, inserted);
@@ -802,14 +822,25 @@ public:
       rewriter.replaceOpWithNewOp<tensor::InsertOp>(op, root, empty, index);
       return success();
     }
-    // The exact i64 sum of squares is bounded by 2^42; the nearest-even
-    // mean by 2^m is the first boundary (frac 30, at most 2^30, so the
-    // declared i32 saturation is unreachable) and the integer root the
-    // second. The mean of squares is nonnegative by construction, which
+    // Boundaries in emission order, all of them declared: the pre-shift where
+    // an exact sum of squares would not fit i64, the nearest-even mean, and
+    // the integer root. The mean is nonnegative by construction, which
     // establishes the sqrt_fixed value domain structurally.
+    auto fixed = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    unsigned storageWidth = cast<IntegerType>(fixed.getStorage()).getWidth();
+    IntegerType storage = rewriter.getIntegerType(storageWidth);
+    unsigned preShift = ondrix::ir::getRmsInputPreShift(storageWidth, extent);
+    // A Q15 mean is bounded by 2^30 and keeps its i32 carrier; a Q31 mean
+    // reaches 2^(62 - 2k) and stays in the accumulator's own width.
+    IntegerType meanType = storageWidth == 16 ? i32 : i64;
     auto meanScale = ondrix::ondsp::ScaleAttr::get(
         context, /*preShiftLeft=*/0, /*postShiftRight=*/llvm::Log2_64(extent),
-        ondrix::ondsp::RoundingMode::NearestEven, ondrix::ondsp::OverflowMode::Saturate, i32);
+        ondrix::ondsp::RoundingMode::NearestEven, ondrix::ondsp::OverflowMode::Saturate, meanType);
+    ondrix::ondsp::ScaleAttr inputScale;
+    if (preShift > 0)
+      inputScale = ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, preShift,
+                                                 *op.getInputRounding(),
+                                                 ondrix::ondsp::OverflowMode::Saturate, storage);
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
@@ -819,16 +850,26 @@ public:
         loc, zero, extentValue, one, ValueRange{zero64},
         [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
           Value element = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+          if (inputScale)
+            element =
+                builder.create<ondrix::ondsp::RoundShiftOp>(loc, storage, element, inputScale);
           Value wide = builder.create<arith::ExtSIOp>(loc, i64, element);
           Value square = builder.create<arith::MulIOp>(loc, wide, wide);
           Value sum = builder.create<arith::AddIOp>(loc, iterArgs.front(), square);
           builder.create<scf::YieldOp>(loc, sum);
         });
-    Value mean =
-        rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, i32, accLoop.getResult(0), meanScale);
-    Value meanWide = rewriter.create<arith::ExtSIOp>(loc, i64, mean);
-    Value root = rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, rewriter.getI16Type(), meanWide,
-                                                             op.getRoundingAttr());
+    Value mean = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, meanType, accLoop.getResult(0),
+                                                              meanScale);
+    Value meanWide = meanType == i64 ? mean : rewriter.create<arith::ExtSIOp>(loc, i64, mean);
+    // Restoring the 2k before the root, not the k after it, resolves the low
+    // bits that a post-root shift would leave zero. The mean is bounded by
+    // 2^(62 - 2k), so no bit leaves i64.
+    if (preShift > 0) {
+      Value restore = rewriter.create<arith::ConstantIntOp>(loc, 2 * preShift, 64);
+      meanWide = rewriter.create<arith::ShLIOp>(loc, meanWide, restore);
+    }
+    Value root =
+        rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, storage, meanWide, op.getRoundingAttr());
 
     RankedTensorType resultType = op.getResult().getType();
     Value empty =

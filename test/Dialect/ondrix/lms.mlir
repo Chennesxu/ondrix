@@ -39,3 +39,36 @@ func.func @f32_lms(%input: tensor<32xf32>, %desired: tensor<32xf32>, %weights: t
   } : (tensor<32xf32>, tensor<32xf32>, tensor<4xf32>) -> (tensor<32xf32>, tensor<4xf32>)
   return %error, %adapted : tensor<32xf32>, tensor<4xf32>
 }
+
+// The Q31 profile declares a per-product boundary on the tap sum only; the
+// step and the update are each a single product and gain nothing. The raw step
+// size widens to the Q1.31 range.
+// CHECK-LABEL: func.func @lms_k32_q31
+// CHECK: ondrix.lms
+// CHECK-SAME: numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+// CHECK-SAME: product_rounding = #ondsp.rounding<toward_negative>
+// CHECK-SAME: step_size = 268435456
+func.func @lms_k32_q31(%x: tensor<16xi32>, %d: tensor<16xi32>, %w: tensor<32xi32>)
+    -> (tensor<16xi32>, tensor<32xi32>) {
+  %e, %a = ondrix.lms %x, %d, %w {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    step_size = 268435456 : i64,
+    product_rounding = #ondsp.rounding<toward_negative>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<16xi32>, tensor<16xi32>, tensor<32xi32>) -> (tensor<16xi32>, tensor<32xi32>)
+  return %e, %a : tensor<16xi32>, tensor<32xi32>
+}
+
+// One tap is one product, which i64 still holds, so this shape declares none.
+// CHECK-LABEL: func.func @lms_k1_q31
+// CHECK: ondrix.lms
+// CHECK-NOT: product_rounding
+func.func @lms_k1_q31(%x: tensor<16xi32>, %d: tensor<16xi32>, %w: tensor<1xi32>)
+    -> (tensor<16xi32>, tensor<1xi32>) {
+  %e, %a = ondrix.lms %x, %d, %w {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    step_size = 1024 : i64,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<16xi32>, tensor<16xi32>, tensor<1xi32>) -> (tensor<16xi32>, tensor<1xi32>)
+  return %e, %a : tensor<16xi32>, tensor<1xi32>
+}

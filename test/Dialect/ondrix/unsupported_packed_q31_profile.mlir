@@ -2,8 +2,11 @@
 
 // Every operation that can carry an ondsp.cx_layout attribute but has no
 // executable packed-Q31 contract rejects the profile explicitly. ondrix.cfft,
-// ondrix.rfft/irfft, and ondsp.cx_butterfly implement it; the rest stay
-// Q15-only and must fail closed rather than reinterpret a wider container.
+// ondrix.rfft/irfft, ondrix.cx_magnitude and ondsp.cx_butterfly implement it;
+// the rest stay Q15-only and must fail closed rather than reinterpret a wider
+// container. The magnitude case below moved from refusing the profile to
+// pinning the layout and the numeric width to each other, which is the
+// refusal that still has to hold.
 
 func.func @butterfly_rejects_q31_profile(%a: i64, %b: i64, %twiddle: i64) -> (i64, i64) {
   // expected-error@+1 {{executable butterfly requires packed_i16_imag_hi_real_lo layout}}
@@ -62,8 +65,8 @@ func.func @rfft_radix4_split_rejects_q31_profile(%input: tensor<32xi16>) -> tens
 
 // -----
 
-func.func @cx_magnitude_rejects_q31_profile(%input: tensor<5xi64>) -> tensor<5xi16> {
-  // expected-error@+1 {{executable magnitude requires packed_i16_imag_hi_real_lo layout}}
+func.func @cx_magnitude_rejects_mismatched_width(%input: tensor<5xi64>) -> tensor<5xi16> {
+  // expected-error@+1 {{numeric requires #ondsp.fixed<signed, storage = i32, frac = 31>}}
   %magnitudes = ondrix.cx_magnitude %input {
     layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,

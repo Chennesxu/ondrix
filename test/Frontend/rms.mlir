@@ -1,5 +1,8 @@
 // RUN: ondrix-compile %S/Inputs/q15_rms.ox | FileCheck %s
 // RUN: ondrix-compile %S/Inputs/q15_rms_floor.ox | FileCheck %s --check-prefix=FLOOR
+// RUN: ondrix-compile %S/Inputs/q31_rms.ox | FileCheck %s --check-prefix=Q31
+// RUN: ondrix-compile %S/Inputs/q31_rms_floor.ox | FileCheck %s --check-prefix=Q31FLOOR
+// RUN: not ondrix-compile %S/Inputs/invalid_rms_input_rounding.ox 2>&1 | FileCheck %s --check-prefix=PRESHIFT
 // RUN: not ondrix-compile %S/Inputs/invalid_rms_extent.ox 2>&1 | FileCheck %s --check-prefix=EXTENT
 // RUN: not ondrix-compile %S/Inputs/invalid_rms_result.ox 2>&1 | FileCheck %s --check-prefix=SINGLETON
 // RUN: not ondrix-compile %S/Inputs/invalid_rms_rounding.ox 2>&1 | FileCheck %s --check-prefix=ROUNDING
@@ -50,3 +53,18 @@
 
 // SCALARQ15: invalid_rms_scalar_q15.ox:2:10: error: scalar rms requires one f32 buffer operand
 // SCALARBUF: invalid_rms_scalar_tensor.ox:2:10: error: scalar rms requires one f32 buffer operand
+
+// The binding supplies the pre-shift boundary the extent forces, and lets a
+// call site override its rounding independently of the root's.
+// Q31-LABEL: func.func @q31_rms(
+// Q31: ondrix.rms
+// Q31-SAME: input_rounding = #ondsp.rounding<nearest_even>
+// Q31-SAME: numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+// Q31-SAME: rounding = #ondsp.rounding<nearest_even>
+
+// Q31FLOOR-LABEL: func.func @q31_rms_floor(
+// Q31FLOOR: ondrix.rms
+// Q31FLOOR-SAME: input_rounding = #ondsp.rounding<toward_negative>
+// Q31FLOOR-SAME: rounding = #ondsp.rounding<toward_negative>
+
+// PRESHIFT: rms at this width and extent has no pre-shift boundary to round

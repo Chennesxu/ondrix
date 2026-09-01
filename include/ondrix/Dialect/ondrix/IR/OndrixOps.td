@@ -1248,6 +1248,33 @@ def Ondrix_MatmulOp : Ondrix_Op<"matmul", [Pure]> {
     value-neutral by construction; moving or splitting the requantization
     boundary is not.
 
+    The Q31 profile takes `tensor<MxKxi32> x tensor<KxNxi32>` to
+    `tensor<MxNxi32>` over the same extent envelope. Its K-sum cannot be
+    exact: one Q1.31 product already reaches `2^62`, so two of them leave
+    i64. The profile therefore declares a SECOND boundary, on each product
+    before it is accumulated:
+
+    ```text
+    t[k]    = round_shift(A[i][k] * B[k][j], p) under `product_rounding`
+    C[i][j] = sat_i32(round(sum_k t[k] / 2^(31 - p)))
+    ```
+
+    `p = max(0, 2*(W-1) + floor(log2 K) - 62)` is the smallest shift that
+    keeps the K-sum exact, derived from the inner extent exactly as the
+    export shift is; it is not a parameter, and only its rounding is a
+    choice. It is `floor` and not `ceil`: `K` terms each bounded by
+    `2^(2*(W-1)-p)` sum below `2^(2*(W-1)-p+floor(log2 K)+1)`, so a `ceil`
+    would spend one bit of precision at every non-power-of-two `K`. It is zero at every admitted Q15 shape and at `K = 1`, so
+    `product_rounding` is required exactly where the boundary exists.
+
+    The boundary is on the PRODUCT, not on the inputs, and that is a measured
+    choice rather than a symmetry preference: narrowing an operand before the
+    multiply scales its error by the OTHER operand's magnitude, so at `K = 64`
+    an input-side narrowing is about `2^27` times less accurate than this one
+    for the same sum bound. `ondrix.rms` narrows its input instead, and that
+    is consistent rather than contradictory: its two factors are one value and
+    its root compresses the error back, which this product does not have.
+
     The f32 profile maps `tensor<MxKxf32> x tensor<KxNxf32>` to
     `tensor<MxNxf32>` over the same extent envelope and carries no rounding
     attribute, because it has no requantization boundary to place: each
@@ -1259,6 +1286,7 @@ def Ondrix_MatmulOp : Ondrix_Op<"matmul", [Pure]> {
   let arguments = (ins AnyRankedTensor:$lhs,
                    AnyRankedTensor:$rhs,
                    Ondsp_NumericAttr:$numeric,
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$product_rounding,
                    OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
@@ -1290,6 +1318,37 @@ def Ondrix_RmsOp : Ondrix_Op<"rms", [Pure]> {
     one maximum, whose floor root 32767 takes the nearest adjustment to
     32768 before the clamp.
 
+    The Q31 profile takes `tensor<Nxi32>` to `tensor<1xi32>` at the same
+    power-of-two extents, and it cannot reuse the shape above: two squares of
+    the Q1.31 minimum already sum to `2^63`, one past the signed i64 maximum,
+    so an exact sum of squares overflows at EVERY admitted extent rather than
+    at a large one. The profile therefore declares one more boundary than Q15
+    does, before the products rather than after them:
+
+    ```text
+    x'    = round_shift(x, k) under `input_rounding`   pre-shift boundary
+    sumsq = sum x'[i]^2                        exact i64, <= 2^(62 - 2k)
+    mean  = round_half_even(sumsq / 2^m)       frac 2*(31 - k)
+    rms   = sqrt_fixed(mean << 2k)             frac 31, the declared reading
+    ```
+
+    `k = ceil(m / 2)` is the smallest shift that makes the sum exact, and it
+    is derived from the extent exactly as the mean's own shift is; it is not
+    a parameter. Only its rounding is a choice, because a target's shifter
+    decides it.
+
+    The `2k` restoration is exact -- the mean is bounded by `2^(62 - 2k)`, so
+    no bit leaves i64 -- and it is applied BEFORE the root rather than after
+    it. Rooting the restored mean resolves the low `k` bits that
+    `sqrt_fixed(mean) << k` would leave zero, so the result uses the full
+    Q1.31 grid. Its ACCURACY is still what the pre-shift left: the input was
+    truncated to `31 - k` bits, 25 of them at `N = 4096`. That is the price of
+    the extent, and it is stated here rather than left to the caller.
+
+    `k` is zero for every admitted Q15 extent and nonzero for every admitted
+    Q31 one, so `input_rounding` is required exactly when the boundary exists
+    and refused when it does not.
+
     The f32 profile takes `tensor<Nxf32>` to `tensor<1xf32>` for any `N` in
     `[2, 4096]` — the power-of-two restriction exists so the fixed-point
     mean is a shift, and an f32 mean is a division by a representable
@@ -1308,6 +1367,7 @@ def Ondrix_RmsOp : Ondrix_Op<"rms", [Pure]> {
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_NumericAttr:$numeric,
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$input_rounding,
                    OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
@@ -1394,6 +1454,28 @@ def Ondrix_LmsOp : Ondrix_Op<"lms", [Pure]> {
     compounds through the feedback. The operation returns the error
     signal and the final weights.
 
+    The Q31 profile runs the same recursion over `tensor<Nxi32>` with a raw
+    Q1.31 `mu` in `[0, 2^31 - 1]`. Exactly one of the five sites changes: the
+    K-term tap sum, where one Q1.31 product already reaches `2^62` and two of
+    them leave i64. Each tap product is therefore requantized by
+    `p = floor(log2 K)` under a declared `product_rounding` before it joins the
+    sum -- the same smallest-shift derivation `ondrix.matmul` states -- and
+    the output boundary shifts by `31 - p`:
+
+    ```text
+    acc   = sum_k round_shift(w[k] * x[n-k], p)     exact i64
+    y     = sat_i32(round(acc / 2^(31 - p)))
+    ```
+
+    The step and the weight update do NOT gain a boundary: each is a single
+    product, which i64 still holds exactly. `p` is zero at every admitted Q15
+    shape and at `K = 1`, so `product_rounding` exists exactly where the
+    boundary does. Every sample therefore takes `2 + K` boundaries at Q15 and
+    `2 + K + K` at Q31, and the quantized state remains part of the contract:
+    the extra per-tap rounding compounds through the same feedback the Q15
+    profile describes, which is why it is declared rather than derived at each
+    call site.
+
     The f32 profile keeps the same recursion with the boundaries removed and
     the step size declared as `fp_step_size`:
 
@@ -1419,6 +1501,7 @@ def Ondrix_LmsOp : Ondrix_Op<"lms", [Pure]> {
                    AnyRankedTensor:$weights,
                    OptionalAttr<I64Attr>:$step_size,
                    OptionalAttr<F32Attr>:$fp_step_size,
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$product_rounding,
                    Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$error, AnyRankedTensor:$adapted);
@@ -1446,15 +1529,36 @@ def Ondrix_CxMagnitudeOp : Ondrix_Op<"cx_magnitude", [Pure]> {
     example `re = im = -32768`). Composed after `ondrix.rfft`, this yields
     the fixed-point magnitude spectrum of the staged-scaling contract.
 
-    The executable profile is limited to static rank-1 `tensor<Nxi32>`
+    The Q31 profile reads `packed_i32_imag_hi_real_lo` -- the layout the Q31
+    transforms already freeze -- taking `tensor<Nxi64>` to `tensor<Nxi32>`.
+    Its sum of squares is NOT exact: two squares of the Q1.31 minimum reach
+    exactly `2^63`, one past the signed i64 maximum, so the profile declares a
+    pre-shift on each component before it is squared:
+
+    ```
+    re'    = round_shift(re, 1) under `input_rounding`
+    im'    = round_shift(im, 1) likewise
+    s      = re'*re' + im'*im'        exact, at most 2^61
+    result = sqrt_fixed(s << 2)       frac 31, the declared reading
+    ```
+
+    The shift is one bit, which is what `2*(31 - k) + 1 <= 62` forces, and it
+    is derived rather than declared -- only its rounding is a choice. The
+    boundary is on the components rather than on each square for the same
+    measured reason `ondrix.rms` places it there: this operation ends in a
+    square root, which compresses the error a linear reduction would keep.
+
+    The Q15 executable profile is limited to static rank-1 `tensor<Nxi32>`
     packed input to `tensor<Nxi16>` output with `N` in `[1, 4096]`, the
     imag-high/real-low packed layout, signed Q15, and `toward_negative` or
     `nearest_even` rounding (the integer square root has no reachable
-    nearest ties).
+    nearest ties). `input_rounding` is refused there: an exact sum of two
+    Q15 squares reaches only `2^31`.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_CxLayoutAttr:$layout,
                    Ondsp_NumericAttr:$numeric,
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$input_rounding,
                    Ondsp_RoundingModeAttr:$rounding);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;

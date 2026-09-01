@@ -83,3 +83,53 @@ func.func @fixed_matmul_without_rounding(%a: tensor<2x2xi16>, %b: tensor<2x2xi16
   } : (tensor<2x2xi16>, tensor<2x2xi16>) -> tensor<2x2xi16>
   return %c : tensor<2x2xi16>
 }
+
+// -----
+
+func.func @q31_matmul_without_product_rounding(%a: tensor<2x64xi32>, %b: tensor<64x2xi32>)
+    -> tensor<2x2xi32> {
+  // expected-error @below {{requantizes each product by 6 and must declare product_rounding}}
+  %result = ondrix.matmul %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<2x64xi32>, tensor<64x2xi32>) -> tensor<2x2xi32>
+  return %result : tensor<2x2xi32>
+}
+
+// -----
+
+func.func @q15_matmul_with_product_rounding(%a: tensor<2x8xi16>, %b: tensor<8x2xi16>)
+    -> tensor<2x2xi16> {
+  // expected-error @below {{has no product boundary to round}}
+  %result = ondrix.matmul %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product_rounding = #ondsp.rounding<nearest_even>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<2x8xi16>, tensor<8x2xi16>) -> tensor<2x2xi16>
+  return %result : tensor<2x2xi16>
+}
+
+// -----
+
+func.func @q31_matmul_k1_with_product_rounding(%a: tensor<2x1xi32>, %b: tensor<1x2xi32>)
+    -> tensor<2x2xi32> {
+  // expected-error @below {{has no product boundary to round}}
+  %result = ondrix.matmul %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product_rounding = #ondsp.rounding<nearest_even>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<2x1xi32>, tensor<1x2xi32>) -> tensor<2x2xi32>
+  return %result : tensor<2x2xi32>
+}
+
+// -----
+
+func.func @f32_matmul_with_product_rounding(%a: tensor<2x8xf32>, %b: tensor<8x2xf32>)
+    -> tensor<2x2xf32> {
+  // expected-error @below {{floating-point matmul has no product boundary to round}}
+  %result = ondrix.matmul %a, %b {
+    numeric = #ondsp.fp<format = f32, contract = off>,
+    product_rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<2x8xf32>, tensor<8x2xf32>) -> tensor<2x2xf32>
+  return %result : tensor<2x2xf32>
+}
