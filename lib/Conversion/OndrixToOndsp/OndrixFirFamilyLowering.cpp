@@ -890,21 +890,25 @@ public:
     int64_t extent = op.getInput().getType().getDimSize(0);
     IntegerType i64 = rewriter.getIntegerType(64);
     auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
-    // The product of two Q1.15 values is exact in i64; the single declared
-    // boundary is the saturating requantization by 15, under the tie rule
+    // The product of two Q1.(W-1) values is exact in i64 at either width; the
+    // single declared boundary is the saturating requantization by W-1, under
+    // the tie rule
     // the operation declares (the verifier admits nearest_even and
     // nearest_ties_positive). The f32 profile is one multiply per element
     // with no boundary after it. One elementwise loop instead of unrolled
     // inserts: the operation admits extents up to 4096, where a long
     // tensor.insert chain is quadratic in one-shot bufferization.
     ondrix::ondsp::ScaleAttr scale;
+    IntegerType storage;
     Value gain;
     if (fp) {
       gain = rewriter.create<arith::ConstantOp>(loc, op.getFpGainAttr());
     } else {
-      scale = ondrix::ondsp::ScaleAttr::get(
-          rewriter.getContext(), /*preShiftLeft=*/0, /*postShiftRight=*/15, *op.getRounding(),
-          ondrix::ondsp::OverflowMode::Saturate, rewriter.getI16Type());
+      storage = cast<IntegerType>(cast<ondrix::ondsp::FixedAttr>(op.getNumeric()).getStorage());
+      scale = ondrix::ondsp::ScaleAttr::get(rewriter.getContext(), /*preShiftLeft=*/0,
+                                            /*postShiftRight=*/storage.getWidth() - 1,
+                                            *op.getRounding(),
+                                            ondrix::ondsp::OverflowMode::Saturate, storage);
       gain = rewriter.create<arith::ConstantIntOp>(loc, op.getGainAttr().getInt(), 64);
     }
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
@@ -924,8 +928,7 @@ public:
           } else {
             Value wide = builder.create<arith::ExtSIOp>(loc, i64, element);
             Value product = builder.create<arith::MulIOp>(loc, wide, gain);
-            scaled = builder.create<ondrix::ondsp::RoundShiftOp>(loc, builder.getI16Type(), product,
-                                                                 scale);
+            scaled = builder.create<ondrix::ondsp::RoundShiftOp>(loc, storage, product, scale);
           }
           Value inserted =
               builder.create<tensor::InsertOp>(loc, scaled, iterArgs.front(), position);
@@ -974,10 +977,12 @@ public:
     // profile's lowering stays byte-identical; every other window is the
     // round_div consumer. Both spell the same nearest-even division by K.
     bool windowIsPowerOfTwo = llvm::isPowerOf2_64(window);
+    // The floating-point profile returned above, so this is the fixed path.
+    auto storage = cast<IntegerType>(cast<ondrix::ondsp::FixedAttr>(op.getNumeric()).getStorage());
     ondrix::ondsp::ScaleAttr scale =
-        windowIsPowerOfTwo
-            ? getNearestEvenSaturatingShift(rewriter.getContext(), llvm::Log2_64(window))
-            : nullptr;
+        windowIsPowerOfTwo ? getNearestEvenSaturatingShift(
+                                 rewriter.getContext(), llvm::Log2_64(window), storage.getWidth())
+                           : nullptr;
 
     SmallVector<Value> inputs;
     inputs.reserve(extent);
@@ -993,10 +998,10 @@ public:
     auto emitMean = [&](Value sum, int64_t n) {
       Value mean;
       if (windowIsPowerOfTwo) {
-        mean = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, rewriter.getI16Type(), sum, scale);
+        mean = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, storage, sum, scale);
       } else {
         mean = rewriter.create<ondrix::ondsp::RoundDivOp>(
-            loc, rewriter.getI16Type(), sum, rewriter.getI64IntegerAttr(window),
+            loc, storage, sum, rewriter.getI64IntegerAttr(window),
             /*pre_shift_left=*/rewriter.getI64IntegerAttr(0),
             ondrix::ondsp::RoundingModeAttr::get(rewriter.getContext(),
                                                  ondrix::ondsp::RoundingMode::NearestEven),

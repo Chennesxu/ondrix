@@ -112,11 +112,13 @@ func.func @rejects_encoded_result(
 
 // -----
 
-func.func @rejects_q31_profile(
+// Both widths are admitted now, so what fails closed is the PAIR: a Q31
+// numeric with the Q15 accumulator cannot hold its own products.
+func.func @rejects_mismatched_accumulator(
     %input: tensor<4xi32>, %coeffs: tensor<3xi32>, %init: tensor<9xi32>) {
-  // expected-error @+1 {{supports only signed Q15/full with a signed frac30 accumulator of at least 32 bits}}
+  // expected-error @+1 {{supports only signed Q15/full with a signed frac30 accumulator of at least 32 bits, or signed Q31/full with an i64/frac62 accumulator}}
   %0 = ondrix.fir_interpolate %input, %coeffs, %init {
-    accumulator = !ondsp.acc<storage = i64, frac = 62, signed,
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed,
                               update_overflow = saturate>,
     dst = #ondsp.fixed<signed, storage = i32, frac = 31>,
     factor = 2,

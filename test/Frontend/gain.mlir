@@ -37,3 +37,13 @@
 // binary64 quotient lands exactly on a binary32 tie point and narrows one ulp
 // above the correctly rounded value.
 // FPMAG: invalid_f32_gain_magnitude.ox:2:10: error: f32 gain constant: numerator and denominator must not exceed 2^24
+
+// RUN: ondrix-compile %S/Inputs/q31_gain.ox | FileCheck %s --check-prefix=Q31
+
+// The raw constant is read at the declared width, so the same integer names a
+// different real number at Q15 and Q31, and the boundary moves to 31.
+// Q31-LABEL: func.func @q31_gain(
+// Q31-SAME: %[[X:.*]]: tensor<8xi32>) -> tensor<8xi32>
+// Q31: ondrix.gain
+// Q31-SAME: gain = 1288490189
+// Q31-SAME: numeric = #ondsp.fixed<signed, storage = i32, frac = 31>

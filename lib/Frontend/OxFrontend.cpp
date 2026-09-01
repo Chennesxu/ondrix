@@ -1323,6 +1323,15 @@ public:
         if (!contract)
           return std::nullopt;
         call.fpContract = contract->spelling.str();
+      } else if (current.kind == TokenKind::Comma) {
+        // The explicit triple, which is what a Q31 resampling site needs:
+        // automatic accumulation is exact and no exact accumulator exists for
+        // K products of 62 bits, so that width must declare its own carrier
+        // and per-update overflow mode.
+        if (!expect(TokenKind::Comma,
+                    llvm::Twine("expected ',' before ") + operation + " numeric policy") ||
+            !parseFixedPolicy(call))
+          return std::nullopt;
       } else {
         applyDefaultFixedPolicy(call);
       }
@@ -2923,10 +2932,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   } else if (isFirDecimate) {
     if (constexprCount != 0 || !ast.primaryResult().tensor ||
         (ast.primaryResult().type != SourceType::Q15 &&
+         ast.primaryResult().type != SourceType::Q31 &&
          ast.primaryResult().type != SourceType::F32) ||
         !lhsParameter || !rhsParameter || !lhsParameter->isTensor() || !rhsParameter->isTensor()) {
-      diagnostics.error(ast.result.position,
-                        "fir_decimate requires Q15 or f32 tensor input, coefficients, and result");
+      diagnostics.error(
+          ast.result.position,
+          "fir_decimate requires Q15, Q31 or f32 tensor input, coefficients, and result");
       return std::nullopt;
     }
     if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
@@ -3073,7 +3084,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     bool isFloat = ast.primaryResult().type == SourceType::F32;
     // rms and dct carry Q31 profiles; the others still hardcode Q15 widths in
     // their verifiers.
-    bool admitsQ31 = ast.result.kind == ReductionKind::Rms || ast.result.kind == ReductionKind::Dct;
+    bool admitsQ31 =
+        ast.result.kind == ReductionKind::Rms || ast.result.kind == ReductionKind::Dct ||
+        ast.result.kind == ReductionKind::Gain || ast.result.kind == ReductionKind::MovingAverage;
     bool isQ31 = ast.primaryResult().type == SourceType::Q31;
     // The Q15 goertzel energy is tensor<1xi64>, a storage width no source
     // type names, so only the f32 profile has a spelling here.
@@ -3169,11 +3182,19 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           return std::nullopt;
         }
         ast.result.fpConstant = constant;
-      } else if (ast.result.gain < std::numeric_limits<int16_t>::min() ||
-                 ast.result.gain > std::numeric_limits<int16_t>::max()) {
-        diagnostics.error(ast.result.position,
-                          "gain constant must be a raw signed Q1.15 value in [-32768, 32767]");
-        return std::nullopt;
+      } else {
+        // The raw constant is read at the declared width, so a Q31 gain names
+        // a Q1.31 integer rather than a Q1.15 one.
+        unsigned width = isQ31 ? 32u : 16u;
+        int64_t top = (int64_t(1) << (width - 1)) - 1;
+        int64_t bottom = -(int64_t(1) << (width - 1));
+        if (ast.result.gain < bottom || ast.result.gain > top) {
+          diagnostics.error(ast.result.position,
+                            llvm::Twine("gain constant must be a raw signed Q1.") +
+                                Twine(width - 1) + " value in [" + Twine(bottom) + ", " +
+                                Twine(top) + "]");
+          return std::nullopt;
+        }
       }
       if (*inputExtent > 4096) {
         diagnostics.error(ast.result.position,

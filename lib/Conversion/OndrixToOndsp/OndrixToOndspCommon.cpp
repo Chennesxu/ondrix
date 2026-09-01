@@ -30,11 +30,12 @@ Value createEmptyTensor(Location loc, RankedTensorType type, Value dynamicLength
   return builder.create<tensor::EmptyOp>(loc, type.getShape(), type.getElementType(), dynamicSizes);
 }
 
-ondrix::ondsp::ScaleAttr getNearestEvenSaturatingShift(MLIRContext *context, unsigned shift) {
+ondrix::ondsp::ScaleAttr getNearestEvenSaturatingShift(MLIRContext *context, unsigned shift,
+                                                       unsigned destinationWidth) {
   return ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, /*postShiftRight=*/shift,
                                        ondrix::ondsp::RoundingMode::NearestEven,
                                        ondrix::ondsp::OverflowMode::Saturate,
-                                       IntegerType::get(context, 16));
+                                       IntegerType::get(context, destinationWidth));
 }
 
 } // namespace ondrix::conversion

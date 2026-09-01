@@ -20,7 +20,8 @@ mlir::Value createFpAdd(mlir::Location loc, mlir::Value lhs, mlir::Value rhs,
 mlir::Value createEmptyTensor(mlir::Location loc, mlir::RankedTensorType type,
                               mlir::Value dynamicLength, mlir::OpBuilder &builder);
 
-ondsp::ScaleAttr getNearestEvenSaturatingShift(mlir::MLIRContext *context, unsigned shift);
+ondsp::ScaleAttr getNearestEvenSaturatingShift(mlir::MLIRContext *context, unsigned shift,
+                                               unsigned destinationWidth = 16);
 
 /// Pattern registration per algorithm family; together these are exactly the
 /// convert-ondrix-to-ondsp pattern set.

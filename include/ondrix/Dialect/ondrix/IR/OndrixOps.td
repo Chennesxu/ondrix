@@ -150,8 +150,12 @@ def Ondrix_FirDecimateOp
 
     The `init` tensor provides destination shape and storage; its element
     values are not part of the mathematical result. The first executable
-    contract is signed Q15 with an exact full product, a signed frac30
-    accumulator of at least 32 bits, and explicit export policy. Input phase,
+    contract admits either uniform-Q width with an exact full product and an
+    explicit export policy: signed Q15 with a signed frac30 accumulator of at
+    least 32 bits, or signed Q31 with the i64/frac62 accumulator the Q31
+    reduction family declares. At Q31 the tap sum is carried by the
+    accumulator's declared per-update overflow mode rather than by a narrowed
+    product, because no exact accumulator exists for `K` products of 62 bits. Input phase,
     padding, interpolation, cross-output polyphase reassociation, and target
     selection are outside this operation. Vectorization is not part of the
     mathematical contract; consumers may batch products only while preserving
@@ -275,9 +279,11 @@ def Ondrix_FirInterpolateOp
     provides destination shape and storage; its element values are not part
     of the mathematical result.
 
-    Both executable profiles accept exactly `factor = 2`. The fixed profile is
-    signed Q15 with exact full products, a signed frac30 accumulator of at
-    least 32 bits, and explicit export policy; the f32 profile carries none of
+    Both executable profiles accept exactly `factor = 2`. The fixed profile
+    admits either uniform-Q width with exact full products and an explicit
+    export policy — signed Q15 with a signed frac30 accumulator of at least 32
+    bits, or signed Q31 with the i64/frac62 accumulator, whose declared
+    per-update overflow mode carries the tap sum; the f32 profile carries none of
     those attributes and reduces from `+0.0` under its `#ondsp.fp` contract.
     Under f32 the skip is a declared algorithmic event, not generic
     zero-product elimination: a materialized term is `0.0 * coeffs[k]`, never
@@ -1047,7 +1053,9 @@ def Ondrix_MovingAverageOp : Ondrix_Op<"moving_average", [Pure]> {
     when `K` is a power of two (keeping that profile's lowering
     byte-identical to its pre-generalization form) and `ondsp.round_div`
     by `K` otherwise — the two spellings agree bit-exactly where both
-    exist. A mean of Q1.15 values stays inside Q1.15, so the declared
+    exist. The width costs this contract no new boundary: at most 64
+    Q1.(W-1) values sum below `2^(W+6)`, exact in i64 at either width, and
+    a mean of Q1.(W-1) values stays inside Q1.(W-1), so the declared
     saturation is unreachable either way. This contract is deliberately
     NOT the equal-tap FIR `sum x[n+i] * q15(1/K)`: quantizing `1/K` first
     is a different program with a different result (a gain-merge-class
@@ -1444,16 +1452,20 @@ def Ondrix_RmsOp : Ondrix_Op<"rms", [Pure]> {
 def Ondrix_GainOp : Ondrix_Op<"gain", [Pure]> {
   let summary = "Elementwise constant Q15 gain with one explicit requantization";
   let description = [{
-    `ondrix.gain` scales a static rank-1 signed-Q1.15 tensor by one raw
-    Q1.15 constant `gain` in `[-32768, 32767]`, with per-element semantics:
+    `ondrix.gain` scales a static rank-1 signed-Q1.(W-1) tensor by one raw
+    Q1.(W-1) constant `gain`, for W of 16 or 32, with per-element
+    semantics:
 
     ```text
-    y[i] = saturate_i16(round(x[i] * gain / 2^15))
+    y[i] = saturate_iW(round(x[i] * gain / 2^(W-1)))
     ```
 
-    The product is exact (`|x * gain| <= 2^30`) and the single explicit
-    boundary is the requantization back to Q1.15; saturation is declared
-    and reachable only for `x = gain = -32768`.
+    The product is exact in i64 at either width (`|x * gain| <= 2^(2W-2)`,
+    so `2^30` at Q15 and `2^62` at Q31) and the single explicit boundary is
+    the requantization back to Q1.(W-1); saturation is declared and
+    reachable only for `x = gain = -2^(W-1)`. The constant is read at the
+    declared width, so the same integer names a different real number at
+    the two widths.
 
     Two tie rules are admissible at that boundary, and the choice is part
     of the contract: `nearest_even` (zero-biased) and
@@ -1465,6 +1477,12 @@ def Ondrix_GainOp : Ondrix_Op<"gain", [Pure]> {
     `-2` under `nearest_even` and `-1` under `nearest_ties_positive`; a
     positive half whose floor quotient is `0` behaves the same way, giving
     `0` versus `1`.
+
+    Cascade merging is a Q15-only rewrite. Its certificate is an exhaustive
+    sweep of the 65536 Q15 inputs, and a Q31 sweep would be `2^32` inputs
+    per candidate pair, which is not a compile-time check; `merge-ondrix-gain-cascades`
+    therefore leaves Q31 cascades alone rather than merging them on a weaker
+    argument.
 
     A cascade of two gain operations is in general a DIFFERENT program
     from one gain carrying the quantized product of the constants: with

@@ -469,17 +469,24 @@ verifyQ15ResamplingProfile(Operation *op, RankedTensorType inputType, RankedTens
                            ondrix::ondsp::RoundingMode rounding) {
   if (failed(verifyDeclaredRounding(op, rounding, "Q15 resampling")))
     return failure();
+  // Both uniform-Q profiles, each with the accumulator its product width
+  // needs: frac30 for Q15 and the i64/frac62 pair the Q31 reduction family
+  // already declares. The per-update overflow mode carries the sum, exactly
+  // as it does for the Q31 FIR; this is not the narrowed-product shape that
+  // matmul and DCT use.
   auto accumulatorStorage = dyn_cast<IntegerType>(accumulator.getStorage());
-  if (!ondrix::ondsp::isSignedQ15(numeric) || !ondrix::ondsp::isFullProduct(product) ||
-      !accumulatorStorage || accumulatorStorage.getWidth() < 32 ||
-      accumulator.getSignedness() != ondrix::ondsp::Signedness::Signed ||
-      accumulator.getFrac() != 30)
-    return op->emitOpError(
-        "supports only signed Q15/full with a signed frac30 accumulator of at least 32 bits");
+  bool q15 = ondrix::ondsp::isSignedQ15(numeric) && accumulatorStorage &&
+             accumulatorStorage.getWidth() >= 32 && accumulator.getFrac() == 30;
+  bool q31 = ondrix::ondsp::isSignedQ31(numeric) &&
+             ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator);
+  if (!ondrix::ondsp::isFullProduct(product) ||
+      accumulator.getSignedness() != ondrix::ondsp::Signedness::Signed || (!q15 && !q31))
+    return op->emitOpError("supports only signed Q15/full with a signed frac30 accumulator of at "
+                           "least 32 bits, or signed Q31/full with an i64/frac62 accumulator");
   if (destination != numeric)
-    return op->emitOpError("destination policy must match the signed Q15 input format");
+    return op->emitOpError("destination policy must match the declared input format");
   if (inputType.getElementType() != numeric.getStorage())
-    return op->emitOpError("input and coefficient element type must match Q15 storage");
+    return op->emitOpError("input and coefficient element type must match the numeric storage");
   if (initType.getElementType() != destination.getStorage())
     return op->emitOpError("init and result element type must match destination storage");
   return verifyFixedReductionResult(op, accumulator, numeric, product);
@@ -1368,11 +1375,18 @@ LogicalResult DctOp::verify() {
 
 LogicalResult MovingAverageOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
+  std::optional<unsigned> storageWidth;
   if (fp) {
     if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "moving average")))
       return failure();
-  } else if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric"))) {
-    return failure();
+  } else {
+    // A window of at most 64 Q1.(W-1) values sums below 2^(W+6), exact in i64
+    // at either width, and a mean of Q1.(W-1) values stays in the format, so
+    // the width costs this contract no new boundary.
+    storageWidth = getUniformQStorageWidth(getNumeric());
+    if (!storageWidth)
+      return emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                         "#ondsp.fixed<signed, storage = i32, frac = 31>");
   }
   RankedTensorType inputType = getInput().getType();
   RankedTensorType resultType = getResult().getType();
@@ -1384,11 +1398,12 @@ LogicalResult MovingAverageOp::verify() {
   int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
-  Type element = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), 16));
+  Type element =
+      fp ? Type(fp.getFormat()) : Type(cast<ondrix::ondsp::FixedAttr>(getNumeric()).getStorage());
   if (inputExtent == ShapedType::kDynamic || inputExtent < window ||
       resultExtent != inputExtent - window + 1 || inputType.getElementType() != element ||
       resultType.getElementType() != element) {
-    llvm::StringRef name = fp ? "f32" : "i16";
+    std::string name = fp ? std::string("f32") : ("i" + llvm::utostr(*storageWidth));
     return emitOpError() << "executable moving average requires static tensor<Nx" << name
                          << "> input and tensor<(N-K+1)x" << name << "> result with N >= K";
   }
@@ -1643,6 +1658,7 @@ LogicalResult RmsOp::verify() {
 
 LogicalResult GainOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
+  std::optional<unsigned> storageWidth;
   if (fp) {
     if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "gain")))
       return failure();
@@ -1653,15 +1669,20 @@ LogicalResult GainOp::verify() {
     if (!getFpGain())
       return emitOpError("floating-point gain requires the fp_gain constant");
   } else {
-    if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-      return failure();
+    storageWidth = getUniformQStorageWidth(getNumeric());
+    if (!storageWidth)
+      return emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                         "#ondsp.fixed<signed, storage = i32, frac = 31>");
     if (getFpGain())
       return emitOpError("fixed gain must not specify a floating-point constant");
     if (!getRounding() || (*getRounding() != ondrix::ondsp::RoundingMode::NearestEven &&
                            *getRounding() != ondrix::ondsp::RoundingMode::NearestTiesPositive))
       return emitOpError("gain requires nearest_even or nearest_ties_positive rounding");
-    if (!getGain() || getGainAttr().getInt() < -32768 || getGainAttr().getInt() > 32767)
-      return emitOpError("gain constant must be a raw signed Q1.15 value in [-32768, 32767]");
+    int64_t top = (int64_t(1) << (*storageWidth - 1)) - 1;
+    int64_t bottom = -(int64_t(1) << (*storageWidth - 1));
+    if (!getGain() || getGainAttr().getInt() < bottom || getGainAttr().getInt() > top)
+      return emitOpError() << "gain constant must be a raw signed Q1." << (*storageWidth - 1)
+                           << " value in [" << bottom << ", " << top << "]";
   }
   RankedTensorType inputType = getInput().getType();
   RankedTensorType resultType = getResult().getType();
@@ -1670,11 +1691,12 @@ LogicalResult GainOp::verify() {
   int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
-  Type element = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), 16));
+  Type element =
+      fp ? Type(fp.getFormat()) : Type(cast<ondrix::ondsp::FixedAttr>(getNumeric()).getStorage());
   if (inputExtent == ShapedType::kDynamic || inputExtent < 1 || inputExtent > 4096 ||
       resultExtent != inputExtent || inputType.getElementType() != element ||
       resultType.getElementType() != element) {
-    llvm::StringRef name = fp ? "f32" : "i16";
+    std::string name = fp ? std::string("f32") : ("i" + llvm::utostr(*storageWidth));
     return emitOpError() << "executable gain requires matching static tensor<Nx" << name
                          << "> input and result with N in [1, 4096]";
   }

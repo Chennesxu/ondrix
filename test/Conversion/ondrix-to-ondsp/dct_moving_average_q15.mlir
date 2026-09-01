@@ -79,3 +79,25 @@ func.func @dct8_floor_q15(%input: tensor<8xi16>) -> tensor<8xi16> {
   } : (tensor<8xi16>) -> tensor<8xi16>
   return %result : tensor<8xi16>
 }
+
+// The Q31 profile changes only the storage: the window sum is still exact in
+// i64 and the shift is still log2(K), so both mean spellings carry through.
+// CHECK-LABEL: func.func @moving_average_q31_pow2
+// CHECK: ondsp.round_shift {{.*}}post_shift_right = 2, {{.*}}saturate_to = i32
+func.func @moving_average_q31_pow2(%input: tensor<16xi32>) -> tensor<13xi32> {
+  %result = ondrix.moving_average %input {
+    window = 4 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+  } : (tensor<16xi32>) -> tensor<13xi32>
+  return %result : tensor<13xi32>
+}
+
+// CHECK-LABEL: func.func @moving_average_q31_odd
+// CHECK: ondsp.round_div {{.*}}divisor = 3{{.*}} : (i64) -> i32
+func.func @moving_average_q31_odd(%input: tensor<16xi32>) -> tensor<14xi32> {
+  %result = ondrix.moving_average %input {
+    window = 3 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+  } : (tensor<16xi32>) -> tensor<14xi32>
+  return %result : tensor<14xi32>
+}

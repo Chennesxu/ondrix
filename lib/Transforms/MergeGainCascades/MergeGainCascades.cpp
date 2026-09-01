@@ -69,9 +69,12 @@ public:
         // policies never merge.
         if (inner.getNumeric() != outer.getNumeric() || inner.getRounding() != outer.getRounding())
           continue;
-        // The certificate is an exhaustive sweep of the 65536 Q15 inputs and
-        // has no floating-point analogue.
-        if (!isa<ondrix::ondsp::FixedAttr>(outer.getNumeric()))
+        // The certificate is an exhaustive sweep of the 65536 Q15 inputs. It
+        // has no floating-point analogue, and no Q31 one either: the sweep
+        // would be 2^32 inputs per candidate pair, which is not a compile-time
+        // check. Q31 gain therefore works and its cascades simply never merge.
+        auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(outer.getNumeric());
+        if (!fixed || cast<IntegerType>(fixed.getStorage()).getWidth() != 16)
           continue;
         // Both operations agree on the tie rule, so the pair has one common
         // mode to compute and certify the merged constant under.

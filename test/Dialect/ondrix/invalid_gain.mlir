@@ -61,14 +61,30 @@ func.func @gain_oversized(%input: tensor<8192xi16>) -> tensor<8192xi16> {
 
 // -----
 
-func.func @gain_wrong_numeric(%input: tensor<8xi16>) -> tensor<8xi16> {
-  // expected-error @below {{numeric}}
+// Both widths are admitted, so the numeric no longer refuses i32 -- what it
+// still refuses is a numeric that disagrees with the tensor element type.
+func.func @gain_numeric_type_disagreement(%input: tensor<8xi16>) -> tensor<8xi16> {
+  // expected-error @below {{executable gain requires matching static tensor<Nxi32> input and result with N in [1, 4096]}}
   %result = ondrix.gain %input {
     gain = 16384 : i64,
     numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
     rounding = #ondsp.rounding<nearest_even>
   } : (tensor<8xi16>) -> tensor<8xi16>
   return %result : tensor<8xi16>
+}
+
+// -----
+
+// Only the two uniform-Q profiles are admitted: a fraction that is not
+// width - 1 still fails closed at either width.
+func.func @gain_non_uniform_q(%input: tensor<8xi32>) -> tensor<8xi32> {
+  // expected-error @below {{numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or #ondsp.fixed<signed, storage = i32, frac = 31>}}
+  %result = ondrix.gain %input {
+    gain = 16384 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 30>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi32>) -> tensor<8xi32>
+  return %result : tensor<8xi32>
 }
 
 // -----

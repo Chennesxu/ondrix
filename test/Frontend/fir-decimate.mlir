@@ -19,3 +19,13 @@
 // FP: ondrix.fir_decimate
 // FP-SAME: factor = 2
 // FP-SAME: numeric = #ondsp.fp<format = f32, contract = fma>
+
+// RUN: ondrix-compile %S/Inputs/q31_fir_decimate.ox | FileCheck %s --check-prefix=Q31
+
+// Automatic accumulation stays Q15-only: no exact accumulator exists for K
+// products of 62 bits, so a Q31 site declares its carrier and its per-update
+// overflow mode instead of inferring one.
+// Q31-LABEL: func.func @q31_fir_decimate(
+// Q31: ondrix.fir_decimate
+// Q31-SAME: accumulator = !ondsp.acc<storage = i64, frac = 62, signed, update_overflow = saturate>
+// Q31-SAME: numeric = #ondsp.fixed<signed, storage = i32, frac = 31>

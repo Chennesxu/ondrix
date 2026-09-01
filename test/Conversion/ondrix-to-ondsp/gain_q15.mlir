@@ -45,3 +45,16 @@ func.func @gain4_q15_ties_positive(%input: tensor<4xi16>) -> tensor<4xi16> {
   } : (tensor<4xi16>) -> tensor<4xi16>
   return %result : tensor<4xi16>
 }
+
+// The Q31 profile is the same shape at the declared width: the product stays
+// exact in i64 and the single boundary moves from 15 to 31.
+// CHECK-LABEL: func.func @gain_q31
+// CHECK: ondsp.round_shift {{.*}}post_shift_right = 31, {{.*}}saturate_to = i32
+func.func @gain_q31(%input: tensor<8xi32>) -> tensor<8xi32> {
+  %result = ondrix.gain %input {
+    gain = 1288490189 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi32>) -> tensor<8xi32>
+  return %result : tensor<8xi32>
+}
