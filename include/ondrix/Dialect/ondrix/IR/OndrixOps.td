@@ -1115,13 +1115,21 @@ class Ondrix_TrigOp<string mnemonic> : Ondrix_Op<mnemonic, [Pure]> {
 }
 
 def Ondrix_SineOp : Ondrix_TrigOp<"sine"> {
-  let summary = "Fixed-point sine over Q15 turn phases, table plus interpolation";
+  let summary = "Fixed-point sine over uniform-Q turn phases, table plus correction";
   let description = [{
-    `ondrix.sine` maps a static rank-1 tensor of Q15 phases (`N` in
-    `[1, 4096]`) elementwise to Q1.15 sines. A raw phase `p` is read as
-    the unsigned 16-bit value `u = p mod 2^16` covering one full turn
-    (`angle = 2*pi*u/65536`), so two's-complement wraparound IS phase
-    wraparound and phase arithmetic stays exact. Per element:
+    `ondrix.sine` maps a static rank-1 tensor of `Q0.W` phases (`N` in
+    `[1, 4096]`, `W` of 16 or 32) elementwise to `Q1.(W-1)` sines. A raw
+    phase `p` is read as the unsigned `W`-bit value `u = p mod 2^W` covering
+    one full turn (`angle = 2*pi*u/2^W`), so two's-complement wraparound IS
+    phase wraparound and phase arithmetic stays exact.
+
+    The phase width and the value width are the same `W`, and that is a
+    contract rather than a convenience. Sine's derivative is `2*pi`, so a
+    `Q0.16` phase quantizes the angle finely enough for about fourteen bits
+    of value and no finer, no matter how large the table is. A wider value
+    needs a wider angle.
+
+    ### The Q15 profile: table plus linear interpolation
 
     ```text
     i      = u >> 8              256-entry table index
@@ -1137,17 +1145,54 @@ def Ondrix_SineOp : Ondrix_TrigOp<"sine"> {
     contract is gated exhaustively. Inadmissible tables fail closed in
     lowering (the committed 256-entry profile is admissible with a
     0.0044 LSB worst margin).
+
+    ### The Q31 profile: table plus third-order angle addition
+
+    Widening the shape above would not have widened the VALUE: a 256-entry
+    table read by linear interpolation sits about `2^-15.7` from the real
+    sine, so its storage can widen while its accuracy does not. Reaching
+    `Q31` by that route needs a table of about `2^18` entries. The Q31
+    profile is therefore a different construction on the same declared
+    footing — one table, one rounding boundary, one saturating combine:
+
+    ```text
+    c      = u >> 22                   1024-entry table index
+    r      = u & (2^22 - 1)            residual, an exact 2^-32 turn fraction
+    t[k]   = q31(sin(2*pi*k/1024))     tie-guarded compile-time table
+    S      = t[c]
+    C      = t[(c + 256) mod 1024]     cos of a table angle is sin a quarter turn on
+    A      = (round(2*pi * 2^38) * r) >> 38          the residual angle at 2^-32
+    A2     = (A*A) >> 32,   A3 = (A2*A) >> 32
+    D      = ((C*A) >> 1) - ((S*A2) >> 2) - ((C*A3) / 12)
+    y      = sat_i32(S + round_half_even(D / 2^31))
+    ```
+
+    `D` is the angle-addition correction
+    `S*(cos A - 1) + C*sin A` carried at `2^-62`, with
+    `cos A ~ 1 - A^2/2` and `sin A ~ A - A^3/6`. The dropped `A^4/24` term is
+    below `2^-33` because `A < 2*pi/1024`, which is what fixes the table at
+    1024 entries rather than a size chosen for its own sake. One table
+    serves both terms, so the constant is 4 KiB rather than 8. The `2*pi`
+    scaling is the largest whose product with a 22-bit residual stays inside
+    `i64`, and its `1.7e-13` relative error is far under the value's own LSB.
+
+    Distance to the correctly-rounded sine, measured offline over ALL `2^32`
+    phases: exact at 3022581719 of them, one LSB at 1272384953, two LSB at
+    624, and never more. The two-LSB bound is what the execution gate
+    enforces continuously, alongside bit-exactness against an independent
+    restatement of the contract above.
   }];
 }
 
 def Ondrix_CosineOp : Ondrix_TrigOp<"cosine"> {
-  let summary = "Fixed-point cosine over Q15 turn phases, table plus interpolation";
+  let summary = "Fixed-point cosine over uniform-Q turn phases, table plus correction";
   let description = [{
-    `ondrix.cosine` is `ondrix.sine` evaluated at `u + 16384 mod 2^16`
-    (the exact quarter-turn phase advance): identical table, index and
-    interpolation contract, and boundaries — see `ondrix.sine`. The two
-    operations therefore agree bit-exactly under the phase identity
-    `cos(u) = sin(u + quarter turn)`, which the exhaustive gate checks.
+    `ondrix.cosine` is `ondrix.sine` evaluated at `u + 2^(W-2) mod 2^W` (the
+    exact quarter-turn phase advance, `16384` at `Q0.16` and `2^30` at
+    `Q0.32`): identical table, index and correction contract, and
+    boundaries — see `ondrix.sine`. The two operations therefore agree
+    bit-exactly under the phase identity `cos(u) = sin(u + quarter turn)`,
+    which the gate checks at both widths.
   }];
 }
 

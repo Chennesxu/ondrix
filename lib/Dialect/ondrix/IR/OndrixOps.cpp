@@ -1439,12 +1439,17 @@ LogicalResult MovingAverageOp::verify() {
   return success();
 }
 
+// The phase and the value share the declared width, and that is a contract
+// rather than a convenience: sine's derivative is 2*pi, so a Q0.16 phase caps
+// the value near 2^-14 no matter how fine the table is.
 static LogicalResult verifyTrigValueDomain(Operation *op, Attribute numeric,
                                            ondrix::ondsp::RoundingMode rounding,
                                            RankedTensorType inputType,
                                            RankedTensorType resultType) {
-  if (failed(verifySignedFixedFormat(op, numeric, 16, 15, "numeric")))
-    return failure();
+  std::optional<unsigned> storageWidth = getUniformQStorageWidth(numeric);
+  if (!storageWidth)
+    return op->emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                           "#ondsp.fixed<signed, storage = i32, frac = 31>");
   if (rounding != ondrix::ondsp::RoundingMode::NearestEven)
     return op->emitOpError("trigonometric operations require nearest_even rounding");
   if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
@@ -1453,10 +1458,11 @@ static LogicalResult verifyTrigValueDomain(Operation *op, Attribute numeric,
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
   if (inputExtent == ShapedType::kDynamic || inputExtent < 1 || inputExtent > 4096 ||
-      resultExtent != inputExtent || !inputType.getElementType().isSignlessInteger(16) ||
-      !resultType.getElementType().isSignlessInteger(16))
-    return op->emitOpError("executable trigonometric operations require matching static "
-                           "tensor<Nxi16> input and result with N in [1, 4096]");
+      resultExtent != inputExtent || !inputType.getElementType().isSignlessInteger(*storageWidth) ||
+      !resultType.getElementType().isSignlessInteger(*storageWidth))
+    return op->emitOpError() << "executable trigonometric operations require matching static "
+                                "tensor<Nxi"
+                             << *storageWidth << "> input and result with N in [1, 4096]";
   return success();
 }
 

@@ -3093,12 +3093,13 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         ast.result.kind == ReductionKind::Dct || ast.result.kind == ReductionKind::Gain ||
         ast.result.kind == ReductionKind::Goertzel;
     bool isFloat = ast.primaryResult().type == SourceType::F32;
-    // rms and dct carry Q31 profiles; the others still hardcode Q15 widths in
-    // their verifiers.
+    // log2/exp2 are the two that still hardcode Q15 widths in their
+    // verifiers; every other member here carries a Q31 profile.
     bool admitsQ31 =
         ast.result.kind == ReductionKind::Rms || ast.result.kind == ReductionKind::Dct ||
         ast.result.kind == ReductionKind::Gain || ast.result.kind == ReductionKind::MovingAverage ||
-        ast.result.kind == ReductionKind::CicDecimate;
+        ast.result.kind == ReductionKind::CicDecimate || ast.result.kind == ReductionKind::Sine ||
+        ast.result.kind == ReductionKind::Cosine;
     bool isQ31 = ast.primaryResult().type == SourceType::Q31;
     // The Q15 goertzel energy is tensor<1xi64>, a storage width no source
     // type names, so only the f32 profile has a spelling here.

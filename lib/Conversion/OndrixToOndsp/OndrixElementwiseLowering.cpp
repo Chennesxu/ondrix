@@ -652,7 +652,108 @@ public:
   }
 };
 
-template <typename TrigOp, int64_t PhaseOffset>
+// The Q31 trigonometric contract. Widening the Q15 shape would not have
+// worked: a 256-entry table read by linear interpolation sits about 2^-15.7
+// from the real sine, so its storage can widen without its VALUE widening.
+// This is instead the third-order angle-addition form
+// `sin(C + A) = sin(C)cos(A) + cos(C)sin(A)` with `cos A ~ 1 - A^2/2` and
+// `sin A ~ A - A^3/6`, over a 1024-entry table. One table serves both terms,
+// because the cosine of a table angle is the sine a quarter turn on.
+static LogicalResult lowerQ31Trig(Operation *op, Value input, Value result, Attribute numeric,
+                                  int64_t phaseOffset, ConversionPatternRewriter &rewriter) {
+  SmallVector<int32_t> table;
+  table.reserve(1024);
+  constexpr double kTwoPi = 6.28318530717958647692528676655900577;
+  for (int64_t k = 0; k < 1024; ++k) {
+    std::optional<ondrix::GuardedQ31Value> entry =
+        ondrix::quantizeGuardedQ31(std::sin(kTwoPi * static_cast<double>(k) / 1024.0));
+    if (!entry)
+      return rewriter.notifyMatchFailure(op, "Q31 sine table entry is not tie-guard admissible");
+    table.push_back(entry->value);
+  }
+
+  Location loc = op->getLoc();
+  IntegerType i32 = rewriter.getIntegerType(32);
+  IntegerType i64 = rewriter.getIntegerType(64);
+  int64_t extent = cast<RankedTensorType>(input.getType()).getDimSize(0);
+  // The one declared boundary: the correction returns to Q1.31 under the
+  // op's pinned tie rule, and the combine below carries the saturation.
+  auto correctionScale = ondrix::ondsp::ScaleAttr::get(
+      rewriter.getContext(), /*preShiftLeft=*/0, /*postShiftRight=*/31,
+      ondrix::ondsp::RoundingMode::NearestEven, ondrix::ondsp::OverflowMode::Saturate, i32);
+  Value tableConstant = rewriter.create<arith::ConstantOp>(
+      loc,
+      DenseElementsAttr::get(RankedTensorType::get({1024}, i32), llvm::ArrayRef<int32_t>(table)));
+  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+  // 2*pi at 2^38: the largest scaling whose product with a 22-bit residual
+  // stays inside i64, and 1.7e-13 relative, far under the value's own LSB.
+  Value twoPi = rewriter.create<arith::ConstantIntOp>(loc, 1727108826179LL, i64);
+  Value offset = rewriter.create<arith::ConstantIntOp>(loc, phaseOffset, i64);
+  Value turnMask = rewriter.create<arith::ConstantIntOp>(loc, 0xFFFFFFFFLL, i64);
+  Value indexShift = rewriter.create<arith::ConstantIntOp>(loc, 22, i64);
+  Value residualMask = rewriter.create<arith::ConstantIntOp>(loc, 0x3FFFFF, i64);
+  Value quarter = rewriter.create<arith::ConstantIntOp>(loc, 256, i64);
+  Value tableMask = rewriter.create<arith::ConstantIntOp>(loc, 1023, i64);
+  Value angleShift = rewriter.create<arith::ConstantIntOp>(loc, 38, i64);
+  Value squareShift = rewriter.create<arith::ConstantIntOp>(loc, 32, i64);
+  Value oneBit = rewriter.create<arith::ConstantIntOp>(loc, 1, i64);
+  Value twoBits = rewriter.create<arith::ConstantIntOp>(loc, 2, i64);
+  Value twelve = rewriter.create<arith::ConstantIntOp>(loc, 12, i64);
+
+  auto loop = rewriter.create<scf::ForOp>(
+      loc, zero, extentValue, one, ValueRange{result},
+      [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+        Value phase = builder.create<tensor::ExtractOp>(loc, input, position);
+        // Zero extension reads the raw bits as the unsigned turn phase; the
+        // offset add plus mask is the exact modular phase advance.
+        Value raw = builder.create<arith::ExtUIOp>(loc, i64, phase);
+        Value advanced = builder.create<arith::AddIOp>(loc, raw, offset);
+        Value turn = builder.create<arith::AndIOp>(loc, advanced, turnMask);
+        Value coarse = builder.create<arith::ShRUIOp>(loc, turn, indexShift);
+        Value residual = builder.create<arith::AndIOp>(loc, turn, residualMask);
+        Value cosineRaw = builder.create<arith::AddIOp>(loc, coarse, quarter);
+        Value cosineIndex = builder.create<arith::AndIOp>(loc, cosineRaw, tableMask);
+        Value sineIdx = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), coarse);
+        Value cosineIdx =
+            builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), cosineIndex);
+        Value sine = builder.create<arith::ExtSIOp>(
+            loc, i64, builder.create<tensor::ExtractOp>(loc, tableConstant, sineIdx));
+        Value cosine = builder.create<arith::ExtSIOp>(
+            loc, i64, builder.create<tensor::ExtractOp>(loc, tableConstant, cosineIdx));
+        // The residual angle and its two powers, each one scaling down so the
+        // next product stays inside i64.
+        Value scaled = builder.create<arith::MulIOp>(loc, twoPi, residual);
+        Value angle = builder.create<arith::ShRSIOp>(loc, scaled, angleShift);
+        Value square = builder.create<arith::ShRSIOp>(
+            loc, builder.create<arith::MulIOp>(loc, angle, angle), squareShift);
+        Value cube = builder.create<arith::ShRSIOp>(
+            loc, builder.create<arith::MulIOp>(loc, square, angle), squareShift);
+        Value linear = builder.create<arith::ShRSIOp>(
+            loc, builder.create<arith::MulIOp>(loc, cosine, angle), oneBit);
+        Value quadratic = builder.create<arith::ShRSIOp>(
+            loc, builder.create<arith::MulIOp>(loc, sine, square), twoBits);
+        Value cubic = builder.create<arith::DivSIOp>(
+            loc, builder.create<arith::MulIOp>(loc, cosine, cube), twelve);
+        Value correction = builder.create<arith::SubIOp>(
+            loc, builder.create<arith::SubIOp>(loc, linear, quadratic), cubic);
+        Value narrowed =
+            builder.create<ondrix::ondsp::RoundShiftOp>(loc, i32, correction, correctionScale);
+        Value combined = builder.create<arith::AddIOp>(
+            loc, sine, builder.create<arith::ExtSIOp>(loc, i64, narrowed));
+        Value saturated = builder.create<ondrix::ondsp::SatCastOp>(loc, i32, combined, numeric);
+        Value inserted =
+            builder.create<tensor::InsertOp>(loc, saturated, iterArgs.front(), position);
+        builder.create<scf::YieldOp>(loc, inserted);
+      });
+  rewriter.replaceOp(op, loop.getResult(0));
+  return success();
+}
+
+// The phase offset is a quarter TURN, so it follows the phase width rather
+// than being one constant: 2^14 at Q0.16 and 2^30 at Q0.32.
+template <typename TrigOp, int64_t QuarterTurns>
 class TrigOpLowering final : public OpConversionPattern<TrigOp> {
 public:
   using OpConversionPattern<TrigOp>::OpConversionPattern;
@@ -660,14 +761,18 @@ public:
   LogicalResult matchAndRewrite(TrigOp op, typename TrigOp::Adaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     RankedTensorType resultType = op.getResult().getType();
+    unsigned storageWidth = resultType.getElementTypeBitWidth();
     Value empty = rewriter.create<tensor::EmptyOp>(op.getLoc(), resultType.getShape(),
                                                    resultType.getElementType());
-    return lowerQ15Trig(op, adaptor.getInput(), empty, op.getNumeric(), PhaseOffset, rewriter);
+    int64_t offset = QuarterTurns * (int64_t(1) << (storageWidth - 2));
+    if (storageWidth == 32)
+      return lowerQ31Trig(op, adaptor.getInput(), empty, op.getNumeric(), offset, rewriter);
+    return lowerQ15Trig(op, adaptor.getInput(), empty, op.getNumeric(), offset, rewriter);
   }
 };
 
 using SineOpLowering = TrigOpLowering<ondrix::ir::SineOp, 0>;
-using CosineOpLowering = TrigOpLowering<ondrix::ir::CosineOp, 16384>;
+using CosineOpLowering = TrigOpLowering<ondrix::ir::CosineOp, 1>;
 
 } // namespace
 

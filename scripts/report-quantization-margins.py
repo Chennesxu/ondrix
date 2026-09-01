@@ -286,6 +286,13 @@ def main():
     for k in range(256):
         sine_table.add(sin(2 * pi * k / 256))
     profiles.append(sine_table)
+    # The Q31 trigonometric profile is a different construction, not this one
+    # widened: 1024 coarse angles read by third-order angle addition rather
+    # than 256 read by linear interpolation.
+    sine_table_q31 = Profile("sine_table1024_q31", fractional_bits=31, guard=Q31_GUARD_LSB)
+    for k in range(1024):
+        sine_table_q31.add(sin(2 * pi * k / 1024))
+    profiles.append(sine_table_q31)
 
     print(f"tie guard: {float(GUARD_LSB):.6e} Q15 LSB (2^-20)")
     if all([profile.report() for profile in profiles]):
