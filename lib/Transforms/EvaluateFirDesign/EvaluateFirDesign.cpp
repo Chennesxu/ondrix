@@ -28,25 +28,40 @@ constexpr double kPi = 3.14159265358979323846264338327950288;
 constexpr double kTwoPi = 6.28318530717958647692528676655900577;
 
 struct QuantizedTable {
-  llvm::SmallVector<int16_t> values;
+  llvm::SmallVector<int64_t> values;
   int64_t saturated = 0;
 };
 
 // Guard argument in GuardedFixedQuantization.h. Under the declared evaluation
 // error budget an emitted table equals the quantization of the real-valued
 // definition and inherits its exact symmetry.
-FailureOr<QuantizedTable> quantizeSignedQ15(Operation *op, llvm::ArrayRef<double> reals) {
+FailureOr<QuantizedTable> quantizeSignedFixed(Operation *op, llvm::ArrayRef<double> reals,
+                                              unsigned storageWidth) {
   QuantizedTable table;
   table.values.reserve(reals.size());
   for (size_t index = 0; index < reals.size(); ++index) {
-    std::optional<ondrix::GuardedQ15Value> quantized = ondrix::quantizeGuardedQ15(reals[index]);
-    if (!quantized)
-      return op->emitOpError() << "coefficient " << index
-                               << " lies inside the 2^-20 quantization tie guard; "
-                                  "the design profile fails closed";
-    if (quantized->saturated)
+    bool saturated = false;
+    int64_t value = 0;
+    if (storageWidth == 32) {
+      std::optional<ondrix::GuardedQ31Value> quantized = ondrix::quantizeGuardedQ31(reals[index]);
+      if (!quantized)
+        return op->emitOpError() << "coefficient " << index
+                                 << " lies inside the quantization tie guard for this width; "
+                                    "the design profile fails closed";
+      saturated = quantized->saturated;
+      value = quantized->value;
+    } else {
+      std::optional<ondrix::GuardedQ15Value> quantized = ondrix::quantizeGuardedQ15(reals[index]);
+      if (!quantized)
+        return op->emitOpError() << "coefficient " << index
+                                 << " lies inside the 2^-20 quantization tie guard; "
+                                    "the design profile fails closed";
+      saturated = quantized->saturated;
+      value = quantized->value;
+    }
+    if (saturated)
       ++table.saturated;
-    table.values.push_back(quantized->value);
+    table.values.push_back(value);
   }
   for (size_t index = 0, extent = table.values.size(); index < extent; ++index)
     if (table.values[index] != table.values[extent - 1 - index])
@@ -94,27 +109,45 @@ double kaiserReal(int64_t n, int64_t extent, int64_t betaNum, int64_t betaDen) {
   return besselI0Real(beta * std::sqrt(1.0 - ratio * ratio)) / besselI0Real(beta);
 }
 
-double sincReal(double x) {
-  if (x == 0.0)
+// sinc(p/q) with the SINE argument reduced exactly and the denominator left
+// whole. sin(pi*x) has period 2 in x, so p modulo 2q is exact; without it the
+// argument reaches pi*2047 and its 2^-52 relative error becomes about 3e-03
+// Q31 LSB, past any guard the coefficients could survive. The denominator is
+// the value itself and must not be reduced.
+double sincRational(int64_t p, int64_t q) {
+  if (p == 0)
     return 1.0;
-  double scaled = kPi * x;
-  return std::sin(scaled) / scaled;
+  int64_t period = 2 * q;
+  int64_t reduced = p % period;
+  if (reduced < 0)
+    reduced += period;
+  double numerator = std::sin(kPi * static_cast<double>(reduced) / static_cast<double>(q));
+  double denominator = kPi * static_cast<double>(p) / static_cast<double>(q);
+  return numerator / denominator;
 }
 
 double lowpassReal(int64_t n, int64_t extent, int64_t cutoffNum, int64_t cutoffDen) {
   int64_t center = (extent - 1) / 2;
   double doubledCutoff = (2.0 * static_cast<double>(cutoffNum)) / static_cast<double>(cutoffDen);
-  return doubledCutoff * sincReal(doubledCutoff * static_cast<double>(n - center)) *
+  return doubledCutoff * sincRational(2 * cutoffNum * (n - center), cutoffDen) *
          hammingReal(n, extent);
 }
 
 LogicalResult replaceWithConstant(Operation *op, RankedTensorType type,
                                   llvm::ArrayRef<double> reals, NamedAttrList provenance) {
-  FailureOr<QuantizedTable> table = quantizeSignedQ15(op, reals);
+  unsigned storageWidth = cast<IntegerType>(type.getElementType()).getWidth();
+  FailureOr<QuantizedTable> table = quantizeSignedFixed(op, reals, storageWidth);
   if (failed(table))
     return failure();
   OpBuilder builder(op);
-  auto elements = DenseElementsAttr::get(type, llvm::ArrayRef<int16_t>(table->values));
+  DenseElementsAttr elements;
+  if (storageWidth == 32) {
+    llvm::SmallVector<int32_t> narrowed(table->values.begin(), table->values.end());
+    elements = DenseElementsAttr::get(type, llvm::ArrayRef<int32_t>(narrowed));
+  } else {
+    llvm::SmallVector<int16_t> narrowed(table->values.begin(), table->values.end());
+    elements = DenseElementsAttr::get(type, llvm::ArrayRef<int16_t>(narrowed));
+  }
   auto constant = builder.create<arith::ConstantOp>(op->getLoc(), elements);
   provenance.append("saturated", builder.getI64IntegerAttr(table->saturated));
   constant->setAttr("ondrix.design_provenance", provenance.getDictionary(builder.getContext()));

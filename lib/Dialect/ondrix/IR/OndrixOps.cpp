@@ -315,11 +315,14 @@ static LogicalResult verifyRfftSplitValueDomain(RfftSplitOp op) {
 }
 
 static LogicalResult verifyDesignCoefficientTensor(Operation *op, RankedTensorType type,
-                                                   int64_t minExtent, int64_t maxExtent) {
+                                                   int64_t minExtent, int64_t maxExtent,
+                                                   unsigned storageWidth = 16) {
   if (failed(verifyUnencodedTensorTypes(op, {type})))
     return failure();
-  if (type.getRank() != 1 || !type.hasStaticShape() || !type.getElementType().isSignlessInteger(16))
-    return op->emitOpError("requires a static rank-1 i16 coefficient tensor");
+  if (type.getRank() != 1 || !type.hasStaticShape() ||
+      !type.getElementType().isSignlessInteger(storageWidth))
+    return op->emitOpError() << "requires a static rank-1 i" << storageWidth
+                             << " coefficient tensor";
   int64_t extent = type.getDimSize(0);
   if (extent < minExtent || extent > maxExtent)
     return op->emitOpError() << "coefficient extent must be in [" << minExtent << ", " << maxExtent
@@ -1841,14 +1844,23 @@ LogicalResult CxMagnitudeOp::verify() {
 }
 
 LogicalResult CxPhaseOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-    return failure();
+  std::optional<unsigned> componentWidth = getUniformQStorageWidth(getNumeric());
+  if (!componentWidth)
+    return emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                       "#ondsp.fixed<signed, storage = i32, frac = 31>");
+  // The turn reading does NOT follow the component width. It is the unsigned
+  // Q0.16 turn `ondrix.sine` consumes, so widening it would produce an angle
+  // with no consumer; the wider components buy a more accurate ratio, not a
+  // finer output format.
   ondrix::ondsp::FixedAttr output = getOutputNumeric();
   if (output.getSignedness() != ondrix::ondsp::Signedness::Unsigned ||
       !output.getStorage().isSignlessInteger(16) || output.getFrac() != 16)
     return emitOpError("cx_phase returns the unsigned Q0.16 turn and must declare that reading");
-  if (getLayout().getLayout() != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
-    return emitOpError("executable phase requires packed_i16_imag_hi_real_lo layout");
+  std::optional<ondrix::ondsp::PackedComplexProfile> profile =
+      ondrix::ondsp::getPackedComplexProfile(getLayout().getLayout());
+  if (!profile || profile->storageWidth != *componentWidth)
+    return emitOpError("executable phase requires the packed layout matching its component width: "
+                       "packed_i16_imag_hi_real_lo at Q15 or packed_i32_imag_hi_real_lo at Q31");
   if (getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
     return emitOpError("cx_phase requires nearest_even rounding");
   RankedTensorType inputType = getInput().getType();
@@ -1859,10 +1871,11 @@ LogicalResult CxPhaseOp::verify() {
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
   if (inputExtent == ShapedType::kDynamic || inputExtent < 1 || inputExtent > 4096 ||
-      resultExtent != inputExtent || !inputType.getElementType().isSignlessInteger(32) ||
+      resultExtent != inputExtent ||
+      !inputType.getElementType().isSignlessInteger(profile->containerWidth) ||
       !resultType.getElementType().isSignlessInteger(16))
-    return emitOpError("executable phase requires tensor<Nxi32> to tensor<Nxi16> "
-                       "with static N in [1, 4096]");
+    return emitOpError() << "executable phase requires tensor<Nxi" << profile->containerWidth
+                         << "> to tensor<Nxi16> with static N in [1, 4096]";
   return success();
 }
 
@@ -1909,9 +1922,12 @@ LogicalResult WindowKaiserOp::verify() {
 }
 
 LogicalResult FirDesignWindowedSincOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-    return failure();
-  if (failed(verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 3, 4095)))
+  std::optional<unsigned> storageWidth = getUniformQStorageWidth(getNumeric());
+  if (!storageWidth)
+    return emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                       "#ondsp.fixed<signed, storage = i32, frac = 31>");
+  if (failed(verifyDesignCoefficientTensor(getOperation(), getCoefficients().getType(), 3, 4095,
+                                           *storageWidth)))
     return failure();
   if (getCoefficients().getType().getDimSize(0) % 2 == 0)
     return emitOpError("windowed-sinc design requires an odd coefficient extent");

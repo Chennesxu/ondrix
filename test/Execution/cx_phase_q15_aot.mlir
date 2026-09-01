@@ -19,3 +19,16 @@ func.func @cx_phase_q15(%input: tensor<4096xi32>) -> tensor<4096xi16>
   } : (tensor<4096xi32>) -> tensor<4096xi16>
   return %result : tensor<4096xi16>
 }
+
+// The Q31 arm shares the turn reading, so the named angles are the same
+// numbers; only the component width and the packed container change.
+func.func @cx_phase_q31(%input: tensor<10xi64>) -> tensor<10xi16>
+    attributes {llvm.emit_c_interface} {
+  %result = ondrix.cx_phase %input {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    output_numeric = #ondsp.fixed<unsigned, storage = i16, frac = 16>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<10xi64>) -> tensor<10xi16>
+  return %result : tensor<10xi16>
+}

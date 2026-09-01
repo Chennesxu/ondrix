@@ -331,6 +331,15 @@ public:
     IntegerType i16 = rewriter.getI16Type();
     IntegerType i32 = rewriter.getIntegerType(32);
     IntegerType i64 = rewriter.getIntegerType(64);
+    // Only the component arithmetic follows the declared width. The ratio, the
+    // table, the interpolation and the octant fold all live on the Q0.16 turn,
+    // which is the reading `ondrix.sine` consumes at either width.
+    ondrix::ondsp::PackedComplexProfile profile =
+        *ondrix::ondsp::getPackedComplexProfile(op.getLayout().getLayout());
+    unsigned componentWidth = profile.storageWidth;
+    IntegerType component = rewriter.getIntegerType(componentWidth);
+    IntegerType container = rewriter.getIntegerType(profile.containerWidth);
+    IntegerType work = rewriter.getIntegerType(profile.containerWidth);
     RankedTensorType resultType = op.getResult().getType();
     int64_t extent = resultType.getDimSize(0);
     auto interpolation =
@@ -353,17 +362,25 @@ public:
           };
           Value packed = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
           Value real = builder.create<arith::ExtSIOp>(
-              loc, i32, builder.create<arith::TruncIOp>(loc, i16, packed));
+              loc, work, builder.create<arith::TruncIOp>(loc, component, packed));
           Value imaginary = builder.create<arith::ExtSIOp>(
-              loc, i32,
+              loc, work,
               builder.create<arith::TruncIOp>(
-                  loc, i16, builder.create<arith::ShRSIOp>(loc, packed, constant(16, i32))));
+                  loc, component,
+                  builder.create<arith::ShRSIOp>(loc, packed,
+                                                 constant(componentWidth, container))));
+          // Two zero constants, and the split is load bearing: the component
+          // arithmetic runs one bit wider than the component (negating the
+          // component minimum is part of taking the absolute value) while the
+          // turn arithmetic below stays on the Q0.16 reading at either width.
+          Value zeroWork = constant(0, work);
+          Value oneWork = constant(1, work);
           Value zero32 = constant(0, i32);
           Value one32 = constant(1, i32);
           Value absReal = builder.create<arith::MaxSIOp>(
-              loc, real, builder.create<arith::SubIOp>(loc, zero32, real));
+              loc, real, builder.create<arith::SubIOp>(loc, zeroWork, real));
           Value absImaginary = builder.create<arith::MaxSIOp>(
-              loc, imaginary, builder.create<arith::SubIOp>(loc, zero32, imaginary));
+              loc, imaginary, builder.create<arith::SubIOp>(loc, zeroWork, imaginary));
           Value swapped =
               builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, absImaginary, absReal);
           Value high = builder.create<arith::MaxSIOp>(loc, absReal, absImaginary);
@@ -371,16 +388,17 @@ public:
           // The origin has no argument; the divisor is forced to one so the
           // division is defined, and the declared value replaces the result.
           Value atOrigin =
-              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, high, zero32);
-          Value divisor = builder.create<arith::SelectOp>(loc, atOrigin, one32, high);
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, high, zeroWork);
+          Value divisor = builder.create<arith::SelectOp>(loc, atOrigin, oneWork, high);
 
           // The ratio, rounded once. Both operands are non-negative, so the
           // truncating division is the floor and the remainder is the
           // Euclidean one; the tie test compares 2*remainder against the
           // divisor rather than forming a half that may not be an integer.
-          Value numerator = builder.create<arith::ShLIOp>(
-              loc, builder.create<arith::ExtSIOp>(loc, i64, low), constant(16, i64));
-          Value wideDivisor = builder.create<arith::ExtSIOp>(loc, i64, divisor);
+          Value wideLow = work == i64 ? low : builder.create<arith::ExtSIOp>(loc, i64, low);
+          Value numerator = builder.create<arith::ShLIOp>(loc, wideLow, constant(16, i64));
+          Value wideDivisor =
+              work == i64 ? divisor : builder.create<arith::ExtSIOp>(loc, i64, divisor).getResult();
           Value quotient = builder.create<arith::DivSIOp>(loc, numerator, wideDivisor);
           Value remainder = builder.create<arith::SubIOp>(
               loc, numerator, builder.create<arith::MulIOp>(loc, quotient, wideDivisor));
@@ -422,9 +440,9 @@ public:
           Value folded = builder.create<arith::SelectOp>(
               loc, swapped, builder.create<arith::SubIOp>(loc, constant(16384, i32), base), base);
           Value nonNegativeReal =
-              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, real, zero32);
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, real, zeroWork);
           Value nonNegativeImaginary =
-              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, imaginary, zero32);
+              builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, imaginary, zeroWork);
           Value half = constant(32768, i32);
           Value right =
               builder.create<arith::SelectOp>(loc, nonNegativeImaginary, folded,

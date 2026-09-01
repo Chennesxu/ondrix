@@ -19,7 +19,16 @@ typedef struct {
   int64_t strides[1];
 } MemRefI16;
 
+typedef struct {
+  int64_t *allocated;
+  int64_t *aligned;
+  int64_t offset;
+  int64_t sizes[1];
+  int64_t strides[1];
+} MemRefI64;
+
 extern void _mlir_ciface_cx_phase_q15(MemRefI16 *, MemRefI32 *);
+extern void _mlir_ciface_cx_phase_q31(MemRefI16 *, MemRefI64 *);
 
 enum { kBlock = 4096 };
 
@@ -47,12 +56,14 @@ static int32_t roundHalfEven(int32_t value, int shift) {
 static uint16_t referencePhase(int32_t real, int32_t imaginary) {
   if (real == 0 && imaginary == 0)
     return 0;
-  int32_t a = real < 0 ? -real : real;
-  int32_t b = imaginary < 0 ? -imaginary : imaginary;
+  /* One bit wider than the component: negating the component minimum is part
+   * of the absolute value, and at Q31 that leaves int32_t. */
+  int64_t a = real < 0 ? -(int64_t)real : (int64_t)real;
+  int64_t b = imaginary < 0 ? -(int64_t)imaginary : (int64_t)imaginary;
   int swapped = b > a;
-  int32_t high = a > b ? a : b;
-  int32_t low = a > b ? b : a;
-  int64_t numerator = (int64_t)low << 16;
+  int64_t high = a > b ? a : b;
+  int64_t low = a > b ? b : a;
+  int64_t numerator = low << 16;
   int64_t quotient = numerator / high;
   int64_t remainder = numerator - quotient * high;
   if (2 * remainder > high || (2 * remainder == high && (quotient & 1)))
@@ -223,6 +234,48 @@ int main(void) {
     if (error > worst)
       worst = error;
   }
+  /* The Q31 arm. The turn reading does not widen with the components, so the
+   * SAME reference and the same named angles apply: what the wider input buys
+   * is a finer ratio, not a finer output format. The axes and diagonals are
+   * the discriminating part -- they are exact index arithmetic on the turn, so
+   * a width change that broke the octant fold would move them. */
+  {
+    struct {
+      int32_t real;
+      int32_t imaginary;
+      uint16_t turn;
+      const char *name;
+    } wide[] = {
+        {2147483647, 0, 0, "q31 east rail"},
+        {0, 2147483647, 16384, "q31 north rail"},
+        {-2147483647, 0, 32768, "q31 west rail"},
+        {0, -2147483647, 49152, "q31 south rail"},
+        {2147483647, 2147483647, 8192, "q31 northeast"},
+        {-2147483647, 2147483647, 24576, "q31 northwest"},
+        {-2147483647, -2147483647, 40960, "q31 southwest"},
+        {2147483647, -2147483647, 57344, "q31 southeast"},
+        {0, 0, 0, "q31 origin"},
+        {1, 0, 0, "q31 east unit"},
+    };
+    int64_t count = (int64_t)(sizeof wide / sizeof wide[0]);
+    int64_t packedWide[10];
+    for (int64_t i = 0; i < count; ++i)
+      packedWide[i] = (int64_t)((((uint64_t)(uint32_t)wide[i].imaginary) << 32) |
+                                (uint64_t)(uint32_t)wide[i].real);
+    MemRefI64 inputRef = {packedWide, packedWide, 0, {count}, {1}};
+    MemRefI16 output;
+    _mlir_ciface_cx_phase_q31(&output, &inputRef);
+    for (int64_t i = 0; i < count; ++i) {
+      uint16_t got = (uint16_t)output.aligned[output.offset + i];
+      uint16_t want = referencePhase(wide[i].real, wide[i].imaginary);
+      if (got != want || got != wide[i].turn) {
+        printf("%s: got %u, reference %u, contract %u\n", wide[i].name, got, want, wide[i].turn);
+        ++failures;
+      }
+    }
+    free(output.allocated);
+  }
+
   printf("cx_phase: worst deviation from the exact argument %.3f raw turn units\n", worst);
   if (worst > 4.0) {
     fprintf(stderr, "cx_phase table accuracy regressed past four turn units\n");

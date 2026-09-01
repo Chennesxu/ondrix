@@ -162,3 +162,24 @@ func.func @window_kaiser_huge_denominator() -> tensor<4xi16> {
   } : tensor<4xi16>
   return %window : tensor<4xi16>
 }
+
+// The Q31 profile evaluates the same real-valued design at the wider
+// quantization. The table below was verified coefficient by coefficient
+// against 50-digit mpmath, and it is what the exact sine-argument reduction
+// buys: unreduced, sin(pi*x) reaches an argument of pi*2047 at the maximum
+// extent and its binary64 error becomes about 3e-03 Q31 LSB, past any guard
+// these coefficients could survive.
+func.func @lowpass_quarter_q31() -> tensor<9xi32> {
+  // CHECK-LABEL: func.func @lowpass_quarter_q31
+  // CHECK-NOT: ondrix.fir_design_windowed_sinc
+  // CHECK: arith.constant
+  // CHECK-SAME: kind = "fir_design_windowed_sinc"
+  // CHECK-SAME: saturated = 0
+  // CHECK-SAME: dense<[0, -48927525, 0, 591467924, 1073741824, 591467924, 0, -48927525, 0]> : tensor<9xi32>
+  %coefficients = ondrix.fir_design_windowed_sinc {
+    response = #ondrix.fir_design_response<lowpass>,
+    cutoff_num = 1 : i64, cutoff_den = 4 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+  } : tensor<9xi32>
+  return %coefficients : tensor<9xi32>
+}

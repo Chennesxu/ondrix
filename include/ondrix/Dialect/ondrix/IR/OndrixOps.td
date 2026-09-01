@@ -1689,6 +1689,17 @@ def Ondrix_CxPhaseOp : Ondrix_Op<"cx_phase", [Pure]> {
     exact under two's-complement wraparound. The result reading is the
     unsigned `Q0.16` turn and is declared in its own attribute.
 
+    That reading does NOT follow the component width, and the asymmetry is
+    the point: the turn is the format `ondrix.sine` consumes, so a `Q0.32`
+    turn would be an angle with no consumer in this catalog. What the wider
+    components buy is a more accurate ratio `r`, hence a more accurate turn
+    in the same format -- not a finer format. Only the absolute values and
+    the ratio numerator follow the width, and they run one bit wider than
+    the component, because negating the component minimum is part of taking
+    an absolute value. The 129-entry arctangent table is a 16-bit
+    quantization either way, so its tie-guard argument carries over
+    unchanged.
+
     ```text
     (re, im) == (0, 0)  ->  0                the declared value at the origin
     a, b   = |re|, |im|                      exact in i32
@@ -1848,18 +1859,27 @@ def Ondrix_FirDesignWindowedSincOp
     ```
 
     Each composite real coefficient is quantized exactly once to signed
-    Q1.15 with round-half-even and declared saturation; there is no
-    quantize-then-combine step. The operation is a compile-time design
+    Q1.(W-1), for W of 16 or 32, with round-half-even and declared
+    saturation; there is no quantize-then-combine step. The sine argument is
+    reduced exactly first -- `2*cutoff_num*(n-M)` modulo `2*cutoff_den`,
+    exact because `sin(pi*x)` has period 2 in `x`, and applied to the
+    NUMERATOR only because the denominator `pi*x` is the value itself.
+    Without it the argument reaches `pi*2047` at the maximum extent and its
+    binary64 error becomes about `3e-03` Q31 LSB, past any guard these
+    coefficients could survive. The operation is a compile-time design
     intent evaluated by the opt-in `evaluate-ondrix-fir-design` pass, which
-    fails closed when any coefficient is closer than `2^-20` Q15 LSB to a
-    rounding tie. Under that guard the emitted integer table equals the
+    fails closed when any coefficient is closer to a rounding tie than the
+    guard for its width. At Q31 that refusal is reachable rather than
+    theoretical: measured tie margins for representative designs run from
+    `2.4e-04` to `1.4e-02` LSB against a `2^-13` guard, so the closest of
+    them clears it by under a factor of two and a longer design can fall
+    inside. Under that guard the emitted integer table equals the
     real-valued definition and is exactly symmetric, so it feeds the
     existing constant-coefficient analysis, symmetric-pairing proofs, and
     proof-gated Vector paths unchanged.
 
-    The result is a static rank-1 `tensor<Nxi16>` with odd
-    `3 <= N <= 4095` and
-    `numeric = #ondsp.fixed<signed, storage = i16, frac = 15>`.
+    The result is a static rank-1 `tensor<NxiW>` with odd `3 <= N <= 4095`
+    and a matching uniform-Q `numeric`.
   }];
   let arguments = (ins Ondrix_FirDesignResponseAttr:$response,
                    I64Attr:$cutoff_num, I64Attr:$cutoff_den,
