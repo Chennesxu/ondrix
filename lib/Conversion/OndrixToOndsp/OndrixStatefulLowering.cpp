@@ -260,7 +260,8 @@ public:
     int64_t delay = op.getDelay();
     int64_t growth = op.getGrowthBits();
     int64_t outputs = op.getResult().getType().getDimSize(0);
-    auto carrier = IntegerType::get(context, 16 + growth);
+    auto storage = cast<IntegerType>(cast<ondrix::ondsp::FixedAttr>(op.getNumeric()).getStorage());
+    auto carrier = IntegerType::get(context, storage.getWidth() + growth);
 
     // Every state combine is the declared-overflow boundary at the carrier
     // width; only the export rounds. The rounding field of the state scale
@@ -270,7 +271,7 @@ public:
         ondrix::ondsp::RoundingMode::TowardNegative, op.getOverflow(), carrier);
     auto exportScale = ondrix::ondsp::ScaleAttr::get(
         context, /*preShiftLeft=*/0, /*postShiftRight=*/unsigned(growth), op.getRounding(),
-        ondrix::ondsp::OverflowMode::Saturate, rewriter.getI16Type());
+        ondrix::ondsp::OverflowMode::Saturate, storage);
 
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
@@ -369,51 +370,81 @@ public:
     // The fixed recursion coefficient is one tie-guarded compile-time cosine
     // (the same guarded quantizer as every generated table); inadmissible
     // bins fail closed.
-    std::optional<ondrix::GuardedQ15Value> coefficient = ondrix::quantizeGuardedQ15(cosine);
-    if (!coefficient)
-      return rewriter.notifyMatchFailure(op, "bin coefficient is not tie-guard admissible");
-    IntegerType i16 = rewriter.getI16Type();
+    auto fixed = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    auto storage = cast<IntegerType>(fixed.getStorage());
+    unsigned width = storage.getWidth();
+    int64_t rawCoefficient;
+    if (width == 32) {
+      std::optional<ondrix::GuardedQ31Value> q31 = ondrix::quantizeGuardedQ31(cosine);
+      if (!q31)
+        return rewriter.notifyMatchFailure(op, "bin coefficient is not tie-guard admissible");
+      rawCoefficient = q31->value;
+    } else {
+      std::optional<ondrix::GuardedQ15Value> q15 = ondrix::quantizeGuardedQ15(cosine);
+      if (!q15)
+        return rewriter.notifyMatchFailure(op, "bin coefficient is not tie-guard admissible");
+      rawCoefficient = q15->value;
+    }
     IntegerType i32 = rewriter.getIntegerType(32);
     IntegerType i64 = rewriter.getIntegerType(64);
+    // The per-step combine holds x + m - s2 without its own boundary, so it
+    // needs one bit more than the storage: i32 carries three Q15 terms, i64
+    // three Q31 ones.
+    IntegerType combineType = width == 32 ? i64 : i32;
     Attribute numeric = op.getNumeric();
-    ondrix::ondsp::ScaleAttr scale = getNearestEvenSaturatingShift(rewriter.getContext(), 15);
-    Value doubledCoefficient =
-        rewriter.create<arith::ConstantIntOp>(loc, 2 * int64_t(coefficient->value), 64);
+    // 2*c*s1 / 2^(W-1) and c*s1 / 2^(W-2) are the same rational, but only the
+    // second one fits: at Q31 the doubled product reaches 2^63. Q15 keeps the
+    // doubled spelling so its emitted code is unchanged.
+    bool foldDoubling = width == 32;
+    ondrix::ondsp::ScaleAttr scale = getNearestEvenSaturatingShift(
+        rewriter.getContext(), foldDoubling ? width - 2 : width - 1, width);
+    Value stepCoefficient = rewriter.create<arith::ConstantIntOp>(
+        loc, foldDoubling ? rawCoefficient : 2 * rawCoefficient, 64);
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
-    Value zero16 = rewriter.create<arith::ConstantIntOp>(loc, 0, 16);
+    Value zeroState = rewriter.create<arith::ConstantIntOp>(loc, 0, width);
 
-    // m = sat_i16(rhe(2*c*s1 / 2^15)) — the per-step product boundary.
+    // m = sat_iW(rhe(2*c*s1 / 2^(W-1))) — the per-step product boundary.
     auto stepProduct = [&](OpBuilder &builder, Location loc, Value s1) -> Value {
       Value wide = builder.create<arith::ExtSIOp>(loc, i64, s1);
-      Value product = builder.create<arith::MulIOp>(loc, doubledCoefficient, wide);
-      return builder.create<ondrix::ondsp::RoundShiftOp>(loc, i16, product, scale);
+      Value product = builder.create<arith::MulIOp>(loc, stepCoefficient, wide);
+      return builder.create<ondrix::ondsp::RoundShiftOp>(loc, storage, product, scale);
     };
 
     auto sampleLoop = rewriter.create<scf::ForOp>(
-        loc, zero, extentValue, one, ValueRange{zero16, zero16},
+        loc, zero, extentValue, one, ValueRange{zeroState, zeroState},
         [&](OpBuilder &builder, Location loc, Value sample, ValueRange states) {
           Value s1 = states[0];
           Value s2 = states[1];
           Value m = stepProduct(builder, loc, s1);
           Value x = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), sample);
-          Value xWide = builder.create<arith::ExtSIOp>(loc, i32, x);
-          Value mWide = builder.create<arith::ExtSIOp>(loc, i32, m);
-          Value s2Wide = builder.create<arith::ExtSIOp>(loc, i32, s2);
+          Value xWide = builder.create<arith::ExtSIOp>(loc, combineType, x);
+          Value mWide = builder.create<arith::ExtSIOp>(loc, combineType, m);
+          Value s2Wide = builder.create<arith::ExtSIOp>(loc, combineType, s2);
           Value sum = builder.create<arith::AddIOp>(loc, xWide, mWide);
           Value combined = builder.create<arith::SubIOp>(loc, sum, s2Wide);
-          Value s0 = builder.create<ondrix::ondsp::SatCastOp>(loc, i16, combined, numeric);
+          Value s0 = builder.create<ondrix::ondsp::SatCastOp>(loc, storage, combined, numeric);
           builder.create<scf::YieldOp>(loc, ValueRange{s0, s1});
         });
     Value s1 = sampleLoop.getResult(0);
     Value s2 = sampleLoop.getResult(1);
     Value mFinal = stepProduct(rewriter, loc, s1);
 
-    // energy = s1^2 + s2^2 - m*s2, exact in i64; no further boundary.
+    // energy = s1^2 + s2^2 - m*s2. Exact in i64 at Q15 (|energy| < 3*2^30);
+    // at Q31 three terms of 2^62 leave the carrier, so each state takes one
+    // declared bit first and the expression is exact again below 2^62.
     Value s1Wide = rewriter.create<arith::ExtSIOp>(loc, i64, s1);
     Value s2Wide = rewriter.create<arith::ExtSIOp>(loc, i64, s2);
     Value mWide = rewriter.create<arith::ExtSIOp>(loc, i64, mFinal);
+    if (width == 32) {
+      ondrix::ondsp::ScaleAttr stateScale = ondrix::ondsp::ScaleAttr::get(
+          rewriter.getContext(), /*preShiftLeft=*/0, /*postShiftRight=*/1, *op.getStateRounding(),
+          ondrix::ondsp::OverflowMode::Saturate, i64);
+      s1Wide = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, i64, s1Wide, stateScale);
+      s2Wide = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, i64, s2Wide, stateScale);
+      mWide = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, i64, mWide, stateScale);
+    }
     Value s1Square = rewriter.create<arith::MulIOp>(loc, s1Wide, s1Wide);
     Value s2Square = rewriter.create<arith::MulIOp>(loc, s2Wide, s2Wide);
     Value cross = rewriter.create<arith::MulIOp>(loc, mWide, s2Wide);

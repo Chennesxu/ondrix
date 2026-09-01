@@ -48,7 +48,7 @@ func.func @cic_stages_out_of_range(%input: tensor<32xi16>) -> tensor<8xi16> {
 // Each attribute is individually admissible; the register width they imply
 // is not, and the bound is on the product rather than any one of them.
 func.func @cic_growth_exceeds_carrier(%input: tensor<4096xi16>) -> tensor<1xi16> {
-  // expected-error @below {{cic decimation requires stages * log2(rate * delay) <= 48}}
+  // expected-error @below {{cic decimation at this width requires stages * log2(rate * delay) <= 48}}
   %result = ondrix.cic_decimate %input {
     stages = 5 : i64,
     rate = 4096 : i64,
@@ -65,7 +65,7 @@ func.func @cic_growth_exceeds_carrier(%input: tensor<4096xi16>) -> tensor<1xi16>
 // The differential delay is part of the growth, so a rate that fits alone
 // can still overflow the carrier once M doubles it.
 func.func @cic_delay_pushes_growth_past_carrier(%input: tensor<4096xi16>) -> tensor<1xi16> {
-  // expected-error @below {{cic decimation requires stages * log2(rate * delay) <= 48}}
+  // expected-error @below {{cic decimation at this width requires stages * log2(rate * delay) <= 48}}
   %result = ondrix.cic_decimate %input {
     stages = 4 : i64,
     rate = 4096 : i64,
@@ -135,4 +135,21 @@ func.func @cic_rejects_f32(%input: tensor<32xf32>) -> tensor<8xf32> {
     rounding = #ondsp.rounding<nearest_even>
   } : (tensor<32xf32>) -> tensor<8xf32>
   return %result : tensor<8xf32>
+}
+
+// -----
+
+// The growth BUDGET is width-derived, so a configuration legal at Q15 fails
+// closed at Q31: the register is W + G and must stay inside i64, which leaves
+// 48 bits at Q15 and 32 at Q31. Widening the carrier past i64 would make the
+// operation generic-scalar-only, so the narrowing is the contract.
+func.func @q31_growth_budget(%input: tensor<2048xi32>) -> tensor<4xi32> {
+  // expected-error @below {{cic decimation at this width requires stages * log2(rate * delay) <= 32}}
+  %result = ondrix.cic_decimate %input {
+    stages = 4 : i64, rate = 512 : i64, delay = 1 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    overflow = #ondsp.overflow<wrap>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<2048xi32>) -> tensor<4xi32>
+  return %result : tensor<4xi32>
 }

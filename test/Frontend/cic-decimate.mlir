@@ -25,3 +25,10 @@
 // The mode has no default because only one value implements the cascade,
 // so omitting it is a parse error rather than a silent choice.
 // MISSING: error: expected ',' before state_overflow policy
+
+// RUN: ondrix-compile %S/Inputs/q31_cic_decimate.ox | FileCheck %s --check-prefix=Q31
+
+// Q31-LABEL: func.func @q31_cic_decimate(
+// Q31-SAME: %[[IN:.*]]: tensor<32xi32>) -> tensor<8xi32>
+// Q31: ondrix.cic_decimate
+// Q31-SAME: numeric = #ondsp.fixed<signed, storage = i32, frac = 31>

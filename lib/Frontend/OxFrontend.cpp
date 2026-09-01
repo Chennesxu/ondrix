@@ -3086,7 +3086,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     // their verifiers.
     bool admitsQ31 =
         ast.result.kind == ReductionKind::Rms || ast.result.kind == ReductionKind::Dct ||
-        ast.result.kind == ReductionKind::Gain || ast.result.kind == ReductionKind::MovingAverage;
+        ast.result.kind == ReductionKind::Gain || ast.result.kind == ReductionKind::MovingAverage ||
+        ast.result.kind == ReductionKind::CicDecimate;
     bool isQ31 = ast.primaryResult().type == SourceType::Q31;
     // The Q15 goertzel energy is tensor<1xi64>, a storage width no source
     // type names, so only the f32 profile has a spelling here.
@@ -3900,7 +3901,8 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       // rounding attribute stays absent.
       result = builder.create<ir::GoertzelOp>(
           expressionLocation, outputType, lhs, builder.getI64IntegerAttr(kernel.ast.result.bin),
-          ondsp::FpAttr::get(&context, elementType, *kernel.fpContract), ondsp::RoundingModeAttr());
+          ondsp::FpAttr::get(&context, elementType, *kernel.fpContract), ondsp::RoundingModeAttr(),
+          ondsp::RoundingModeAttr());
     } else if (kernel.ast.result.kind == ReductionKind::Sine) {
       result = builder.create<ir::SineOp>(expressionLocation, outputType, lhs, numeric, rounding);
     } else if (kernel.ast.result.kind == ReductionKind::Cosine) {

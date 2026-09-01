@@ -50,3 +50,18 @@ func.func @cic_widest_admissible_growth(%input: tensor<4096xi16>) -> tensor<1xi1
   } : (tensor<4096xi16>) -> tensor<1xi16>
   return %result : tensor<1xi16>
 }
+
+// The Q31 profile keeps the same cascade and shifts the register to W + G;
+// only the growth budget narrows.
+// CHECK-LABEL: func.func @q31_cic_decimate
+// CHECK: ondrix.cic_decimate
+// CHECK-SAME: numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
+func.func @q31_cic_decimate(%input: tensor<256xi32>) -> tensor<4xi32> {
+  %result = ondrix.cic_decimate %input {
+    stages = 4 : i64, rate = 64 : i64, delay = 1 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    overflow = #ondsp.overflow<wrap>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<256xi32>) -> tensor<4xi32>
+  return %result : tensor<4xi32>
+}

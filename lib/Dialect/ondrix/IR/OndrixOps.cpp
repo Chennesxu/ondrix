@@ -1008,13 +1008,30 @@ LogicalResult ShiftOp::verify() {
                                     {getInput().getType(), getResult().getType()});
 }
 
+// The two admitted uniform-Q profiles. Both operations whose fixed contract
+// spans them read the width from here rather than pinning one.
+static std::optional<unsigned> getUniformQStorageWidth(Attribute numeric) {
+  auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric);
+  if (!fixed || fixed.getSignedness() != ondrix::ondsp::Signedness::Signed)
+    return std::nullopt;
+  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
+  if (!storage || !storage.isSignless())
+    return std::nullopt;
+  unsigned width = storage.getWidth();
+  if ((width != 16 && width != 32) || fixed.getFrac() != width - 1)
+    return std::nullopt;
+  return width;
+}
+
 int64_t CicDecimateOp::getGrowthBits() {
   return getStages() * llvm::Log2_64(uint64_t(getRate()) * uint64_t(getDelay()));
 }
 
 LogicalResult CicDecimateOp::verify() {
-  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-    return failure();
+  std::optional<unsigned> storageWidth = getUniformQStorageWidth(getNumeric());
+  if (!storageWidth)
+    return emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                       "#ondsp.fixed<signed, storage = i32, frac = 31>");
   if (getRounding() != ondrix::ondsp::RoundingMode::NearestEven &&
       getRounding() != ondrix::ondsp::RoundingMode::NearestTiesPositive)
     return emitOpError("cic decimation requires nearest_even or nearest_ties_positive rounding");
@@ -1027,9 +1044,15 @@ LogicalResult CicDecimateOp::verify() {
     return emitOpError("cic decimation requires a power-of-two rate in [2, 4096]");
   if (delay != 1 && delay != 2)
     return emitOpError("cic decimation requires a differential delay of 1 or 2");
-  // W = 16 + G must stay inside the widest carrier the fixed lowerings use.
-  if (16 + getGrowthBits() > 64)
-    return emitOpError("cic decimation requires stages * log2(rate * delay) <= 48");
+  // The register width is W + G and must stay inside the widest carrier the
+  // fixed lowerings use, so the growth BUDGET shrinks with the input width:
+  // 48 bits at Q15 and 32 at Q31. That is a real narrowing of the admitted
+  // configurations, not an implementation limit -- 33 of the 192 (S, R, M)
+  // combinations legal at Q15 fail closed at Q31 -- and widening the carrier
+  // past i64 would make the operation generic-scalar-only.
+  if (*storageWidth + getGrowthBits() > 64)
+    return emitOpError() << "cic decimation at this width requires stages * log2(rate * delay) <= "
+                         << (64 - *storageWidth);
   RankedTensorType inputType = getInput().getType();
   RankedTensorType resultType = getResult().getType();
   if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
@@ -1039,10 +1062,11 @@ LogicalResult CicDecimateOp::verify() {
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
   if (inputExtent == ShapedType::kDynamic || resultExtent == ShapedType::kDynamic ||
       resultExtent < 1 || resultExtent > 4096 || inputExtent != resultExtent * rate ||
-      !inputType.getElementType().isSignlessInteger(16) ||
-      !resultType.getElementType().isSignlessInteger(16))
-    return emitOpError("executable cic decimation requires static tensor<(R*L)xi16> input and "
-                       "tensor<Lxi16> result with L in [1, 4096]");
+      !inputType.getElementType().isSignlessInteger(*storageWidth) ||
+      !resultType.getElementType().isSignlessInteger(*storageWidth))
+    return emitOpError() << "executable cic decimation requires static tensor<(R*L)xi"
+                         << *storageWidth << "> input and tensor<Lxi" << *storageWidth
+                         << "> result with L in [1, 4096]";
   return success();
 }
 
@@ -1292,21 +1316,6 @@ LogicalResult RfftSplitOp::verify() {
   return verifyRfftSplitValueDomain(*this);
 }
 
-// The two admitted uniform-Q profiles. Both operations whose fixed contract
-// spans them read the width from here rather than pinning one.
-static std::optional<unsigned> getUniformQStorageWidth(Attribute numeric) {
-  auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric);
-  if (!fixed || fixed.getSignedness() != ondrix::ondsp::Signedness::Signed)
-    return std::nullopt;
-  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
-  if (!storage || !storage.isSignless())
-    return std::nullopt;
-  unsigned width = storage.getWidth();
-  if ((width != 16 && width != 32) || fixed.getFrac() != width - 1)
-    return std::nullopt;
-  return width;
-}
-
 static bool isMatmulRounding(ondrix::ondsp::RoundingMode mode) {
   return mode == ondrix::ondsp::RoundingMode::NearestEven ||
          mode == ondrix::ondsp::RoundingMode::TowardNegative ||
@@ -1493,14 +1502,26 @@ LogicalResult CosineOp::verify() {
 
 LogicalResult GoertzelOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
+  std::optional<unsigned> storageWidth;
   if (fp) {
     if (failed(ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "goertzel")))
       return failure();
     if (getRounding())
       return emitOpError("floating-point goertzel rounds at no declared boundary of its own");
   } else {
-    if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
-      return failure();
+    storageWidth = getUniformQStorageWidth(getNumeric());
+    if (!storageWidth)
+      return emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                         "#ondsp.fixed<signed, storage = i32, frac = 31>");
+    // The energy expression is exact in i64 at Q15 (|energy| < 3*2^30) and is
+    // NOT at Q31, where three terms of 2^62 exceed the carrier. The wider
+    // width therefore declares a one-bit state boundary before the squares,
+    // and refuses to declare one where there is none.
+    if (*storageWidth == 32 && !getStateRounding())
+      return emitOpError("a Q31 Goertzel energy requantizes each state by one bit before the "
+                         "squares and must declare state_rounding");
+    if (*storageWidth == 16 && getStateRounding())
+      return emitOpError("a Q15 Goertzel energy is exact and has no state boundary to round");
     if (!getRounding() || *getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
       return emitOpError("goertzel requires nearest_even rounding");
   }
@@ -1511,14 +1532,15 @@ LogicalResult GoertzelOp::verify() {
   int64_t extent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
   int64_t energyExtent =
       energyType.getRank() == 1 ? energyType.getDimSize(0) : ShapedType::kDynamic;
-  // The fixed energy is the exact integer the recursion produces and needs a
-  // wider storage than its input; the f32 energy is the same format.
-  Type element = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), 16));
+  // The fixed energy is the integer the recursion produces and needs a wider
+  // storage than its input at either width; the f32 energy is the same format.
+  Type element =
+      fp ? Type(fp.getFormat()) : Type(cast<ondrix::ondsp::FixedAttr>(getNumeric()).getStorage());
   Type energyElement = fp ? Type(fp.getFormat()) : Type(IntegerType::get(getContext(), 64));
   if (extent == ShapedType::kDynamic || extent < 2 || extent > 4096 ||
       inputType.getElementType() != element || energyExtent != 1 ||
       energyType.getElementType() != energyElement) {
-    llvm::StringRef name = fp ? "f32" : "i16";
+    std::string name = fp ? std::string("f32") : ("i" + llvm::utostr(*storageWidth));
     llvm::StringRef energyName = fp ? "f32" : "i64";
     return emitOpError() << "executable goertzel requires static tensor<Nx" << name
                          << "> input with N in [2, 4096] and tensor<1x" << energyName << "> energy";

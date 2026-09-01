@@ -38,3 +38,18 @@ func.func @f32_goertzel(%input: tensor<16xf32>) -> tensor<1xf32> {
   } : (tensor<16xf32>) -> tensor<1xf32>
   return %energy : tensor<1xf32>
 }
+
+// The Q31 profile carries a state boundary the Q15 one does not: three terms
+// of 2^62 leave i64, so each state takes one declared bit before the squares.
+// CHECK-LABEL: func.func @goertzel_q31
+// CHECK: ondrix.goertzel
+// CHECK-SAME: state_rounding = #ondsp.rounding<nearest_even>
+func.func @goertzel_q31(%input: tensor<64xi32>) -> tensor<1xi64> {
+  %energy = ondrix.goertzel %input {
+    bin = 5 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    state_rounding = #ondsp.rounding<nearest_even>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<64xi32>) -> tensor<1xi64>
+  return %energy : tensor<1xi64>
+}

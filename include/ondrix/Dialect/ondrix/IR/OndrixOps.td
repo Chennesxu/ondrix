@@ -195,17 +195,18 @@ def Ondrix_FirDecimateOp
 def Ondrix_CicDecimateOp : Ondrix_Op<"cic_decimate", [Pure]> {
   let summary = "Multiplier-free cascaded integrator-comb decimation";
   let description = [{
-    `ondrix.cic_decimate` decimates a static rank-1 signed-Q1.15 tensor of
-    `R * L` samples to `L` samples (`L` in `[1, 4096]`) through `S`
-    integrator stages at the input rate, a rate change by `R`, and `S` comb
-    stages with differential delay `M` at the output rate. `S` is in
+    `ondrix.cic_decimate` decimates a static rank-1 signed-Q1.(W-1) tensor,
+    for W of 16 or 32, of `R * L` samples to `L` samples (`L` in
+    `[1, 4096]`) through `S` integrator stages at the input rate, a rate
+    change by `R`, and `S` comb stages with differential delay `M` at the
+    output rate. `S` is in
     `[1, 8]`, `R` is a power of two in `[2, 4096]`, and `M` is 1 or 2, so
     the transfer gain `(R*M)^S` is the exact power of two `2^G` with
     `G = S * log2(R*M)`, and the normalizing output shift is exact. All
     state is carried in one declared register width:
 
     ```text
-    W       = 16 + G                          at most 64
+    W       = storage + G                     at most 64
     s[-1,n] = x[n]                            sign extended to W bits
     s[j,n]  = combine_W(s[j,n-1], s[j-1,n])   j = 0 .. S-1, state starts at 0
     v[m]    = s[S-1, m*R + R-1]               the rate change
@@ -225,6 +226,14 @@ def Ondrix_CicDecimateOp : Ondrix_Op<"cic_decimate", [Pure]> {
     reaches the rail. This is the one operation in the catalog whose
     correctness selects the overflow mode rather than merely observing it,
     so no default is inferred: the source must say `wrap`.
+
+    The register width is what the wider input costs: `G` is budgeted at
+    `64 - storage`, so 48 bits at Q15 and 32 at Q31, and 33 of the 192
+    admissible `(S, R, M)` combinations at Q15 fail closed at Q31 (a
+    four-stage cascade at `R = 512`, for instance). That is a declared
+    narrowing of the contract, not an implementation limit: carrying the
+    cascade past i64 would make the operation generic-scalar-only, which the
+    target classes this project maps to do not all support.
 
     Only the final requantization rounds, and `G < W` makes that shift the
     single boundary; saturation there is declared and unreachable for
@@ -1226,8 +1235,9 @@ def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
   let summary = "Single-bin Goertzel energy with quantized recursion state";
   let description = [{
     `ondrix.goertzel` computes the squared magnitude of one DFT bin `k`
-    of a static rank-1 signed-Q1.15 tensor of length `N` in `[2, 4096]`
-    with `0 <= k <= N/2`, through the quantized Goertzel recursion:
+    of a static rank-1 signed-Q1.(W-1) tensor, for W of 16 or 32, of length
+    `N` in `[2, 4096]` with `0 <= k <= N/2`, through the quantized Goertzel
+    recursion:
 
     ```text
     c  = q15(cos(2*pi*k/N))       tie-guarded compile-time constant
@@ -1240,11 +1250,29 @@ def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
     ```
 
     One product boundary and one saturating combine per sample are the
-    observable state quantization; the final energy is the exact i64
+    observable state quantization. At Q15 the final energy is the exact i64
     value of the integer expression (`|energy| < 3 * 2^30`), returned as
-    `tensor<1xi64>` with no further rounding. The coefficient is
-    admissible only under the `2^-20` quantization tie guard; other bins
-    fail closed in lowering. Detecting one tone this way takes two words
+    `tensor<1xi64>` with no further rounding.
+
+    Q31 changes two things, and both are forced by the carrier rather than
+    chosen. The step product is spelled `c*s1 / 2^(W-2)` instead of
+    `2*c*s1 / 2^(W-1)` — the same rational, but the doubled form reaches
+    `2^63` at Q31 while the folded one stays inside i64. And the energy is
+    no longer exact: three terms of `2^62` leave i64, so each of `s1`, `s2`
+    and `m` is requantized by ONE bit under a declared `state_rounding`
+    before the squares, which puts the expression back below `2^62`. The
+    returned reading is therefore two fractional bits coarser than the Q15
+    one. `state_rounding` is required exactly at Q31 and refused at Q15,
+    where the boundary does not exist.
+
+    The coefficient is admissible only under the width's quantization tie
+    guard; other bins fail closed in lowering. At Q31 that refusal is not
+    theoretical the way it is at Q15: measured over all 4198399 admissible
+    `(k, N)` sites, 1017 of them — 0.024%, one in 4130 — sit closer to a
+    rounding tie than the `2^-13` LSB guard, so a binary64 evaluation
+    cannot prove they round like the real-valued definition and the bin is
+    refused by name. None of them is at `N <= 64`; the refusals begin where
+    the coefficient space becomes dense enough to crowd the ties. Detecting one tone this way takes two words
     of recursion state instead of a full FFT's O(N) storage, at the cost
     of a different (also observable) quantization path — the Goertzel
     energy of a bin is NOT the squared magnitude of the corresponding
@@ -1294,6 +1322,7 @@ def Ondrix_GoertzelOp : Ondrix_Op<"goertzel", [Pure]> {
   let arguments = (ins AnyRankedTensor:$input,
                    I64Attr:$bin,
                    Ondsp_NumericAttr:$numeric,
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$state_rounding,
                    OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$energy);
   let hasVerifier = 1;
