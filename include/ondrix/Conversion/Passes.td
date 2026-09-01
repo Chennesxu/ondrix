@@ -22,12 +22,17 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
 
     The opt-in fft-loops mode lowers static CFFT/RFFT/IRFFT through a
     bit-reversal permutation and stage/butterfly loops over in-memory
-    twiddle tables instead of fully unrolled SSA butterflies. Every
-    butterfly executes the same scalar `ondsp.cx_butterfly` with the same
-    requantization attributes in an equivalent order, so results are
-    bit-identical to the default recursive lowering; only the code shape
-    changes (object footprint and compile time versus unrolled constant
-    propagation). It is mutually exclusive with vectorize-static-cfft.
+    twiddle tables instead of fully unrolled SSA butterflies. A packed
+    profile's butterfly stays the same scalar `ondsp.cx_butterfly` with the
+    same requantization attributes; the interleaved f32 profile has no
+    requantization boundary and emits arith/math directly in both shapes.
+    Either way every element passes the identical expression in an
+    equivalent order, so results are bit-identical to the default recursive
+    lowering and only the code shape changes (object footprint and compile
+    time versus unrolled constant propagation). The f32 shape additionally
+    peels the exact unit and quarter-turn phases into their own loops,
+    because those legs carry no product event by contract. It is mutually
+    exclusive with vectorize-static-cfft.
 
     A fixed DF-II SOS cascade emits its sections straight-line inside the
     sample loop, instead of as an inner `scf.for`, when the coefficient,

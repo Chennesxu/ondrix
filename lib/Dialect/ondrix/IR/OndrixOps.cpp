@@ -177,6 +177,73 @@ static LogicalResult verifyIrfftValueDomain(IrfftOp op) {
   return success();
 }
 
+// The floating-point complex profile has no container: one complex value is
+// two adjacent elements of the format itself. The three value domains below
+// therefore measure the transform size N, never the element count -- an
+// interleaved operand carries 2N elements and a real operand carries N.
+static constexpr int64_t kMaxFpTransformExtent = 1024;
+
+static int64_t getStaticExtent(RankedTensorType type) {
+  return type.getRank() == 1 ? type.getDimSize(0) : ShapedType::kDynamic;
+}
+
+static LogicalResult verifyFpCfftValueDomain(CfftOp op, ondrix::ondsp::FpAttr fp) {
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType resultType = op.getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
+    return failure();
+  int64_t elements = getStaticExtent(inputType);
+  int64_t extent = elements == ShapedType::kDynamic ? elements : elements / 2;
+  if (inputType != resultType || elements % 2 != 0 || extent < 4 ||
+      extent > kMaxFpTransformExtent || !llvm::isPowerOf2_64(extent) ||
+      inputType.getElementType() != fp.getFormat())
+    return op.emitOpError() << "executable floating-point CFFT requires matching tensor<2Nxf32> "
+                               "input and result with power-of-two N in [4, "
+                            << kMaxFpTransformExtent << "]";
+  return success();
+}
+
+static LogicalResult verifyFpRfftValueDomain(RfftOp op, ondrix::ondsp::FpAttr fp) {
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType resultType = op.getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
+    return failure();
+  int64_t extent = getStaticExtent(inputType);
+  if (extent < 8 || extent > kMaxFpTransformExtent || !llvm::isPowerOf2_64(extent) ||
+      getStaticExtent(resultType) != extent + 2 || inputType.getElementType() != fp.getFormat() ||
+      resultType.getElementType() != fp.getFormat())
+    return op.emitOpError() << "executable floating-point RFFT requires tensor<Nxf32> to "
+                               "tensor<(N+2)xf32> with power-of-two N in [8, "
+                            << kMaxFpTransformExtent << "]";
+  return success();
+}
+
+static LogicalResult verifyFpIrfftValueDomain(IrfftOp op, ondrix::ondsp::FpAttr fp) {
+  RankedTensorType inputType = op.getInput().getType();
+  RankedTensorType resultType = op.getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
+    return failure();
+  int64_t extent = getStaticExtent(resultType);
+  if (extent < 8 || extent > kMaxFpTransformExtent || !llvm::isPowerOf2_64(extent) ||
+      getStaticExtent(inputType) != extent + 2 || inputType.getElementType() != fp.getFormat() ||
+      resultType.getElementType() != fp.getFormat())
+    return op.emitOpError() << "executable floating-point IRFFT requires tensor<(N+2)xf32> to "
+                               "tensor<Nxf32> with power-of-two N in [8, "
+                            << kMaxFpTransformExtent << "]";
+  return success();
+}
+
+// Only the floating-point profile omits the requantization attributes, so a
+// missing one on a fixed-point transform is an incomplete contract rather
+// than a floating-point program.
+static LogicalResult verifyFixedTransformAttributes(Operation *op, Attribute product,
+                                                    Attribute productScale, Attribute outputScale) {
+  if (!product || !productScale || !outputScale)
+    return op->emitOpError(
+        "fixed-point transform requires product, product_scale, and output_scale");
+  return success();
+}
+
 static LogicalResult verifySignedFixedFormat(Operation *op, Attribute numeric, unsigned width,
                                              unsigned frac, StringRef name) {
   auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric);
@@ -1140,32 +1207,62 @@ static LogicalResult verifyPackedQ31TransformProduct(Operation *op,
 }
 
 LogicalResult CfftOp::verify() {
+  if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric())) {
+    if (failed(ondrix::ondsp::verifyInterleavedFpTransformPolicy(
+            *this, getLayout(), fp, getProductAttr(), getProductScaleAttr(), getOutputScaleAttr(),
+            "CFFT")))
+      return failure();
+    return verifyFpCfftValueDomain(*this, fp);
+  }
+  if (failed(verifyFixedTransformAttributes(getOperation(), getProductAttr(), getProductScaleAttr(),
+                                            getOutputScaleAttr())))
+    return failure();
   if (failed(verifyCfftValueDomain(*this)))
     return failure();
   if (failed(ondrix::ondsp::verifyPackedButterflyPolicy(
-          *this, getLayout(), getNumeric(), getProduct(), getProductScale(), getOutputScale(),
+          *this, getLayout(), getNumeric(), *getProduct(), *getProductScale(), *getOutputScale(),
           /*targetInventory=*/true)))
     return failure();
   return verifyPackedQ31TransformProduct(*this, cast<ondrix::ondsp::CxLayoutAttr>(getLayout()),
-                                         getProduct());
+                                         *getProduct());
 }
 
 LogicalResult RfftOp::verify() {
+  if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric())) {
+    if (failed(ondrix::ondsp::verifyInterleavedFpTransformPolicy(
+            *this, getLayout(), fp, getProductAttr(), getProductScaleAttr(), getOutputScaleAttr(),
+            "RFFT")))
+      return failure();
+    return verifyFpRfftValueDomain(*this, fp);
+  }
+  if (failed(verifyFixedTransformAttributes(getOperation(), getProductAttr(), getProductScaleAttr(),
+                                            getOutputScaleAttr())))
+    return failure();
   if (failed(verifyRfftValueDomain(*this)))
     return failure();
   if (failed(ondrix::ondsp::verifyPackedButterflyPolicy(
-          *this, getLayout(), getNumeric(), getProduct(), getProductScale(), getOutputScale())))
+          *this, getLayout(), getNumeric(), *getProduct(), *getProductScale(), *getOutputScale())))
     return failure();
-  return verifyPackedQ31TransformProduct(*this, getLayout(), getProduct());
+  return verifyPackedQ31TransformProduct(*this, getLayout(), *getProduct());
 }
 
 LogicalResult IrfftOp::verify() {
+  if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric())) {
+    if (failed(ondrix::ondsp::verifyInterleavedFpTransformPolicy(
+            *this, getLayout(), fp, getProductAttr(), getProductScaleAttr(), getOutputScaleAttr(),
+            "IRFFT")))
+      return failure();
+    return verifyFpIrfftValueDomain(*this, fp);
+  }
+  if (failed(verifyFixedTransformAttributes(getOperation(), getProductAttr(), getProductScaleAttr(),
+                                            getOutputScaleAttr())))
+    return failure();
   if (failed(verifyIrfftValueDomain(*this)))
     return failure();
   if (failed(ondrix::ondsp::verifyPackedButterflyPolicy(
-          *this, getLayout(), getNumeric(), getProduct(), getProductScale(), getOutputScale())))
+          *this, getLayout(), getNumeric(), *getProduct(), *getProductScale(), *getOutputScale())))
     return failure();
-  return verifyPackedQ31TransformProduct(*this, getLayout(), getProduct());
+  return verifyPackedQ31TransformProduct(*this, getLayout(), *getProduct());
 }
 
 LogicalResult RfftRadix4SplitOp::verify() {

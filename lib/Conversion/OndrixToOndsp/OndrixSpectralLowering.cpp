@@ -6,6 +6,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Support/DctCoefficients.h"
+#include "ondrix/Support/F32TwiddleTables.h"
 #include "ondrix/Support/GuardedQ15Quantization.h"
 #include "ondrix/Support/Q30SplitTwiddleTables.h"
 #include "ondrix/Support/Q31TwiddleTables.h"
@@ -498,6 +499,291 @@ static Value conjugatePackedSaturating(Location loc, Value packed,
   return rewriter.create<arith::OrIOp>(loc, shiftedImaginary, realBits);
 }
 
+// One complex value of the interleaved floating-point profile, carried as two
+// SSA components between the two adjacent tensor elements that store it.
+struct FpComplexValue {
+  Value real;
+  Value imaginary;
+};
+
+static SmallVector<FpComplexValue>
+extractInterleavedFpComplex(Location loc, Value tensor, int64_t extent, OpBuilder &rewriter) {
+  SmallVector<FpComplexValue> values;
+  values.reserve(extent);
+  for (int64_t index = 0; index < extent; ++index) {
+    Value realPosition = rewriter.create<arith::ConstantIndexOp>(loc, 2 * index);
+    Value imaginaryPosition = rewriter.create<arith::ConstantIndexOp>(loc, 2 * index + 1);
+    values.push_back({rewriter.create<tensor::ExtractOp>(loc, tensor, realPosition),
+                      rewriter.create<tensor::ExtractOp>(loc, tensor, imaginaryPosition)});
+  }
+  return values;
+}
+
+static Value insertInterleavedFpComplex(Location loc, Value tensor, ArrayRef<FpComplexValue> values,
+                                        OpBuilder &rewriter) {
+  for (auto [index, value] : llvm::enumerate(values)) {
+    Value realPosition = rewriter.create<arith::ConstantIndexOp>(loc, 2 * index);
+    Value imaginaryPosition = rewriter.create<arith::ConstantIndexOp>(loc, 2 * index + 1);
+    tensor = rewriter.create<tensor::InsertOp>(loc, value.real, tensor, realPosition);
+    tensor = rewriter.create<tensor::InsertOp>(loc, value.imaginary, tensor, imaginaryPosition);
+  }
+  return tensor;
+}
+
+// The same recursive even/odd decomposition as lowerPackedCfft, over
+// exact-format arithmetic with no requantization boundary. Fusion is the one
+// declared choice and is spent on the two multiply-adds of the complex
+// product; the additive combine has no product to fuse with.
+//
+// Index 0 and index n/4 carry no product at all, because their twiddles are
+// exactly one and exactly -+j. That is definitional rather than an
+// optimization: a multiply by 0.0 is not the identity on an infinite or
+// negatively signed operand, so emitting one would change the contract on
+// exactly the values the declared environment says propagate per IEEE 754.
+static SmallVector<FpComplexValue>
+lowerInterleavedFpCfft(Location loc, ArrayRef<FpComplexValue> inputs, bool forward,
+                       ondrix::ondsp::FpAttr numeric, ConversionPatternRewriter &rewriter) {
+  Type element = numeric.getFormat();
+  auto createConstant = [&](float value) -> Value {
+    return rewriter.create<arith::ConstantOp>(loc, rewriter.getFloatAttr(element, value));
+  };
+
+  std::function<SmallVector<FpComplexValue>(ArrayRef<FpComplexValue>)> lower =
+      [&](ArrayRef<FpComplexValue> values) -> SmallVector<FpComplexValue> {
+    if (values.size() == 1)
+      return {values.front()};
+
+    SmallVector<FpComplexValue> evenInputs;
+    SmallVector<FpComplexValue> oddInputs;
+    evenInputs.reserve(values.size() / 2);
+    oddInputs.reserve(values.size() / 2);
+    for (auto [index, value] : llvm::enumerate(values))
+      (index % 2 == 0 ? evenInputs : oddInputs).push_back(value);
+
+    SmallVector<FpComplexValue> even = lower(evenInputs);
+    SmallVector<FpComplexValue> odd = lower(oddInputs);
+    int64_t size = static_cast<int64_t>(values.size());
+    SmallVector<FpComplexValue> outputs(values.size());
+    for (int64_t index = 0, half = size / 2; index < half; ++index) {
+      const FpComplexValue &a = even[index];
+      const FpComplexValue &b = odd[index];
+      FpComplexValue term;
+      if (index == 0) {
+        term = b;
+      } else if (index == size / 4) {
+        term = forward ? FpComplexValue{b.imaginary, rewriter.create<arith::NegFOp>(loc, b.real)}
+                       : FpComplexValue{rewriter.create<arith::NegFOp>(loc, b.imaginary), b.real};
+      } else {
+        ondrix::F32Twiddle twiddle = ondrix::getF32Twiddle(forward, size, index);
+        Value twiddleReal = createConstant(twiddle.real);
+        Value twiddleImaginary = createConstant(twiddle.imaginary);
+        Value crossed = createFpMultiply(loc, twiddleImaginary, b.imaginary, rewriter);
+        Value negatedCross = rewriter.create<arith::NegFOp>(loc, crossed);
+        term.real =
+            createFpAccumulatorUpdate(loc, twiddleReal, b.real, negatedCross, numeric, rewriter);
+        Value straight = createFpMultiply(loc, twiddleImaginary, b.real, rewriter);
+        term.imaginary =
+            createFpAccumulatorUpdate(loc, twiddleReal, b.imaginary, straight, numeric, rewriter);
+      }
+      outputs[index] = {rewriter.create<arith::AddFOp>(loc, a.real, term.real),
+                        rewriter.create<arith::AddFOp>(loc, a.imaginary, term.imaginary)};
+      outputs[index + half] = {rewriter.create<arith::SubFOp>(loc, a.real, term.real),
+                               rewriter.create<arith::SubFOp>(loc, a.imaginary, term.imaginary)};
+    }
+    return outputs;
+  };
+  return lower(inputs);
+}
+
+// Loop-form counterpart of lowerInterleavedFpCfft, resting on the same
+// argument as the packed loop form: the recursive even/odd combine on
+// natural-order input computes exactly the butterflies of the iterative
+// algorithm on bit-reversed input, so every element passes through the
+// identical expression and the two lowerings agree bit for bit.
+//
+// The exact unit and quarter-turn legs are PEELED into their own loops
+// rather than selected inside one, because a dynamic multiply by the unit
+// twiddle is a different expression, not a slower spelling of the same one.
+static Value lowerInterleavedFpCfftLoops(Location loc, Value input, int64_t extent, bool forward,
+                                         ondrix::ondsp::FpAttr numeric,
+                                         ConversionPatternRewriter &rewriter) {
+  Type element = numeric.getFormat();
+  int64_t stageCount = llvm::Log2_64(extent);
+
+  // twiddles[half + j] = W(2*half, j). Slot half + 0 and slot half + half/2
+  // are the peeled legs and are never read; they stay zero so that losing the
+  // peeling produces an obviously wrong transform rather than a plausible one.
+  SmallVector<Attribute> twiddleWords(2 * extent, rewriter.getFloatAttr(element, 0.0f));
+  for (int64_t half = 1; half < extent; half *= 2) {
+    for (int64_t index = 1; index < half; ++index) {
+      if (index == half / 2)
+        continue;
+      ondrix::F32Twiddle twiddle = ondrix::getF32Twiddle(forward, 2 * half, index);
+      twiddleWords[2 * (half + index)] = rewriter.getFloatAttr(element, twiddle.real);
+      twiddleWords[2 * (half + index) + 1] = rewriter.getFloatAttr(element, twiddle.imaginary);
+    }
+  }
+  Value twiddleTable = rewriter.create<arith::ConstantOp>(
+      loc, DenseElementsAttr::get(RankedTensorType::get({2 * extent}, element), twiddleWords));
+
+  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value two = rewriter.create<arith::ConstantIndexOp>(loc, 2);
+  Value halfExtent = rewriter.create<arith::ConstantIndexOp>(loc, extent / 2);
+  Value stages = rewriter.create<arith::ConstantIndexOp>(loc, stageCount);
+
+  auto loadComplex = [&](OpBuilder &builder, Value data, Value index) {
+    Value base = builder.create<arith::MulIOp>(loc, index, two);
+    Value high = builder.create<arith::AddIOp>(loc, base, one);
+    return FpComplexValue{builder.create<tensor::ExtractOp>(loc, data, base),
+                          builder.create<tensor::ExtractOp>(loc, data, high)};
+  };
+  auto storeComplex = [&](OpBuilder &builder, Value data, Value index, FpComplexValue value) {
+    Value base = builder.create<arith::MulIOp>(loc, index, two);
+    Value high = builder.create<arith::AddIOp>(loc, base, one);
+    data = builder.create<tensor::InsertOp>(loc, value.real, data, base);
+    return builder.create<tensor::InsertOp>(loc, value.imaginary, data, high).getResult();
+  };
+
+  enum class LegKind { Unit, QuarterTurn, General };
+  auto buildLeg = [&](OpBuilder &builder, Value data, Value half, Value upper, Value twiddleIndex,
+                      LegKind kind) -> Value {
+    Value lower = builder.create<arith::AddIOp>(loc, upper, half);
+    FpComplexValue a = loadComplex(builder, data, upper);
+    FpComplexValue b = loadComplex(builder, data, lower);
+    FpComplexValue term;
+    if (kind == LegKind::Unit) {
+      term = b;
+    } else if (kind == LegKind::QuarterTurn) {
+      term = forward ? FpComplexValue{b.imaginary, builder.create<arith::NegFOp>(loc, b.real)}
+                     : FpComplexValue{builder.create<arith::NegFOp>(loc, b.imaginary), b.real};
+    } else {
+      FpComplexValue twiddle = loadComplex(builder, twiddleTable, twiddleIndex);
+      Value crossed = createFpMultiply(loc, twiddle.imaginary, b.imaginary, builder);
+      Value negatedCross = builder.create<arith::NegFOp>(loc, crossed);
+      term.real =
+          createFpAccumulatorUpdate(loc, twiddle.real, b.real, negatedCross, numeric, builder);
+      Value straight = createFpMultiply(loc, twiddle.imaginary, b.real, builder);
+      term.imaginary =
+          createFpAccumulatorUpdate(loc, twiddle.real, b.imaginary, straight, numeric, builder);
+    }
+    data = storeComplex(builder, data, upper,
+                        {builder.create<arith::AddFOp>(loc, a.real, term.real),
+                         builder.create<arith::AddFOp>(loc, a.imaginary, term.imaginary)});
+    return storeComplex(builder, data, lower,
+                        {builder.create<arith::SubFOp>(loc, a.real, term.real),
+                         builder.create<arith::SubFOp>(loc, a.imaginary, term.imaginary)});
+  };
+
+  SmallVector<int64_t> bitReversed(extent);
+  for (int64_t index = 0; index < extent; ++index) {
+    int64_t reversed = 0;
+    for (int64_t bit = 0; bit < stageCount; ++bit)
+      reversed |= ((index >> bit) & 1) << (stageCount - 1 - bit);
+    bitReversed[index] = reversed;
+  }
+  Value reversalTable = rewriter.create<arith::ConstantOp>(
+      loc, DenseElementsAttr::get(RankedTensorType::get({extent}, rewriter.getI64Type()),
+                                  llvm::ArrayRef<int64_t>(bitReversed)));
+  Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{2 * extent}, element);
+  Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+  auto permuteLoop = rewriter.create<scf::ForOp>(
+      loc, zero, extentValue, one, ValueRange{empty},
+      [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+        Value source64 = builder.create<tensor::ExtractOp>(loc, reversalTable, position);
+        Value source = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), source64);
+        builder.create<scf::YieldOp>(loc, storeComplex(builder, iterArgs.front(), position,
+                                                       loadComplex(builder, input, source)));
+      });
+
+  // Stage half = 1 is entirely unit legs, so it is peeled: the dynamic stage
+  // loop below needs half >= 2 for half/2 to be a distinct phase.
+  auto firstStage = rewriter.create<scf::ForOp>(
+      loc, zero, halfExtent, one, ValueRange{permuteLoop.getResult(0)},
+      [&](OpBuilder &builder, Location loc, Value group, ValueRange iterArgs) {
+        Value upper = builder.create<arith::MulIOp>(loc, group, two);
+        builder.create<scf::YieldOp>(
+            loc, buildLeg(builder, iterArgs.front(), one, upper, zero, LegKind::Unit));
+      });
+
+  auto stageLoop = rewriter.create<scf::ForOp>(
+      loc, one, stages, one, ValueRange{firstStage.getResult(0)},
+      [&](OpBuilder &builder, Location loc, Value stage, ValueRange stageArgs) {
+        Value half = builder.create<arith::ShLIOp>(loc, one, stage);
+        Value doubled = builder.create<arith::AddIOp>(loc, half, half);
+        Value quarter = builder.create<arith::ShRUIOp>(loc, half, one);
+        Value groups = builder.create<arith::DivUIOp>(loc, extentValue, doubled);
+        // One phase at a fixed offset, one leg per group.
+        auto peeledPhase = [&](Value data, Value phase, LegKind kind) -> Value {
+          auto loop = builder.create<scf::ForOp>(
+              loc, zero, groups, one, ValueRange{data},
+              [&](OpBuilder &builder, Location loc, Value group, ValueRange iterArgs) {
+                Value base = builder.create<arith::MulIOp>(loc, group, doubled);
+                Value upper = builder.create<arith::AddIOp>(loc, base, phase);
+                builder.create<scf::YieldOp>(
+                    loc, buildLeg(builder, iterArgs.front(), half, upper, zero, kind));
+              });
+          return loop.getResult(0);
+        };
+        // The general phases are the two ranges the peeled phases leave
+        // behind; either can be empty, which the loop bounds already say.
+        auto generalRange = [&](Value data, Value first, Value bound) -> Value {
+          auto groupLoop = builder.create<scf::ForOp>(
+              loc, zero, groups, one, ValueRange{data},
+              [&](OpBuilder &builder, Location loc, Value group, ValueRange groupArgs) {
+                Value base = builder.create<arith::MulIOp>(loc, group, doubled);
+                auto phaseLoop = builder.create<scf::ForOp>(
+                    loc, first, bound, one, ValueRange{groupArgs.front()},
+                    [&](OpBuilder &builder, Location loc, Value phase, ValueRange phaseArgs) {
+                      Value upper = builder.create<arith::AddIOp>(loc, base, phase);
+                      Value twiddleIndex = builder.create<arith::AddIOp>(loc, half, phase);
+                      builder.create<scf::YieldOp>(loc,
+                                                   buildLeg(builder, phaseArgs.front(), half, upper,
+                                                            twiddleIndex, LegKind::General));
+                    });
+                builder.create<scf::YieldOp>(loc, phaseLoop.getResult(0));
+              });
+          return groupLoop.getResult(0);
+        };
+        Value data = peeledPhase(stageArgs.front(), zero, LegKind::Unit);
+        data = generalRange(data, one, quarter);
+        data = peeledPhase(data, quarter, LegKind::QuarterTurn);
+        Value afterQuarter = builder.create<arith::AddIOp>(loc, quarter, one);
+        builder.create<scf::YieldOp>(loc, generalRange(data, afterQuarter, half));
+      });
+  return stageLoop.getResult(0);
+}
+
+// The single final 1/N multiply IS the declared inverse contract; see the
+// ondrix.cfft description for why it is a choice rather than a collapse
+// justified by equivalence.
+static Value scaleFpByInverseExtent(Location loc, Value value, int64_t extent, Type element,
+                                    OpBuilder &rewriter) {
+  Value factor = rewriter.create<arith::ConstantOp>(
+      loc, rewriter.getFloatAttr(element, 1.0f / static_cast<float>(extent)));
+  return createFpMultiply(loc, value, factor, rewriter);
+}
+
+// The same single multiply per component as the unrolled form, walked over
+// the whole interleaved tensor.
+static Value scaleFpTensorByInverseExtent(Location loc, Value tensor, int64_t elements,
+                                          int64_t extent, Type element,
+                                          ConversionPatternRewriter &rewriter) {
+  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value bound = rewriter.create<arith::ConstantIndexOp>(loc, elements);
+  auto loop = rewriter.create<scf::ForOp>(
+      loc, zero, bound, one, ValueRange{tensor},
+      [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+        Value value = builder.create<tensor::ExtractOp>(loc, iterArgs.front(), position);
+        Value scaled = scaleFpByInverseExtent(loc, value, extent, element, builder);
+        builder.create<scf::YieldOp>(
+            loc,
+            builder.create<tensor::InsertOp>(loc, scaled, iterArgs.front(), position).getResult());
+      });
+  return loop.getResult(0);
+}
+
 class CfftOpLowering final : public OpConversionPattern<ondrix::ir::CfftOp> {
 public:
   CfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops)
@@ -511,6 +797,31 @@ public:
     if (!layout)
       return rewriter.notifyMatchFailure(op, "requires an ondsp.cx_layout layout attribute");
 
+    if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric())) {
+      RankedTensorType resultType = op.getResult().getType();
+      int64_t extent = resultType.getDimSize(0) / 2;
+      bool forward = op.getDirection() == ondrix::ir::CfftDirection::Forward;
+      if (fftLoops) {
+        Value spectrum =
+            lowerInterleavedFpCfftLoops(loc, adaptor.getInput(), extent, forward, fp, rewriter);
+        if (!forward)
+          spectrum = scaleFpTensorByInverseExtent(loc, spectrum, 2 * extent, extent, fp.getFormat(),
+                                                  rewriter);
+        rewriter.replaceOp(op, spectrum);
+        return success();
+      }
+      SmallVector<FpComplexValue> outputs = lowerInterleavedFpCfft(
+          loc, extractInterleavedFpComplex(loc, adaptor.getInput(), extent, rewriter), forward, fp,
+          rewriter);
+      if (!forward)
+        for (FpComplexValue &value : outputs)
+          value = {scaleFpByInverseExtent(loc, value.real, extent, fp.getFormat(), rewriter),
+                   scaleFpByInverseExtent(loc, value.imaginary, extent, fp.getFormat(), rewriter)};
+      Value empty = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), fp.getFormat());
+      rewriter.replaceOp(op, insertInterleavedFpComplex(loc, empty, outputs, rewriter));
+      return success();
+    }
+
     std::optional<ondrix::ondsp::PackedComplexProfile> profile =
         ondrix::ondsp::getPackedComplexProfile(layout.getLayout());
     if (!profile)
@@ -520,8 +831,8 @@ public:
       return rewriter.notifyMatchFailure(op, "the stage twiddle table is unavailable");
     if (fftLoops) {
       Value result = lowerPackedCfftLoops(loc, adaptor.getInput(), extent, op.getDirection(),
-                                          *profile, layout, op.getNumeric(), op.getProduct(),
-                                          op.getProductScale(), op.getOutputScale(), rewriter);
+                                          *profile, layout, op.getNumeric(), *op.getProduct(),
+                                          *op.getProductScale(), *op.getOutputScale(), rewriter);
       rewriter.replaceOp(op, result);
       return success();
     }
@@ -535,8 +846,8 @@ public:
       inputs.push_back(rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position));
     }
     SmallVector<Value> outputs = lowerPackedCfft(
-        loc, inputs, op.getDirection(), *profile, layout, op.getNumeric(), op.getProduct(),
-        op.getProductScale(), op.getOutputScale(), vectorizeStaticCfft, rewriter);
+        loc, inputs, op.getDirection(), *profile, layout, op.getNumeric(), *op.getProduct(),
+        *op.getProductScale(), *op.getOutputScale(), vectorizeStaticCfft, rewriter);
 
     Value result = rewriter.create<tensor::EmptyOp>(loc, op.getResult().getType().getShape(),
                                                     op.getResult().getType().getElementType());
@@ -560,6 +871,58 @@ public:
   LogicalResult matchAndRewrite(ondrix::ir::RfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
+    if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric())) {
+      int64_t extent = op.getInput().getType().getDimSize(0);
+      Value zero =
+          rewriter.create<arith::ConstantOp>(loc, rewriter.getFloatAttr(fp.getFormat(), 0.0f));
+      RankedTensorType binType = op.getResult().getType();
+      if (fftLoops) {
+        Value zeroIndex = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+        Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+        Value two = rewriter.create<arith::ConstantIndexOp>(loc, 2);
+        Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+        Value empty =
+            rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{2 * extent}, fp.getFormat());
+        auto seedLoop = rewriter.create<scf::ForOp>(
+            loc, zeroIndex, extentValue, one, ValueRange{empty},
+            [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+              Value real = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
+              Value base = builder.create<arith::MulIOp>(loc, position, two);
+              Value high = builder.create<arith::AddIOp>(loc, base, one);
+              Value seeded = builder.create<tensor::InsertOp>(loc, real, iterArgs.front(), base);
+              builder.create<scf::YieldOp>(
+                  loc, builder.create<tensor::InsertOp>(loc, zero, seeded, high).getResult());
+            });
+        Value spectrum = lowerInterleavedFpCfftLoops(loc, seedLoop.getResult(0), extent,
+                                                     /*forward=*/true, fp, rewriter);
+        Value compact = rewriter.create<tensor::ExtractSliceOp>(
+            loc, binType, spectrum, ArrayRef<OpFoldResult>{rewriter.getIndexAttr(0)},
+            ArrayRef<OpFoldResult>{rewriter.getIndexAttr(extent + 2)},
+            ArrayRef<OpFoldResult>{rewriter.getIndexAttr(1)});
+        Value nyquistImaginary = rewriter.create<arith::ConstantIndexOp>(loc, extent + 1);
+        compact = rewriter.create<tensor::InsertOp>(loc, zero, compact, one);
+        compact = rewriter.create<tensor::InsertOp>(loc, zero, compact, nyquistImaginary);
+        rewriter.replaceOp(op, compact);
+        return success();
+      }
+      SmallVector<FpComplexValue> inputs;
+      inputs.reserve(extent);
+      for (int64_t index = 0; index < extent; ++index) {
+        Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+        inputs.push_back(
+            {rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position), zero});
+      }
+      SmallVector<FpComplexValue> spectrum =
+          lowerInterleavedFpCfft(loc, inputs, /*forward=*/true, fp, rewriter);
+      // The DC and Nyquist imaginary components are canonically zero, the
+      // same reference-schedule rule the packed profiles state.
+      SmallVector<FpComplexValue> bins(spectrum.begin(), spectrum.begin() + extent / 2 + 1);
+      bins.front().imaginary = zero;
+      bins.back().imaginary = zero;
+      Value empty = rewriter.create<tensor::EmptyOp>(loc, binType.getShape(), fp.getFormat());
+      rewriter.replaceOp(op, insertInterleavedFpComplex(loc, empty, bins, rewriter));
+      return success();
+    }
     ondrix::ondsp::PackedComplexProfile profile = getVerifiedPackedProfile(op.getLayout());
     IntegerType container = rewriter.getIntegerType(profile.containerWidth);
     int64_t extent = op.getInput().getType().getDimSize(0);
@@ -582,8 +945,8 @@ public:
           });
       Value spectrum = lowerPackedCfftLoops(loc, packLoop.getResult(0), extent,
                                             ondrix::ir::CfftDirection::Forward, profile,
-                                            op.getLayout(), op.getNumeric(), op.getProduct(),
-                                            op.getProductScale(), op.getOutputScale(), rewriter);
+                                            op.getLayout(), op.getNumeric(), *op.getProduct(),
+                                            *op.getProductScale(), *op.getOutputScale(), rewriter);
       RankedTensorType resultType = op.getResult().getType();
       int64_t binCount = resultType.getDimSize(0);
       Value compact = rewriter.create<tensor::ExtractSliceOp>(
@@ -608,9 +971,10 @@ public:
       inputs.push_back(rewriter.create<arith::ExtUIOp>(loc, container, real));
     }
 
-    SmallVector<Value> outputs = lowerPackedCfft(
-        loc, inputs, ondrix::ir::CfftDirection::Forward, profile, op.getLayout(), op.getNumeric(),
-        op.getProduct(), op.getProductScale(), op.getOutputScale(), vectorizeStaticCfft, rewriter);
+    SmallVector<Value> outputs =
+        lowerPackedCfft(loc, inputs, ondrix::ir::CfftDirection::Forward, profile, op.getLayout(),
+                        op.getNumeric(), *op.getProduct(), *op.getProductScale(),
+                        *op.getOutputScale(), vectorizeStaticCfft, rewriter);
     outputs.front() = canonicalizePackedReal(loc, outputs.front(), profile, rewriter);
     outputs[extent / 2] = canonicalizePackedReal(loc, outputs[extent / 2], profile, rewriter);
 
@@ -639,6 +1003,89 @@ public:
   LogicalResult matchAndRewrite(ondrix::ir::IrfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
+    if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric())) {
+      RankedTensorType resultType = op.getResult().getType();
+      int64_t extent = resultType.getDimSize(0);
+      Value zero =
+          rewriter.create<arith::ConstantOp>(loc, rewriter.getFloatAttr(fp.getFormat(), 0.0f));
+      if (fftLoops) {
+        Value zeroIndex = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+        Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+        Value two = rewriter.create<arith::ConstantIndexOp>(loc, 2);
+        Value halfValue = rewriter.create<arith::ConstantIndexOp>(loc, extent / 2);
+        Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+        Value empty =
+            rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{2 * extent}, fp.getFormat());
+        // Bin N/2 sits at element N of the compact input and at element N of
+        // the full spectrum for the same reason: both are two elements per
+        // complex value, and bin N/2 is complex index N/2 in each.
+        Value nyquistReal = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+        Value nyquistImaginary = rewriter.create<arith::ConstantIndexOp>(loc, extent + 1);
+        Value dc = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), zeroIndex);
+        Value nyquist = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), nyquistReal);
+        Value seeded = rewriter.create<tensor::InsertOp>(loc, dc, empty, zeroIndex);
+        seeded = rewriter.create<tensor::InsertOp>(loc, zero, seeded, one);
+        seeded = rewriter.create<tensor::InsertOp>(loc, nyquist, seeded, nyquistReal);
+        seeded = rewriter.create<tensor::InsertOp>(loc, zero, seeded, nyquistImaginary);
+        auto mirrorLoop = rewriter.create<scf::ForOp>(
+            loc, one, halfValue, one, ValueRange{seeded},
+            [&](OpBuilder &builder, Location loc, Value bin, ValueRange iterArgs) {
+              Value base = builder.create<arith::MulIOp>(loc, bin, two);
+              Value high = builder.create<arith::AddIOp>(loc, base, one);
+              Value real = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), base);
+              Value imaginary = builder.create<tensor::ExtractOp>(loc, adaptor.getInput(), high);
+              Value data = builder.create<tensor::InsertOp>(loc, real, iterArgs.front(), base);
+              data = builder.create<tensor::InsertOp>(loc, imaginary, data, high);
+              Value mirrored = builder.create<arith::SubIOp>(loc, extentValue, bin);
+              Value mirroredBase = builder.create<arith::MulIOp>(loc, mirrored, two);
+              Value mirroredHigh = builder.create<arith::AddIOp>(loc, mirroredBase, one);
+              data = builder.create<tensor::InsertOp>(loc, real, data, mirroredBase);
+              Value conjugated = builder.create<arith::NegFOp>(loc, imaginary);
+              builder.create<scf::YieldOp>(
+                  loc, builder.create<tensor::InsertOp>(loc, conjugated, data, mirroredHigh)
+                           .getResult());
+            });
+        Value outputs = lowerInterleavedFpCfftLoops(loc, mirrorLoop.getResult(0), extent,
+                                                    /*forward=*/false, fp, rewriter);
+        Value resultEmpty =
+            rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), fp.getFormat());
+        auto exportLoop = rewriter.create<scf::ForOp>(
+            loc, zeroIndex, extentValue, one, ValueRange{resultEmpty},
+            [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+              Value base = builder.create<arith::MulIOp>(loc, position, two);
+              Value real = builder.create<tensor::ExtractOp>(loc, outputs, base);
+              Value scaled = scaleFpByInverseExtent(loc, real, extent, fp.getFormat(), builder);
+              builder.create<scf::YieldOp>(
+                  loc, builder.create<tensor::InsertOp>(loc, scaled, iterArgs.front(), position)
+                           .getResult());
+            });
+        rewriter.replaceOp(op, exportLoop.getResult(0));
+        return success();
+      }
+      SmallVector<FpComplexValue> bins =
+          extractInterleavedFpComplex(loc, adaptor.getInput(), extent / 2 + 1, rewriter);
+      // Conjugation is an exact sign flip here; the packed profiles instead
+      // saturate, because negating their storage minimum leaves the format.
+      SmallVector<FpComplexValue> spectrum(extent);
+      spectrum.front() = {bins.front().real, zero};
+      spectrum[extent / 2] = {bins.back().real, zero};
+      for (int64_t index = 1; index < extent / 2; ++index) {
+        spectrum[index] = bins[index];
+        spectrum[extent - index] = {bins[index].real,
+                                    rewriter.create<arith::NegFOp>(loc, bins[index].imaginary)};
+      }
+      SmallVector<FpComplexValue> outputs =
+          lowerInterleavedFpCfft(loc, spectrum, /*forward=*/false, fp, rewriter);
+      Value result = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), fp.getFormat());
+      for (int64_t index = 0; index < extent; ++index) {
+        Value position = rewriter.create<arith::ConstantIndexOp>(loc, index);
+        Value scaled =
+            scaleFpByInverseExtent(loc, outputs[index].real, extent, fp.getFormat(), rewriter);
+        result = rewriter.create<tensor::InsertOp>(loc, scaled, result, position);
+      }
+      rewriter.replaceOp(op, result);
+      return success();
+    }
     ondrix::ondsp::PackedComplexProfile profile = getVerifiedPackedProfile(op.getLayout());
     IntegerType storage = rewriter.getIntegerType(profile.storageWidth);
     int64_t extent = op.getResult().getType().getDimSize(0);
@@ -671,8 +1118,8 @@ public:
           });
       Value outputs = lowerPackedCfftLoops(loc, mirrorLoop.getResult(0), extent,
                                            ondrix::ir::CfftDirection::Inverse, profile,
-                                           op.getLayout(), op.getNumeric(), op.getProduct(),
-                                           op.getProductScale(), op.getOutputScale(), rewriter);
+                                           op.getLayout(), op.getNumeric(), *op.getProduct(),
+                                           *op.getProductScale(), *op.getOutputScale(), rewriter);
       RankedTensorType resultType = op.getResult().getType();
       Value resultEmpty =
           rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
@@ -703,9 +1150,10 @@ public:
       spectrum[extent - index] = conjugatePackedSaturating(loc, compact[index], profile, rewriter);
     }
 
-    SmallVector<Value> outputs = lowerPackedCfft(
-        loc, spectrum, ondrix::ir::CfftDirection::Inverse, profile, op.getLayout(), op.getNumeric(),
-        op.getProduct(), op.getProductScale(), op.getOutputScale(), vectorizeStaticCfft, rewriter);
+    SmallVector<Value> outputs =
+        lowerPackedCfft(loc, spectrum, ondrix::ir::CfftDirection::Inverse, profile, op.getLayout(),
+                        op.getNumeric(), *op.getProduct(), *op.getProductScale(),
+                        *op.getOutputScale(), vectorizeStaticCfft, rewriter);
     RankedTensorType resultType = op.getResult().getType();
     Value result =
         rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());

@@ -153,6 +153,18 @@ struct PackedComplexProfile {
 /// interleaved, and the real-high packed spelling deliberately have none.
 std::optional<PackedComplexProfile> getPackedComplexProfile(ComplexLayout layout);
 
+/// Verifies the executable floating-point complex-transform profile: an
+/// `interleaved` layout, an executable format, and no requantization
+/// attributes at all. A floating-point transform contains no requantization
+/// boundary, so declaring `product`, `product_scale`, or `output_scale` would
+/// name a boundary the program does not have; the contract axis it does have
+/// is the format's own contract mode.
+mlir::LogicalResult verifyInterleavedFpTransformPolicy(mlir::Operation *op, CxLayoutAttr layout,
+                                                       FpAttr numeric, ProductAttr product,
+                                                       ScaleAttr productScale,
+                                                       ScaleAttr outputScale,
+                                                       llvm::StringRef executable);
+
 /// Verifies the executable packed radix-2 butterfly profile the layout
 /// selects: signed Q(storageWidth-1) numeric in matching storage, an exact
 /// full product and one product requantization by storageWidth - 1. The

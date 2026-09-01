@@ -80,3 +80,18 @@ func.func @icfft64_q31(%input: tensor<64xi64>) -> tensor<64xi64> {
   } : (tensor<64xi64>) -> tensor<64xi64>
   return %result : tensor<64xi64>
 }
+
+// The interleaved floating-point profile declares no requantization
+// attribute, so the round trip must not invent one.
+// CHECK-LABEL: func.func @f32_cfft
+// CHECK: ondrix.cfft
+// CHECK-NOT: product
+// CHECK-NOT: scale
+func.func @f32_cfft(%input: tensor<16xf32>) -> tensor<16xf32> {
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
+    layout = #ondsp.cx_layout<interleaved>,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<16xf32>) -> tensor<16xf32>
+  return %result : tensor<16xf32>
+}

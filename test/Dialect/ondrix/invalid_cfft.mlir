@@ -134,3 +134,80 @@ func.func @q31_rejects_narrow_output_destination(%input: tensor<4xi64>) -> tenso
   } : (tensor<4xi64>) -> tensor<4xi64>
   return %result : tensor<4xi64>
 }
+
+// -----
+
+func.func @fp_packed_layout(%input: tensor<16xf32>) -> tensor<16xf32> {
+  // expected-error@+1 {{floating-point CFFT requires interleaved layout}}
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<16xf32>) -> tensor<16xf32>
+  return %result : tensor<16xf32>
+}
+
+// -----
+
+func.func @fp_unsupported_format(%input: tensor<16xf64>) -> tensor<16xf64> {
+  // expected-error@+1 {{executable CFFT supports the f32 floating-point format}}
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
+    layout = #ondsp.cx_layout<interleaved>,
+    numeric = #ondsp.fp<format = f64, contract = off>
+  } : (tensor<16xf64>) -> tensor<16xf64>
+  return %result : tensor<16xf64>
+}
+
+// -----
+
+func.func @fp_declares_a_boundary(%input: tensor<16xf32>) -> tensor<16xf32> {
+  // expected-error@+1 {{floating-point CFFT has no requantization boundary to declare}}
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
+    layout = #ondsp.cx_layout<interleaved>,
+    numeric = #ondsp.fp<format = f32, contract = off>,
+    output_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 1, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (tensor<16xf32>) -> tensor<16xf32>
+  return %result : tensor<16xf32>
+}
+
+// -----
+
+func.func @fp_odd_element_count(%input: tensor<17xf32>) -> tensor<17xf32> {
+  // expected-error@+1 {{executable floating-point CFFT requires matching tensor<2Nxf32> input and result with power-of-two N in [4, 1024]}}
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
+    layout = #ondsp.cx_layout<interleaved>,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<17xf32>) -> tensor<17xf32>
+  return %result : tensor<17xf32>
+}
+
+// -----
+
+// An element count that is a power of two but denotes a transform size that is
+// not: the rule is about N, never about the element count.
+func.func @fp_non_power_of_two_size(%input: tensor<24xf32>) -> tensor<24xf32> {
+  // expected-error@+1 {{executable floating-point CFFT requires matching tensor<2Nxf32> input and result with power-of-two N in [4, 1024]}}
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
+    layout = #ondsp.cx_layout<interleaved>,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<24xf32>) -> tensor<24xf32>
+  return %result : tensor<24xf32>
+}
+
+// -----
+
+func.func @fixed_without_output_scale(%input: tensor<8xi32>) -> tensor<8xi32> {
+  // expected-error@+1 {{fixed-point transform requires product, product_scale, and output_scale}}
+  %result = ondrix.cfft %input {
+    direction = #ondrix.cfft_direction<forward>,
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (tensor<8xi32>) -> tensor<8xi32>
+  return %result : tensor<8xi32>
+}

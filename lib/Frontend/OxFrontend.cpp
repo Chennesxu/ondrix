@@ -200,7 +200,7 @@ private:
   unsigned column = 1;
 };
 
-enum class SourceType { Q15, Q31, F32, ComplexQ15, ComplexQ31 };
+enum class SourceType { Q15, Q31, F32, ComplexQ15, ComplexQ31, ComplexF32 };
 
 enum class ContainerKind { Scalar, Buffer, Tensor, Constexpr };
 
@@ -816,6 +816,19 @@ public:
       if (!operand)
         return std::nullopt;
       call.operands.push_back(std::move(*operand));
+      // The interleaved floating-point profile has no stage boundary, so its
+      // one axis is the contract mode; sema decides which parameter set the
+      // operand element type admits.
+      if (current.kind == TokenKind::Comma && next.spelling == "contract") {
+        if (!expect(TokenKind::Comma, "expected ',' before floating-point contract policy") ||
+            !expectIdentifier("contract", "expected floating-point contract policy") ||
+            !expect(TokenKind::Equal, "expected '=' after contract"))
+          return std::nullopt;
+        auto contract = parseIdentifier("expected floating-point contract mode");
+        if (!contract)
+          return std::nullopt;
+        call.fpContract = contract->spelling.str();
+      }
       // Only the CFFT profile admits a declared stage policy; one pair names
       // both scale boundaries, the shape the gated combinations share.
       // Omission keeps the nearest_even saturating default.
@@ -1429,6 +1442,10 @@ private:
     if (isIdentifier("complex_q31")) {
       advance();
       return SourceType::ComplexQ31;
+    }
+    if (isIdentifier("complex_f32")) {
+      advance();
+      return SourceType::ComplexF32;
     }
     diagnostics.error(current.position, message);
     return std::nullopt;
@@ -2644,6 +2661,45 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         }
         return ComposedType{complexQ31 ? SourceType::Q31 : SourceType::Q15, input->extent};
       }
+      // The interleaved floating-point profile covers all four transforms and
+      // reads its extent the same way: complex operands count transform
+      // points, an rfft real operand counts samples.
+      bool floatingTransform =
+          isFftKind(call.kind) &&
+          (input->elementType == SourceType::ComplexF32 ||
+           (call.kind == ReductionKind::Rfft && input->elementType == SourceType::F32));
+      if (floatingTransform) {
+        if (!call.rounding.empty() || !call.destinationOverflow.empty()) {
+          diagnostics.error(
+              call.position,
+              "a floating-point transform has no stage boundary to round or saturate");
+          return std::nullopt;
+        }
+        if (!parseFpContract(call.fpContract)) {
+          diagnostics.error(call.position,
+                            "a floating-point transform requires contract = off, fma, or fast");
+          return std::nullopt;
+        }
+        int64_t points =
+            call.kind == ReductionKind::Irfft ? (input->extent - 1) * 2 : input->extent;
+        int64_t minimumPoints = isCfftKind(call.kind) ? 4 : 8;
+        if (points < minimumPoints || points > 1024 || !llvm::isPowerOf2_64(points)) {
+          diagnostics.error(call.position,
+                            "a floating-point transform currently supports power-of-two sizes in "
+                            "[4, 1024], and [8, 1024] for the real spellings");
+          return std::nullopt;
+        }
+        if (call.kind == ReductionKind::Rfft)
+          return ComposedType{SourceType::ComplexF32, points / 2 + 1};
+        if (call.kind == ReductionKind::Irfft)
+          return ComposedType{SourceType::F32, points};
+        return *input;
+      }
+      if (isFftKind(call.kind) && !call.fpContract.empty()) {
+        diagnostics.error(call.position,
+                          "a fixed-point transform declares no floating-point contract");
+        return std::nullopt;
+      }
       if (isCfftKind(call.kind)) {
         if (input->elementType != SourceType::ComplexQ15 &&
             input->elementType != SourceType::ComplexQ31) {
@@ -2773,6 +2829,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   if (ast.primaryResult().type == SourceType::ComplexQ31) {
     diagnostics.error(ast.result.position, "complex_q31 is currently supported only by the cfft, "
                                            "icfft, rfft, and irfft builtins");
+    return std::nullopt;
+  }
+  if (ast.primaryResult().type == SourceType::ComplexF32) {
+    diagnostics.error(ast.result.position, "complex_f32 is currently supported only by the cfft, "
+                                           "icfft, and rfft builtins");
     return std::nullopt;
   }
 
@@ -3401,11 +3462,17 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     return builder.getF32Type();
   };
   Type elementType = getStorageType(kernel.ast.primaryResult().type);
-  auto materializeShape = [](llvm::ArrayRef<std::optional<int64_t>> shape) {
+  // complex_f32 is the one declared type whose extent is not its element
+  // count: each value occupies two adjacent elements of the trailing
+  // dimension, which is what `interleaved` means.
+  auto materializeShape = [](llvm::ArrayRef<std::optional<int64_t>> shape, SourceType type) {
     SmallVector<int64_t> dimensions;
     dimensions.reserve(shape.size());
     for (std::optional<int64_t> extent : shape)
       dimensions.push_back(extent.value_or(ShapedType::kDynamic));
+    if (type == SourceType::ComplexF32 && !dimensions.empty() &&
+        dimensions.back() != ShapedType::kDynamic)
+      dimensions.back() *= 2;
     return dimensions;
   };
   SmallVector<Type> inputTypes;
@@ -3416,19 +3483,20 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     if (parameter.isScalar())
       inputTypes.push_back(parameterElementType);
     else if (parameter.isTensor())
-      inputTypes.push_back(
-          RankedTensorType::get(materializeShape(parameter.shape), parameterElementType));
+      inputTypes.push_back(RankedTensorType::get(materializeShape(parameter.shape, parameter.type),
+                                                 parameterElementType));
     else
       inputTypes.push_back(
-          MemRefType::get(materializeShape(parameter.shape), parameterElementType));
+          MemRefType::get(materializeShape(parameter.shape, parameter.type), parameterElementType));
   }
   SmallVector<Type> resultTypes;
   resultTypes.reserve(kernel.ast.results.size());
   for (const ResultTypeAst &result : kernel.ast.results) {
     Type resultElementType = getStorageType(result.type);
-    resultTypes.push_back(result.tensor ? Type(RankedTensorType::get(materializeShape(result.shape),
-                                                                     resultElementType))
-                                        : resultElementType);
+    resultTypes.push_back(result.tensor
+                              ? Type(RankedTensorType::get(
+                                    materializeShape(result.shape, result.type), resultElementType))
+                              : resultElementType);
   }
   Type resultType = resultTypes.front();
   FunctionType functionType = builder.getFunctionType(inputTypes, resultTypes);
@@ -3493,6 +3561,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         &context, 1, 0, ondsp::RoundingMode::TowardNegative, ondsp::OverflowMode::Saturate, i32);
     auto q31StageOutput = ondsp::ScaleAttr::get(&context, 0, 1, ondsp::RoundingMode::TowardNegative,
                                                 ondsp::OverflowMode::Saturate, i32);
+    // The interleaved floating-point profile: sema admitted the contract mode
+    // per call site and refused every requantization parameter.
+    auto interleavedLayout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::Interleaved);
+    auto getFpNumeric = [&](const BuiltinCallAst &call) {
+      return ondsp::FpAttr::get(&context, builder.getF32Type(), *parseFpContract(call.fpContract));
+    };
     std::function<Value(const BuiltinCallAst &)> emitComposedCall =
         [&](const BuiltinCallAst &call) -> Value {
       if (call.kind == ReductionKind::FirFilter) {
@@ -3622,6 +3696,10 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         auto direction = ir::CfftDirectionAttr::get(&context, call.kind == ReductionKind::Cfft
                                                                   ? ir::CfftDirection::Forward
                                                                   : ir::CfftDirection::Inverse);
+        if (inputType.getElementType().isF32())
+          return builder.create<ir::CfftOp>(
+              callLocation, inputType, input, direction, interleavedLayout, getFpNumeric(call),
+              ondsp::ProductAttr(), ondsp::ScaleAttr(), ondsp::ScaleAttr());
         if (inputType.getElementType().isInteger(64))
           return builder.create<ir::CfftOp>(callLocation, inputType, input, direction, q31Layout,
                                             q31Numeric, q31Product, q31StageProduct,
@@ -3640,6 +3718,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       }
       if (call.kind == ReductionKind::Rfft) {
         int64_t realExtent = inputType.getDimSize(0);
+        if (inputType.getElementType().isF32()) {
+          auto outputType = RankedTensorType::get({realExtent + 2}, builder.getF32Type());
+          return builder.create<ir::RfftOp>(callLocation, outputType, input, interleavedLayout,
+                                            getFpNumeric(call), ondsp::ProductAttr(),
+                                            ondsp::ScaleAttr(), ondsp::ScaleAttr());
+        }
         // Q31 real samples arrive as i32 elements and produce packed i64
         // bins under the frozen profile.
         if (inputType.getElementType().isInteger(32)) {
@@ -3650,6 +3734,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         auto outputType = RankedTensorType::get({realExtent / 2 + 1}, builder.getI32Type());
         return builder.create<ir::RfftOp>(callLocation, outputType, input, layout, numeric, product,
                                           productScale, outputScale);
+      }
+      if (inputType.getElementType().isF32()) {
+        int64_t bins = inputType.getDimSize(0) / 2;
+        auto outputType = RankedTensorType::get({(bins - 1) * 2}, builder.getF32Type());
+        return builder.create<ir::IrfftOp>(callLocation, outputType, input, interleavedLayout,
+                                           getFpNumeric(call), ondsp::ProductAttr(),
+                                           ondsp::ScaleAttr(), ondsp::ScaleAttr());
       }
       int64_t realExtent = (inputType.getDimSize(0) - 1) * 2;
       if (inputType.getElementType().isInteger(64)) {

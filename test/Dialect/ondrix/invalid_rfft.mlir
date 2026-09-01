@@ -82,3 +82,49 @@ func.func @rfft_too_large(%input: tensor<2048xi16>) -> tensor<1025xi32> {
   } : (tensor<2048xi16>) -> tensor<1025xi32>
   return %result : tensor<1025xi32>
 }
+
+// -----
+
+func.func @fp_wrong_bin_count(%input: tensor<16xf32>) -> tensor<17xf32> {
+  // expected-error@+1 {{executable floating-point RFFT requires tensor<Nxf32> to tensor<(N+2)xf32> with power-of-two N in [8, 1024]}}
+  %result = ondrix.rfft %input {
+    layout = #ondsp.cx_layout<interleaved>,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<16xf32>) -> tensor<17xf32>
+  return %result : tensor<17xf32>
+}
+
+// -----
+
+func.func @fp_declares_a_product(%input: tensor<16xf32>) -> tensor<18xf32> {
+  // expected-error@+1 {{floating-point RFFT has no requantization boundary to declare}}
+  %result = ondrix.rfft %input {
+    layout = #ondsp.cx_layout<interleaved>,
+    numeric = #ondsp.fp<format = f32, contract = fma>,
+    product = #ondsp.product<full>
+  } : (tensor<16xf32>) -> tensor<18xf32>
+  return %result : tensor<18xf32>
+}
+
+// -----
+
+func.func @fp_irfft_wrong_bin_count(%input: tensor<17xf32>) -> tensor<16xf32> {
+  // expected-error@+1 {{executable floating-point IRFFT requires tensor<(N+2)xf32> to tensor<Nxf32> with power-of-two N in [8, 1024]}}
+  %result = ondrix.irfft %input {
+    layout = #ondsp.cx_layout<interleaved>,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<17xf32>) -> tensor<16xf32>
+  return %result : tensor<16xf32>
+}
+
+// -----
+
+func.func @fp_irfft_declares_a_scale(%input: tensor<18xf32>) -> tensor<16xf32> {
+  // expected-error@+1 {{floating-point IRFFT has no requantization boundary to declare}}
+  %result = ondrix.irfft %input {
+    layout = #ondsp.cx_layout<interleaved>,
+    numeric = #ondsp.fp<format = f32, contract = off>,
+    product_scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>
+  } : (tensor<18xf32>) -> tensor<16xf32>
+  return %result : tensor<16xf32>
+}

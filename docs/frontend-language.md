@@ -263,8 +263,43 @@ extents from 4 through 64, `rfft` over `q31` reals, and `irfft` back to
 them — and all emit the re-frozen packed-Q31 profile: raw-high per-term
 products and toward_negative saturating stage scaling. That profile has
 exactly one gated stage policy, so the optional `rounding=`/`overflow=`
-parameters admit only `toward_negative` and `saturate`; the other real and
-complex builtins remain Q15-only.
+parameters admit only `toward_negative` and `saturate`.
+
+`complex_f32` is the interleaved floating-point spelling, and it is the one
+declared type whose extent is not its element count: one complex value
+occupies two adjacent `f32` elements, real first, so `tensor[complex_f32,N]`
+is `tensor<2Nxf32>` in the emitted IR. The four FFT-family builtins accept it
+— `cfft`/`icfft` at static power-of-two sizes from 4 through 1024, `rfft`
+over `f32` reals and `irfft` back to them from 8 through 1024. A
+floating-point transform has no stage boundary, so it REFUSES `rounding=` and
+`overflow=` and instead REQUIRES `contract=`, which names the same
+`off`/`fma`/`fast` axis every other f32 builtin carries:
+
+```
+def spectrum(x: tensor[complex_f32,256]) -> tensor[complex_f32,256]:
+  return cfft(x, contract = fma)
+```
+
+Naming `contract=` on a fixed-point transform is refused for the mirror
+reason.
+
+Three fixed-point builtins gained a Q31 profile whose extra boundary is a
+per-call-site parameter, each required exactly where the boundary exists and
+refused where it does not:
+
+- `magnitude` exposes both of its boundaries, `input_rounding=` for the
+  component pre-shift the Q31 width forces and `root_rounding=` for the
+  square root. Naming `input_rounding=` at a width whose squares stay exact
+  is refused rather than ignored.
+- `matmul` and `lms` take `product_rounding=` for the per-term boundary their
+  Q31 tap/inner sums need. It is refused at Q15 and at `K = 1`, where the
+  derived shift is zero and there is no boundary to round.
+- `rms` takes `input_rounding=` for the Q31 pre-shift, alongside the
+  `root_rounding=` it already carried.
+
+All four admit `nearest_even` and `toward_negative`; `matmul` additionally
+admits `nearest_ties_positive`, and `lms` does not. Omission keeps the `nearest_even` default. The
+remaining real and complex builtins are Q15-only.
 
 As a bounded expression-composition slice, the unary FFT-family builtins may
 be nested when every intermediate type and extent satisfies the next

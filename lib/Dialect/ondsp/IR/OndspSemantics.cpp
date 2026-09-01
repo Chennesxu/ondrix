@@ -160,6 +160,19 @@ std::optional<PackedComplexProfile> getPackedComplexProfile(ComplexLayout layout
   return std::nullopt;
 }
 
+LogicalResult verifyInterleavedFpTransformPolicy(Operation *op, CxLayoutAttr layout, FpAttr numeric,
+                                                 ProductAttr product, ScaleAttr productScale,
+                                                 ScaleAttr outputScale, StringRef executable) {
+  if (layout.getLayout() != ComplexLayout::Interleaved)
+    return op->emitOpError() << "floating-point " << executable << " requires interleaved layout";
+  if (failed(verifyExecutableFpFormat(op, numeric, executable)))
+    return failure();
+  if (product || productScale || outputScale)
+    return op->emitOpError() << "floating-point " << executable
+                             << " has no requantization boundary to declare";
+  return success();
+}
+
 LogicalResult verifyPackedButterflyPolicy(Operation *op, CxLayoutAttr layout, Attribute numeric,
                                           ProductAttr product, ScaleAttr productScale,
                                           ScaleAttr outputScale, bool targetInventory) {

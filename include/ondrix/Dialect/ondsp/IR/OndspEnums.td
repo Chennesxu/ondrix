@@ -154,6 +154,10 @@ def Ondsp_FpContractMode : I32EnumAttr<
 }
 
 def Ondsp_CxSplit : I32EnumAttrCase<"Split", 0, "split">;
+// One complex value as two adjacent elements of the element format itself,
+// real first. The only layout that carries no packing, so it is the only one
+// a floating-point transform can use; the packed spellings below bit-pack two
+// integer components and are integer-only by construction.
 def Ondsp_CxInterleaved : I32EnumAttrCase<"Interleaved", 1, "interleaved">;
 def Ondsp_CxPackedImagHiRealLo
     : I32EnumAttrCase<"PackedI16ImagHiRealLo", 2,

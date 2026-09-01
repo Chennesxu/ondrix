@@ -593,7 +593,10 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
     * `packed_i16_imag_hi_real_lo`: signed Q15, matching `tensor<Nxi32>`
       input and result, `N` in `[4, 1024]`;
     * `packed_i32_imag_hi_real_lo`: signed Q31, matching `tensor<Nxi64>`
-      input and result, `N` in `[4, 64]`.
+      input and result, `N` in `[4, 64]`;
+    * `interleaved` with a floating-point `numeric`: one complex value as two
+      adjacent elements, real first, so the transform maps `tensor<2Nxf32>`
+      to itself, `N` in `[4, 1024]`.
 
     Each packed element uses the layout and finite-precision butterfly
     contract of `ondsp.cx_butterfly` under the same profile.
@@ -658,14 +661,47 @@ def Ondrix_CfftOp : Ondrix_Op<"cfft", [Pure]> {
     is the exception, always converting as the paired scalar form.
     Dynamic planning, other sizes, and other numeric profiles require
     separate extensions.
+
+    The interleaved floating-point profile declares none of `product`,
+    `product_scale`, and `output_scale`, because the program it denotes
+    contains no requantization boundary; its one contract axis is the
+    format's own `contract` mode, spent on the two multiply-add events of
+    each butterfly's complex product. Stage twiddles are the binary32
+    roundings of the same real-valued definition, evaluated in the compiler
+    without a tie guard for the reason stated on `ondrix.dct`'s f32
+    coefficients.
+
+    The stage legs whose twiddle is exactly one (index 0) and exactly `-+j`
+    (index `n/4`) CONTAIN NO PRODUCT EVENT. That is part of this contract,
+    not a strength reduction a later pass may undo or reintroduce: `0.0 * x`
+    is not the identity when `x` is infinite or a negative zero, and the
+    declared floating-point environment propagates both per IEEE 754. A leg
+    written as `a +- w*b` with `w = 1` would turn a `(+inf, -0.0)` operand
+    into a NaN imaginary component; the declared leg returns `-0.0`.
+
+    The inverse direction's `1/N` is a single final multiply rather than
+    `log2(N)` stage shifts. This is a DECLARED CHOICE, not a collapse
+    justified by equivalence: `2^-log2(N)` is exactly representable, so the
+    two orders agree bit for bit only while no intermediate leaves the
+    format's range. They diverge on overflow -- a size-4 inverse of four
+    `2^126` values reaches `2^128` before the final scaling and returns an
+    infinity where per-stage halving would have returned `2^126` -- and on
+    underflow to subnormal. The single multiply is what the contract names;
+    the fixed-point profiles, whose stage scaling is not optional, cannot
+    make even the bounded-range claim.
+
+    The opt-in loop-form lowering covers this profile too, and emits the
+    exact unit and quarter-turn phases as their own loops rather than
+    branching inside one, so it stays bit-identical to the unrolled form.
+    The Vector-batched lowering does not cover it.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondrix_CfftDirectionAttr:$direction,
                    Ondsp_CxLayoutAttr:$layout,
                    Ondsp_NumericAttr:$numeric,
-                   Ondsp_ProductAttr:$product,
-                   Ondsp_ScaleAttr:$product_scale,
-                   Ondsp_ScaleAttr:$output_scale);
+                   OptionalAttr<Ondsp_ProductAttr>:$product,
+                   OptionalAttr<Ondsp_ScaleAttr>:$product_scale,
+                   OptionalAttr<Ondsp_ScaleAttr>:$output_scale);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
@@ -679,7 +715,11 @@ def Ondrix_RfftOp : Ondrix_Op<"rfft", [Pure]> {
     complex layout. The layout selects the profile exactly as `ondrix.cfft`
     does: packed Q15 maps `tensor<Nxi16>` to `tensor<(N/2+1)xi32>` for `N` in
     `[8, 1024]`; packed Q31 maps `tensor<Nxi32>` to `tensor<(N/2+1)xi64>` for
-    `N` in `[8, 64]`, the frozen-table ceiling.
+    `N` in `[8, 64]`, the frozen-table ceiling. The `interleaved` layout with a
+    floating-point `numeric` maps `tensor<Nxf32>` to `tensor<(N+2)xf32>` --
+    `N/2+1` complex bins of two adjacent elements each -- for `N` in
+    `[8, 1024]`, and declares none of the three requantization attributes,
+    exactly as `ondrix.cfft` describes.
 
     The reference schedule embeds every real input `x[n]` as
     `x[n] + j*0`, evaluates the size-N staged radix-2 CFFT equation, and
@@ -709,9 +749,9 @@ def Ondrix_RfftOp : Ondrix_Op<"rfft", [Pure]> {
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_CxLayoutAttr:$layout,
                    Ondsp_NumericAttr:$numeric,
-                   Ondsp_ProductAttr:$product,
-                   Ondsp_ScaleAttr:$product_scale,
-                   Ondsp_ScaleAttr:$output_scale);
+                   OptionalAttr<Ondsp_ProductAttr>:$product,
+                   OptionalAttr<Ondsp_ScaleAttr>:$product_scale,
+                   OptionalAttr<Ondsp_ScaleAttr>:$output_scale);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
@@ -725,7 +765,9 @@ def Ondrix_IrfftOp : Ondrix_Op<"irfft", [Pure]> {
     layout selects the profile exactly as `ondrix.rfft` does: packed Q15
     maps `tensor<(N/2+1)xi32>` to `tensor<Nxi16>` for `N` in `[8, 1024]`;
     packed Q31 maps `tensor<(N/2+1)xi64>` to `tensor<Nxi32>` for `N` in
-    `[8, 64]`.
+    `[8, 64]`; interleaved f32 maps `tensor<(N+2)xf32>` to `tensor<Nxf32>`
+    for `N` in `[8, 1024]`, declaring none of the three requantization
+    attributes and applying the `1/N` normalization once at the end.
 
     The reference schedule canonicalizes the imaginary components of the DC
     and Nyquist bins to zero, copies bins `1..N/2-1`, and reconstructs bin
@@ -755,9 +797,9 @@ def Ondrix_IrfftOp : Ondrix_Op<"irfft", [Pure]> {
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_CxLayoutAttr:$layout,
                    Ondsp_NumericAttr:$numeric,
-                   Ondsp_ProductAttr:$product,
-                   Ondsp_ScaleAttr:$product_scale,
-                   Ondsp_ScaleAttr:$output_scale);
+                   OptionalAttr<Ondsp_ProductAttr>:$product,
+                   OptionalAttr<Ondsp_ScaleAttr>:$product_scale,
+                   OptionalAttr<Ondsp_ScaleAttr>:$output_scale);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
