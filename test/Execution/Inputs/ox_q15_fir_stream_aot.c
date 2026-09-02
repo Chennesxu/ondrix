@@ -28,7 +28,7 @@ static const struct Policy policy = {
     .update_overflow = WRAP,
     .state_rounding = NEAREST_EVEN,
     .state_overflow = SATURATE,
-    .output_rounding = NEAREST_EVEN,
+    .output_rounding = NEAREST_TIES_POSITIVE,
     .output_overflow = SATURATE,
 };
 

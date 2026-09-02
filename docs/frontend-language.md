@@ -374,10 +374,9 @@ def q15_fir_stream(
 The chunk extent may be dynamic. Coefficient, state, and next-state extents are
 static, with `state_length = coefficient_length - 1`; output extent follows the
 input chunk. With the policy omitted, a Q15 stream uses the same inferred exact
-accumulation as a static-tap FIR sample and a `nearest_even` saturating export
-(this binding predates the add-half family default below and keeps its own);
-an explicit `accumulator=exact[40,...]`, `rounding=`, `overflow=` triple
-overrides it. A Q31 stream must spell that triple with width 64, because two
+accumulation as a static-tap FIR sample and the export-default
+`nearest_ties_positive` saturating export; an explicit
+`accumulator=exact[40,...]`, `rounding=`, `overflow=` triple overrides it. A Q31 stream must spell that triple with width 64, because two
 Q31 products already leave i64 and no inferred width makes the update mode
 vacuous. Next state is the chronological raw-sample suffix and is not
 requantized, so whole and split chunks have identical output and final-state

@@ -10,7 +10,7 @@
 // CHECK: %[[OUTPUT:.*]], %[[NEXT:.*]] = ondrix.fir_stream
 // CHECK-SAME: accumulator = !ondsp.acc<storage = i33, frac = 30, signed, update_overflow = wrap>
 // CHECK-SAME: overflow = #ondsp.overflow<saturate>
-// CHECK-SAME: rounding = #ondsp.rounding<nearest_even>
+// CHECK-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
 // CHECK: return %[[OUTPUT]], %[[NEXT]]
 
 // The spelled contract at the width where two products already leave i64.

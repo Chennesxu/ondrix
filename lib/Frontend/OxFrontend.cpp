@@ -2087,7 +2087,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       ast.result.accumulatorWidth =
           inferQ15FullAccumulatorWidth(static_cast<uint64_t>(coefficientExtent));
       return CheckedKernel{std::move(ast), ondsp::OverflowMode::Wrap,
-                           ondsp::RoundingMode::NearestEven, ondsp::OverflowMode::Saturate,
+                           ondsp::RoundingMode::NearestTiesPositive, ondsp::OverflowMode::Saturate,
                            std::nullopt};
     } else {
       if (ast.result.accumulatorWidth != (isQ31 ? 64u : 40u)) {
