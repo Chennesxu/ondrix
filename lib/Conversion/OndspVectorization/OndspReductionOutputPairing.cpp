@@ -67,9 +67,17 @@ struct ReductionWeb {
   int64_t length = 0;
 };
 
+/// The value a chain of `memref.cast`s re-types, which is where a static
+/// extent lives when the reduction's operand was cast to a dynamic one.
+Value peelCasts(Value value) {
+  while (auto cast = value.getDefiningOp<memref::CastOp>())
+    value = cast.getSource();
+  return value;
+}
+
 /// Static extent of a rank-1 memref whose element type is `storage`.
 std::optional<int64_t> getStreamLength(Value value, Type storage) {
-  auto type = dyn_cast<MemRefType>(value.getType());
+  auto type = dyn_cast<MemRefType>(peelCasts(value).getType());
   if (!type || type.getRank() != 1 || type.isDynamicDim(0) || type.getElementType() != storage)
     return std::nullopt;
   return type.getDimSize(0);
@@ -212,8 +220,9 @@ using LaneEmitter = llvm::function_ref<std::pair<Value, Value>(OpBuilder &, Loca
 /// coefficient and the lane values enter as the vector operand, so both lanes
 /// visit the indices in the order the ordered reduction declared.
 Value emitPairedWeb(OpBuilder &builder, Location loc, ReductionWeb web, Value shared,
-                    LaneEmitter emitLanes) {
+                    LaneEmitter emitLanes, std::optional<int64_t> chainLength = std::nullopt) {
   MLIRContext *context = builder.getContext();
+  int64_t length = chainLength.value_or(web.length);
   auto laneAccumulator = ondrix::ondsp::AccType::get(
       context, web.accumulator.getStorage(), web.accumulator.getFrac(),
       web.accumulator.getSignedness(), web.accumulator.getUpdateOverflow(),
@@ -236,12 +245,12 @@ Value emitPairedWeb(OpBuilder &builder, Location loc, ReductionWeb web, Value sh
   };
 
   Value accumulator = builder.create<ondrix::ondsp::AccZeroOp>(loc, laneAccumulator);
-  if (web.length <= kMaxUnrolledLength) {
-    for (int64_t index = 0; index < web.length; ++index)
+  if (length <= kMaxUnrolledLength) {
+    for (int64_t index = 0; index < length; ++index)
       accumulator = emitStep(builder, loc, accumulator, getIndexLiteral(builder, loc, index));
   } else {
     Value lower = builder.create<arith::ConstantIndexOp>(loc, 0);
-    Value upper = builder.create<arith::ConstantIndexOp>(loc, web.length);
+    Value upper = builder.create<arith::ConstantIndexOp>(loc, length);
     Value step = builder.create<arith::ConstantIndexOp>(loc, 1);
     auto loop = builder.create<scf::ForOp>(
         loc, lower, upper, step, ValueRange{accumulator},
@@ -768,6 +777,217 @@ void pairPackedColumnLoops(memref::AllocOp alloc) {
   alloc.erase();
 }
 
+//===----------------------------------------------------------------------===//
+// Sliding-window output loops
+//===----------------------------------------------------------------------===//
+
+/// A loop of consecutive outputs over sliding windows of one stream: output
+/// `n` reduces `stream[n .. n + K)` against a loop-invariant coefficient stream
+/// of length `K` and stores at `dst[n]`.
+struct WindowLoop {
+  scf::ForOp loop;
+  ReductionWeb web;
+  memref::SubViewOp view;
+  Value stream;
+  Value coefficients;
+  int64_t lower = 0;
+  int64_t upper = 0;
+};
+
+/// Matches the window loop rooted at `loop`. The body is exactly the window
+/// view (plus casts of it), and one web whose window side is that view and
+/// whose other side is available before the loop; the store's only index is
+/// the induction variable.
+FailureOr<WindowLoop> matchWindowLoop(scf::ForOp loop) {
+  std::optional<int64_t> lower = getConstantIntValue(loop.getLowerBound());
+  std::optional<int64_t> upper = getConstantIntValue(loop.getUpperBound());
+  std::optional<int64_t> step = getConstantIntValue(loop.getStep());
+  if (!loop.getInitArgs().empty() || !lower || !upper || !step || *step != 1 || *upper <= *lower)
+    return failure();
+
+  SmallVector<Operation *> body = getShapeOperations(*loop.getBody());
+  auto view = body.empty() ? nullptr : dyn_cast<memref::SubViewOp>(body.front());
+  if (!view)
+    return failure();
+  ondrix::ondsp::AccZeroOp zero;
+  for (Operation *op : body)
+    if (auto candidate = dyn_cast<ondrix::ondsp::AccZeroOp>(op))
+      zero = candidate;
+  if (!zero)
+    return failure();
+  FailureOr<ReductionWeb> web = matchReductionWeb(zero);
+  if (failed(web))
+    return failure();
+  DenseSet<Operation *> admitted{view, web->zero, web->reduce, web->exportOp, web->store};
+  for (Operation *op : body) {
+    if (admitted.contains(op))
+      continue;
+    auto cast = dyn_cast<memref::CastOp>(op);
+    if (!cast || peelCasts(cast.getSource()) != view.getResult())
+      return failure();
+  }
+
+  Value induction = loop.getInductionVar();
+  auto sourceType = dyn_cast<MemRefType>(view.getSource().getType());
+  if (!sourceType || sourceType.getRank() != 1 || !sourceType.hasStaticShape() ||
+      !sourceType.getLayout().isIdentity() || view.getType().getRank() != 1)
+    return failure();
+  SmallVector<OpFoldResult> offsets = view.getMixedOffsets();
+  SmallVector<OpFoldResult> sizes = view.getMixedSizes();
+  SmallVector<OpFoldResult> strides = view.getMixedStrides();
+  if (offsets.size() != 1 || offsets.front().dyn_cast<Value>() != induction ||
+      getConstantIntValue(sizes.front()) != web->length ||
+      getConstantIntValue(strides.front()) != 1)
+    return failure();
+
+  Value lhs = peelCasts(web->reduce.getLhs());
+  Value rhs = peelCasts(web->reduce.getRhs());
+  Value coefficients;
+  if (lhs == view.getResult() && rhs != view.getResult())
+    coefficients = web->reduce.getRhs();
+  else if (rhs == view.getResult() && lhs != view.getResult())
+    coefficients = web->reduce.getLhs();
+  else
+    return failure();
+  if (!isAvailableAt(coefficients, loop) || !isAvailableAt(view.getSource(), loop))
+    return failure();
+
+  Value destination = web->store.getMemRef();
+  if (!isAvailableAt(destination, loop) || web->store.getIndices().size() != 1 ||
+      web->store.getIndices().front() != induction)
+    return failure();
+  // Output `n` is stored after output `n + 1`'s window and coefficients are
+  // read, and the coefficient pairs are packed before the loop runs, so the
+  // destination must be provably distinct from both streams.
+  if (ondrix::conversion::mayShareStorage(destination, view.getSource()) ||
+      ondrix::conversion::mayShareStorage(destination, coefficients))
+    return failure();
+
+  WindowLoop match;
+  match.loop = loop;
+  match.web = *web;
+  match.view = view;
+  match.stream = view.getSource();
+  match.coefficients = coefficients;
+  match.lower = *lower;
+  match.upper = *upper;
+  return match;
+}
+
+/// Emits the coefficient pair buffer: slot `2j` holds `c[j]` and slot `2j + 1`
+/// holds `c[j - 1]`, with `c[-1]` and `c[K]` the exact zero, so one word at
+/// step `j` carries lane 0's tap `j` and lane 1's tap `j - 1`.
+Value emitCoefficientPairBuffer(OpBuilder &builder, Location loc, Value coefficients, int64_t taps,
+                                Type storage) {
+  auto pairType = MemRefType::get({kLanes * (taps + 1)}, storage);
+  auto alloc = builder.create<memref::AllocaOp>(loc, pairType, builder.getI64IntegerAttr(4));
+  Value zero = builder.create<arith::ConstantOp>(loc, builder.getZeroAttr(storage));
+  builder.create<memref::StoreOp>(loc, zero, alloc, getIndexLiteral(builder, loc, 1).value);
+  builder.create<memref::StoreOp>(loc, zero, alloc,
+                                  getIndexLiteral(builder, loc, kLanes * taps).value);
+  Value lower = builder.create<arith::ConstantIndexOp>(loc, 0);
+  Value upper = builder.create<arith::ConstantIndexOp>(loc, taps);
+  Value step = builder.create<arith::ConstantIndexOp>(loc, 1);
+  builder.create<scf::ForOp>(
+      loc, lower, upper, step, ValueRange{},
+      [&](OpBuilder &bodyBuilder, Location bodyLoc, Value tap, ValueRange) {
+        Value coefficient =
+            bodyBuilder.create<memref::LoadOp>(bodyLoc, coefficients, ValueRange{tap});
+        FoldedIndex index{tap, std::nullopt};
+        Value ownSlot = getScaledIndex(bodyBuilder, bodyLoc, index, kLanes, 0).value;
+        Value nextSlot = getScaledIndex(bodyBuilder, bodyLoc, index, kLanes, 3).value;
+        bodyBuilder.create<memref::StoreOp>(bodyLoc, coefficient, alloc, ownSlot);
+        bodyBuilder.create<memref::StoreOp>(bodyLoc, coefficient, alloc, nextSlot);
+        bodyBuilder.create<scf::YieldOp>(bodyLoc);
+      });
+  return alloc.getResult();
+}
+
+/// Emits outputs `n` and `n + 1` of a window loop as one dual-lane web over the
+/// `K + 1` samples both windows span: the sample is the scalar coefficient and
+/// the pair buffer supplies each lane's tap.
+void emitWindowPair(OpBuilder &builder, Location loc, WindowLoop match, Value pairBuffer,
+                    FoldedIndex first) {
+  int64_t taps = match.web.length;
+  OpFoldResult offset = first.literal ? OpFoldResult(builder.getIndexAttr(*first.literal))
+                                      : OpFoldResult(first.value);
+  auto windowType = memref::SubViewOp::inferRankReducedResultType(
+      {taps + 1}, cast<MemRefType>(match.stream.getType()), {offset},
+      {builder.getIndexAttr(taps + 1)}, {builder.getIndexAttr(1)});
+  Value window = builder.create<memref::SubViewOp>(
+      loc, cast<MemRefType>(windowType), match.stream, ArrayRef<OpFoldResult>{offset},
+      ArrayRef<OpFoldResult>{builder.getIndexAttr(taps + 1)},
+      ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
+  Value exported = emitPairedWeb(
+      builder, loc, match.web, window,
+      [&](OpBuilder &stepBuilder, Location stepLoc, FoldedIndex index) {
+        auto [low, high] = getLaneSlots(stepBuilder, stepLoc, index);
+        Value lowValue = stepBuilder.create<memref::LoadOp>(stepLoc, pairBuffer, ValueRange{low});
+        Value highValue = stepBuilder.create<memref::LoadOp>(stepLoc, pairBuffer, ValueRange{high});
+        return std::make_pair(lowValue, highValue);
+      },
+      taps + 1);
+  Value second = getScaledIndex(builder, loc, first, 1, 1).value;
+  storeLane(builder, loc, exported, 0, match.web.store.getMemRef(), first.value);
+  storeLane(builder, loc, exported, 1, match.web.store.getMemRef(), second);
+}
+
+/// Rewrites a matched window loop into a walk over output pairs, leaving an odd
+/// last output on the original single-lane loop.
+void rewriteWindowLoop(WindowLoop match) {
+  int64_t taps = match.web.length;
+  int64_t outputs = match.upper - match.lower;
+  int64_t pairs = outputs / 2;
+  OpBuilder builder(match.loop);
+  Location loc = match.loop.getLoc();
+  Value pairBuffer = emitCoefficientPairBuffer(builder, loc, match.coefficients, taps,
+                                               match.web.numeric.getStorage());
+  if (pairs * (taps + 1) <= kMaxUnrolledPairBody) {
+    for (int64_t pair = 0; pair < pairs; ++pair)
+      emitWindowPair(builder, loc, match, pairBuffer,
+                     getIndexLiteral(builder, loc, match.lower + kLanes * pair));
+  } else {
+    Value lower = builder.create<arith::ConstantIndexOp>(loc, 0);
+    Value upper = builder.create<arith::ConstantIndexOp>(loc, pairs);
+    Value step = builder.create<arith::ConstantIndexOp>(loc, 1);
+    builder.create<scf::ForOp>(
+        loc, lower, upper, step, ValueRange{},
+        [&](OpBuilder &pairBuilder, Location pairLoc, Value pair, ValueRange) {
+          FoldedIndex first =
+              getScaledIndex(pairBuilder, pairLoc, {pair, std::nullopt}, kLanes, match.lower);
+          emitWindowPair(pairBuilder, pairLoc, match, pairBuffer, first);
+          pairBuilder.create<scf::YieldOp>(pairLoc);
+        });
+  }
+  if (outputs % 2 == 0) {
+    match.loop.erase();
+    return;
+  }
+  match.loop.getLowerBoundMutable().assign(
+      builder.create<arith::ConstantIndexOp>(loc, match.lower + kLanes * pairs));
+}
+
+/// Pairs every window loop the pass can prove. The coefficient pair buffer is a
+/// stack allocation, so the loop must sit directly in an automatic allocation
+/// scope and the buffer inside the stack budget.
+void pairWindowLoops(ModuleOp module) {
+  SmallVector<scf::ForOp> loops;
+  module.walk([&](scf::ForOp loop) { loops.push_back(loop); });
+  for (scf::ForOp loop : loops) {
+    if (!loop->getParentOp()->hasTrait<OpTrait::AutomaticAllocationScope>())
+      continue;
+    FailureOr<WindowLoop> match = matchWindowLoop(loop);
+    if (failed(match))
+      continue;
+    int64_t elementBytes =
+        llvm::divideCeil(cast<IntegerType>(match->web.numeric.getStorage()).getWidth(), 8);
+    if (kLanes * (match->web.length + 1) * elementBytes > kMaxPairBufferBytes ||
+        match->upper - match->lower < kLanes)
+      continue;
+    rewriteWindowLoop(*match);
+  }
+}
+
 class PairOndspFixedReductionOutputsPass final
     : public ondrix::impl::PairOndspFixedReductionOutputsBase<PairOndspFixedReductionOutputsPass> {
 public:
@@ -783,6 +1003,7 @@ public:
     module.walk([&](memref::AllocOp alloc) { allocations.push_back(alloc); });
     for (memref::AllocOp alloc : allocations)
       pairPackedColumnLoops(alloc);
+    pairWindowLoops(module);
 
     SmallVector<Block *> blocks;
     module.walk([&](Block *block) { blocks.push_back(block); });

@@ -210,3 +210,42 @@ func.func @refuse_foreign_pack_buffer_user(%arg0: memref<4x4xi16>, %arg1: memref
   memref.dealloc %alloc_0 : memref<4x4xi16>
   return %alloc : memref<4x4xi16>
 }
+
+// A window loop whose destination is the stream it slides over: output n is
+// stored after output n+1's window is read, so the pairing is refused.
+// CHECK-LABEL: func.func @refuse_window_loop_storing_into_stream
+// CHECK: ondsp.reduce_mac
+func.func @refuse_window_loop_storing_into_stream(%arg0: memref<12xi16>, %arg1: memref<4xi16>) {
+  %c9 = arith.constant 9 : index
+  %c1 = arith.constant 1 : index
+  %c0 = arith.constant 0 : index
+  scf.for %n = %c0 to %c9 step %c1 {
+    %subview = memref.subview %arg0[%n] [4] [1] : memref<12xi16> to memref<4xi16, strided<[1], offset: ?>>
+    %0 = ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = saturate>
+    %1 = ondsp.reduce_mac %0, %subview, %arg1 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<4xi16, strided<[1], offset: ?>>, memref<4xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %2 = ondsp.acc_export %1 {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<nearest_ties_positive>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+    memref.store %2, %arg0[%n] : memref<12xi16>
+  }
+  return
+}
+
+// The window matcher pairs consecutive outputs, so a store whose index is not
+// the induction variable itself is not that shape.
+// CHECK-LABEL: func.func @refuse_window_loop_scattered_store
+// CHECK: ondsp.reduce_mac
+func.func @refuse_window_loop_scattered_store(%arg0: memref<12xi16>, %arg1: memref<4xi16>) -> memref<18xi16> {
+  %c9 = arith.constant 9 : index
+  %c2 = arith.constant 2 : index
+  %c1 = arith.constant 1 : index
+  %c0 = arith.constant 0 : index
+  %alloc = memref.alloc() {alignment = 64 : i64} : memref<18xi16>
+  scf.for %n = %c0 to %c9 step %c1 {
+    %subview = memref.subview %arg0[%n] [4] [1] : memref<12xi16> to memref<4xi16, strided<[1], offset: ?>>
+    %0 = ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = saturate>
+    %1 = ondsp.reduce_mac %0, %subview, %arg1 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<4xi16, strided<[1], offset: ?>>, memref<4xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    %2 = ondsp.acc_export %1 {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<nearest_ties_positive>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+    %3 = arith.muli %n, %c2 : index
+    memref.store %2, %alloc[%3] : memref<18xi16>
+  }
+  return %alloc : memref<18xi16>
+}

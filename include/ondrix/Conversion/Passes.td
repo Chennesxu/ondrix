@@ -787,12 +787,25 @@ def PairOndspFixedReductionOutputs
     was the reduction's lhs this swaps the operand roles, which is exact
     because the full Q15 product is commutative.
 
-    Two matchers reach the paired form. The straight-line matcher pairs
+    Three matchers reach the paired form. The straight-line matcher pairs
     consecutive webs of one block whose differing streams are private constant
     globals, and interleaves those two tables into a single `2K`-element pair
     global. The column-loop matcher recognizes a transposed pack buffer feeding
     a loop over the packed rows, adds a pack nest that writes adjacent output
-    columns interleaved, and rewrites the column loop over output pairs.
+    columns interleaved, and rewrites the column loop over output pairs. The
+    window-loop matcher recognizes a loop of consecutive outputs over sliding
+    windows of one stream against a loop-invariant coefficient stream — the
+    valid-boundary FIR on the bufferized route — and pairs outputs `n` and
+    `n + 1` with the roles turned around: the `K + 1` samples both windows
+    span become the scalar coefficient, and the lanes read a pair buffer whose
+    slot `2j` holds tap `j` and slot `2j + 1` tap `j - 1`, with `c[-1]` and
+    `c[K]` the exact zero. A step whose product is exactly zero leaves the
+    accumulator unchanged under every declared overflow mode, so each lane
+    still performs its declared `K` updates in increasing tap order with one
+    identity step interposed, and the pairing stays exact. The pair buffer is
+    packed once before the loop, so the coefficient stream must be provably
+    distinct from the destination; an odd last output stays on the original
+    single-lane loop.
 
     Both interleaved buffers carry `alignment = 4`, which is what lets the
     backend merge each lane pair's two 16-bit loads into one aligned 32-bit
