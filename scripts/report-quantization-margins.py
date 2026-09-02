@@ -48,7 +48,7 @@ import hashlib
 import struct
 import sys
 
-from mpmath import cos, floor, mp, mpf, pi, sin
+from mpmath import atan, cos, floor, log, mp, mpf, pi, sin
 
 mp.dps = 50
 
@@ -293,6 +293,19 @@ def main():
     for k in range(1024):
         sine_table_q31.add(sin(2 * pi * k / 1024))
     profiles.append(sine_table_q31)
+
+    # The three Q31-profile transcendental tables, each read by a residual
+    # series; their scales are the descriptions' (Q30, 2^31 unsigned, 2^33).
+    log2_table_q31 = Profile("log2_table1024_q30", fractional_bits=30, guard=Q31_GUARD_LSB)
+    exp2_table_q31 = Profile("exp2_table1024_u31", fractional_bits=31, guard=Q31_GUARD_LSB)
+    atan_table_q32 = Profile("atan_table1024_q33", fractional_bits=33, guard=Q31_GUARD_LSB)
+    for k in range(1024):
+        log2_table_q31.add(log(1 + mpf(k) / 1024) / log(2))
+        # The exp2 table lives in [2^31, 2^32); offsetting it by the integer
+        # 2^31 keeps it inside the profile's range and moves no tie margin.
+        exp2_table_q31.add(mpf(2) ** (mpf(k) / 1024) - 1)
+        atan_table_q32.add(atan(mpf(k) / 1024) / (2 * pi))
+    profiles.extend([log2_table_q31, exp2_table_q31, atan_table_q32])
 
     print(f"tie guard: {float(GUARD_LSB):.6e} Q15 LSB (2^-20)")
     if all([profile.report() for profile in profiles]):

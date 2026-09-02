@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -316,20 +317,190 @@ static std::optional<SmallVector<int32_t>> buildArctangentTable() {
   return buildDeclaredTable(8192, [](double t) { return std::atan(t) / kTwoPi * 65536.0; });
 }
 
+// The Q31-profile tables: 1024 coarse points read by a correction series
+// rather than by interpolation, quantized under the Q31 tie guard at the scale
+// each description names and stored as raw 32-bit words (the exp2 table reads
+// back unsigned). An optional exact endpoint closes the arctangent's eighth turn.
+static std::optional<SmallVector<int32_t>>
+buildQ31Table(double scale, llvm::function_ref<double(double)> exactValue,
+              std::optional<int64_t> exactEndpoint) {
+  SmallVector<int32_t> table;
+  table.reserve(1025);
+  for (int64_t k = 0; k < 1024; ++k) {
+    std::optional<int64_t> word = ondrix::quantizeGuardedAtScale(exactValue(k / 1024.0), scale);
+    if (!word || *word < 0 || *word > 0xFFFFFFFFLL)
+      return std::nullopt;
+    table.push_back(static_cast<int32_t>(static_cast<uint32_t>(*word)));
+  }
+  if (exactEndpoint)
+    table.push_back(static_cast<int32_t>(*exactEndpoint));
+  return table;
+}
+
+static std::optional<SmallVector<int32_t>> buildLog2TableQ31() {
+  return buildQ31Table(
+      1073741824.0, [](double t) { return std::log2(1.0 + t); }, std::nullopt);
+}
+
+static std::optional<SmallVector<int32_t>> buildExp2TableQ31() {
+  return buildQ31Table(
+      2147483648.0, [](double t) { return std::exp2(t); }, std::nullopt);
+}
+
+static std::optional<SmallVector<int32_t>> buildArctangentTableQ32() {
+  constexpr double kTwoPi = 6.28318530717958647692528676655900577;
+  return buildQ31Table(
+      8589934592.0, [](double t) { return std::atan(t) / kTwoPi; }, int64_t(1) << 30);
+}
+
+// The Q0.32 turn: the ratio is carried to 2^-32 and the arctangent is the
+// exact angle addition `atan(x) = atan(r_k) + atan(u)` with
+// `u = (x - r_k) / (1 + x*r_k)` below 2^-10, so `atan(u) ~ u - u^3/3` needs
+// one table. The component unpack is the Q0.16 path's; only the turn differs.
+static LogicalResult lowerWideTurnCxPhase(ondrix::ir::CxPhaseOp op, Value input,
+                                          ConversionPatternRewriter &rewriter) {
+  std::optional<SmallVector<int32_t>> table = buildArctangentTableQ32();
+  if (!table)
+    return rewriter.notifyMatchFailure(op,
+                                       "Q0.32 arctangent table entry is not tie-guard admissible");
+  Location loc = op.getLoc();
+  MLIRContext *context = rewriter.getContext();
+  IntegerType i32 = rewriter.getIntegerType(32);
+  IntegerType i64 = rewriter.getIntegerType(64);
+  ondrix::ondsp::PackedComplexProfile profile =
+      *ondrix::ondsp::getPackedComplexProfile(op.getLayout().getLayout());
+  IntegerType component = rewriter.getIntegerType(profile.storageWidth);
+  IntegerType container = rewriter.getIntegerType(profile.containerWidth);
+  RankedTensorType resultType = op.getResult().getType();
+  int64_t extent = resultType.getDimSize(0);
+  auto turnScale =
+      ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, /*postShiftRight=*/33,
+                                    op.getRounding(), ondrix::ondsp::OverflowMode::Saturate, i32);
+  Value tableConstant = rewriter.create<arith::ConstantOp>(
+      loc,
+      DenseElementsAttr::get(RankedTensorType::get({1025}, i32), llvm::ArrayRef<int32_t>(*table)));
+  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+  Value empty = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), i32);
+  // 1/(2*pi) at 2^40, which returns the radian correction to turns.
+  Value inverseTwoPi = rewriter.create<arith::ConstantIntOp>(loc, 174992710548LL, i64);
+
+  auto loop = rewriter.create<scf::ForOp>(
+      loc, zero, extentValue, one, ValueRange{empty},
+      [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+        auto constant = [&](int64_t value) -> Value {
+          return builder.create<arith::ConstantIntOp>(loc, value, i64);
+        };
+        Value packed = builder.create<tensor::ExtractOp>(loc, input, position);
+        Value real = builder.create<arith::ExtSIOp>(
+            loc, i64, builder.create<arith::TruncIOp>(loc, component, packed));
+        Value imaginary = builder.create<arith::ExtSIOp>(
+            loc, i64,
+            builder.create<arith::TruncIOp>(
+                loc, component,
+                builder.create<arith::ShRSIOp>(
+                    loc, packed,
+                    builder.create<arith::ConstantIntOp>(loc, profile.storageWidth, container))));
+        Value zero64 = constant(0);
+        Value absReal = builder.create<arith::MaxSIOp>(
+            loc, real, builder.create<arith::SubIOp>(loc, zero64, real));
+        Value absImaginary = builder.create<arith::MaxSIOp>(
+            loc, imaginary, builder.create<arith::SubIOp>(loc, zero64, imaginary));
+        Value swapped =
+            builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, absImaginary, absReal);
+        Value high = builder.create<arith::MaxSIOp>(loc, absReal, absImaginary);
+        Value low = builder.create<arith::MinSIOp>(loc, absReal, absImaginary);
+        Value atOrigin = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, high, zero64);
+        Value divisor = builder.create<arith::SelectOp>(loc, atOrigin, constant(1), high);
+        // The ratio at 2^-32, rounded once. Unsigned throughout: low reaches
+        // 2^31 at the component minimum and its shifted numerator is 2^63.
+        Value numerator = builder.create<arith::ShLIOp>(loc, low, constant(32));
+        Value quotient = builder.create<arith::DivUIOp>(loc, numerator, divisor);
+        Value remainder = builder.create<arith::SubIOp>(
+            loc, numerator, builder.create<arith::MulIOp>(loc, quotient, divisor));
+        Value doubled = builder.create<arith::AddIOp>(loc, remainder, remainder);
+        Value aboveHalf =
+            builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, doubled, divisor);
+        Value atHalf =
+            builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, doubled, divisor);
+        Value odd = builder.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::ne,
+            builder.create<arith::AndIOp>(loc, quotient, constant(1)), zero64);
+        Value stepUp = builder.create<arith::OrIOp>(
+            loc, aboveHalf, builder.create<arith::AndIOp>(loc, atHalf, odd));
+        Value ratio = builder.create<arith::AddIOp>(
+            loc, quotient, builder.create<arith::SelectOp>(loc, stepUp, constant(1), zero64));
+        // Coarse point k = x at 2^-10 (1024 when the ratio is exactly one),
+        // residual d below it, then u = d / (1 + x*r_k) at 2^-32.
+        Value coarse = builder.create<arith::ShRUIOp>(loc, ratio, constant(22));
+        Value residual = builder.create<arith::SubIOp>(
+            loc, ratio, builder.create<arith::ShLIOp>(loc, coarse, constant(22)));
+        Value denominator = builder.create<arith::AddIOp>(
+            loc, constant(int64_t(1) << 42), builder.create<arith::MulIOp>(loc, ratio, coarse));
+        Value u = builder.create<arith::DivUIOp>(
+            loc, builder.create<arith::ShLIOp>(loc, residual, constant(42)), denominator);
+        Value uSquare = builder.create<arith::ShRUIOp>(
+            loc, builder.create<arith::MulIOp>(loc, u, u), constant(22));
+        Value uCube = builder.create<arith::ShRUIOp>(
+            loc, builder.create<arith::MulIOp>(loc, uSquare, u), constant(22));
+        Value linear = builder.create<arith::ShRUIOp>(
+            loc, builder.create<arith::MulIOp>(loc, u, inverseTwoPi), constant(7));
+        Value cubic = builder.create<arith::ShRUIOp>(
+            loc,
+            builder.create<arith::DivUIOp>(
+                loc, builder.create<arith::MulIOp>(loc, uCube, inverseTwoPi), constant(3)),
+            constant(27));
+        Value correction = builder.create<arith::SubIOp>(loc, linear, cubic);
+        Value coarseIdx = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), coarse);
+        Value tableWord = builder.create<arith::ExtSIOp>(
+            loc, i64, builder.create<tensor::ExtractOp>(loc, tableConstant, coarseIdx));
+        Value total = builder.create<arith::AddIOp>(
+            loc, builder.create<arith::ShLIOp>(loc, tableWord, constant(32)), correction);
+        Value base = builder.create<arith::ExtSIOp>(
+            loc, i64, builder.create<ondrix::ondsp::RoundShiftOp>(loc, i32, total, turnScale));
+        // Exact turn arithmetic from here: the octant fold and quadrant
+        // unfold, then the truncation is the modulo-2^32 turn.
+        Value folded = builder.create<arith::SelectOp>(
+            loc, swapped, builder.create<arith::SubIOp>(loc, constant(int64_t(1) << 30), base),
+            base);
+        Value nonNegativeReal =
+            builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, real, zero64);
+        Value nonNegativeImaginary =
+            builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, imaginary, zero64);
+        Value half = constant(int64_t(1) << 31);
+        Value right = builder.create<arith::SelectOp>(
+            loc, nonNegativeImaginary, folded, builder.create<arith::SubIOp>(loc, zero64, folded));
+        Value left = builder.create<arith::SelectOp>(
+            loc, nonNegativeImaginary, builder.create<arith::SubIOp>(loc, half, folded),
+            builder.create<arith::AddIOp>(loc, half, folded));
+        Value turn = builder.create<arith::SelectOp>(loc, nonNegativeReal, right, left);
+        Value selected = builder.create<arith::SelectOp>(loc, atOrigin, zero64, turn);
+        Value narrowed = builder.create<arith::TruncIOp>(loc, i32, selected);
+        Value inserted =
+            builder.create<tensor::InsertOp>(loc, narrowed, iterArgs.front(), position);
+        builder.create<scf::YieldOp>(loc, inserted);
+      });
+  rewriter.replaceOp(op, loop.getResult(0));
+  return success();
+}
+
 class CxPhaseOpLowering final : public OpConversionPattern<ondrix::ir::CxPhaseOp> {
 public:
   using OpConversionPattern<ondrix::ir::CxPhaseOp>::OpConversionPattern;
 
   LogicalResult matchAndRewrite(ondrix::ir::CxPhaseOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    std::optional<SmallVector<int32_t>> table = buildArctangentTable();
-    if (!table)
-      return rewriter.notifyMatchFailure(op, "arctangent table entry is not tie-guard admissible");
     // The ratio division below writes nearest-even inline (its divisor is a
     // runtime value, so round_div cannot carry it). Same self-guard as exp2:
     // one operation must not follow two tie rules without a diagnostic.
     if (op.getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
       return rewriter.notifyMatchFailure(op, "cx_phase lowering implements nearest_even only");
+    if (op.getOutputNumeric().getStorage().isSignlessInteger(32))
+      return lowerWideTurnCxPhase(op, adaptor.getInput(), rewriter);
+    std::optional<SmallVector<int32_t>> table = buildArctangentTable();
+    if (!table)
+      return rewriter.notifyMatchFailure(op, "arctangent table entry is not tie-guard admissible");
 
     Location loc = op.getLoc();
     MLIRContext *context = rewriter.getContext();
@@ -467,12 +638,193 @@ public:
   }
 };
 
+// The Q31 logarithm: exponent plus a 1024-point Q30 table plus the series
+// log2(1 + r) ~ (r - r^2/2) / ln 2 for the residual ratio r below 2^-10, which
+// one 64-bit division supplies. The dropped cubic term is under 2^-31 of a
+// unit, and the only rounding boundary is the return to Q6.26.
+static LogicalResult lowerQ31Log2(ondrix::ir::Log2Op op, Value input,
+                                  ConversionPatternRewriter &rewriter) {
+  std::optional<SmallVector<int32_t>> table = buildLog2TableQ31();
+  if (!table)
+    return rewriter.notifyMatchFailure(op, "Q31 log2 table entry is not tie-guard admissible");
+  Location loc = op.getLoc();
+  MLIRContext *context = rewriter.getContext();
+  IntegerType i32 = rewriter.getIntegerType(32);
+  IntegerType i64 = rewriter.getIntegerType(64);
+  RankedTensorType resultType = op.getResult().getType();
+  int64_t extent = resultType.getDimSize(0);
+  auto mantissaScale =
+      ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, /*postShiftRight=*/30,
+                                    op.getRounding(), ondrix::ondsp::OverflowMode::Saturate, i32);
+  Value tableConstant = rewriter.create<arith::ConstantOp>(
+      loc,
+      DenseElementsAttr::get(RankedTensorType::get({1024}, i32), llvm::ArrayRef<int32_t>(*table)));
+  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+  Value empty = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), i32);
+  // 1/ln2 at 2^24 for the linear term and at 2^13 for the halved square, so
+  // both land at 2^56 alongside the table word.
+  Value linearScale = rewriter.create<arith::ConstantIntOp>(loc, 24204406, i64);
+  Value squareScale = rewriter.create<arith::ConstantIntOp>(loc, 11819, i64);
+
+  auto loop = rewriter.create<scf::ForOp>(
+      loc, zero, extentValue, one, ValueRange{empty},
+      [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+        auto constant32 = [&](int64_t value) -> Value {
+          return builder.create<arith::ConstantIntOp>(loc, value, i32);
+        };
+        auto constant64 = [&](int64_t value) -> Value {
+          return builder.create<arith::ConstantIntOp>(loc, value, i64);
+        };
+        Value magnitude = builder.create<tensor::ExtractOp>(loc, input, position);
+        Value isPole =
+            builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, magnitude, constant32(0));
+        // The pole takes the declared value; its arithmetic path is fed a one
+        // so no shift amount reaches the width.
+        Value safe = builder.create<arith::SelectOp>(loc, isPole, constant32(1), magnitude);
+        Value exponent = builder.create<arith::SubIOp>(
+            loc, constant32(31), builder.create<math::CountLeadingZerosOp>(loc, safe));
+        Value mantissa = builder.create<arith::ExtUIOp>(
+            loc, i64,
+            builder.create<arith::ShLIOp>(
+                loc, safe, builder.create<arith::SubIOp>(loc, constant32(31), exponent)));
+        Value coarse = builder.create<arith::ShRUIOp>(loc, mantissa, constant64(21));
+        Value base = builder.create<arith::ShLIOp>(loc, coarse, constant64(21));
+        Value residual = builder.create<arith::SubIOp>(loc, mantissa, base);
+        Value ratio = builder.create<arith::DivUIOp>(
+            loc, builder.create<arith::ShLIOp>(loc, residual, constant64(32)), base);
+        Value ratioSquare = builder.create<arith::ShRUIOp>(
+            loc, builder.create<arith::MulIOp>(loc, ratio, ratio), constant64(22));
+        Value series = builder.create<arith::SubIOp>(
+            loc, builder.create<arith::MulIOp>(loc, ratio, linearScale),
+            builder.create<arith::MulIOp>(loc, ratioSquare, squareScale));
+        Value tableIdx = builder.create<arith::IndexCastOp>(
+            loc, builder.getIndexType(),
+            builder.create<arith::SubIOp>(loc, coarse, constant64(1024)));
+        Value tableWord = builder.create<arith::ExtSIOp>(
+            loc, i64, builder.create<tensor::ExtractOp>(loc, tableConstant, tableIdx));
+        Value total = builder.create<arith::AddIOp>(
+            loc, builder.create<arith::ShLIOp>(loc, tableWord, constant64(26)), series);
+        Value fraction =
+            builder.create<ondrix::ondsp::RoundShiftOp>(loc, i32, total, mantissaScale);
+        Value binade = builder.create<arith::ShLIOp>(
+            loc, builder.create<arith::SubIOp>(loc, exponent, constant32(32)), constant32(26));
+        Value sum = builder.create<arith::AddIOp>(loc, binade, fraction);
+        Value selected = builder.create<arith::SelectOp>(loc, isPole, constant32(INT32_MIN), sum);
+        Value inserted =
+            builder.create<tensor::InsertOp>(loc, selected, iterArgs.front(), position);
+        builder.create<scf::YieldOp>(loc, inserted);
+      });
+  rewriter.replaceOp(op, loop.getResult(0));
+  return success();
+}
+
+// The Q31 exponential: a 1024-point table of 2^(k/1024) at 2^31 read back
+// unsigned, the series 2^x - 1 ~ a + a^2/2 + a^3/6 with a = x ln 2 below
+// 2^-10.5, and the binade placement taken on the 2^62-scaled product so the
+// whole element has ONE rounding boundary where the Q15 profile needs two.
+static LogicalResult lowerQ31Exp2(ondrix::ir::Exp2Op op, Value input,
+                                  ConversionPatternRewriter &rewriter) {
+  std::optional<SmallVector<int32_t>> table = buildExp2TableQ31();
+  if (!table)
+    return rewriter.notifyMatchFailure(op, "Q31 exp2 table entry is not tie-guard admissible");
+  Location loc = op.getLoc();
+  IntegerType i32 = rewriter.getIntegerType(32);
+  IntegerType i64 = rewriter.getIntegerType(64);
+  RankedTensorType resultType = op.getResult().getType();
+  int64_t extent = resultType.getDimSize(0);
+  Value tableConstant = rewriter.create<arith::ConstantOp>(
+      loc,
+      DenseElementsAttr::get(RankedTensorType::get({1024}, i32), llvm::ArrayRef<int32_t>(*table)));
+  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+  Value empty = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), i32);
+  Value logTwo = rewriter.create<arith::ConstantIntOp>(loc, 762123384786LL, i64); // ln 2 at 2^40
+
+  auto loop = rewriter.create<scf::ForOp>(
+      loc, zero, extentValue, one, ValueRange{empty},
+      [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+        auto constant32 = [&](int64_t value) -> Value {
+          return builder.create<arith::ConstantIntOp>(loc, value, i32);
+        };
+        auto constant64 = [&](int64_t value) -> Value {
+          return builder.create<arith::ConstantIntOp>(loc, value, i64);
+        };
+        Value value = builder.create<tensor::ExtractOp>(loc, input, position);
+        Value aboveRange =
+            builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, value, constant32(0));
+        Value exponent = builder.create<arith::ShRSIOp>(loc, value, constant32(26));
+        Value fraction = builder.create<arith::AndIOp>(loc, value, constant32((1 << 26) - 1));
+        Value coarseIdx = builder.create<arith::IndexCastOp>(
+            loc, builder.getIndexType(),
+            builder.create<arith::ShRUIOp>(loc, fraction, constant32(16)));
+        Value residual = builder.create<arith::ExtUIOp>(
+            loc, i64, builder.create<arith::AndIOp>(loc, fraction, constant32(0xFFFF)));
+        // a = x ln2 at 2^40 and its two powers, then 2^x - 1 at 2^40.
+        Value angle = builder.create<arith::ShRUIOp>(
+            loc, builder.create<arith::MulIOp>(loc, residual, logTwo), constant64(26));
+        Value square = builder.create<arith::ShRUIOp>(
+            loc, builder.create<arith::MulIOp>(loc, angle, angle), constant64(40));
+        Value cube = builder.create<arith::ShRUIOp>(
+            loc, builder.create<arith::MulIOp>(loc, square, angle), constant64(40));
+        Value series = builder.create<arith::AddIOp>(
+            loc,
+            builder.create<arith::AddIOp>(
+                loc, angle, builder.create<arith::ShRUIOp>(loc, square, constant64(1))),
+            builder.create<arith::DivUIOp>(loc, cube, constant64(6)));
+        Value tableWord = builder.create<arith::ExtUIOp>(
+            loc, i64, builder.create<tensor::ExtractOp>(loc, tableConstant, coarseIdx));
+        // The mantissa at 2^62: table word at 2^31 plus its scaled series.
+        Value wide = builder.create<arith::AddIOp>(
+            loc, builder.create<arith::ShLIOp>(loc, tableWord, constant64(31)),
+            builder.create<arith::ShRUIOp>(
+                loc, builder.create<arith::MulIOp>(loc, tableWord, series), constant64(9)));
+        // The binade placement is the one boundary, written out because its
+        // amount is input-dependent; above the range the amount is pinned
+        // away from an undefined shift and the ceiling is selected instead.
+        Value places = builder.create<arith::ExtSIOp>(
+            loc, i64,
+            builder.create<arith::SelectOp>(
+                loc, aboveRange, constant32(31),
+                builder.create<arith::SubIOp>(loc, constant32(30), exponent)));
+        Value quotient = builder.create<arith::ShRUIOp>(loc, wide, places);
+        Value remainder = builder.create<arith::SubIOp>(
+            loc, wide, builder.create<arith::ShLIOp>(loc, quotient, places));
+        Value half = builder.create<arith::ShLIOp>(
+            loc, constant64(1), builder.create<arith::SubIOp>(loc, places, constant64(1)));
+        Value aboveHalf =
+            builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, remainder, half);
+        Value atHalf =
+            builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, remainder, half);
+        Value odd = builder.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::ne,
+            builder.create<arith::AndIOp>(loc, quotient, constant64(1)), constant64(0));
+        Value stepUp = builder.create<arith::OrIOp>(
+            loc, aboveHalf, builder.create<arith::AndIOp>(loc, atHalf, odd));
+        Value rounded = builder.create<arith::AddIOp>(
+            loc, quotient,
+            builder.create<arith::SelectOp>(loc, stepUp, constant64(1), constant64(0)));
+        Value selected =
+            builder.create<arith::SelectOp>(loc, aboveRange, constant64(0xFFFFFFFFLL), rounded);
+        Value narrowed = builder.create<arith::TruncIOp>(loc, i32, selected);
+        Value inserted =
+            builder.create<tensor::InsertOp>(loc, narrowed, iterArgs.front(), position);
+        builder.create<scf::YieldOp>(loc, inserted);
+      });
+  rewriter.replaceOp(op, loop.getResult(0));
+  return success();
+}
+
 class Log2OpLowering final : public OpConversionPattern<ondrix::ir::Log2Op> {
 public:
   using OpConversionPattern<ondrix::ir::Log2Op>::OpConversionPattern;
 
   LogicalResult matchAndRewrite(ondrix::ir::Log2Op op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumeric().getStorage().isSignlessInteger(32))
+      return lowerQ31Log2(op, adaptor.getInput(), rewriter);
     std::optional<SmallVector<int32_t>> table = buildLog2Table();
     if (!table)
       return rewriter.notifyMatchFailure(op, "log2 table entry is not tie-guard admissible");
@@ -553,15 +905,17 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ir::Exp2Op op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    std::optional<SmallVector<int32_t>> table = buildExp2Table();
-    if (!table)
-      return rewriter.notifyMatchFailure(op, "exp2 table entry is not tie-guard admissible");
     // The binade placement below writes nearest-even inline (its shift
     // amount is input-dependent, so round_shift cannot carry it). The
     // verifier pins the mode; this guard keeps the lowering from silently
     // applying two different rules if that pin is ever widened.
     if (op.getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
       return rewriter.notifyMatchFailure(op, "exp2 lowering implements nearest_even only");
+    if (op.getNumeric().getStorage().isSignlessInteger(32))
+      return lowerQ31Exp2(op, adaptor.getInput(), rewriter);
+    std::optional<SmallVector<int32_t>> table = buildExp2Table();
+    if (!table)
+      return rewriter.notifyMatchFailure(op, "exp2 table entry is not tie-guard admissible");
 
     Location loc = op.getLoc();
     MLIRContext *context = rewriter.getContext();

@@ -132,8 +132,8 @@ fully overlapping interior. Dynamic full output, same padding, stride,
 dilation, streaming state, mutable destinations, and tensor indexing remain
 available only through textual MLIR contracts.
 
-The first source resampling slice exposes valid, phase-zero Q15 FIR decimation
-by two:
+The first source resampling slice exposes valid, phase-zero FIR decimation
+by two, at Q15, Q31 or f32:
 
 ```python
 def q15_fir_decimate(
@@ -144,13 +144,16 @@ def q15_fir_decimate(
 All extents are static and the result must have
 `floor((input_length - coefficient_length) / 2) + 1` elements. Each output
 uses the same increasing-tap ordered FIR equation and portable accumulator
-inference as other static Q15 feed-forward reductions. It can lower through
-the generic scalar path or through direct bufferization into ordered
+inference as other static Q15 feed-forward reductions; a Q31 site spells its
+`accumulator=exact[64,...]`, `rounding=`, `overflow=` triple after the
+factor, since no inferred width holds its 62-bit products. It can lower
+through the generic scalar path or through direct bufferization into ordered
 fixed-width Vector products plus a scalar tail. Other factors, dynamic shapes,
-nonzero phase, cross-output polyphase lowering, and Q31 resampling are not
-part of this source slice.
+nonzero phase, and cross-output polyphase lowering are not part of this
+source slice.
 
-Static phase-zero Q15 FIR interpolation by two is also available:
+Static phase-zero FIR interpolation by two is also available, at the same
+three widths:
 
 ```python
 def q15_fir_interpolate(
@@ -299,9 +302,9 @@ refused where it does not:
 
 All four admit `nearest_even` and `toward_negative`; `matmul` additionally
 admits `nearest_ties_positive`, and `lms` does not. Omission keeps the
-`nearest_even` default. Of the remaining fixed-point builtins, `log2`, `exp2`
-and `butterfly` are Q15-only, and `phase` takes `complex_q15` or `complex_q31`
-operands but always returns the Q0.16 turn in `q15` storage.
+`nearest_even` default. Of the remaining fixed-point builtins only
+`butterfly` is Q15-only; `log2` and `exp2` take `q31`, and `phase` takes
+`complex_q15` or `complex_q31` operands and either turn width (see below).
 
 As a bounded expression-composition slice, the unary FFT-family builtins may
 be nested when every intermediate type and extent satisfies the next
@@ -508,19 +511,25 @@ guarantee the language makes.
 
 ### Transcendental Builtins
 
-`log2(x)` and `exp2(x)` are inverses of each other over static rank-1 Q15
-tensors. The source type system names only the i16 storage, so the two
+`log2(x)` and `exp2(x)` are inverses of each other over static rank-1 Q15 or
+Q31 tensors. The source type system names only the storage, so the two
 readings their contract distinguishes — the unsigned `Q0.16` magnitude and
-the signed `Q5.11` exponent — are supplied by the binding rather than spelled
-at the call site, the same projection `dct`'s derived output fraction uses.
-Neither is part of the composable set yet, so like `dct`, `rms`, `sine`, and
-`cosine` they take an operand name rather than a nested expression.
+the signed `Q5.11` exponent at `q15`, the unsigned `Q0.32` magnitude and the
+signed `Q6.26` exponent at `q31` — are supplied by the binding rather than
+spelled at the call site, the same projection `dct`'s derived output fraction
+uses. Neither is part of the composable set yet, so like `dct`, `rms`,
+`sine`, and `cosine` they take an operand name rather than a nested
+expression.
 
-`phase(z)` maps a `complex_q15` tensor to the unsigned turn its elements'
-arguments name, in the same reading `sine` consumes. It composes exactly
-where `magnitude` does — `phase(rfft(x))` is the phase spectrum. Its contract
-admits exactly one tie rule, so unlike `magnitude`'s `root_rounding=` there
-is no rounding parameter to accept, and spelling one is a parse error.
+`phase(z)` maps a `complex_q15` or `complex_q31` tensor to the unsigned turn
+its elements' arguments name, in the reading `sine` consumes. It composes
+exactly where `magnitude` does — `phase(rfft(x))` is the phase spectrum. The
+one call-site choice is the turn width, independent of the component width:
+`phase(z)` and `phase(z, turn=q15)` return the `Q0.16` turn in `q15` storage
+for the Q15 sine, `phase(z, turn=q31)` the `Q0.32` turn in `q31` storage for
+the Q31 sine. Its contract admits exactly one tie rule, so unlike
+`magnitude`'s `root_rounding=` there is no rounding parameter to accept, and
+spelling one is an error.
 
 ### Elementwise Builtins
 

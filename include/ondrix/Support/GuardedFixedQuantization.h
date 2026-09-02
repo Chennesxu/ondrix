@@ -87,6 +87,24 @@ inline std::optional<GuardedQ31Value> quantizeGuardedQ31(double real) {
   return GuardedQ31Value{static_cast<int32_t>(quantized), false};
 }
 
+// The same guarded nearest-integer quantization for a table whose scale is
+// not a Q-format's own: `real * scale` under the Q31 tie guard, with no clamp,
+// so a caller states the range its table occupies and checks it. The Q31
+// guard is the right one for every scale between 2^30 and 2^33, where the
+// binary64 ulp measured in LSB lies between 2^-22 and 2^-19.
+inline std::optional<int64_t> quantizeGuardedAtScale(double real, double scale) {
+  if (!std::isfinite(real))
+    return std::nullopt;
+  double scaled = real * scale;
+  double lower = std::floor(scaled);
+  if (std::fabs(lower) >= 4611686018427387904.0)
+    return std::nullopt;
+  double fraction = scaled - lower;
+  if (std::fabs(fraction - 0.5) < kQ31TieGuardLsb)
+    return std::nullopt;
+  return static_cast<int64_t>(lower) + (fraction > 0.5 ? 1 : 0);
+}
+
 } // namespace ondrix
 
 #endif // ONDRIX_SUPPORT_GUARDEDFIXEDQUANTIZATION_H

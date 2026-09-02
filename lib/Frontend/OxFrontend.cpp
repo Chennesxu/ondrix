@@ -368,6 +368,7 @@ struct BuiltinCallAst {
   std::string stateOverflow;
   std::string fpContract;
   std::string boundary;
+  std::string turn;
   int64_t factor = 0;
   int64_t window = 0;
   int64_t gain = 0;
@@ -858,12 +859,30 @@ public:
       return call;
     }
     if (call.kind == ReductionKind::Phase) {
-      // The phase contract admits exactly one tie rule, so unlike magnitude
-      // there is no rounding choice to expose at the call site.
+      // The phase contract admits exactly one tie rule, so the only choice at
+      // the call site is the turn width; omission keeps the Q0.16 turn.
       std::optional<ExpressionAst> operand = parseComposedOperand();
       if (!operand)
         return std::nullopt;
       call.operands.push_back(std::move(*operand));
+      if (current.kind == TokenKind::Comma) {
+        advance();
+        std::optional<Token> name = parseIdentifier("expected phase turn width");
+        if (!name || name->spelling != "turn" ||
+            !expect(TokenKind::Equal, "expected '=' after turn")) {
+          if (name && name->spelling != "turn")
+            diagnostics.error(name->position, "phase accepts only turn=q15 or turn=q31");
+          return std::nullopt;
+        }
+        std::optional<Token> width = parseIdentifier("expected phase turn width");
+        if (!width)
+          return std::nullopt;
+        if (width->spelling != "q15" && width->spelling != "q31") {
+          diagnostics.error(width->position, "phase accepts only turn=q15 or turn=q31");
+          return std::nullopt;
+        }
+        call.turn = width->spelling.str();
+      }
       if (!expect(TokenKind::RightParen, "expected ')' after phase operand"))
         return std::nullopt;
       return call;
@@ -2706,6 +2725,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                             "phase currently requires an operand extent in [1, 4096]");
           return std::nullopt;
         }
+        // The turn width is the call site's, independent of the component
+        // width; the i32 storage of a Q0.32 turn is spelled q31 here.
+        if (call.turn == "q31")
+          return ComposedType{SourceType::Q31, input->extent};
         return ComposedType{SourceType::Q15, input->extent};
       }
       if (call.kind == ReductionKind::Magnitude) {
@@ -3149,13 +3172,13 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         ast.result.kind == ReductionKind::Dct || ast.result.kind == ReductionKind::Gain ||
         ast.result.kind == ReductionKind::Goertzel;
     bool isFloat = ast.primaryResult().type == SourceType::F32;
-    // log2/exp2 are the two that still hardcode Q15 widths in their
-    // verifiers; every other member here carries a Q31 profile.
+    // Every fixed-point member here carries a Q31 profile.
     bool admitsQ31 =
         ast.result.kind == ReductionKind::Rms || ast.result.kind == ReductionKind::Dct ||
         ast.result.kind == ReductionKind::Gain || ast.result.kind == ReductionKind::MovingAverage ||
         ast.result.kind == ReductionKind::CicDecimate || ast.result.kind == ReductionKind::Sine ||
-        ast.result.kind == ReductionKind::Cosine;
+        ast.result.kind == ReductionKind::Cosine || ast.result.kind == ReductionKind::Log2 ||
+        ast.result.kind == ReductionKind::Exp2;
     bool isQ31 = ast.primaryResult().type == SourceType::Q31;
     // The Q15 goertzel energy is tensor<1xi64>, a storage width no source
     // type names, so only the f32 profile has a spelling here.
@@ -3781,13 +3804,14 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       }
       Location callLocation = getLocation(context, sourceName, call.position);
       if (call.kind == ReductionKind::Phase) {
-        // The result reading is the unsigned Q0.16 turn at either component
-        // width; the source type system names only the i16 storage, so the
-        // binding supplies it — the same projection log2/exp2 use.
+        // The result reading is the unsigned turn at the declared width; the
+        // source type system names only the storage, so the binding supplies
+        // the reading — the same projection log2/exp2 use.
         bool wideComponents = inputType.getElementType().isSignlessInteger(64);
-        auto outputType = RankedTensorType::get({inputType.getDimSize(0)}, builder.getI16Type());
-        auto turn =
-            ondsp::FixedAttr::get(&context, ondsp::Signedness::Unsigned, builder.getI16Type(), 16);
+        IntegerType turnStorage = call.turn == "q31" ? i32 : i16;
+        auto outputType = RankedTensorType::get({inputType.getDimSize(0)}, turnStorage);
+        auto turn = ondsp::FixedAttr::get(&context, ondsp::Signedness::Unsigned, turnStorage,
+                                          turnStorage.getWidth());
         return builder.create<ir::CxPhaseOp>(
             callLocation, outputType, input, wideComponents ? q31Layout : layout,
             wideComponents ? q31Numeric : numeric, turn,
@@ -3963,13 +3987,15 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
           ondsp::OverflowModeAttr::get(&context, *kernel.stateOverflow), rounding);
     } else if (kernel.ast.result.kind == ReductionKind::Log2 ||
                kernel.ast.result.kind == ReductionKind::Exp2) {
-      // The source type system names only the i16 storage, so the two
-      // readings the contract distinguishes are supplied here rather than
-      // spelled at the call site; the projection is safe because the pair
-      // does not compose with anything that would misread the scale.
+      // The source type system names only the storage, so the two readings
+      // the contract distinguishes are supplied here rather than spelled at
+      // the call site; the projection is safe because the pair does not
+      // compose with anything that would misread the scale.
+      unsigned width = cast<IntegerType>(elementType).getWidth();
       auto magnitude =
-          ondsp::FixedAttr::get(&context, ondsp::Signedness::Unsigned, elementType, 16);
-      auto exponent = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 11);
+          ondsp::FixedAttr::get(&context, ondsp::Signedness::Unsigned, elementType, width);
+      auto exponent = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType,
+                                            width == 16 ? 11 : 26);
       if (kernel.ast.result.kind == ReductionKind::Log2)
         result = builder.create<ir::Log2Op>(expressionLocation, outputType, lhs, magnitude,
                                             exponent, rounding);

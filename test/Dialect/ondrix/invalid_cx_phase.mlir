@@ -1,9 +1,9 @@
 // RUN: ondrix-opt %s --split-input-file --verify-diagnostics
 
-// The result reading is the unsigned Q0.16 turn; a Q15 declaration would
-// silently rescale every phase by half.
+// The result reading is an unsigned turn; a Q15 declaration would silently
+// rescale every phase by half.
 func.func @phase_with_the_q15_reading(%input: tensor<8xi32>) -> tensor<8xi16> {
-  // expected-error @below {{cx_phase returns the unsigned Q0.16 turn and must declare that reading}}
+  // expected-error @below {{cx_phase returns the unsigned Q0.16 or Q0.32 turn and must declare that reading}}
   %result = ondrix.cx_phase %input {
     layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
@@ -50,4 +50,18 @@ func.func @phase_with_mismatched_extents(%input: tensor<8xi32>) -> tensor<4xi16>
     rounding = #ondsp.rounding<nearest_even>
   } : (tensor<8xi32>) -> tensor<4xi16>
   return %result : tensor<4xi16>
+}
+
+// -----
+
+// The result storage follows the declared turn, not the component width.
+func.func @phase_turn32_in_narrow_storage(%input: tensor<8xi32>) -> tensor<8xi16> {
+  // expected-error @below {{executable phase requires tensor<Nxi32> to tensor<Nxi32> with static N in [1, 4096]}}
+  %result = ondrix.cx_phase %input {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    output_numeric = #ondsp.fixed<unsigned, storage = i32, frac = 32>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi32>) -> tensor<8xi16>
+  return %result : tensor<8xi16>
 }

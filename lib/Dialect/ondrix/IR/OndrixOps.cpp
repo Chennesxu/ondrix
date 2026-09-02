@@ -1466,28 +1466,36 @@ static LogicalResult verifyTrigValueDomain(Operation *op, Attribute numeric,
   return success();
 }
 
-// The two readings are opposite ends of the same pair, so one helper states
-// which is which and neither operation can quietly declare the other's.
+// The two readings are opposite ends of the same pair at one width, so one
+// helper states which is which and neither operation can quietly declare the
+// other's: Q0.16 with Q5.11 at sixteen bits, Q0.32 with Q6.26 at thirty-two.
 static LogicalResult verifyExponentialDomain(Operation *op, ondrix::ondsp::FixedAttr numeric,
                                              ondrix::ondsp::FixedAttr outputNumeric,
                                              ondrix::ondsp::RoundingMode rounding,
                                              RankedTensorType inputType,
                                              RankedTensorType resultType, bool inputIsMagnitude) {
-  auto isMagnitude = [](ondrix::ondsp::FixedAttr attr) {
+  auto isMagnitude = [](ondrix::ondsp::FixedAttr attr, unsigned width) {
     return attr.getSignedness() == ondrix::ondsp::Signedness::Unsigned &&
-           attr.getStorage().isSignlessInteger(16) && attr.getFrac() == 16;
+           attr.getStorage().isSignlessInteger(width) && attr.getFrac() == width;
   };
-  auto isExponent = [](ondrix::ondsp::FixedAttr attr) {
+  auto isExponent = [](ondrix::ondsp::FixedAttr attr, unsigned width) {
     return attr.getSignedness() == ondrix::ondsp::Signedness::Signed &&
-           attr.getStorage().isSignlessInteger(16) && attr.getFrac() == 11;
+           attr.getStorage().isSignlessInteger(width) && attr.getFrac() == (width == 16 ? 11 : 26);
   };
-  bool ok = inputIsMagnitude ? (isMagnitude(numeric) && isExponent(outputNumeric))
-                             : (isExponent(numeric) && isMagnitude(outputNumeric));
-  if (!ok)
+  ondrix::ondsp::FixedAttr magnitude = inputIsMagnitude ? numeric : outputNumeric;
+  ondrix::ondsp::FixedAttr exponent = inputIsMagnitude ? outputNumeric : numeric;
+  unsigned width = 0;
+  for (unsigned candidate : {16u, 32u})
+    if (isMagnitude(magnitude, candidate) && isExponent(exponent, candidate))
+      width = candidate;
+  if (width == 0)
     return op->emitOpError() << "requires "
-                             << (inputIsMagnitude
-                                     ? "an unsigned Q0.16 input and a signed Q5.11 result"
-                                     : "a signed Q5.11 input and an unsigned Q0.16 result")
+                             << (inputIsMagnitude ? "an unsigned Q0.16 input and a signed Q5.11 "
+                                                    "result, or an unsigned Q0.32 input and a "
+                                                    "signed Q6.26 result"
+                                                  : "a signed Q5.11 input and an unsigned Q0.16 "
+                                                    "result, or a signed Q6.26 input and an "
+                                                    "unsigned Q0.32 result")
                              << ", each declared in its own numeric attribute";
   if (rounding != ondrix::ondsp::RoundingMode::NearestEven)
     return op->emitOpError("exponential operations require nearest_even rounding");
@@ -1497,10 +1505,11 @@ static LogicalResult verifyExponentialDomain(Operation *op, ondrix::ondsp::Fixed
   int64_t resultExtent =
       resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
   if (inputExtent == ShapedType::kDynamic || inputExtent < 1 || inputExtent > 4096 ||
-      resultExtent != inputExtent || !inputType.getElementType().isSignlessInteger(16) ||
-      !resultType.getElementType().isSignlessInteger(16))
-    return op->emitOpError("executable exponential operations require matching static "
-                           "tensor<Nxi16> input and result with N in [1, 4096]");
+      resultExtent != inputExtent || !inputType.getElementType().isSignlessInteger(width) ||
+      !resultType.getElementType().isSignlessInteger(width))
+    return op->emitOpError() << "executable exponential operations require matching static "
+                                "tensor<Nxi"
+                             << width << "> input and result with N in [1, 4096]";
   return success();
 }
 
@@ -1871,13 +1880,14 @@ LogicalResult CxPhaseOp::verify() {
   if (!componentWidth)
     return emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
                        "#ondsp.fixed<signed, storage = i32, frac = 31>");
-  // The turn reading does NOT follow the component width: a 129-entry table
-  // read by linear interpolation carries about 2^-16, which no Q0.32 reading
-  // could inherit, so the wider components buy a more accurate ratio only.
+  // The turn width is declared on its own, independent of the component
+  // width: each turn profile is its own construction, not a rescaling.
   ondrix::ondsp::FixedAttr output = getOutputNumeric();
+  unsigned turnWidth = output.getStorage().isSignlessInteger(32) ? 32 : 16;
   if (output.getSignedness() != ondrix::ondsp::Signedness::Unsigned ||
-      !output.getStorage().isSignlessInteger(16) || output.getFrac() != 16)
-    return emitOpError("cx_phase returns the unsigned Q0.16 turn and must declare that reading");
+      !output.getStorage().isSignlessInteger(turnWidth) || output.getFrac() != turnWidth)
+    return emitOpError(
+        "cx_phase returns the unsigned Q0.16 or Q0.32 turn and must declare that reading");
   std::optional<ondrix::ondsp::PackedComplexProfile> profile =
       ondrix::ondsp::getPackedComplexProfile(getLayout().getLayout());
   if (!profile || profile->storageWidth != *componentWidth)
@@ -1895,9 +1905,9 @@ LogicalResult CxPhaseOp::verify() {
   if (inputExtent == ShapedType::kDynamic || inputExtent < 1 || inputExtent > 4096 ||
       resultExtent != inputExtent ||
       !inputType.getElementType().isSignlessInteger(profile->containerWidth) ||
-      !resultType.getElementType().isSignlessInteger(16))
+      !resultType.getElementType().isSignlessInteger(turnWidth))
     return emitOpError() << "executable phase requires tensor<Nxi" << profile->containerWidth
-                         << "> to tensor<Nxi16> with static N in [1, 4096]";
+                         << "> to tensor<Nxi" << turnWidth << "> with static N in [1, 4096]";
   return success();
 }
 

@@ -1216,10 +1216,14 @@ def Ondrix_Log2Op : Ondrix_ExponentialOp<"log2"> {
   let summary = "Fixed-point base-two logarithm, exponent plus a mantissa table";
   let description = [{
     `ondrix.log2` maps a static rank-1 tensor (`N` in `[1, 4096]`)
-    elementwise. The raw i16 input is read as the UNSIGNED `Q0.16` magnitude
-    `u / 2^16` in `[0, 1)`, and the result reads as signed `Q5.11`, which
-    holds the whole output range `[-16, 0)` exactly. Both readings are in the
+    elementwise, at one of two widths. The raw i16 input is read as the
+    UNSIGNED `Q0.16` magnitude `u / 2^16` in `[0, 1)`, and the result reads
+    as signed `Q5.11`, which holds the whole output range `[-16, 0)` exactly;
+    the raw i32 input is read as the unsigned `Q0.32` magnitude and the
+    result as signed `Q6.26`, holding `[-32, 0]`. Both readings are in the
     attributes; neither is a scaling.
+
+    ### The Q15 profile: exponent plus a 129-entry interpolated table
 
     ```text
     u == 0   -> -32768                    the declared value at the pole
@@ -1241,16 +1245,47 @@ def Ondrix_Log2Op : Ondrix_ExponentialOp<"log2"> {
     the operation does not pretend otherwise: `-32768` is the declared floor
     of the output format, named here rather than produced by a saturation
     the caller cannot see.
+
+    ### The Q31 profile: exponent plus a table plus a residual series
+
+    Widening the table above would not widen the value: a 129-point table
+    read by linear interpolation is about `2^-16` from the real logarithm at
+    any storage width. The Q31 profile is a different construction on the
+    same footing — one table, one rounding boundary, no saturation:
+
+    ```text
+    u == 0   -> -2^31                     the declared value at the pole
+    e        = highest set bit of u                       0 .. 31
+    m        = u << (31 - e)              mantissa, in [2^31, 2^32)
+    k        = m >> 21                    1024-entry table index, k - 1024
+    d        = m - (k << 21)              residual below the table point
+    r        = (d << 32) / (k << 21)      the residual RATIO at 2^-32, < 2^22
+    t[j]     = q30(log2(1 + j/1024))      tie-guarded compile-time table
+    series   = r * round(2^24/ln2) - ((r*r) >> 22) * round(2^13/ln2)
+    y        = ((e - 32) << 26) + round_half_even((t[k-1024] << 26 + series) / 2^30)
+    ```
+
+    `series` is `log2(1 + r) ~ (r - r^2/2) / ln 2` carried at `2^56`; the
+    dropped `r^3/3` term is below `2^-31.6` of a unit because `r < 2^-10`,
+    which is what fixes the table at 1024 entries. The exponent term is
+    exact and the sum ranges over exactly `[-2^31, 0]`, so nothing
+    saturates. Distance to the correctly rounded logarithm, measured offline
+    over ALL `2^32 - 1` nonzero inputs: exact at 4207881748 of them, one
+    `Q6.26` LSB at 87085547, never more. The one-LSB bound is what the gate
+    enforces against an independent `long double` reference, alongside
+    bit-exactness against a restatement of the program above.
   }];
 }
 
 def Ondrix_Exp2Op : Ondrix_ExponentialOp<"exp2"> {
   let summary = "Fixed-point base-two exponential, the declared inverse of log2";
   let description = [{
-    `ondrix.exp2` reverses `ondrix.log2`'s readings: the input is signed
-    `Q5.11` and the result is the unsigned `Q0.16` magnitude. Inputs at or
-    above zero have no `Q0.16` result and produce the declared ceiling
-    `65535`.
+    `ondrix.exp2` reverses `ondrix.log2`'s readings at either width: the
+    input is signed `Q5.11` (`Q6.26`) and the result is the unsigned `Q0.16`
+    (`Q0.32`) magnitude. Inputs at or above zero have no magnitude result
+    and produce the declared ceiling, `65535` or `2^32 - 1`.
+
+    ### The Q15 profile: two boundaries
 
     ```text
     v >= 0   -> 65535                     the declared value above the range
@@ -1273,6 +1308,30 @@ def Ondrix_Exp2Op : Ondrix_ExponentialOp<"exp2"> {
     is: each direction rounds once or twice, and the round trip is gated as
     a bounded discrepancy over the whole input domain rather than as an
     equality.
+
+    ### The Q31 profile: one boundary
+
+    ```text
+    v >= 0   -> 2^32 - 1                  the declared value above the range
+    e        = v >> 26                    exponent, -32 .. -1
+    p        = v & (2^26 - 1)             fractional part, Q26
+    k        = p >> 16                    1024-entry table index
+    q        = p & 0xFFFF                 residual x = q / 2^26, below 2^-10
+    m[j]     = 2^(j/1024) at 2^31, tie-guarded, read back unsigned
+    a        = (q * round(ln2 * 2^40)) >> 26       x ln 2 at 2^40
+    s        = a + (a*a >> 40)/2 + (a*a*a >> 80)/6  2^x - 1 at 2^40
+    wide     = (m[k] << 31) + ((m[k] * s) >> 9)     the mantissa at 2^62
+    y        = round_half_even(wide / 2^(30 - e))
+    ```
+
+    The binade placement is taken on the `2^62`-scaled mantissa, so the
+    whole element has ONE rounding boundary where the Q15 profile needs two;
+    it is still written out rather than declared as a `round_shift`, because
+    its amount depends on the input. The dropped fourth-order term of the
+    series is below `2^-46` of a unit. Distance to the correctly rounded
+    exponential, measured offline over ALL `2^31` in-range inputs: exact at
+    2114335012 of them, one `Q0.32` LSB at 33148636, never more. The gate
+    enforces that bound alongside bit-exactness against a restatement.
   }];
 }
 
@@ -1725,30 +1784,24 @@ def Ondrix_CxMagnitudeOp : Ondrix_Op<"cx_magnitude", [Pure]> {
 }
 
 def Ondrix_CxPhaseOp : Ondrix_Op<"cx_phase", [Pure]> {
-  let summary = "Fixed-point phase of a packed Q15 complex tensor, as a turn";
+  let summary = "Fixed-point phase of a packed complex tensor, as a turn";
   let description = [{
-    `ondrix.cx_phase` maps each packed signed-Q1.15 complex element to its
-    argument, expressed in the SAME unsigned turn `ondrix.sine` reads:
-    the result is `atan2(im, re) / (2*pi) * 2^16` taken modulo `2^16`, so
-    `sine(cx_phase(z))` is a well-formed program and phase arithmetic stays
-    exact under two's-complement wraparound. The result reading is the
-    unsigned `Q0.16` turn and is declared in its own attribute.
+    `ondrix.cx_phase` maps each packed signed-Q1.(W-1) complex element, `W`
+    of 16 or 32, to its argument, expressed in the unsigned turn
+    `ondrix.sine` reads: the result is `atan2(im, re) / (2*pi) * 2^T` taken
+    modulo `2^T`, so `sine(cx_phase(z))` is a well-formed program and phase
+    arithmetic stays exact under two's-complement wraparound. The turn width
+    `T`, 16 or 32, is declared in its own attribute and independently of the
+    component width: the `Q0.16` turn is what the Q15 sine reads and the
+    `Q0.32` turn what the Q31 sine reads, and either component width can
+    produce either, because the components only ever enter through the
+    ratio `r` and the ratio is carried to the turn's precision.
 
-    That reading does NOT follow the component width. What the wider
-    components buy is a more accurate ratio `r`, hence a more accurate turn
-    in the same format -- not a finer format. Only the absolute values and
-    the ratio numerator follow the width, and they run one bit wider than
-    the component, because negating the component minimum is part of taking
-    an absolute value. The 129-entry arctangent table is a 16-bit
-    quantization either way, so its tie-guard argument carries over
-    unchanged.
+    Only the absolute values and the ratio numerator follow the component
+    width, and they run one bit wider than the component, because negating
+    the component minimum is part of taking an absolute value.
 
-    That was originally justified by there being no consumer for a `Q0.32`
-    turn, and since `ondrix.sine` gained its Q31 profile that is no longer
-    true. The `Q0.16` output is therefore unfinished width rather than a
-    contract, and reaching `Q0.32` means what the Q31 sine needed: the
-    129-entry table read by linear interpolation is about `2^-16` from the
-    real arctangent, which no `Q0.32` reading can inherit.
+    ### The Q0.16 turn: a 129-entry interpolated table
 
     ```text
     (re, im) == (0, 0)  ->  0                the declared value at the origin
@@ -1776,6 +1829,35 @@ def Ondrix_CxPhaseOp : Ondrix_Op<"cx_phase", [Pure]> {
     fixed values of the other, all four axes and all four diagonals over
     their whole range, the rails, and a deterministic sweep. That is a
     weaker evidence class than an exhaustive one and is recorded as such.
+
+    ### The Q0.32 turn: exact angle addition over a 1025-entry table
+
+    Widening the table above would not widen the turn — a 129-point table
+    read by linear interpolation is about `2^-16` from the real arctangent
+    at any storage width — so the wide turn is a different construction:
+
+    ```text
+    R      = round(lo * 2^32 / hi)           the ratio at 2^-32, in [0, 2^32]
+    k      = R >> 22                         1025-entry table index, 0..1024
+    d      = R - (k << 22)                   residual below the table point
+    u      = (d << 42) / (2^42 + R*k)        (x - r_k)/(1 + x*r_k) at 2^-32
+    t[j]   = atan(j/1024) / (2*pi) at 2^33, tie-guarded, t[1024] = 2^30 exactly
+    corr   = (u*K) >> 7 - (((u^3 >> 44) * K) / 3) >> 27,   K = round(2^40/(2*pi))
+    base   = round_half_even((t[k] << 32 + corr) / 2^33)   in [0, 2^29]
+    q      = b > a ? 2^30 - base : base
+    turn   = re >= 0 ? (im >= 0 ? q : -q) : (im >= 0 ? 2^31 - q : 2^31 + q)  mod 2^32
+    ```
+
+    `atan(x) = atan(r_k) + atan(u)` is exact, and `u < 2^-10` so
+    `atan(u) ~ u - u^3/3` drops a term below `2^-52`. Two rounding
+    boundaries per element again, the ratio and the return to `Q0.32`, both
+    nearest-even; the second division truncates and its `2^-32` error is
+    under a twentieth of an output LSB. The `2^64` input domain cannot be
+    swept; measured over `2^30` pseudo-random Q31 pairs the result is exact
+    at 918798647 of them, one `Q0.32` LSB from the correctly rounded turn at
+    154943177, never more, and the gate enforces that one-LSB bound at both
+    component widths alongside bit-exactness against a restatement. The axes
+    and diagonals are exact at both turn widths.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_CxLayoutAttr:$layout,
