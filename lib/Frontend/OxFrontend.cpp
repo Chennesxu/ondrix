@@ -1063,14 +1063,20 @@ public:
       auto third = parseIdentifier(call.kind == ReductionKind::Butterfly
                                        ? "expected butterfly twiddle operand"
                                        : "expected fir_stream state operand");
-      if (!third || !expect(TokenKind::RightParen,
-                            llvm::Twine("expected ')' after ") + builtin + " operands"))
+      if (!third)
         return std::nullopt;
       call.operands.push_back(resolveOperand(*rhs));
       call.operands.push_back(resolveOperand(*third));
       if (call.kind == ReductionKind::FirStream) {
-        applyDefaultFixedPolicy(call);
+        if (current.kind == TokenKind::RightParen)
+          applyDefaultFixedPolicy(call);
+        else if (!expect(TokenKind::Comma, "expected ',' before fir_stream numeric policy") ||
+                 !parseFixedPolicy(call))
+          return std::nullopt;
       }
+      if (!expect(TokenKind::RightParen,
+                  llvm::Twine("expected ')' after ") + builtin + " operands"))
+        return std::nullopt;
       return call;
     }
     if (call.kind == ReductionKind::Dct || call.kind == ReductionKind::Rms ||
@@ -1702,6 +1708,7 @@ private:
   // section sum by 3*2^30 < 2^39, so wrap is vacuous at i40 here too; both
   // export boundaries lose information and take the export-default tie rule.
   static void applyDefaultSosPolicy(BuiltinCallAst &result) {
+    result.accumulatorAuto = true;
     result.accumulatorWidth = 40;
     result.updateOverflow = "wrap";
     result.stateRounding = "nearest_ties_positive";
@@ -2012,14 +2019,14 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, std::nullopt};
   }
   if (ast.result.kind == ReductionKind::FirStream) {
+    bool isQ31 = ast.primaryResult().type == SourceType::Q31;
     if (ast.results.size() != 2 || !ast.primaryResult().tensor || !ast.results[1].tensor ||
-        ast.primaryResult().type != SourceType::Q15 || !lhsParameter || !rhsParameter ||
+        (ast.primaryResult().type != SourceType::Q15 && !isQ31) || !lhsParameter || !rhsParameter ||
         !thirdParameter || llvm::any_of(ast.parameters, [](const ParameterAst &parameter) {
           return !parameter.isTensor();
         })) {
-      diagnostics.error(
-          ast.result.position,
-          "fir_stream requires three Q15 tensor parameters and two Q15 tensor results");
+      diagnostics.error(ast.result.position, "fir_stream requires three Q15 or Q31 tensor "
+                                             "parameters and two matching tensor results");
       return std::nullopt;
     }
     if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
@@ -2050,24 +2057,53 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     else if (lhsExtent && *resultExtent != *lhsExtent)
       diagnostics.error(ast.result.position,
                         "fir_stream output extent must equal the input chunk extent");
-    else {
+    else if (ast.result.accumulatorAuto) {
+      // Two Q31 products already leave i64, so no inferred width makes the
+      // update mode vacuous there; the Q31 stream spells its whole contract.
+      if (isQ31) {
+        diagnostics.error(ast.result.position, "a Q31 fir_stream requires an explicit accumulator, "
+                                               "rounding, and overflow policy");
+        return std::nullopt;
+      }
       ast.result.accumulatorWidth =
           inferQ15FullAccumulatorWidth(static_cast<uint64_t>(coefficientExtent));
       return CheckedKernel{std::move(ast), ondsp::OverflowMode::Wrap,
                            ondsp::RoundingMode::NearestEven, ondsp::OverflowMode::Saturate,
                            std::nullopt};
+    } else {
+      if (ast.result.accumulatorWidth != (isQ31 ? 64u : 40u)) {
+        diagnostics.error(ast.result.position,
+                          isQ31 ? "the executable Q31 profile requires exact accumulator width 64"
+                                : "the executable Q15 profile requires exact accumulator width 40");
+        return std::nullopt;
+      }
+      auto updateOverflow = parseOverflow(ast.result.updateOverflow);
+      auto rounding = parseRounding(ast.result.rounding);
+      auto destinationOverflow = parseOverflow(ast.result.destinationOverflow);
+      if (!updateOverflow || !rounding || !destinationOverflow) {
+        diagnostics.error(ast.result.position, "fir_stream contains an unsupported numeric policy");
+        return std::nullopt;
+      }
+      if (!isDeclaredExportRounding(*rounding)) {
+        diagnostics.error(ast.result.position,
+                          "export rounding must be nearest_even, nearest_ties_positive, "
+                          "toward_negative, or toward_zero");
+        return std::nullopt;
+      }
+      return CheckedKernel{std::move(ast), *updateOverflow, *rounding, *destinationOverflow,
+                           std::nullopt};
     }
     return std::nullopt;
   }
   if (ast.result.kind == ReductionKind::SosDf2Fixed) {
+    bool isQ31 = ast.primaryResult().type == SourceType::Q31;
     if (ast.results.size() != 2 || !ast.primaryResult().tensor || !ast.results[1].tensor ||
-        ast.primaryResult().type != SourceType::Q15 || !lhsParameter || !rhsParameter ||
+        (ast.primaryResult().type != SourceType::Q15 && !isQ31) || !lhsParameter || !rhsParameter ||
         !thirdParameter || !fourthParameter || constexprCount != 0 ||
         llvm::any_of(ast.parameters,
                      [](const ParameterAst &parameter) { return !parameter.isTensor(); })) {
-      diagnostics.error(
-          ast.result.position,
-          "sos_df2_fixed requires four Q15 tensor parameters and two Q15 tensor results");
+      diagnostics.error(ast.result.position, "sos_df2_fixed requires four Q15 or Q31 tensor "
+                                             "parameters and two matching tensor results");
       return std::nullopt;
     }
     if (!hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 2) ||
@@ -2097,9 +2133,19 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           "sos_df2_fixed currently requires coefficients [1,5], scales [1], and state [1,2]");
       return std::nullopt;
     }
-    if (ast.result.accumulatorWidth != 40) {
+    // Three Q31 products leave i64, so the Q15 default's vacuous wrap has no
+    // Q31 counterpart; the Q31 section spells its whole contract.
+    if (isQ31 && ast.result.accumulatorAuto) {
       diagnostics.error(ast.result.position,
-                        "the executable Q15 SOS profile requires exact accumulator width 40");
+                        "a Q31 sos_df2_fixed requires an explicit accumulator, "
+                        "state, and output policy");
+      return std::nullopt;
+    }
+    if (ast.result.accumulatorWidth != (isQ31 ? 64u : 40u)) {
+      diagnostics.error(ast.result.position,
+                        isQ31
+                            ? "the executable Q31 SOS profile requires exact accumulator width 64"
+                            : "the executable Q15 SOS profile requires exact accumulator width 40");
       return std::nullopt;
     }
     auto updateOverflow = parseOverflow(ast.result.updateOverflow);
@@ -2431,9 +2477,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
 
       return checkComposedCall(*expression.call);
     };
-    // A fir_filter stage may feed the FFT chain: static Q15 tensors, the
-    // valid boundary, and the executable Q15 export profile, explicitly
-    // declared. Its coefficients are a tensor parameter or a design builtin.
+    // A fir_filter stage may feed the FFT chain: static Q15 or Q31 tensors,
+    // the valid boundary, and the executable export profile of that width.
+    // Its coefficients are a tensor parameter or a design builtin.
     auto checkNestedFirFilter = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       if (call.operands.size() != 2) {
         diagnostics.error(call.position, "builtin operand count does not match its contract");
@@ -2453,11 +2499,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       ++parameterUses[inputOperand.parameter];
       const ParameterAst *input = inputEntry->second;
-      if (!input->isTensor() || input->type != SourceType::Q15 || !hasRank(input->shape, 1) ||
-          !getRankOneExtent(input->shape)) {
+      bool isQ31 = input->type == SourceType::Q31;
+      if (!input->isTensor() || (input->type != SourceType::Q15 && !isQ31) ||
+          !hasRank(input->shape, 1) || !getRankOneExtent(input->shape)) {
         diagnostics.error(inputOperand.position,
-                          "a composed fir_filter currently requires a static rank-1 Q15 tensor "
-                          "input");
+                          "a composed fir_filter currently requires a static rank-1 Q15 or Q31 "
+                          "tensor input");
         return std::nullopt;
       }
       int64_t inputExtent = *getRankOneExtent(input->shape);
@@ -2473,11 +2520,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         }
         ++parameterUses[coefficientOperand.parameter];
         const ParameterAst *coefficients = entry->second;
-        if (!coefficients->isTensor() || coefficients->type != SourceType::Q15 ||
+        if (!coefficients->isTensor() || coefficients->type != input->type ||
             !hasRank(coefficients->shape, 1) || !getRankOneExtent(coefficients->shape)) {
           diagnostics.error(coefficientOperand.position,
                             "composed fir_filter coefficients currently require a static rank-1 "
-                            "Q15 tensor parameter or a coefficient design");
+                            "tensor parameter of the input's width or a coefficient design");
           return std::nullopt;
         }
         tapCount = *getRankOneExtent(coefficients->shape);
@@ -2516,7 +2563,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       } else {
         diagnostics.error(coefficientOperand.position,
                           "composed fir_filter coefficients currently require a static rank-1 "
-                          "Q15 tensor parameter or a coefficient design");
+                          "tensor parameter of the input's width or a coefficient design");
         return std::nullopt;
       }
       if (call.boundary != "valid") {
@@ -2529,13 +2576,20 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       }
       // A composed stage takes the same default an uncomposed one takes;
-      // the tap count is already static here, so the inference is identical.
+      // the tap count is already static here, so the inference is identical,
+      // and a Q31 stage spells its contract for the reason an uncomposed one does.
       if (call.accumulatorAuto) {
+        if (isQ31) {
+          diagnostics.error(call.position, "a Q31 fir_filter stage requires an explicit "
+                                           "accumulator, rounding, and overflow policy");
+          return std::nullopt;
+        }
         call.accumulatorAuto = false;
         call.accumulatorWidth = inferQ15FullAccumulatorWidth(static_cast<uint64_t>(tapCount));
-      } else if (call.accumulatorWidth != 40) {
+      } else if (call.accumulatorWidth != (isQ31 ? 64u : 40u)) {
         diagnostics.error(call.position,
-                          "the executable Q15 profile requires exact accumulator width 40");
+                          isQ31 ? "the executable Q31 profile requires exact accumulator width 64"
+                                : "the executable Q15 profile requires exact accumulator width 40");
         return std::nullopt;
       }
       if (!parseOverflow(call.updateOverflow)) {
@@ -2561,7 +2615,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                                              call.destinationOverflow + "'");
         return std::nullopt;
       }
-      return ComposedType{SourceType::Q15, inputExtent - tapCount + 1};
+      return ComposedType{input->type, inputExtent - tapCount + 1};
     };
     // The elementwise family: one uniform-Q width in, the same width out,
     // extents equal. Only the two boundary attributes vary between members,
@@ -2641,8 +2695,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
 
       if (call.kind == ReductionKind::Phase) {
-        if (input->elementType != SourceType::ComplexQ15) {
-          diagnostics.error(call.position, "phase requires complex_q15 operand elements");
+        if (input->elementType != SourceType::ComplexQ15 &&
+            input->elementType != SourceType::ComplexQ31) {
+          diagnostics.error(call.position,
+                            "phase requires complex_q15 or complex_q31 operand elements");
           return std::nullopt;
         }
         if (input->extent < 1 || input->extent > 4096) {
@@ -3629,10 +3685,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     std::function<Value(const BuiltinCallAst &)> emitComposedCall =
         [&](const BuiltinCallAst &call) -> Value {
       if (call.kind == ReductionKind::FirFilter) {
-        // The composed filter stage: sema pinned Q15 elements, the valid
-        // boundary, static extents, and the explicit width-40 profile.
+        // The composed filter stage: sema pinned one uniform width, the valid
+        // boundary, static extents, and that width's exact accumulator profile.
         Location callLocation = getLocation(context, sourceName, call.position);
         Value signal = arguments.lookup(call.operands[0].parameter);
+        auto signalType = cast<RankedTensorType>(signal.getType());
+        auto storage = cast<IntegerType>(signalType.getElementType());
+        ondsp::FixedAttr stageNumeric = storage.getWidth() == 32 ? q31Numeric : numeric;
         const ExpressionAst &coefficientOperand = call.operands[1];
         Value coefficients;
         if (coefficientOperand.isParameterReference()) {
@@ -3640,43 +3699,45 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         } else {
           const BuiltinCallAst &design = *coefficientOperand.call;
           Location designLocation = getLocation(context, sourceName, design.position);
-          auto designType = RankedTensorType::get({design.taps}, i16);
+          auto designType = RankedTensorType::get({design.taps}, storage);
           switch (design.kind) {
           case ReductionKind::Hamming:
-            coefficients = builder.create<ir::WindowHammingOp>(designLocation, designType, numeric);
+            coefficients =
+                builder.create<ir::WindowHammingOp>(designLocation, designType, stageNumeric);
             break;
           case ReductionKind::Hann:
-            coefficients = builder.create<ir::WindowHannOp>(designLocation, designType, numeric);
+            coefficients =
+                builder.create<ir::WindowHannOp>(designLocation, designType, stageNumeric);
             break;
           case ReductionKind::Blackman:
             coefficients =
-                builder.create<ir::WindowBlackmanOp>(designLocation, designType, numeric);
+                builder.create<ir::WindowBlackmanOp>(designLocation, designType, stageNumeric);
             break;
           case ReductionKind::Kaiser:
             coefficients = builder.create<ir::WindowKaiserOp>(
                 designLocation, designType, builder.getI64IntegerAttr(design.betaNum),
-                builder.getI64IntegerAttr(design.betaDen), numeric);
+                builder.getI64IntegerAttr(design.betaDen), stageNumeric);
             break;
           default:
             coefficients = builder.create<ir::FirDesignWindowedSincOp>(
                 designLocation, designType,
                 ir::FirDesignResponseAttr::get(&context, ir::FirDesignResponse::Lowpass),
                 builder.getI64IntegerAttr(design.cutoffNum),
-                builder.getI64IntegerAttr(design.cutoffDen), numeric);
+                builder.getI64IntegerAttr(design.cutoffDen), stageNumeric);
             break;
           }
         }
-        int64_t inputExtent = cast<RankedTensorType>(signal.getType()).getDimSize(0);
+        int64_t inputExtent = signalType.getDimSize(0);
         int64_t tapCount = cast<RankedTensorType>(coefficients.getType()).getDimSize(0);
-        auto outputType = RankedTensorType::get({inputExtent - tapCount + 1}, i16);
-        Value init = builder.create<tensor::EmptyOp>(callLocation, outputType.getShape(), i16);
-        auto accumulatorType =
-            ondsp::AccType::get(&context, builder.getIntegerType(call.accumulatorWidth), 30,
-                                ondsp::Signedness::Signed, *parseOverflow(call.updateOverflow));
+        auto outputType = RankedTensorType::get({inputExtent - tapCount + 1}, storage);
+        Value init = builder.create<tensor::EmptyOp>(callLocation, outputType.getShape(), storage);
+        auto accumulatorType = ondsp::AccType::get(
+            &context, builder.getIntegerType(call.accumulatorWidth), 2 * stageNumeric.getFrac(),
+            ondsp::Signedness::Signed, *parseOverflow(call.updateOverflow));
         return builder.create<ir::FirFilterOp>(
             callLocation, outputType, signal, coefficients, init, Value(),
-            ir::FirBoundaryMode::Valid, numeric, product, TypeAttr::get(accumulatorType), numeric,
-            ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding)),
+            ir::FirBoundaryMode::Valid, stageNumeric, product, TypeAttr::get(accumulatorType),
+            stageNumeric, ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding)),
             ondsp::OverflowModeAttr::get(&context, *parseOverflow(call.destinationOverflow)));
       }
       const ExpressionAst &operand = call.operands.front();
@@ -3720,14 +3781,16 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       }
       Location callLocation = getLocation(context, sourceName, call.position);
       if (call.kind == ReductionKind::Phase) {
-        // The result reading is the unsigned Q0.16 turn; the source type
-        // system names only the i16 storage, so the binding supplies it —
-        // the same projection log2/exp2 use.
+        // The result reading is the unsigned Q0.16 turn at either component
+        // width; the source type system names only the i16 storage, so the
+        // binding supplies it — the same projection log2/exp2 use.
+        bool wideComponents = inputType.getElementType().isSignlessInteger(64);
         auto outputType = RankedTensorType::get({inputType.getDimSize(0)}, builder.getI16Type());
         auto turn =
             ondsp::FixedAttr::get(&context, ondsp::Signedness::Unsigned, builder.getI16Type(), 16);
         return builder.create<ir::CxPhaseOp>(
-            callLocation, outputType, input, layout, numeric, turn,
+            callLocation, outputType, input, wideComponents ? q31Layout : layout,
+            wideComponents ? q31Numeric : numeric, turn,
             ondsp::RoundingModeAttr::get(&context, ondsp::RoundingMode::NearestEven));
       }
       if (call.kind == ReductionKind::Magnitude) {
@@ -3969,11 +4032,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   if (kernel.ast.result.kind == ReductionKind::SosDf2Fixed) {
     Value scales = arguments.lookup(*getParameterOperand(kernel.ast.result, 2));
     Value state = arguments.lookup(*getParameterOperand(kernel.ast.result, 3));
-    auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
+    unsigned fractionalBits = cast<IntegerType>(elementType).getWidth() - 1;
+    auto numeric =
+        ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, fractionalBits);
     auto product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::Full);
     auto accumulatorType =
         ondsp::AccType::get(&context, builder.getIntegerType(kernel.ast.result.accumulatorWidth),
-                            30, ondsp::Signedness::Signed, *kernel.updateOverflow);
+                            fractionalBits * 2, ondsp::Signedness::Signed, *kernel.updateOverflow);
     auto sos = builder.create<ir::SosFilterDf2FixedOp>(
         expressionLocation, resultTypes, lhs, rhs, scales, state, numeric, product, accumulatorType,
         *kernel.stateRounding, *kernel.stateOverflow, *kernel.rounding,
@@ -4002,11 +4067,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     Value state = arguments.lookup(*getParameterOperand(kernel.ast.result, 2));
     auto outputType = cast<RankedTensorType>(resultTypes[0]);
     auto nextStateType = cast<RankedTensorType>(resultTypes[1]);
-    auto fixed = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, 15);
+    unsigned fractionalBits = cast<IntegerType>(elementType).getWidth() - 1;
+    auto fixed =
+        ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, fractionalBits);
     auto product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::Full);
     auto accumulatorType =
         ondsp::AccType::get(&context, builder.getIntegerType(kernel.ast.result.accumulatorWidth),
-                            30, ondsp::Signedness::Signed, *kernel.updateOverflow);
+                            fractionalBits * 2, ondsp::Signedness::Signed, *kernel.updateOverflow);
     auto stream = builder.create<ir::FirStreamOp>(
         expressionLocation, TypeRange{outputType, nextStateType}, lhs, rhs, state, fixed, product,
         TypeAttr::get(accumulatorType), fixed,

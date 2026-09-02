@@ -1871,10 +1871,9 @@ LogicalResult CxPhaseOp::verify() {
   if (!componentWidth)
     return emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
                        "#ondsp.fixed<signed, storage = i32, frac = 31>");
-  // The turn reading does NOT follow the component width. It is the unsigned
-  // Q0.16 turn `ondrix.sine` consumes, so widening it would produce an angle
-  // with no consumer; the wider components buy a more accurate ratio, not a
-  // finer output format.
+  // The turn reading does NOT follow the component width: a 129-entry table
+  // read by linear interpolation carries about 2^-16, which no Q0.32 reading
+  // could inherit, so the wider components buy a more accurate ratio only.
   ondrix::ondsp::FixedAttr output = getOutputNumeric();
   if (output.getSignedness() != ondrix::ondsp::Signedness::Unsigned ||
       !output.getStorage().isSignlessInteger(16) || output.getFrac() != 16)

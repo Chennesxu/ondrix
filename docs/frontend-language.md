@@ -298,8 +298,10 @@ refused where it does not:
   `root_rounding=` it already carried.
 
 All four admit `nearest_even` and `toward_negative`; `matmul` additionally
-admits `nearest_ties_positive`, and `lms` does not. Omission keeps the `nearest_even` default. The
-remaining real and complex builtins are Q15-only.
+admits `nearest_ties_positive`, and `lms` does not. Omission keeps the
+`nearest_even` default. Of the remaining fixed-point builtins, `log2`, `exp2`
+and `butterfly` are Q15-only, and `phase` takes `complex_q15` or `complex_q31`
+operands but always returns the Q0.16 turn in `q15` storage.
 
 As a bounded expression-composition slice, the unary FFT-family builtins may
 be nested when every intermediate type and extent satisfies the next
@@ -315,9 +317,11 @@ is not a second evaluation: the duplicated subtrees are `Pure` Ondrix
 operations and the canonical pipeline's `canonicalize`/`cse` collapses them,
 which is what lets an intermediate be reused, as in `add(mult(t, t), t)`.
 Within this slice a `fir_filter` stage may feed the FFT chain — static Q15
-tensors, the `valid` boundary, and the explicit executable accumulator
-profile — and its coefficients may come from a runtime tensor parameter or
-from a compile-time design expression. The available designs are `lowpass`,
+or Q31 tensors, the `valid` boundary, and the explicit executable accumulator
+profile of that width (i40 at Q15, i64 at Q31, where the policy is
+mandatory) — and its coefficients may come from a runtime tensor parameter of
+the same width or from a compile-time design expression evaluated at it. The
+available designs are `lowpass`,
 which names the Hamming-windowed-sinc contract (`taps` odd in [3, 4095],
 rational `cutoff` strictly inside (0, 1/2)), and the four window designs
 `hamming(taps=N)`, `hann(taps=N)`, `blackman(taps=N)`, and
@@ -352,7 +356,8 @@ def q15_butterfly(
   return butterfly(a, b, twiddle)
 ```
 
-Static-coefficient Q15 streaming FIR is the second bounded multi-result form:
+Static-coefficient streaming FIR is the second bounded multi-result form, at
+Q15 or Q31:
 
 ```python
 def q15_fir_stream(
@@ -365,16 +370,22 @@ def q15_fir_stream(
 
 The chunk extent may be dynamic. Coefficient, state, and next-state extents are
 static, with `state_length = coefficient_length - 1`; output extent follows the
-input chunk. Each output uses the same inferred exact Q15 accumulation as a
-static-tap FIR sample, while next state is the chronological raw-sample suffix
-and is not requantized. Whole and split chunks therefore have identical output
-and final-state semantics.
+input chunk. With the policy omitted, a Q15 stream uses the same inferred exact
+accumulation as a static-tap FIR sample and a `nearest_even` saturating export
+(this binding predates the add-half family default below and keeps its own);
+an explicit `accumulator=exact[40,...]`, `rounding=`, `overflow=` triple
+overrides it. A Q31 stream must spell that triple with width 64, because two
+Q31 products already leave i64 and no inferred width makes the update mode
+vacuous. Next state is the chronological raw-sample suffix and is not
+requantized, so whole and split chunks have identical output and final-state
+semantics at either width.
 
 These two forms do not introduce general tuples, assignments, configurable
 complex arithmetic, recursive-state inference, or a stable C ABI.
 
 One fixed direct-form-II SOS section is available through an explicit
-recursive numeric profile:
+recursive numeric profile, at Q15 with the i40 accumulator or at Q31 with
+`accumulator=exact[64,...]`:
 
 ```python
 def q15_sos_df2_fixed(
@@ -396,9 +407,11 @@ The coefficient row is `[b0,b1,b2,a1,a2]`; feedback is additive, so a
 subtractive convention supplies negated `a1/a2`. State is `[d1,d2]`. The input
 and output chunk extent may be dynamic, while coefficients `[1,5]`, scales
 `[1]`, and state/next-state `[1,2]` are static. Unlike feed-forward `auto`
-accumulation, all recursive update and quantization behavior is explicit.
-Q31/f32 variants, additional direct forms, recursive Vector lowering, and a
-stable state ABI are outside this source slice.
+accumulation, all recursive update and quantization behavior is explicit; a
+Q15 site may omit the whole policy and take the default below, a Q31 site may
+not, since three Q31 products leave i64 and wrap is not vacuous there.
+Additional direct forms, recursive Vector lowering, and a stable state ABI are
+outside this source slice.
 
 Compile it to textual MLIR with:
 
@@ -426,9 +439,12 @@ that fixed-point export hardware realizes natively (add half, then shift;
 `nearest_even` remains one declaration away for unbiased accumulation),
 and saturation at the one boundary that does lose information. This covers
 `dot`, `fir`, `fir_filter`, `fir_decimate`, `fir_interpolate`, `convolution`,
-`correlation`, `fir_stream`, and `sos_df2_fixed`. Inference needs a static
-tap count, so a dynamic coefficient extent is a diagnostic rather than a
-guessed width. Any explicit parameter still overrides the default, and the
+`correlation`, and `sos_df2_fixed`; `fir_stream` infers the same width but
+keeps its original `nearest_even` export. Inference needs a static tap count,
+so a dynamic coefficient extent is a diagnostic rather than a guessed width,
+and it is Q15-only: no Q31 width holds two 62-bit products, so every Q31
+site of these builtins spells its accumulator. Any explicit parameter still
+overrides the default, and the
 `.ox` object gate executes the inferred and the spelled contract against one
 exact reference rather than asserting their equivalence.
 
