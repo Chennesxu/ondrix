@@ -42,6 +42,7 @@ func.func @q31_high_raw_reduce(
 // CHECK: %[[FULL:.*]] = arith.muli {{.*}} : i64
 // CHECK: %[[SHIFTED:.*]] = arith.shrsi %[[FULL]], {{.*}} : i64
 // CHECK: %[[HIGH:.*]] = arith.trunci %[[SHIFTED]] : i64 to i32
-// CHECK: arith.addi {{.*}} : i41
-// CHECK: return %[[LOOP]] : i40
+// CHECK: %[[HIGH_EXT:.*]] = arith.extsi %[[HIGH]] : i32 to i64
+// CHECK: arith.addi {{.*}}, %[[HIGH_EXT]] : i64
+// CHECK: return %[[LOOP]] : i64
 // CHECK-NOT: ondsp.

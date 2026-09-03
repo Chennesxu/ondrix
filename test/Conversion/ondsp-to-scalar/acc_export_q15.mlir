@@ -56,49 +56,51 @@ func.func @export_same_width_saturate(
 }
 
 // CHECK-LABEL: func.func @export_floor_saturate(
-// CHECK-SAME: %[[ACC:.*]]: i40) -> i16
-// CHECK: %[[SHIFT:.*]] = arith.constant 15 : i40
-// CHECK: %[[ROUNDED:.*]] = arith.shrsi %[[ACC]], %[[SHIFT]] : i40
-// CHECK: %[[MIN:.*]] = arith.constant -32768 : i40
-// CHECK: %[[MAX:.*]] = arith.constant 32767 : i40
-// CHECK: %[[LOWER:.*]] = arith.maxsi %[[ROUNDED]], %[[MIN]] : i40
-// CHECK: %[[CLAMPED:.*]] = arith.minsi %[[LOWER]], %[[MAX]] : i40
-// CHECK: %[[RESULT:.*]] = arith.trunci %[[CLAMPED]] : i40 to i16
+// CHECK-SAME: %[[ACC:.*]]: i64) -> i16
+// CHECK: %[[SHIFT:.*]] = arith.constant 15 : i64
+// CHECK: %[[ROUNDED:.*]] = arith.shrsi %[[ACC]], %[[SHIFT]] : i64
+// CHECK: %[[MIN:.*]] = arith.constant -32768 : i64
+// CHECK: %[[MAX:.*]] = arith.constant 32767 : i64
+// CHECK: %[[LOWER:.*]] = arith.maxsi %[[ROUNDED]], %[[MIN]] : i64
+// CHECK: %[[CLAMPED:.*]] = arith.minsi %[[LOWER]], %[[MAX]] : i64
+// CHECK: %[[RESULT:.*]] = arith.trunci %[[CLAMPED]] : i64 to i16
 // CHECK: return %[[RESULT]] : i16
 
 // CHECK-LABEL: func.func @export_zero_wrap(
-// CHECK-SAME: %[[ACC:.*]]: i40) -> i16
-// CHECK: %[[SHIFT:.*]] = arith.constant 15 : i40
-// CHECK: %[[QUOTIENT:.*]] = arith.shrsi %[[ACC]], %[[SHIFT]] : i40
-// CHECK: %[[BITS:.*]] = arith.trunci %[[ACC]] : i40 to i15
-// CHECK: %[[REMAINDER:.*]] = arith.extui %[[BITS]] : i15 to i40
-// CHECK: %[[ZERO:.*]] = arith.constant 0 : i40
-// CHECK: %[[ONE:.*]] = arith.constant 1 : i40
-// CHECK: %[[NEGATIVE:.*]] = arith.cmpi slt, %[[ACC]], %[[ZERO]] : i40
-// CHECK: %[[NONZERO:.*]] = arith.cmpi ne, %[[REMAINDER]], %[[ZERO]] : i40
+// CHECK-SAME: %[[ACC:.*]]: i64) -> i16
+// CHECK: %[[NARROW:.*]] = arith.trunci %[[ACC]] : i64 to i40
+// CHECK: %[[WRAPPED:.*]] = arith.extsi %[[NARROW]] : i40 to i64
+// CHECK: %[[SHIFT:.*]] = arith.constant 15 : i64
+// CHECK: %[[QUOTIENT:.*]] = arith.shrsi %[[WRAPPED]], %[[SHIFT]] : i64
+// CHECK: %[[BITS:.*]] = arith.trunci %[[WRAPPED]] : i64 to i15
+// CHECK: %[[REMAINDER:.*]] = arith.extui %[[BITS]] : i15 to i64
+// CHECK: %[[ZERO:.*]] = arith.constant 0 : i64
+// CHECK: %[[ONE:.*]] = arith.constant 1 : i64
+// CHECK: %[[NEGATIVE:.*]] = arith.cmpi slt, %[[WRAPPED]], %[[ZERO]] : i64
+// CHECK: %[[NONZERO:.*]] = arith.cmpi ne, %[[REMAINDER]], %[[ZERO]] : i64
 // CHECK: %[[INCREMENT_IF:.*]] = arith.andi %[[NEGATIVE]], %[[NONZERO]] : i1
-// CHECK: %[[INCREMENT:.*]] = arith.select %[[INCREMENT_IF]], %[[ONE]], %[[ZERO]] : i40
-// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[INCREMENT]] : i40
-// CHECK: %[[RESULT:.*]] = arith.trunci %[[ROUNDED]] : i40 to i16
+// CHECK: %[[INCREMENT:.*]] = arith.select %[[INCREMENT_IF]], %[[ONE]], %[[ZERO]] : i64
+// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[INCREMENT]] : i64
+// CHECK: %[[RESULT:.*]] = arith.trunci %[[ROUNDED]] : i64 to i16
 // CHECK: return %[[RESULT]] : i16
 
 // CHECK-LABEL: func.func @export_nearest_even_wrap(
-// CHECK-SAME: %[[ACC:.*]]: i40) -> i16
-// CHECK: %[[QUOTIENT:.*]] = arith.shrsi %[[ACC]], %{{.*}} : i40
-// CHECK: %[[BITS:.*]] = arith.trunci %[[ACC]] : i40 to i15
-// CHECK: %[[REMAINDER:.*]] = arith.extui %[[BITS]] : i15 to i40
-// CHECK: %[[ZERO:.*]] = arith.constant 0 : i40
-// CHECK: %[[ONE:.*]] = arith.constant 1 : i40
-// CHECK: %[[HALF:.*]] = arith.constant 16384 : i40
-// CHECK: %[[ABOVE:.*]] = arith.cmpi ugt, %[[REMAINDER]], %[[HALF]] : i40
-// CHECK: %[[EQUAL:.*]] = arith.cmpi eq, %[[REMAINDER]], %[[HALF]] : i40
-// CHECK: %[[LOW_BIT:.*]] = arith.andi %[[QUOTIENT]], %[[ONE]] : i40
-// CHECK: %[[ODD:.*]] = arith.cmpi ne, %[[LOW_BIT]], %[[ZERO]] : i40
+// CHECK-SAME: %[[ACC:.*]]: i64) -> i16
+// CHECK: %[[QUOTIENT:.*]] = arith.shrsi %[[ACC]], %{{.*}} : i64
+// CHECK: %[[BITS:.*]] = arith.trunci %[[ACC]] : i64 to i15
+// CHECK: %[[REMAINDER:.*]] = arith.extui %[[BITS]] : i15 to i64
+// CHECK: %[[ZERO:.*]] = arith.constant 0 : i64
+// CHECK: %[[ONE:.*]] = arith.constant 1 : i64
+// CHECK: %[[HALF:.*]] = arith.constant 16384 : i64
+// CHECK: %[[ABOVE:.*]] = arith.cmpi ugt, %[[REMAINDER]], %[[HALF]] : i64
+// CHECK: %[[EQUAL:.*]] = arith.cmpi eq, %[[REMAINDER]], %[[HALF]] : i64
+// CHECK: %[[LOW_BIT:.*]] = arith.andi %[[QUOTIENT]], %[[ONE]] : i64
+// CHECK: %[[ODD:.*]] = arith.cmpi ne, %[[LOW_BIT]], %[[ZERO]] : i64
 // CHECK: %[[TIE_ODD:.*]] = arith.andi %[[EQUAL]], %[[ODD]] : i1
 // CHECK: %[[INCREMENT_IF:.*]] = arith.ori %[[ABOVE]], %[[TIE_ODD]] : i1
-// CHECK: %[[INCREMENT:.*]] = arith.select %[[INCREMENT_IF]], %[[ONE]], %[[ZERO]] : i40
-// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[INCREMENT]] : i40
-// CHECK: %[[RESULT:.*]] = arith.trunci %[[ROUNDED]] : i40 to i16
+// CHECK: %[[INCREMENT:.*]] = arith.select %[[INCREMENT_IF]], %[[ONE]], %[[ZERO]] : i64
+// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[INCREMENT]] : i64
+// CHECK: %[[RESULT:.*]] = arith.trunci %[[ROUNDED]] : i64 to i16
 // CHECK: return %[[RESULT]] : i16
 
 // CHECK-LABEL: func.func @export_same_width_wrap(

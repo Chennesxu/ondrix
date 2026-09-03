@@ -15,10 +15,10 @@ func.func @q15_mac_export(%lhs: i16, %rhs: i16) -> i16 {
 }
 
 // CHECK-LABEL: func.func @q15_mac_export(
-// CHECK: arith.constant 0 : i40
+// CHECK: arith.constant 0 : i64
 // CHECK: arith.muli
 // CHECK: arith.addi
 // CHECK: arith.shrsi
-// CHECK: arith.trunci {{.*}} : i40 to i16
+// CHECK: arith.trunci {{.*}} : i64 to i16
 // CHECK: return {{.*}} : i16
 // CHECK-NOT: ondsp.

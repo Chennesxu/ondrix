@@ -99,15 +99,14 @@ func.func @export_integer_reading(
   return %result : i32
 }
 
-// The identity i64/frac30 destination is also reachable from a NARROWER
-// frac30 accumulator. The shift is zero and the frac is unchanged, so the
-// only work is a widening sign extension, which is exactly value
-// preserving: both declared overflow modes are no-ops and neither a
-// truncation nor a clamp may appear.
+// A narrower frac30 accumulator shares the i64 carrier, so the identity
+// i64/frac30 destination only re-wraps to the storage width, and never clamps.
 // CHECK-LABEL: func.func @export_widen_i40_wrap(
-// CHECK-SAME: %[[W40:.*]]: i40) -> i64
-// CHECK-NEXT: %[[W40_RESULT:.*]] = arith.extsi %[[W40]] : i40 to i64
+// CHECK-SAME: %[[W40:.*]]: i64) -> i64
+// CHECK-NEXT: %[[W40_NARROW:.*]] = arith.trunci %[[W40]] : i64 to i40
+// CHECK-NEXT: %[[W40_RESULT:.*]] = arith.extsi %[[W40_NARROW]] : i40 to i64
 // CHECK-NEXT: return %[[W40_RESULT]] : i64
+// CHECK-NOT: arith.maxsi
 func.func @export_widen_i40_wrap(
     %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>)
     -> i64 {
@@ -120,9 +119,8 @@ func.func @export_widen_i40_wrap(
 }
 
 // CHECK-LABEL: func.func @export_widen_i40_saturate(
-// CHECK-SAME: %[[S40:.*]]: i40) -> i64
-// CHECK-NEXT: %[[S40_RESULT:.*]] = arith.extsi %[[S40]] : i40 to i64
-// CHECK-NEXT: return %[[S40_RESULT]] : i64
+// CHECK-SAME: %[[S40:.*]]: i64) -> i64
+// CHECK-NEXT: return %[[S40]] : i64
 func.func @export_widen_i40_saturate(
     %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>)
     -> i64 {
@@ -135,9 +133,11 @@ func.func @export_widen_i40_saturate(
 }
 
 // CHECK-LABEL: func.func @export_widen_i48_wrap(
-// CHECK-SAME: %[[W48:.*]]: i48) -> i64
-// CHECK-NEXT: %[[W48_RESULT:.*]] = arith.extsi %[[W48]] : i48 to i64
+// CHECK-SAME: %[[W48:.*]]: i64) -> i64
+// CHECK-NEXT: %[[W48_NARROW:.*]] = arith.trunci %[[W48]] : i64 to i48
+// CHECK-NEXT: %[[W48_RESULT:.*]] = arith.extsi %[[W48_NARROW]] : i48 to i64
 // CHECK-NEXT: return %[[W48_RESULT]] : i64
+// CHECK-NOT: arith.maxsi
 func.func @export_widen_i48_wrap(
     %acc: !ondsp.acc<storage = i48, frac = 30, signed, update_overflow = wrap>)
     -> i64 {
@@ -150,9 +150,8 @@ func.func @export_widen_i48_wrap(
 }
 
 // CHECK-LABEL: func.func @export_widen_i48_saturate(
-// CHECK-SAME: %[[S48:.*]]: i48) -> i64
-// CHECK-NEXT: %[[S48_RESULT:.*]] = arith.extsi %[[S48]] : i48 to i64
-// CHECK-NEXT: return %[[S48_RESULT]] : i64
+// CHECK-SAME: %[[S48:.*]]: i64) -> i64
+// CHECK-NEXT: return %[[S48]] : i64
 func.func @export_widen_i48_saturate(
     %acc: !ondsp.acc<storage = i48, frac = 30, signed, update_overflow = saturate>)
     -> i64 {

@@ -49,19 +49,17 @@ func.func @q15_in_mixed_module(
 // CHECK: return %[[RESULT]] : i64
 
 // CHECK-LABEL: func.func @q31_high_raw_wrap(
-// CHECK-SAME: %[[ACC:.*]]: i40, %[[LHS:.*]]: i32, %[[RHS:.*]]: i32) -> i40
+// CHECK-SAME: %[[ACC:.*]]: i64, %[[LHS:.*]]: i32, %[[RHS:.*]]: i32) -> i64
 // CHECK: %[[LHS_EXT:.*]] = arith.extsi %[[LHS]] : i32 to i64
 // CHECK: %[[RHS_EXT:.*]] = arith.extsi %[[RHS]] : i32 to i64
 // CHECK: %[[FULL:.*]] = arith.muli %[[LHS_EXT]], %[[RHS_EXT]] : i64
 // CHECK: %[[SHIFT:.*]] = arith.constant 32 : i64
 // CHECK: %[[SHIFTED:.*]] = arith.shrsi %[[FULL]], %[[SHIFT]] : i64
 // CHECK: %[[HIGH:.*]] = arith.trunci %[[SHIFTED]] : i64 to i32
-// CHECK: %[[ACC_EXT:.*]] = arith.extsi %[[ACC]] : i40 to i41
-// CHECK: %[[HIGH_EXT:.*]] = arith.extsi %[[HIGH]] : i32 to i41
-// CHECK: %[[UPDATED:.*]] = arith.subi %[[ACC_EXT]], %[[HIGH_EXT]] : i41
-// CHECK: %[[RESULT:.*]] = arith.trunci %[[UPDATED]] : i41 to i40
-// CHECK: return %[[RESULT]] : i40
+// CHECK: %[[HIGH_EXT:.*]] = arith.extsi %[[HIGH]] : i32 to i64
+// CHECK: %[[UPDATED:.*]] = arith.subi %[[ACC]], %[[HIGH_EXT]] : i64
+// CHECK: return %[[UPDATED]] : i64
 
 // CHECK-LABEL: func.func @q15_in_mixed_module(
-// CHECK-SAME: %{{.*}}: i40, %{{.*}}: i16, %{{.*}}: i16) -> i40
+// CHECK-SAME: %{{.*}}: i64, %{{.*}}: i16, %{{.*}}: i16) -> i64
 // CHECK-NOT: ondsp.

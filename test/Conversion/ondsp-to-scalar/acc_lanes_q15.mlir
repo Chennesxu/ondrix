@@ -2,7 +2,7 @@
 
 // A multi-lane accumulator lowers to one storage element per lane and runs the
 // identical per-lane arithmetic the single-lane path runs: the same i32 exact
-// product, the same i41 update width, the same accumulator clamp bounds, and
+// product, the same i64 carrier width, the same accumulator clamp bounds, and
 // the same nearest-even export. The only difference is that the comparisons and
 // selects are vector shaped. Compare the constants and widths below against
 // mac_q15.mlir and acc_export_q15.mlir: they are the same numbers.
@@ -27,43 +27,41 @@ func.func @lane_lifecycle_saturate(%value: vector<8xi16>, %coefficient: i16) -> 
 
 // CHECK-LABEL: func.func @lane_lifecycle_saturate(
 // CHECK-SAME: %[[VALUE:.*]]: vector<8xi16>, %[[COEFFICIENT:.*]]: i16) -> vector<8xi16>
-// CHECK: %[[ZERO:.*]] = arith.constant dense<0> : vector<8xi40>
+// CHECK: %[[ZERO:.*]] = arith.constant dense<0> : vector<8xi64>
 // The declared per-lane broadcast of the scalar coefficient.
 // CHECK: %[[SPLAT:.*]] = vector.broadcast %[[COEFFICIENT]] : i16 to vector<8xi16>
 // CHECK: %[[VALUE_EXT:.*]] = arith.extsi %[[VALUE]] : vector<8xi16> to vector<8xi32>
 // CHECK: %[[SPLAT_EXT:.*]] = arith.extsi %[[SPLAT]] : vector<8xi16> to vector<8xi32>
 // CHECK: %[[PRODUCT:.*]] = arith.muli %[[VALUE_EXT]], %[[SPLAT_EXT]] : vector<8xi32>
-// CHECK: %[[ACC_EXT:.*]] = arith.extsi %[[ZERO]] : vector<8xi40> to vector<8xi41>
-// CHECK: %[[PRODUCT_EXT:.*]] = arith.extsi %[[PRODUCT]] : vector<8xi32> to vector<8xi41>
-// CHECK: %[[UPDATED:.*]] = arith.addi %[[ACC_EXT]], %[[PRODUCT_EXT]] : vector<8xi41>
+// CHECK: %[[PRODUCT_EXT:.*]] = arith.extsi %[[PRODUCT]] : vector<8xi32> to vector<8xi64>
+// CHECK: %[[UPDATED:.*]] = arith.addi %[[ZERO]], %[[PRODUCT_EXT]] : vector<8xi64>
 // The accumulator clamp bounds are the single-lane i40 bounds, splatted.
-// CHECK: %[[MIN:.*]] = arith.constant dense<-549755813888> : vector<8xi41>
-// CHECK: %[[MAX:.*]] = arith.constant dense<549755813887> : vector<8xi41>
-// CHECK: %[[LOWER:.*]] = arith.maxsi %[[UPDATED]], %[[MIN]] : vector<8xi41>
-// CHECK: %[[CLAMPED:.*]] = arith.minsi %[[LOWER]], %[[MAX]] : vector<8xi41>
-// CHECK: %[[ACC:.*]] = arith.trunci %[[CLAMPED]] : vector<8xi41> to vector<8xi40>
+// CHECK: %[[MIN:.*]] = arith.constant dense<-549755813888> : vector<8xi64>
+// CHECK: %[[MAX:.*]] = arith.constant dense<549755813887> : vector<8xi64>
+// CHECK: %[[LOWER:.*]] = arith.maxsi %[[UPDATED]], %[[MIN]] : vector<8xi64>
+// CHECK: %[[ACC:.*]] = arith.minsi %[[LOWER]], %[[MAX]] : vector<8xi64>
 // The export is the same nearest-even shift by 15 in quotient/remainder form.
-// CHECK: %[[SHIFT:.*]] = arith.constant dense<15> : vector<8xi40>
-// CHECK: %[[QUOTIENT:.*]] = arith.shrsi %[[ACC]], %[[SHIFT]] : vector<8xi40>
-// CHECK: %[[LOW_BITS:.*]] = arith.trunci %[[ACC]] : vector<8xi40> to vector<8xi15>
-// CHECK: %[[REMAINDER:.*]] = arith.extui %[[LOW_BITS]] : vector<8xi15> to vector<8xi40>
-// CHECK: %[[EXPORT_ZERO:.*]] = arith.constant dense<0> : vector<8xi40>
-// CHECK: %[[ONE:.*]] = arith.constant dense<1> : vector<8xi40>
-// CHECK: %[[HALF:.*]] = arith.constant dense<16384> : vector<8xi40>
-// CHECK: %[[ABOVE_HALF:.*]] = arith.cmpi ugt, %[[REMAINDER]], %[[HALF]] : vector<8xi40>
-// CHECK: %[[EXACT_HALF:.*]] = arith.cmpi eq, %[[REMAINDER]], %[[HALF]] : vector<8xi40>
-// CHECK: %[[LOW_BIT:.*]] = arith.andi %[[QUOTIENT]], %[[ONE]] : vector<8xi40>
-// CHECK: %[[IS_ODD:.*]] = arith.cmpi ne, %[[LOW_BIT]], %[[EXPORT_ZERO]] : vector<8xi40>
+// CHECK: %[[SHIFT:.*]] = arith.constant dense<15> : vector<8xi64>
+// CHECK: %[[QUOTIENT:.*]] = arith.shrsi %[[ACC]], %[[SHIFT]] : vector<8xi64>
+// CHECK: %[[LOW_BITS:.*]] = arith.trunci %[[ACC]] : vector<8xi64> to vector<8xi15>
+// CHECK: %[[REMAINDER:.*]] = arith.extui %[[LOW_BITS]] : vector<8xi15> to vector<8xi64>
+// CHECK: %[[EXPORT_ZERO:.*]] = arith.constant dense<0> : vector<8xi64>
+// CHECK: %[[ONE:.*]] = arith.constant dense<1> : vector<8xi64>
+// CHECK: %[[HALF:.*]] = arith.constant dense<16384> : vector<8xi64>
+// CHECK: %[[ABOVE_HALF:.*]] = arith.cmpi ugt, %[[REMAINDER]], %[[HALF]] : vector<8xi64>
+// CHECK: %[[EXACT_HALF:.*]] = arith.cmpi eq, %[[REMAINDER]], %[[HALF]] : vector<8xi64>
+// CHECK: %[[LOW_BIT:.*]] = arith.andi %[[QUOTIENT]], %[[ONE]] : vector<8xi64>
+// CHECK: %[[IS_ODD:.*]] = arith.cmpi ne, %[[LOW_BIT]], %[[EXPORT_ZERO]] : vector<8xi64>
 // CHECK: %[[HALF_AND_ODD:.*]] = arith.andi %[[EXACT_HALF]], %[[IS_ODD]] : vector<8xi1>
 // CHECK: %[[ROUND_UP:.*]] = arith.ori %[[ABOVE_HALF]], %[[HALF_AND_ODD]] : vector<8xi1>
-// CHECK: %[[INCREMENT:.*]] = arith.select %[[ROUND_UP]], %[[ONE]], %[[EXPORT_ZERO]] : vector<8xi1>, vector<8xi40>
-// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[INCREMENT]] : vector<8xi40>
+// CHECK: %[[INCREMENT:.*]] = arith.select %[[ROUND_UP]], %[[ONE]], %[[EXPORT_ZERO]] : vector<8xi1>, vector<8xi64>
+// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[INCREMENT]] : vector<8xi64>
 // The destination clamp is the signed Q15 range, per lane.
-// CHECK: %[[DST_MIN:.*]] = arith.constant dense<-32768> : vector<8xi40>
-// CHECK: %[[DST_MAX:.*]] = arith.constant dense<32767> : vector<8xi40>
-// CHECK: %[[DST_LOWER:.*]] = arith.maxsi %[[ROUNDED]], %[[DST_MIN]] : vector<8xi40>
-// CHECK: %[[DST_CLAMPED:.*]] = arith.minsi %[[DST_LOWER]], %[[DST_MAX]] : vector<8xi40>
-// CHECK: %[[RESULT:.*]] = arith.trunci %[[DST_CLAMPED]] : vector<8xi40> to vector<8xi16>
+// CHECK: %[[DST_MIN:.*]] = arith.constant dense<-32768> : vector<8xi64>
+// CHECK: %[[DST_MAX:.*]] = arith.constant dense<32767> : vector<8xi64>
+// CHECK: %[[DST_LOWER:.*]] = arith.maxsi %[[ROUNDED]], %[[DST_MIN]] : vector<8xi64>
+// CHECK: %[[DST_CLAMPED:.*]] = arith.minsi %[[DST_LOWER]], %[[DST_MAX]] : vector<8xi64>
+// CHECK: %[[RESULT:.*]] = arith.trunci %[[DST_CLAMPED]] : vector<8xi64> to vector<8xi16>
 // CHECK: return %[[RESULT]] : vector<8xi16>
 
 // The wrapping profile drops the accumulator clamp per lane exactly as the
@@ -83,11 +81,11 @@ func.func @lane_update_wrap(
 }
 
 // CHECK-LABEL: func.func @lane_update_wrap(
-// CHECK-SAME: %[[ACC:.*]]: vector<4xi34>, %[[VALUE:.*]]: vector<4xi16>, %[[COEFFICIENT:.*]]: i16) -> vector<4xi34>
+// CHECK-SAME: %[[ACC:.*]]: vector<4xi64>, %[[VALUE:.*]]: vector<4xi16>, %[[COEFFICIENT:.*]]: i16) -> vector<4xi64>
 // CHECK: vector.broadcast %[[COEFFICIENT]] : i16 to vector<4xi16>
 // CHECK: arith.muli {{.*}} : vector<4xi32>
-// CHECK: arith.extsi %[[ACC]] : vector<4xi34> to vector<4xi35>
-// CHECK: %[[UPDATED:.*]] = arith.addi {{.*}} : vector<4xi35>
+// CHECK: %[[PRODUCT_EXT:.*]] = arith.extsi {{.*}} : vector<4xi32> to vector<4xi64>
+// CHECK: %[[UPDATED:.*]] = arith.addi %[[ACC]], %[[PRODUCT_EXT]] : vector<4xi64>
 // CHECK-NOT: arith.cmpi
-// CHECK: %[[RESULT:.*]] = arith.trunci %[[UPDATED]] : vector<4xi35> to vector<4xi34>
-// CHECK: return %[[RESULT]] : vector<4xi34>
+// CHECK-NOT: arith.trunci
+// CHECK: return %[[UPDATED]] : vector<4xi64>

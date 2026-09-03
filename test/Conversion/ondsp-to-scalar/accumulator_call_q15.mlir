@@ -14,10 +14,10 @@ func.func @call_forward()
 }
 
 // CHECK-LABEL: func.func @forward(
-// CHECK-SAME: %[[ACC:.*]]: i40) -> i40
-// CHECK: return %[[ACC]] : i40
-// CHECK-LABEL: func.func @call_forward() -> i40
-// CHECK: %[[ZERO:.*]] = arith.constant 0 : i40
-// CHECK: %[[RESULT:.*]] = call @forward(%[[ZERO]]) : (i40) -> i40
-// CHECK: return %[[RESULT]] : i40
+// CHECK-SAME: %[[ACC:.*]]: i64) -> i64
+// CHECK: return %[[ACC]] : i64
+// CHECK-LABEL: func.func @call_forward() -> i64
+// CHECK: %[[ZERO:.*]] = arith.constant 0 : i64
+// CHECK: %[[RESULT:.*]] = call @forward(%[[ZERO]]) : (i64) -> i64
+// CHECK: return %[[RESULT]] : i64
 // CHECK-NOT: ondsp.

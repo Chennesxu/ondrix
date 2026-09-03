@@ -9,9 +9,9 @@ func.func @import_q15(%input: i16)
 }
 
 // CHECK-LABEL: func.func @import_q15(
-// CHECK-SAME: %[[INPUT:.*]]: i16) -> i40
-// CHECK: %[[EXTENDED:.*]] = arith.extsi %[[INPUT]] : i16 to i40
-// CHECK: %[[SHIFT:.*]] = arith.constant 15 : i40
-// CHECK: %[[ACC:.*]] = arith.shli %[[EXTENDED]], %[[SHIFT]] : i40
-// CHECK: return %[[ACC]] : i40
+// CHECK-SAME: %[[INPUT:.*]]: i16) -> i64
+// CHECK: %[[EXTENDED:.*]] = arith.extsi %[[INPUT]] : i16 to i64
+// CHECK: %[[SHIFT:.*]] = arith.constant 15 : i64
+// CHECK: %[[ACC:.*]] = arith.shli %[[EXTENDED]], %[[SHIFT]] : i64
+// CHECK: return %[[ACC]] : i64
 // CHECK-NOT: ondsp.

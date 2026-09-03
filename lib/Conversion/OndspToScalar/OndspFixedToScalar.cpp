@@ -94,13 +94,26 @@ static bool isSupportedAccumulatorTerm(ondrix::ondsp::AccType accumulator,
          numeric.getFrac() == accumulator.getFrac();
 }
 
-/// Storage carrier of one accumulator value: the raw storage type for a single
-/// lane, and one storage element per lane otherwise. Lanes never interact, so
-/// the multi-lane carrier is the single-lane carrier applied elementwise.
+/// The machine width an accumulator of `storageWidth` bits is carried in: the
+/// next legal integer width, so an i40 travels as an i64 instead of paying a
+/// sign-extension at every use. A saturating carrier always holds the storage
+/// value sign-extended; a wrapping carrier holds any value congruent to it
+/// modulo 2^storageWidth and is canonicalized only where the bits are read.
+static unsigned getAccumulatorCarrierWidth(unsigned storageWidth) {
+  if (storageWidth <= 32)
+    return 32;
+  return storageWidth <= 64 ? 64 : storageWidth;
+}
+
+/// One carrier element per lane; lanes never interact, so the multi-lane
+/// carrier is the single-lane carrier applied elementwise.
 static Type getAccumulatorCarrier(ondrix::ondsp::AccType accumulator) {
+  auto storage = cast<IntegerType>(accumulator.getStorage());
+  Type element =
+      IntegerType::get(storage.getContext(), getAccumulatorCarrierWidth(storage.getWidth()));
   if (ondrix::ondsp::isSingleLaneAccumulator(accumulator))
-    return accumulator.getStorage();
-  return VectorType::get({static_cast<int64_t>(accumulator.getLanes())}, accumulator.getStorage());
+    return element;
+  return VectorType::get({static_cast<int64_t>(accumulator.getLanes())}, element);
 }
 
 class OndspFixedToScalarTypeConverter final : public TypeConverter {
@@ -189,6 +202,19 @@ static Value createIntegerConstant(Location loc, Type type, int64_t value, OpBui
       loc, type, llvm::APInt(getIntegerElementType(type).getWidth(), value, true), builder);
 }
 
+/// The sign-extended storage value of a carried accumulator. A wrapping
+/// carrier wider than its storage is folded back to the storage width first.
+static Value canonicalizeAccumulator(Location loc, Value carried,
+                                     ondrix::ondsp::AccType accumulator, OpBuilder &builder) {
+  unsigned storageWidth = cast<IntegerType>(accumulator.getStorage()).getWidth();
+  if (accumulator.getUpdateOverflow() != ondrix::ondsp::OverflowMode::Wrap ||
+      getIntegerElementType(carried.getType()).getWidth() == storageWidth)
+    return carried;
+  Type storageType = getIntegerTypeLike(carried.getType(), storageWidth, builder);
+  Value narrowed = builder.create<arith::TruncIOp>(loc, storageType, carried);
+  return builder.create<arith::ExtSIOp>(loc, carried.getType(), narrowed);
+}
+
 class AccZeroOpLowering final : public OpConversionPattern<ondrix::ondsp::AccZeroOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::AccZeroOp>::OpConversionPattern;
@@ -215,28 +241,44 @@ public:
           "fixed scalar lowering supports Q15 or Q30 to a signed frac30 accumulator of at least "
           "32 bits, or Q31 to i64/frac62 exact import");
 
-    auto accumulatorStorage = cast<IntegerType>(accumulator.getStorage());
-    Value extended =
-        rewriter.create<arith::ExtSIOp>(op.getLoc(), accumulatorStorage, adaptor.getInput());
+    auto carrier = cast<IntegerType>(getAccumulatorCarrier(accumulator));
+    Value extended = adaptor.getInput();
+    if (extended.getType() != carrier)
+      extended = rewriter.create<arith::ExtSIOp>(op.getLoc(), carrier, extended);
     Value shift = rewriter.create<arith::ConstantIntOp>(
-        op.getLoc(), accumulator.getFrac() - op.getSrc().getFrac(), accumulatorStorage.getWidth());
+        op.getLoc(), accumulator.getFrac() - op.getSrc().getFrac(), carrier.getWidth());
     rewriter.replaceOpWithNewOp<arith::ShLIOp>(op, extended, shift);
     return success();
   }
 };
 
+/// Updates a carried accumulator of `storageWidth` bits. The sum is formed in
+/// the carrier when the exact update width fits it and in that exact width
+/// otherwise; a wrapping result stays congruent, a saturating one is clamped to
+/// the storage rails and so stays canonical.
 static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value product,
-                                    ondrix::ondsp::OverflowMode overflowMode,
+                                    unsigned storageWidth, ondrix::ondsp::OverflowMode overflowMode,
                                     ondrix::fixedpoint::AccumulatorUpdateOperation operation,
                                     OpBuilder &builder) {
-  Type accumulatorType = accumulator.getType();
-  IntegerType accumulatorElement = getIntegerElementType(accumulatorType);
+  Type carrierType = accumulator.getType();
+  unsigned carrierWidth = getIntegerElementType(carrierType).getWidth();
   IntegerType productElement = getIntegerElementType(product.getType());
-  unsigned intermediateWidth = ondrix::fixedpoint::getAccumulatorUpdateIntermediateWidth(
-      accumulatorElement.getWidth(), productElement.getWidth());
-  Type intermediateType = getIntegerTypeLike(accumulatorType, intermediateWidth, builder);
-  Value extendedAccumulator = builder.create<arith::ExtSIOp>(loc, intermediateType, accumulator);
-  Value extendedProduct = builder.create<arith::ExtSIOp>(loc, intermediateType, product);
+  unsigned intermediateWidth =
+      std::max(carrierWidth, ondrix::fixedpoint::getAccumulatorUpdateIntermediateWidth(
+                                 storageWidth, productElement.getWidth()));
+  Type intermediateType = getIntegerTypeLike(carrierType, intermediateWidth, builder);
+  auto widen = [&](Value value) -> Value {
+    if (getIntegerElementType(value.getType()).getWidth() == intermediateWidth)
+      return value;
+    return builder.create<arith::ExtSIOp>(loc, intermediateType, value);
+  };
+  Value extendedAccumulator = widen(accumulator);
+  Value extendedProduct = widen(product);
+  auto narrowToCarrier = [&](Value value) -> Value {
+    if (intermediateWidth == carrierWidth)
+      return value;
+    return builder.create<arith::TruncIOp>(loc, carrierType, value);
+  };
   Value updated;
   switch (operation) {
   case ondrix::fixedpoint::AccumulatorUpdateOperation::Add:
@@ -251,20 +293,17 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
   // -Wswitch finding here instead of borrowing a neighbour's semantics.
   switch (overflowMode) {
   case ondrix::ondsp::OverflowMode::Wrap:
-    return builder.create<arith::TruncIOp>(loc, accumulatorType, updated);
+    return narrowToCarrier(updated);
   case ondrix::ondsp::OverflowMode::Saturate: {
-    // Clamp in the exact update width before narrowing to the accumulator.
     // Signed min/max rather than a compare/select pair: the same function
     // either way, but this is the form that reaches cmov and packed min/max.
-    llvm::APInt minimum =
-        llvm::APInt::getSignedMinValue(accumulatorElement.getWidth()).sext(intermediateWidth);
-    llvm::APInt maximum =
-        llvm::APInt::getSignedMaxValue(accumulatorElement.getWidth()).sext(intermediateWidth);
+    llvm::APInt minimum = llvm::APInt::getSignedMinValue(storageWidth).sext(intermediateWidth);
+    llvm::APInt maximum = llvm::APInt::getSignedMaxValue(storageWidth).sext(intermediateWidth);
     Value minimumValue = createIntegerConstant(loc, intermediateType, minimum, builder);
     Value maximumValue = createIntegerConstant(loc, intermediateType, maximum, builder);
     Value lowerClamped = builder.create<arith::MaxSIOp>(loc, updated, minimumValue);
     Value clamped = builder.create<arith::MinSIOp>(loc, lowerClamped, maximumValue);
-    return builder.create<arith::TruncIOp>(loc, accumulatorType, clamped);
+    return narrowToCarrier(clamped);
   }
   }
   llvm_unreachable("unhandled declared overflow mode");
@@ -482,6 +521,7 @@ public:
     Value product =
         lowerSignedProduct(loc, value, coefficient, op.getNumeric(), domain->product, rewriter);
     Value updated = lowerAccumulatorUpdate(loc, adaptor.getAcc(), product,
+                                           cast<IntegerType>(accumulator.getStorage()).getWidth(),
                                            accumulator.getUpdateOverflow(), operation, rewriter);
     rewriter.replaceOp(op, updated);
     return success();
@@ -654,7 +694,8 @@ public:
           "with the same fractional position");
 
     Value result = lowerAccumulatorUpdate(
-        op.getLoc(), adaptor.getAcc(), adaptor.getTerm(), accumulator.getUpdateOverflow(),
+        op.getLoc(), adaptor.getAcc(), adaptor.getTerm(),
+        cast<IntegerType>(accumulator.getStorage()).getWidth(), accumulator.getUpdateOverflow(),
         ondrix::fixedpoint::AccumulatorUpdateOperation::Add, rewriter);
     rewriter.replaceOp(op, result);
     return success();
@@ -701,9 +742,11 @@ public:
           Value lhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), iv);
           Value rhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), iv);
           Value product = lowerSignedProduct(bodyLoc, lhs, rhs, numeric, domain->product, builder);
-          Value next = lowerAccumulatorUpdate(
-              bodyLoc, iterArgs.front(), product, accumulator.getUpdateOverflow(),
-              ondrix::fixedpoint::AccumulatorUpdateOperation::Add, builder);
+          Value next =
+              lowerAccumulatorUpdate(bodyLoc, iterArgs.front(), product,
+                                     cast<IntegerType>(accumulator.getStorage()).getWidth(),
+                                     accumulator.getUpdateOverflow(),
+                                     ondrix::fixedpoint::AccumulatorUpdateOperation::Add, builder);
           builder.create<scf::YieldOp>(bodyLoc, next);
         });
 
@@ -735,8 +778,9 @@ public:
           "frac");
 
     unsigned shift = accumulator.getFrac() - op.getDst().getFrac();
+    Value canonical = canonicalizeAccumulator(op.getLoc(), adaptor.getAcc(), accumulator, rewriter);
     Value rounded =
-        roundSignedRightShift(op.getLoc(), adaptor.getAcc(), shift, op.getRounding(), rewriter);
+        roundSignedRightShift(op.getLoc(), canonical, shift, op.getRounding(), rewriter);
     // A multi-lane accumulator exports one destination element per lane; the
     // rounding, narrowing, and clamping sequence below is exactly the
     // single-lane one applied elementwise.
@@ -745,16 +789,9 @@ public:
     unsigned roundedWidth = getIntegerElementType(rounded.getType()).getWidth();
     Value result;
     if (destinationWidth > roundedWidth) {
-      // The destination is WIDER than the accumulator storage, which the
-      // i64/frac30 identity destination reaches from an i40 or i48
-      // accumulator. `narrowSignedValue` cannot serve this direction: its
-      // wrap branch would emit an illegal widening `arith.trunci` and its
-      // saturate branch would sign extend the destination bounds into a
-      // narrower comparison width. Widening sign extension is exactly
-      // value preserving, so both destination export overflow modes are
-      // provably no-ops here and neither needs to be materialized. The
-      // accumulator's own update_overflow stays observable semantics; the
-      // widening merely materializes the already-updated state faithfully.
+      // A destination wider than the carrier (the i64/frac30 identity from an
+      // i32 carrier) is a value-preserving widening; both overflow modes are
+      // no-ops there and `narrowSignedValue` could not spell the direction.
       result = rewriter.create<arith::ExtSIOp>(op.getLoc(), destinationType, rounded);
     } else {
       result = narrowSignedValue(op.getLoc(), rounded, destinationType, op.getOverflow(), rewriter);
@@ -1102,6 +1139,52 @@ private:
   bool sqrtEstimate;
 };
 
+/// A cast between one accumulator and an integer of its storage width reads or
+/// writes the storage bits: the canonical value narrowed to the storage, or the
+/// storage value sign-extended into the carrier. Every other cast shape is left
+/// to the structural conversion.
+class AccumulatorStorageCastLowering final
+    : public OpConversionPattern<UnrealizedConversionCastOp> {
+public:
+  AccumulatorStorageCastLowering(TypeConverter &typeConverter, MLIRContext *context)
+      : OpConversionPattern(typeConverter, context, /*benefit=*/2) {}
+
+  LogicalResult matchAndRewrite(UnrealizedConversionCastOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumOperands() != 1 || op.getNumResults() != 1)
+      return failure();
+    Type inputType = op.getOperand(0).getType();
+    Type resultType = op.getResult(0).getType();
+    Location loc = op.getLoc();
+    if (auto accumulator = dyn_cast<ondrix::ondsp::AccType>(inputType)) {
+      if (getTypeConverter()->convertType(accumulator) == nullptr ||
+          getIntegerTypeLike(adaptor.getInputs()[0].getType(),
+                             cast<IntegerType>(accumulator.getStorage()).getWidth(),
+                             rewriter) != resultType)
+        return failure();
+      Value canonical = canonicalizeAccumulator(loc, adaptor.getInputs()[0], accumulator, rewriter);
+      if (canonical.getType() == resultType)
+        rewriter.replaceOp(op, canonical);
+      else
+        rewriter.replaceOpWithNewOp<arith::TruncIOp>(op, resultType, canonical);
+      return success();
+    }
+    if (auto accumulator = dyn_cast<ondrix::ondsp::AccType>(resultType)) {
+      Type carrier = getTypeConverter()->convertType(accumulator);
+      if (!carrier ||
+          getIntegerTypeLike(carrier, cast<IntegerType>(accumulator.getStorage()).getWidth(),
+                             rewriter) != inputType)
+        return failure();
+      if (carrier == inputType)
+        rewriter.replaceOp(op, adaptor.getInputs()[0]);
+      else
+        rewriter.replaceOpWithNewOp<arith::ExtSIOp>(op, carrier, adaptor.getInputs()[0]);
+      return success();
+    }
+    return failure();
+  }
+};
+
 class ConvertOndspFixedToScalarPass final
     : public ondrix::impl::ConvertOndspFixedToScalarBase<ConvertOndspFixedToScalarPass> {
 public:
@@ -1126,6 +1209,7 @@ public:
                  ReduceMacOpLowering, RoundDivOpLowering, RoundShiftOpLowering, SatCastOpLowering,
                  SubShiftOpLowering>(typeConverter, &getContext());
     patterns.add<SqrtFixedOpLowering>(typeConverter, &getContext(), sqrtEstimate);
+    patterns.add<AccumulatorStorageCastLowering>(typeConverter, &getContext());
     patterns.add<CxButterflyOpLowering>(typeConverter, &getContext(), specializeCanonicalTwiddles);
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);

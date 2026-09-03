@@ -54,9 +54,10 @@ func.func @preserve_portable_i34(
 
 // FINAL-LABEL: func.func @parallel_wrap
 // FINAL: vector.reduction <add>
-// FINAL: arith.extsi {{.*}} : i40 to i65
 // FINAL: arith.extsi {{.*}} : i64 to i65
-// FINAL: arith.addi
+// FINAL: arith.extsi {{.*}} : i64 to i65
+// FINAL: arith.addi {{.*}} : i65
+// FINAL: arith.trunci {{.*}} : i65 to i64
 // FINAL-LABEL: func.func @preserve_saturate
 // FINAL: vector.extract
 // FINAL-NOT: ondsp.

@@ -35,23 +35,23 @@ func.func @select_accumulator(
 }
 
 // CHECK-LABEL: func.func @branch_accumulator(
-// CHECK-SAME: %[[INPUT:.*]]: i40) -> i40
-// CHECK: cf.br ^[[FORWARD:.*]](%[[INPUT]] : i40)
-// CHECK: ^[[FORWARD]](%[[ACC:.*]]: i40):
-// CHECK: return %[[ACC]] : i40
+// CHECK-SAME: %[[INPUT:.*]]: i64) -> i64
+// CHECK: cf.br ^[[FORWARD:.*]](%[[INPUT]] : i64)
+// CHECK: ^[[FORWARD]](%[[ACC:.*]]: i64):
+// CHECK: return %[[ACC]] : i64
 
 // CHECK-LABEL: func.func @conditional_accumulator(
-// CHECK-SAME: %[[COND:.*]]: i1, %[[LHS:.*]]: i40, %[[RHS:.*]]: i40) -> i40
-// CHECK: cf.cond_br %[[COND]], ^[[LEFT:.*]](%[[LHS]] : i40), ^[[RIGHT:.*]](%[[RHS]] : i40)
-// CHECK: ^[[LEFT]](%[[LEFT_ACC:.*]]: i40):
-// CHECK: cf.br ^[[MERGE:.*]](%[[LEFT_ACC]] : i40)
-// CHECK: ^[[RIGHT]](%[[RIGHT_ACC:.*]]: i40):
-// CHECK: cf.br ^[[MERGE]](%[[RIGHT_ACC]] : i40)
-// CHECK: ^[[MERGE]](%[[MERGED:.*]]: i40):
-// CHECK: return %[[MERGED]] : i40
+// CHECK-SAME: %[[COND:.*]]: i1, %[[LHS:.*]]: i64, %[[RHS:.*]]: i64) -> i64
+// CHECK: cf.cond_br %[[COND]], ^[[LEFT:.*]](%[[LHS]] : i64), ^[[RIGHT:.*]](%[[RHS]] : i64)
+// CHECK: ^[[LEFT]](%[[LEFT_ACC:.*]]: i64):
+// CHECK: cf.br ^[[MERGE:.*]](%[[LEFT_ACC]] : i64)
+// CHECK: ^[[RIGHT]](%[[RIGHT_ACC:.*]]: i64):
+// CHECK: cf.br ^[[MERGE]](%[[RIGHT_ACC]] : i64)
+// CHECK: ^[[MERGE]](%[[MERGED:.*]]: i64):
+// CHECK: return %[[MERGED]] : i64
 
 // CHECK-LABEL: func.func @select_accumulator(
-// CHECK-SAME: %[[COND:.*]]: i1, %[[LHS:.*]]: i40, %[[RHS:.*]]: i40) -> i40
-// CHECK: %[[SELECTED:.*]] = arith.select %[[COND]], %[[LHS]], %[[RHS]] {test.tag = "keep"} : i40
-// CHECK: return %[[SELECTED]] : i40
+// CHECK-SAME: %[[COND:.*]]: i1, %[[LHS:.*]]: i64, %[[RHS:.*]]: i64) -> i64
+// CHECK: %[[SELECTED:.*]] = arith.select %[[COND]], %[[LHS]], %[[RHS]] {test.tag = "keep"} : i64
+// CHECK: return %[[SELECTED]] : i64
 // CHECK-NOT: !ondsp.acc

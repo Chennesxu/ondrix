@@ -50,24 +50,24 @@ func.func @while_accumulator(%condition: i1,
 
 // CHECK-LABEL: func.func @for_accumulator(
 // CHECK-SAME: %[[LOWER:.*]]: index, %[[UPPER:.*]]: index, %[[STEP:.*]]: index,
-// CHECK-SAME: %[[INITIAL:.*]]: i40, %[[LHS:.*]]: i16, %[[RHS:.*]]: i16) -> i16
+// CHECK-SAME: %[[INITIAL:.*]]: i64, %[[LHS:.*]]: i16, %[[RHS:.*]]: i16) -> i16
 // CHECK: %[[RESULT:.*]] = scf.for %{{.*}} = %[[LOWER]] to %[[UPPER]] step %[[STEP]]
-// CHECK-SAME: iter_args(%[[ACC:.*]] = %[[INITIAL]]) -> (i40) {
-// CHECK: scf.yield %{{.*}} : i40
+// CHECK-SAME: iter_args(%[[ACC:.*]] = %[[INITIAL]]) -> (i64) {
+// CHECK: scf.yield %{{.*}} : i64
 // CHECK: return %{{.*}} : i16
 
 // CHECK-LABEL: func.func @if_accumulator(
-// CHECK: %[[RESULT:.*]] = scf.if %{{.*}} -> (i40) {
-// CHECK: scf.yield %{{.*}} : i40
+// CHECK: %[[RESULT:.*]] = scf.if %{{.*}} -> (i64) {
+// CHECK: scf.yield %{{.*}} : i64
 // CHECK: } else {
-// CHECK: scf.yield %{{.*}} : i40
-// CHECK: return %[[RESULT]] : i40
+// CHECK: scf.yield %{{.*}} : i64
+// CHECK: return %[[RESULT]] : i64
 
 // CHECK-LABEL: func.func @while_accumulator(
-// CHECK: %[[RESULT:.*]] = scf.while (%[[ACC:.*]] = %{{.*}}) : (i40) -> i40 {
-// CHECK: scf.condition(%{{.*}}) %[[ACC]] : i40
+// CHECK: %[[RESULT:.*]] = scf.while (%[[ACC:.*]] = %{{.*}}) : (i64) -> i64 {
+// CHECK: scf.condition(%{{.*}}) %[[ACC]] : i64
 // CHECK: } do {
-// CHECK: ^bb0(%[[BODY_ACC:.*]]: i40):
-// CHECK: scf.yield %[[BODY_ACC]] : i40
-// CHECK: return %[[RESULT]] : i40
+// CHECK: ^bb0(%[[BODY_ACC:.*]]: i64):
+// CHECK: scf.yield %[[BODY_ACC]] : i64
+// CHECK: return %[[RESULT]] : i64
 // CHECK-NOT: !ondsp.acc

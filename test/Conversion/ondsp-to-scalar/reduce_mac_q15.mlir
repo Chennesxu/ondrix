@@ -11,22 +11,24 @@ func.func @reduce_q15_saturate(
   return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 }
 
-// CHECK-LABEL: func.func @reduce_q15_saturate(%arg0: i40
+// CHECK-LABEL: func.func @reduce_q15_saturate(%arg0: i64
 // CHECK: %[[C0:.*]] = arith.constant 0 : index
 // CHECK: %[[C8:.*]] = arith.constant 8 : index
 // CHECK: %[[C1:.*]] = arith.constant 1 : index
-// CHECK: %[[RESULT:.*]] = scf.for {{.*}} iter_args(%[[ACC:.*]] = %arg0) -> (i40) {
+// CHECK: %[[RESULT:.*]] = scf.for {{.*}} iter_args(%[[ACC:.*]] = %arg0) -> (i64) {
 // CHECK: %[[LHS:.*]] = memref.load
 // CHECK: %[[RHS:.*]] = memref.load
 // CHECK: %[[LHS_EXT:.*]] = arith.extsi %[[LHS]] : i16 to i32
 // CHECK: %[[RHS_EXT:.*]] = arith.extsi %[[RHS]] : i16 to i32
 // CHECK: %[[PRODUCT:.*]] = arith.muli %[[LHS_EXT]], %[[RHS_EXT]] : i32
-// CHECK: arith.extsi %[[ACC]] : i40 to i41
-// CHECK: arith.extsi %[[PRODUCT]] : i32 to i41
+// CHECK: %[[PRODUCT_EXT:.*]] = arith.extsi %[[PRODUCT]] : i32 to i64
+// CHECK: arith.addi %[[ACC]], %[[PRODUCT_EXT]] : i64
+// CHECK: arith.constant -549755813888 : i64
+// CHECK: arith.constant 549755813887 : i64
 // CHECK: arith.maxsi
 // CHECK: arith.minsi
-// CHECK: scf.yield {{.*}} : i40
-// CHECK: return %[[RESULT]] : i40
+// CHECK: scf.yield {{.*}} : i64
+// CHECK: return %[[RESULT]] : i64
 // CHECK-NOT: ondsp.
 
 func.func @reduce_q15_dynamic_wrap(
@@ -46,6 +48,7 @@ func.func @reduce_q15_dynamic_wrap(
 // CHECK: %[[RHS_LEN:.*]] = memref.dim %arg2, %[[C0]] : memref<?xi16>
 // CHECK: %[[MATCH:.*]] = arith.cmpi eq, %[[LHS_LEN]], %[[RHS_LEN]] : index
 // CHECK: cf.assert %[[MATCH]], "ondsp.reduce_mac requires equal operand lengths"
-// CHECK: scf.for
-// CHECK: arith.trunci {{.*}} : i41 to i40
+// CHECK: scf.for {{.*}} -> (i64) {
+// CHECK: arith.addi {{.*}} : i64
+// CHECK-NOT: arith.trunci
 // CHECK-NOT: ondsp.

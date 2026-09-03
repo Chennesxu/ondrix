@@ -46,11 +46,11 @@ func.func @export_q30(
 // CHECK: return %[[ACC]] : i64
 
 // CHECK-LABEL: func.func @import_q30(
-// CHECK-SAME: %[[INPUT:.*]]: i32) -> i40
-// CHECK: %[[EXTENDED:.*]] = arith.extsi %[[INPUT]] : i32 to i40
-// CHECK: %[[SHIFT:.*]] = arith.constant 0 : i40
-// CHECK: %[[ACC:.*]] = arith.shli %[[EXTENDED]], %[[SHIFT]] : i40
-// CHECK: return %[[ACC]] : i40
+// CHECK-SAME: %[[INPUT:.*]]: i32) -> i64
+// CHECK: %[[EXTENDED:.*]] = arith.extsi %[[INPUT]] : i32 to i64
+// CHECK: %[[SHIFT:.*]] = arith.constant 0 : i64
+// CHECK: %[[ACC:.*]] = arith.shli %[[EXTENDED]], %[[SHIFT]] : i64
+// CHECK: return %[[ACC]] : i64
 
 // CHECK-LABEL: func.func @export_q31(
 // CHECK-SAME: %[[ACC:.*]]: i64) -> i32
@@ -63,7 +63,9 @@ func.func @export_q30(
 // CHECK: return %[[RESULT]] : i32
 
 // CHECK-LABEL: func.func @export_q30(
-// CHECK-SAME: %[[ACC:.*]]: i40) -> i32
-// CHECK-NEXT: %[[RESULT:.*]] = arith.trunci %[[ACC]] : i40 to i32
+// CHECK-SAME: %[[ACC:.*]]: i64) -> i32
+// CHECK-NEXT: %[[NARROW:.*]] = arith.trunci %[[ACC]] : i64 to i40
+// CHECK-NEXT: %[[WRAPPED:.*]] = arith.extsi %[[NARROW]] : i40 to i64
+// CHECK-NEXT: %[[RESULT:.*]] = arith.trunci %[[WRAPPED]] : i64 to i32
 // CHECK-NEXT: return %[[RESULT]] : i32
 // CHECK-NOT: ondsp.
