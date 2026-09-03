@@ -341,5 +341,11 @@ func.func @wrapping_q15(%input: memref<8xi16>)
                               update_overflow = wrap>
 }
 
+// A wrapping accumulator takes the same certificate; its pairs are pre-added
+// in i32 and the trace carries the wrap mode.
 // CHECK-LABEL: func.func @wrapping_q15
-// CHECK: ondsp.reduce_mac
+// CHECK: vector.shuffle {{.*}} [0, 2]
+// CHECK: vector.shuffle {{.*}} [1, 3]
+// CHECK: vector.reduction <add>, {{.*}} : vector<2xi32> into i32
+// CHECK: ondsp.acc_add_term {{.*}} update_overflow = wrap>, i32)
+// CHECK-NOT: ondsp.reduce_mac

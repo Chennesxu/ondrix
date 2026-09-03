@@ -322,7 +322,8 @@ json::Object toJSON(const NoOverflowChunkReassociationTrace &trace) {
       {"accumulator_storage_width", static_cast<int64_t>(trace.accumulatorStorageWidth)},
       {"accumulator_frac", static_cast<int64_t>(trace.accumulatorFrac)},
       {"accumulator_signedness", "signed"},
-      {"accumulator_update_overflow", "saturate"},
+      {"accumulator_update_overflow",
+       trace.accumulatorUpdateOverflow == ondsp::OverflowMode::Wrap ? "wrap" : "saturate"},
       {"product_selection", "full"},
       {"product_raw_width", static_cast<int64_t>(trace.productRawWidth)},
       {"product_frac", static_cast<int64_t>(trace.productFrac)},
@@ -366,9 +367,10 @@ parseNoOverflowChunkReassociationTrace(const json::Value &value,
       !numericSignedness || *numericSignedness != "signed" ||
       !isUnsignedField(accumulatorStorageWidth) || !isUnsignedField(accumulatorFrac) ||
       !accumulatorSignedness || *accumulatorSignedness != "signed" || !accumulatorOverflow ||
-      *accumulatorOverflow != "saturate" || !productSelection || *productSelection != "full" ||
-      !isUnsignedField(productRawWidth) || !isUnsignedField(productFrac) || !chunkWidth ||
-      *chunkWidth <= 1 || !termWidth || (*termWidth != 32 && *termWidth != 64) || !pairWidth ||
+      (*accumulatorOverflow != "saturate" && *accumulatorOverflow != "wrap") || !productSelection ||
+      *productSelection != "full" || !isUnsignedField(productRawWidth) ||
+      !isUnsignedField(productFrac) || !chunkWidth || *chunkWidth <= 1 || !termWidth ||
+      (*termWidth != 32 && *termWidth != 64) || !pairWidth ||
       (*pairWidth != 32 && *pairWidth != 64))
     return failure();
 
@@ -395,6 +397,8 @@ parseNoOverflowChunkReassociationTrace(const json::Value &value,
   trace.numericFrac = static_cast<unsigned>(*numericFrac);
   trace.accumulatorStorageWidth = static_cast<unsigned>(*accumulatorStorageWidth);
   trace.accumulatorFrac = static_cast<unsigned>(*accumulatorFrac);
+  trace.accumulatorUpdateOverflow =
+      *accumulatorOverflow == "wrap" ? ondsp::OverflowMode::Wrap : ondsp::OverflowMode::Saturate;
   trace.productRawWidth = static_cast<unsigned>(*productRawWidth);
   trace.productFrac = static_cast<unsigned>(*productFrac);
   trace.chunkWidth = *chunkWidth;
@@ -411,8 +415,10 @@ bool areEquivalent(const NoOverflowChunkReassociationTrace &lhs,
   return lhs.subjectOrdinal == rhs.subjectOrdinal &&
          lhs.numericStorageWidth == rhs.numericStorageWidth && lhs.numericFrac == rhs.numericFrac &&
          lhs.accumulatorStorageWidth == rhs.accumulatorStorageWidth &&
-         lhs.accumulatorFrac == rhs.accumulatorFrac && lhs.productRawWidth == rhs.productRawWidth &&
-         lhs.productFrac == rhs.productFrac && lhs.chunkWidth == rhs.chunkWidth &&
+         lhs.accumulatorFrac == rhs.accumulatorFrac &&
+         lhs.accumulatorUpdateOverflow == rhs.accumulatorUpdateOverflow &&
+         lhs.productRawWidth == rhs.productRawWidth && lhs.productFrac == rhs.productFrac &&
+         lhs.chunkWidth == rhs.chunkWidth &&
          lhs.implementationTermWidth == rhs.implementationTermWidth &&
          lhs.pairTermWidth == rhs.pairTermWidth &&
          equalCoefficients(lhs.coefficients, rhs.coefficients) &&
@@ -639,19 +645,28 @@ FailureOr<NoOverflowChunkReassociationPlan>
 FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
     ondsp::ReduceMacOp reduction, const ondrix::ConstantIntegerMemRefFacts &constant,
     int64_t chunkWidth) {
+  return planZeroSeededConstantChunkReduction(reduction, constant.getSequence().getValues(),
+                                              constant.getSource(), chunkWidth);
+}
+
+FailureOr<NoOverflowChunkReassociationPlan>
+FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(ondsp::ReduceMacOp reduction,
+                                                                   ArrayRef<APInt> coefficients,
+                                                                   Value coefficientSource,
+                                                                   int64_t chunkWidth) {
   auto numeric = dyn_cast<ondsp::FixedAttr>(reduction.getNumeric());
   auto accumulator = dyn_cast<ondsp::AccType>(reduction.getInitial().getType());
   if (!numeric || !accumulator || !reduction.getProduct() ||
-      reduction.getRhs() != constant.getSource() ||
+      reduction.getRhs() != coefficientSource ||
       !reduction.getInitial().getDefiningOp<ondsp::AccZeroOp>())
     return failure();
   ondsp::ProductAttr product = *reduction.getProduct();
-  ArrayRef<APInt> coefficients = constant.getSequence().getValues();
   auto accumulatorStorage = dyn_cast<IntegerType>(accumulator.getStorage());
+  // A wrapping accumulator takes the same certificate: the proof that no
+  // prefix leaves the storage makes the two update modes coincide.
   if (!accumulatorStorage || !accumulatorStorage.isSignless() || chunkWidth <= 1 ||
       coefficients.size() < static_cast<size_t>(chunkWidth) ||
-      coefficients.size() > static_cast<size_t>(std::numeric_limits<int64_t>::max()) ||
-      accumulator.getUpdateOverflow() != ondsp::OverflowMode::Saturate)
+      coefficients.size() > static_cast<size_t>(std::numeric_limits<int64_t>::max()))
     return failure();
 
   FailureOr<ondsp::ProductSemantics> productSemantics =
@@ -695,6 +710,7 @@ FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
   trace.numericFrac = numeric.getFrac();
   trace.accumulatorStorageWidth = accumulatorStorage.getWidth();
   trace.accumulatorFrac = accumulator.getFrac();
+  trace.accumulatorUpdateOverflow = accumulator.getUpdateOverflow();
   trace.productRawWidth = productSemantics->rawWidth;
   trace.productFrac = productSemantics->frac;
   trace.chunkWidth = chunkWidth;
@@ -703,8 +719,8 @@ FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
   trace.coefficients.assign(coefficients.begin(), coefficients.end());
   trace.originalPrefixes = std::move(*originalPrefixes);
   trace.reassociatedPrefixes = std::move(*reassociatedPrefixes);
-  return NoOverflowChunkReassociationPlan(reduction, constant.getSource(), *productSemantics,
-                                          numeric, product, accumulator, coefficients, chunkWidth,
+  return NoOverflowChunkReassociationPlan(reduction, coefficientSource, *productSemantics, numeric,
+                                          product, accumulator, coefficients, chunkWidth,
                                           std::move(trace));
 }
 

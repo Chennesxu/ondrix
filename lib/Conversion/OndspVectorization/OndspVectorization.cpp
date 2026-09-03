@@ -96,6 +96,8 @@ struct ChunkAccess {
   Value memref;
   /// Present only for a reversed view: view index `i` is `memref[origin - i]`.
   std::optional<int64_t> origin;
+  /// The static extent of a reversed view.
+  int64_t size = 0;
 };
 
 std::optional<ChunkAccess> getChunkAccess(Value operand) {
@@ -131,7 +133,7 @@ std::optional<ChunkAccess> getChunkAccess(Value operand) {
   // `source[offset - i]`, so the last index read is `offset - (size - 1)`.
   if (offset < 0 || offset >= sourceType.getDimSize(0) || viewType.getDimSize(0) > offset + 1)
     return std::nullopt;
-  return ChunkAccess{subview.getSource(), offset};
+  return ChunkAccess{subview.getSource(), offset, viewType.getDimSize(0)};
 }
 
 /// Loads one chunk of the operand starting at view index `base`.
@@ -171,15 +173,8 @@ bool hasSupportedReductionShape(ondrix::ondsp::ReduceMacOp op, bool allowReverse
                                                              *op.getProduct());
 }
 
-/// The strict shape. The constant-saturating route keeps it because its prefix
-/// certificate reads the coefficient sequence itself, and a reversed view
-/// would present that sequence in the wrong order to the analysis.
-bool isSupportedMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
-  return hasSupportedReductionShape(op, /*allowReversedLayout=*/false);
-}
-
-/// The exact-modulo route additionally admits a reversed operand: it reads the
-/// elements, never their order, and the reversal is undone in the load.
+/// Both routes admit a reversed operand: the reversal is undone in the load,
+/// and the constant certificate is taken over the coefficients in read order.
 bool isVectorizableMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
   return hasSupportedReductionShape(op, /*allowReversedLayout=*/true);
 }
@@ -233,13 +228,13 @@ Value createHorizontalAccumulatorUpdate(
 FailureOr<ondrix::analysis::NoOverflowChunkReassociationPlan>
 planConstantSaturatingReduction(ondrix::ondsp::ReduceMacOp op, int64_t vectorWidth,
                                 int64_t maxElements) {
-  if (!isSupportedMemRefReduction(op) || !op.getInitial().getDefiningOp<ondrix::ondsp::AccZeroOp>())
+  if (!isVectorizableMemRefReduction(op) ||
+      !op.getInitial().getDefiningOp<ondrix::ondsp::AccZeroOp>())
     return failure();
 
   auto accumulator = cast<ondrix::ondsp::AccType>(op.getInitial().getType());
   auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
-  if (accumulator.getUpdateOverflow() != ondrix::ondsp::OverflowMode::Saturate ||
-      !ondrix::ondsp::isFullProduct(*op.getProduct()) ||
+  if (!ondrix::ondsp::isFullProduct(*op.getProduct()) ||
       !ondrix::conversion::isSupportedFixedHorizontalMacDomain(accumulator, numeric,
                                                                *op.getProduct()))
     return failure();
@@ -249,16 +244,31 @@ planConstantSaturatingReduction(ondrix::ondsp::ReduceMacOp op, int64_t vectorWid
   if (failed(domain) || domain->termStorage.getWidth() > 64)
     return failure();
 
+  std::optional<ChunkAccess> access = getChunkAccess(op.getRhs());
+  if (!access)
+    return failure();
   FailureOr<ondrix::ConstantIntegerMemRefFacts> constant =
-      ondrix::analyzeConstantIntegerMemRef(op.getRhs(), maxElements);
+      ondrix::analyzeConstantIntegerMemRef(access->memref, maxElements);
   if (failed(constant))
     return failure();
-  auto rhsType = cast<MemRefType>(op.getRhs().getType());
-  if (!rhsType.isDynamicDim(0) &&
-      constant->getSequence().getElementCount() != rhsType.getDimSize(0))
+  if (!access->origin) {
+    auto rhsType = cast<MemRefType>(op.getRhs().getType());
+    if (!rhsType.isDynamicDim(0) &&
+        constant->getSequence().getElementCount() != rhsType.getDimSize(0))
+      return failure();
+    return ondrix::analysis::FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
+        op, *constant, vectorWidth);
+  }
+  // A reversed view reads `source[origin - i]`; the certificate is over the
+  // coefficients in that reading order, and the plan is bound to the view.
+  ArrayRef<llvm::APInt> values = constant->getSequence().getValues();
+  if (*access->origin >= static_cast<int64_t>(values.size()) || access->size > *access->origin + 1)
     return failure();
+  SmallVector<llvm::APInt> readOrder;
+  for (int64_t index = 0; index < access->size; ++index)
+    readOrder.push_back(values[*access->origin - index]);
   return ondrix::analysis::FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
-      op, *constant, vectorWidth);
+      op, readOrder, op.getRhs(), vectorWidth);
 }
 
 /// The certified chunk may be several machine vectors wide. Widening it does
@@ -332,10 +342,10 @@ public:
               auto vectorLoop = rewriter.create<scf::ForOp>(
                   loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{seed},
                   [&](OpBuilder &builder, Location bodyLoc, Value base, ValueRange iterArgs) {
-                    Value lhs =
-                        builder.create<vector::LoadOp>(bodyLoc, vectorType, op.getLhs(), base);
-                    Value rhs =
-                        builder.create<vector::LoadOp>(bodyLoc, vectorType, op.getRhs(), base);
+                    Value lhs = loadReductionChunk(*getChunkAccess(op.getLhs()), base, vectorType,
+                                                   bodyLoc, builder);
+                    Value rhs = loadReductionChunk(*getChunkAccess(op.getRhs()), base, vectorType,
+                                                   bodyLoc, builder);
                     Value next = createHorizontalAccumulatorUpdate(op, iterArgs.front(), lhs, rhs,
                                                                    proofTrace, builder);
                     builder.create<scf::YieldOp>(bodyLoc, next);

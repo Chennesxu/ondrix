@@ -38,6 +38,7 @@ struct NoOverflowChunkReassociationTrace {
   unsigned numericFrac = 0;
   unsigned accumulatorStorageWidth = 0;
   unsigned accumulatorFrac = 0;
+  ondsp::OverflowMode accumulatorUpdateOverflow = ondsp::OverflowMode::Saturate;
   unsigned productRawWidth = 0;
   unsigned productFrac = 0;
   int64_t chunkWidth = 0;
@@ -211,6 +212,14 @@ public:
   planZeroSeededConstantChunkReduction(ondsp::ReduceMacOp reduction,
                                        const ondrix::ConstantIntegerMemRefFacts &coefficients,
                                        int64_t chunkWidth);
+
+  /// The same plan over coefficients already listed in the order the reduction
+  /// reads them, for a coefficient operand that is a reversed view of a
+  /// constant; `coefficientSource` is the operand value the plan is bound to.
+  static mlir::FailureOr<NoOverflowChunkReassociationPlan>
+  planZeroSeededConstantChunkReduction(ondsp::ReduceMacOp reduction,
+                                       llvm::ArrayRef<llvm::APInt> coefficientsInReadOrder,
+                                       mlir::Value coefficientSource, int64_t chunkWidth);
 };
 
 } // namespace ondrix::analysis

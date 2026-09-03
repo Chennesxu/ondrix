@@ -571,7 +571,7 @@ bool testConstantChunkReductionPlan() {
              q15Reduction, *q15OtherConstant, 8)) &&
          mlir::failed(FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
              q15OverflowingReduction, *q15OverflowingConstant, 8)) &&
-         mlir::failed(FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
+         mlir::succeeded(FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
              q15WrappingReduction, *q15Constant, 8)) &&
          mlir::failed(FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
              q15HighReduction, *q15Constant, 8)) &&
