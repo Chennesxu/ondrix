@@ -13,7 +13,7 @@ func.func private @zero_lanes_is_not_an_accumulator() -> !ondsp.acc<storage = i4
 // Importing one scalar value into W independent accumulators has no definition.
 func.func @acc_import_rejects_lanes(%input: i16)
     -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate, lanes = 8> {
-  // expected-error@+1 {{acc_import requires a single-lane accumulator; lanes > 1 is accepted only by acc_zero, mac, and acc_export}}
+  // expected-error@+1 {{acc_import requires a single-lane accumulator; lanes > 1 is accepted only by acc_zero, mac, acc_add_term, and acc_export}}
   %accumulator = ondsp.acc_import %input {
     src = #ondsp.fixed<signed, storage = i16, frac = 15>
   } : (i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate, lanes = 8>
@@ -29,7 +29,7 @@ func.func @mac_sub_rejects_lanes(
     %accumulator: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate, lanes = 8>,
     %value: vector<8xi16>, %coefficient: i16)
     -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate, lanes = 8> {
-  // expected-error@+1 {{mac_sub requires a single-lane accumulator; lanes > 1 is accepted only by acc_zero, mac, and acc_export}}
+  // expected-error@+1 {{mac_sub requires a single-lane accumulator; lanes > 1 is accepted only by acc_zero, mac, acc_add_term, and acc_export}}
   %result = ondsp.mac_sub %accumulator, %value, %coefficient {
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
     product = #ondsp.product<full>
@@ -42,13 +42,12 @@ func.func @mac_sub_rejects_lanes(
 
 // -----
 
-// A pre-computed term is the normalization point for horizontal partial sums,
-// whose lane meaning is the reduction axis, not independent outputs.
+// A multi-lane accumulator takes one term element per lane, never a scalar.
 func.func @acc_add_term_rejects_lanes(
     %accumulator: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate, lanes = 8>,
     %term: i40)
     -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate, lanes = 8> {
-  // expected-error@+1 {{acc_add_term requires a single-lane accumulator; lanes > 1 is accepted only by acc_zero, mac, and acc_export}}
+  // expected-error@+1 {{term must be a fixed-length rank-1 vector value for a multi-lane accumulator}}
   %result = ondsp.acc_add_term %accumulator, %term {
     term_numeric = #ondsp.fixed<signed, storage = i40, frac = 30>
   } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate, lanes = 8>, i40)
@@ -67,7 +66,7 @@ func.func @reduce_mac_rejects_lanes(%lhs: memref<8xi16>, %rhs: memref<8xi16>)
     -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate, lanes = 8> {
   %zero = ondsp.acc_zero
       : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate, lanes = 8>
-  // expected-error@+1 {{reduce_mac requires a single-lane accumulator; lanes > 1 is accepted only by acc_zero, mac, and acc_export}}
+  // expected-error@+1 {{reduce_mac requires a single-lane accumulator; lanes > 1 is accepted only by acc_zero, mac, acc_add_term, and acc_export}}
   %result = ondsp.reduce_mac %zero, %lhs, %rhs {
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
     product = #ondsp.product<full>

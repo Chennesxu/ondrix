@@ -252,10 +252,11 @@ public:
   }
 };
 
-/// Updates a carried accumulator of `storageWidth` bits. The sum is formed in
-/// the carrier when the exact update width fits it and in that exact width
-/// otherwise; a wrapping result stays congruent, a saturating one is clamped to
-/// the storage rails and so stays canonical.
+/// Updates a carried accumulator of `storageWidth` bits. A saturating sum is
+/// formed in the exact update width or the carrier, whichever is wider, and
+/// clamped to the storage rails so it stays canonical. A wrapping sum is formed
+/// in the carrier itself: the carrier is at least the storage width, so the
+/// truncated exact sum and the carrier-width sum are the same residue.
 static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value product,
                                     unsigned storageWidth, ondrix::ondsp::OverflowMode overflowMode,
                                     ondrix::fixedpoint::AccumulatorUpdateOperation operation,
@@ -264,12 +265,17 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
   unsigned carrierWidth = getIntegerElementType(carrierType).getWidth();
   IntegerType productElement = getIntegerElementType(product.getType());
   unsigned intermediateWidth =
-      std::max(carrierWidth, ondrix::fixedpoint::getAccumulatorUpdateIntermediateWidth(
-                                 storageWidth, productElement.getWidth()));
+      overflowMode == ondrix::ondsp::OverflowMode::Wrap
+          ? carrierWidth
+          : std::max(carrierWidth, ondrix::fixedpoint::getAccumulatorUpdateIntermediateWidth(
+                                       storageWidth, productElement.getWidth()));
   Type intermediateType = getIntegerTypeLike(carrierType, intermediateWidth, builder);
   auto widen = [&](Value value) -> Value {
-    if (getIntegerElementType(value.getType()).getWidth() == intermediateWidth)
+    unsigned width = getIntegerElementType(value.getType()).getWidth();
+    if (width == intermediateWidth)
       return value;
+    if (width > intermediateWidth)
+      return builder.create<arith::TruncIOp>(loc, intermediateType, value);
     return builder.create<arith::ExtSIOp>(loc, intermediateType, value);
   };
   Value extendedAccumulator = widen(accumulator);
@@ -685,9 +691,6 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::AccAddTermOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
-    if (!ondrix::ondsp::isSingleLaneAccumulator(accumulator))
-      return op.emitOpError("fixed scalar lowering requires a single-lane accumulator for "
-                            "acc_add_term");
     if (!isSupportedAccumulatorTerm(accumulator, op.getTermNumeric()))
       return op.emitOpError(
           "fixed scalar lowering requires a supported signed accumulator and a signed term "

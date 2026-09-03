@@ -76,6 +76,10 @@ struct DecimateLoopShape {
   /// Set when a constant coefficient sequence certifies that no ordered prefix
   /// reaches the accumulator rail, so the lanes may update wrapping.
   bool certifiedWrap = false;
+  /// On wrapping lanes, the number of consecutive taps whose products are
+  /// certified to sum within i32, so they accumulate in an i32 lane group
+  /// before joining the declared accumulator; zero keeps every tap direct.
+  int64_t termGroup = 0;
 };
 
 /// The coefficient memref of one tap read: rank-1, default memory space, unit
@@ -349,16 +353,19 @@ FailureOr<DecimateLoopShape> matchDecimateLoop(scf::ForOp loop, int64_t vectorWi
   shape.fullBlocks = fullBlocks;
 
   // A saturating profile keeps its clamp per lane unless a constant coefficient
-  // sequence certifies that no ordered prefix reaches the rail.
-  if (accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Saturate) {
-    std::optional<SmallVector<llvm::APInt>> constants =
-        getConstantCoefficientsInReadOrder(shape.coefficients, shape.coefficientLength);
-    shape.certifiedWrap =
-        constants &&
-        succeeded(
-            ondrix::analysis::FixedPointPrefixRangePlanner::proveOrderedZeroSeededConstantReduction(
-                reduce, *constants));
-  }
+  // sequence certifies that no ordered prefix reaches the rail; a wrapping
+  // profile needs no rail certificate, only the group one for narrow terms.
+  std::optional<SmallVector<llvm::APInt>> constants =
+      getConstantCoefficientsInReadOrder(shape.coefficients, shape.coefficientLength);
+  if (!constants)
+    return shape;
+  if (accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Saturate)
+    shape.certifiedWrap = succeeded(
+        ondrix::analysis::FixedPointPrefixRangePlanner::proveOrderedZeroSeededConstantReduction(
+            reduce, *constants));
+  if (shape.certifiedWrap || accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Wrap)
+    shape.termGroup = ondrix::analysis::FixedPointPrefixRangePlanner::largestCertifiedTermGroup(
+        reduce, *constants, /*termWidth=*/32);
 
   return shape;
 }
@@ -381,6 +388,23 @@ void batchDecimateOutputs(const DecimateLoopShape &shape, int64_t vectorWidth, O
                                   static_cast<unsigned>(vectorWidth));
   auto storage = cast<IntegerType>(shape.numeric.getStorage());
   auto spanType = VectorType::get({shape.factor * vectorWidth}, storage);
+  // A certified tap group accumulates in i32 lanes and joins the declared
+  // accumulator as one term; both are wrapping, so the composition is exact.
+  int64_t groupedTaps =
+      shape.termGroup >= 2 ? (shape.coefficientLength / shape.termGroup) * shape.termGroup : 0;
+  ondrix::ondsp::AccType groupAccumulator;
+  ondrix::ondsp::FixedAttr groupTermNumeric;
+  VectorType groupTermType;
+  if (groupedTaps > 0) {
+    groupAccumulator = ondrix::ondsp::AccType::get(
+        context, builder.getI32Type(), shape.accumulator.getFrac(),
+        shape.accumulator.getSignedness(), ondrix::ondsp::OverflowMode::Wrap,
+        static_cast<unsigned>(vectorWidth));
+    groupTermNumeric =
+        ondrix::ondsp::FixedAttr::get(context, shape.accumulator.getSignedness(),
+                                      builder.getI32Type(), shape.accumulator.getFrac());
+    groupTermType = VectorType::get({vectorWidth}, builder.getI32Type());
+  }
   auto sampleType =
       VectorType::get({vectorWidth}, cast<IntegerType>(shape.destination.getStorage()));
 
@@ -413,7 +437,11 @@ void batchDecimateOutputs(const DecimateLoopShape &shape, int64_t vectorWidth, O
         // because a loop-carried multi-lane accumulator forces the backend to
         // legalize its phi lane by lane, which spills exactly the independence
         // the batching exists to exploit.
+        Value group;
         for (int64_t tap = 0; tap < shape.coefficientLength; ++tap) {
+          bool grouped = tap < groupedTaps;
+          if (grouped && tap % shape.termGroup == 0)
+            group = blockBuilder.create<ondrix::ondsp::AccZeroOp>(blockLoc, groupAccumulator);
           Value base =
               tap == 0 ? windowBase
                        : blockBuilder.create<arith::AddIOp>(blockLoc, windowBase, tapIndices[tap]);
@@ -424,9 +452,21 @@ void batchDecimateOutputs(const DecimateLoopShape &shape, int64_t vectorWidth, O
             values = blockBuilder.create<vector::ShuffleOp>(blockLoc, span, span, evenLanes);
           Value coefficient = blockBuilder.create<memref::LoadOp>(blockLoc, shape.coefficients,
                                                                   ValueRange{tapIndices[tap]});
-          accumulator = blockBuilder.create<ondrix::ondsp::MacOp>(blockLoc, laneAccumulator,
-                                                                  accumulator, values, coefficient,
-                                                                  shape.numeric, shape.product);
+          if (!grouped) {
+            accumulator = blockBuilder.create<ondrix::ondsp::MacOp>(
+                blockLoc, laneAccumulator, accumulator, values, coefficient, shape.numeric,
+                shape.product);
+            continue;
+          }
+          group = blockBuilder.create<ondrix::ondsp::MacOp>(
+              blockLoc, groupAccumulator, group, values, coefficient, shape.numeric, shape.product);
+          if (tap % shape.termGroup == shape.termGroup - 1) {
+            Value term = blockBuilder.create<ondrix::ondsp::AccExportOp>(
+                blockLoc, groupTermType, group, groupTermNumeric,
+                ondrix::ondsp::RoundingMode::TowardNegative, ondrix::ondsp::OverflowMode::Wrap);
+            accumulator = blockBuilder.create<ondrix::ondsp::AccAddTermOp>(
+                blockLoc, laneAccumulator, accumulator, term, groupTermNumeric);
+          }
         }
         Value samples = blockBuilder.create<ondrix::ondsp::AccExportOp>(
             blockLoc, sampleType, accumulator, shape.destination, shape.rounding, shape.overflow);

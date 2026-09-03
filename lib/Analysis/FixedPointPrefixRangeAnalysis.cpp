@@ -649,6 +649,29 @@ FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
                                               constant.getSource(), chunkWidth);
 }
 
+int64_t FixedPointPrefixRangePlanner::largestCertifiedTermGroup(ondsp::ReduceMacOp reduction,
+                                                                ArrayRef<APInt> coefficients,
+                                                                unsigned termWidth) {
+  auto numeric = dyn_cast<ondsp::FixedAttr>(reduction.getNumeric());
+  auto accumulator = dyn_cast<ondsp::AccType>(reduction.getInitial().getType());
+  if (!numeric || !accumulator || !reduction.getProduct())
+    return 0;
+  auto accumulatorStorage = dyn_cast<IntegerType>(accumulator.getStorage());
+  auto numericStorage = dyn_cast<IntegerType>(numeric.getStorage());
+  if (!accumulatorStorage || !numericStorage || 2 * numericStorage.getWidth() > termWidth)
+    return 0;
+  int64_t best = 0;
+  for (int64_t group = 2; group <= static_cast<int64_t>(coefficients.size()); group *= 2) {
+    if (analyzeZeroSeededConstantChunkReassociation(numericStorage.getWidth(), numeric.getFrac(),
+                                                    accumulatorStorage.getWidth(), coefficients,
+                                                    group, termWidth)
+            .status != ConstantChunkReassociationStatus::Authorized)
+      break;
+    best = group;
+  }
+  return best;
+}
+
 LogicalResult FixedPointPrefixRangePlanner::proveOrderedZeroSeededConstantReduction(
     ondsp::ReduceMacOp reduction, ArrayRef<APInt> coefficients) {
   auto numeric = dyn_cast<ondsp::FixedAttr>(reduction.getNumeric());

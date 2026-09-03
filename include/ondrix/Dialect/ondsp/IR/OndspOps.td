@@ -253,9 +253,10 @@ def Ondsp_AccAddTermOp
     single exact product or a product partial sum whose equivalence was proven
     by a preceding transform. This operation is a target-independent
     normalization point for consumers that compute terms separately from
-    accumulator updates.
+    accumulator updates. With a `lanes = W` accumulator the term is a
+    `vector<W x storage>` and every lane adds its own element.
   }];
-  let arguments = (ins Ondsp_Acc:$acc, AnyInteger:$term,
+  let arguments = (ins Ondsp_Acc:$acc, Ondsp_LaneInteger:$term,
                    Ondsp_FixedAttr:$term_numeric);
   let results = (outs Ondsp_Acc:$result);
   let hasVerifier = 1;
@@ -273,7 +274,7 @@ def Ondsp_AccExportOp : Ondsp_Op<"acc_export", [Pure]> {
 
     With a `lanes = W` accumulator the result is a `vector<W x storage>` and
     every lane is exported independently under the same destination policy.
-    This is one of the three operations that accept a multi-lane accumulator.
+    This is one of the four operations that accept a multi-lane accumulator.
   }];
   let arguments = (ins Ondsp_Acc:$acc, Ondsp_FixedAttr:$dst,
                    Ondsp_RoundingModeAttr:$rounding,

@@ -122,7 +122,7 @@ static LogicalResult verifySingleLaneAccumulator(Operation *op, AccType accumula
     return success();
   return op->emitOpError() << consumer
                            << " requires a single-lane accumulator; lanes > 1 is accepted only by "
-                              "acc_zero, mac, and acc_export";
+                              "acc_zero, mac, acc_add_term, and acc_export";
 }
 
 /// Returns the lane count of a value in the accumulator's lane domain: the
@@ -370,9 +370,9 @@ LogicalResult MacSubOp::verify() {
 LogicalResult AccAddTermOp::verify() {
   AccType accumulator = getAcc().getType();
   FixedAttr termNumeric = getTermNumeric();
-  if (failed(verifySingleLaneAccumulator(*this, accumulator, "acc_add_term")))
+  if (failed(verifyLaneDomain(*this, getTerm().getType(), accumulator, "term")))
     return failure();
-  if (getTerm().getType() != termNumeric.getStorage())
+  if (ondrix::getElementTypeOrSelf(getTerm().getType()) != termNumeric.getStorage())
     return emitOpError("term type must match term numeric storage type");
   if (accumulator.getSignedness() != termNumeric.getSignedness())
     return emitOpError("term and accumulator signedness must match");

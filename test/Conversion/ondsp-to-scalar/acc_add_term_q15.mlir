@@ -29,10 +29,9 @@ func.func @acc_add_wide_term_q15(
 }
 
 // CHECK-LABEL: func.func @acc_add_wide_term_q15(%{{.*}}: i64, %{{.*}}: i64) -> i64
-// CHECK: arith.extsi {{.*}} : i64 to i65
-// CHECK: arith.extsi {{.*}} : i64 to i65
-// CHECK: arith.addi
-// CHECK: arith.trunci {{.*}} : i65 to i64
+// CHECK-NOT: arith.extsi
+// CHECK: arith.addi {{.*}} : i64
+// CHECK-NOT: arith.trunci
 // CHECK-NOT: ondsp.
 
 func.func @acc_add_inferred_width_q15(

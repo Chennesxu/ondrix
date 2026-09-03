@@ -60,11 +60,11 @@ func.func @full_saturate_preserves_order(
 
 // FINAL-LABEL: func.func @full_wrap
 // FINAL: vector.reduction <add>
-// FINAL: arith.addi {{.*}} : i65
+// FINAL: arith.addi {{.*}} : i64
 // FINAL-LABEL: func.func @high_raw_wrap
 // FINAL: arith.shrsi {{.*}} : vector<4xi64>
 // FINAL: vector.reduction <add>
-// FINAL: arith.addi {{.*}} : i65
+// FINAL: arith.addi {{.*}} : i64
 // FINAL-LABEL: func.func @full_saturate_preserves_order
 // FINAL: vector.extract
 // FINAL-NOT: ondsp.

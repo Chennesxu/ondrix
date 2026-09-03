@@ -221,6 +221,13 @@ public:
   proveOrderedZeroSeededConstantReduction(ondsp::ReduceMacOp reduction,
                                           llvm::ArrayRef<llvm::APInt> coefficientsInReadOrder);
 
+  /// The widest power-of-two group of consecutive coefficients, aligned from
+  /// the first, whose product sums all fit `termWidth` bits (with the tail
+  /// products taken singly); zero when not even pairs do.
+  static int64_t largestCertifiedTermGroup(ondsp::ReduceMacOp reduction,
+                                           llvm::ArrayRef<llvm::APInt> coefficientsInReadOrder,
+                                           unsigned termWidth);
+
   /// The same plan over coefficients already listed in the order the reduction
   /// reads them, for a coefficient operand that is a reversed view of a
   /// constant; `coefficientSource` is the operand value the plan is bound to.

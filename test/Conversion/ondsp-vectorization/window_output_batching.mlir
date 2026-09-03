@@ -31,13 +31,19 @@ func.func @fir_runtime_coefficients(
 }
 
 // A convolution flips its constant kernel: the taps read the reversed view
-// one scalar at a time, and the certified prefixes let the lanes wrap while
-// the export keeps the declared saturating boundary.
+// one scalar at a time, the certified prefixes let the lanes wrap, and eight
+// consecutive taps (sum of |c| under 2^16) accumulate in an i32 lane group.
 // CHECK-LABEL: func.func @conv_constant_kernel_certified
 // CHECK: scf.for
 // CHECK: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = wrap, lanes = 8>
+// CHECK: ondsp.acc_zero : <storage = i32, frac = 30, signed, update_overflow = wrap, lanes = 8>
 // CHECK: memref.load %{{.*}} : memref<16xi16, strided<[-1], offset: 15>>
-// CHECK: ondsp.mac
+// CHECK-COUNT-8: ondsp.mac
+// CHECK: ondsp.acc_export {{.*}} -> vector<8xi32>
+// CHECK: ondsp.acc_add_term {{.*}} lanes = 8>, vector<8xi32>)
+// CHECK: ondsp.acc_zero : <storage = i32, frac = 30, signed, update_overflow = wrap, lanes = 8>
+// CHECK-COUNT-8: ondsp.mac
+// CHECK: ondsp.acc_add_term
 // CHECK: ondsp.acc_export {{.*}} overflow = #ondsp.overflow<saturate>
 // CHECK: vector.store {{.*}} : memref<32xi16>, vector<8xi16>
 func.func @conv_constant_kernel_certified(%input: tensor<47xi16>) -> tensor<32xi16> {
@@ -45,6 +51,29 @@ func.func @conv_constant_kernel_certified(%input: tensor<47xi16>) -> tensor<32xi
   %init = tensor.empty() : tensor<32xi16>
   %result = ondrix.conv1d %input, %kernel, %init {
     accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    mode = #ondrix.conv1d_mode<convolution>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<47xi16>, tensor<16xi16>, tensor<32xi16>) -> tensor<32xi16>
+  return %result : tensor<32xi16>
+}
+
+// A wrapping accumulator needs no rail certificate; the same kernel still
+// earns the i32 tap groups.
+// CHECK-LABEL: func.func @conv_constant_kernel_wrapping
+// CHECK: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = wrap, lanes = 8>
+// CHECK: ondsp.acc_zero : <storage = i32, frac = 30, signed, update_overflow = wrap, lanes = 8>
+// CHECK-COUNT-8: ondsp.mac
+// CHECK: ondsp.acc_export {{.*}} -> vector<8xi32>
+// CHECK: ondsp.acc_add_term {{.*}} lanes = 8>, vector<8xi32>)
+func.func @conv_constant_kernel_wrapping(%input: tensor<47xi16>) -> tensor<32xi16> {
+  %kernel = arith.constant dense<[-10000, -7269, -4538, -1807, 924, 3655, 6386, 9117, -8153, -5422, -2691, 40, 2771, 5502, 8233, -9037]> : tensor<16xi16>
+  %init = tensor.empty() : tensor<32xi16>
+  %result = ondrix.conv1d %input, %kernel, %init {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>,
     dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
     mode = #ondrix.conv1d_mode<convolution>,
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
