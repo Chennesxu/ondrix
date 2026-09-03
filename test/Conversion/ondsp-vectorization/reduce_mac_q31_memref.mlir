@@ -43,8 +43,17 @@ func.func @high_raw_dynamic(
 // CHECK: %[[RHS_SIZE:.*]] = memref.dim
 // CHECK: %[[MATCH:.*]] = arith.cmpi eq, %[[LHS_SIZE]], %[[RHS_SIZE]] : index
 // CHECK: cf.assert %[[MATCH]], "ondsp.reduce_mac requires equal operand lengths"
+// CHECK: %[[LANES:.*]] = arith.constant dense<0> : vector<4xi64>
+// CHECK: %[[SUMS:.*]] = scf.for {{.*}} iter_args(%[[LANE_ACC:.*]] = %[[LANES]]) -> (vector<4xi64>)
 // CHECK: vector.load {{.*}} : memref<?xi32>, vector<4xi32>
-// CHECK: ondsp.reduce_mac
+// CHECK: vector.load {{.*}} : memref<?xi32>, vector<4xi32>
+// CHECK: arith.muli {{.*}} : vector<4xi64>
+// CHECK: %[[HIGH:.*]] = arith.trunci {{.*}} : vector<4xi64> to vector<4xi32>
+// CHECK: %[[HIGH_EXT:.*]] = arith.extsi %[[HIGH]] : vector<4xi32> to vector<4xi64>
+// CHECK: arith.addi %[[LANE_ACC]], %[[HIGH_EXT]] : vector<4xi64>
+// CHECK: %[[TOTAL:.*]] = vector.reduction <add>, %[[SUMS]] : vector<4xi64> into i64
+// CHECK: ondsp.acc_add_term {{.*}}, %[[TOTAL]] {term_numeric = #ondsp.fixed<signed, storage = i64, frac = 30>}
+// CHECK-NOT: ondsp.reduce_mac
 // CHECK: ondsp.mac
 
 func.func @unsupported_accumulator_fallback(

@@ -595,23 +595,71 @@ public:
     Value remainder = rewriter.create<arith::RemUIOp>(loc, bounds->upperBound, vectorStep);
     Value vectorEnd = rewriter.create<arith::SubIOp>(loc, bounds->upperBound, remainder);
     auto vectorType = VectorType::get({chunkWidth}, elementType);
+    auto loadChunks = [&](OpBuilder &builder, Location bodyLoc, Value base) {
+      Value lhs =
+          loadReductionChunk(*getChunkAccess(adaptor.getLhs()), base, vectorType, bodyLoc, builder);
+      Value rhs =
+          loadReductionChunk(*getChunkAccess(adaptor.getRhs()), base, vectorType, bodyLoc, builder);
+      return std::pair<Value, Value>{lhs, rhs};
+    };
 
-    auto vectorLoop = rewriter.create<scf::ForOp>(
-        loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{adaptor.getInitial()},
-        [&](OpBuilder &builder, Location bodyLoc, Value base, ValueRange iterArgs) {
-          Value lhs = loadReductionChunk(*getChunkAccess(adaptor.getLhs()), base, vectorType,
-                                         bodyLoc, builder);
-          Value rhs = loadReductionChunk(*getChunkAccess(adaptor.getRhs()), base, vectorType,
-                                         bodyLoc, builder);
-          Value next = builder.create<ondrix::ondsp::ReduceMacOp>(
-              bodyLoc, iterArgs.front().getType(), iterArgs.front(), lhs, rhs, numeric,
-              *op.getProduct());
-          builder.create<scf::YieldOp>(bodyLoc, next);
-        });
+    auto accumulator = cast<ondrix::ondsp::AccType>(op.getInitial().getType());
+    bool exactModulo =
+        ondrix::ondsp::classifyReductionReassociation(accumulator.getUpdateOverflow()) ==
+            ondrix::ondsp::ReductionReassociationSafety::ExactModulo &&
+        ondrix::conversion::isSupportedFixedHorizontalMacDomain(accumulator, numeric,
+                                                                *op.getProduct());
+    Value vectorResult;
+    if (exactModulo) {
+      // Wrapping updates commute modulo 2^W, so one machine vector of i64 lane
+      // sums carried to the loop exit and folded once equals the ordered fold.
+      auto laneType = VectorType::get({vectorWidth}, rewriter.getI64Type());
+      Value zeroLanes =
+          rewriter.create<arith::ConstantOp>(loc, laneType, rewriter.getZeroAttr(laneType));
+      auto laneLoop = rewriter.create<scf::ForOp>(
+          loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{zeroLanes},
+          [&](OpBuilder &builder, Location bodyLoc, Value base, ValueRange iterArgs) {
+            auto [lhs, rhs] = loadChunks(builder, bodyLoc, base);
+            FailureOr<ondrix::conversion::FixedVectorProductTerms> terms =
+                ondrix::conversion::lowerFixedVectorProductTerms(
+                    op, accumulator, numeric, *op.getProduct(), lhs, rhs, builder);
+            assert(succeeded(terms) && "validated fixed Vector product domain must lower");
+            Value lanes = iterArgs.front();
+            for (int64_t offset = 0; offset < chunkWidth; offset += vectorWidth) {
+              Value slice = terms->getTerms();
+              if (chunkWidth != vectorWidth)
+                slice = builder.create<vector::ExtractStridedSliceOp>(
+                    bodyLoc, slice, ArrayRef<int64_t>{offset}, ArrayRef<int64_t>{vectorWidth},
+                    ArrayRef<int64_t>{1});
+              if (slice.getType() != laneType)
+                slice = builder.create<arith::ExtSIOp>(bodyLoc, laneType, slice);
+              lanes = builder.create<arith::AddIOp>(bodyLoc, lanes, slice);
+            }
+            builder.create<scf::YieldOp>(bodyLoc, lanes);
+          });
+      Value sum = rewriter.create<vector::ReductionOp>(loc, vector::CombiningKind::ADD,
+                                                       laneLoop.getResult(0));
+      auto termNumeric =
+          ondrix::ondsp::FixedAttr::get(rewriter.getContext(), ondrix::ondsp::Signedness::Signed,
+                                        rewriter.getI64Type(), accumulator.getFrac());
+      vectorResult = rewriter.create<ondrix::ondsp::AccAddTermOp>(
+          loc, accumulator, adaptor.getInitial(), sum, termNumeric);
+    } else {
+      auto vectorLoop = rewriter.create<scf::ForOp>(
+          loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{adaptor.getInitial()},
+          [&](OpBuilder &builder, Location bodyLoc, Value base, ValueRange iterArgs) {
+            auto [lhs, rhs] = loadChunks(builder, bodyLoc, base);
+            Value next = builder.create<ondrix::ondsp::ReduceMacOp>(
+                bodyLoc, iterArgs.front().getType(), iterArgs.front(), lhs, rhs, numeric,
+                *op.getProduct());
+            builder.create<scf::YieldOp>(bodyLoc, next);
+          });
+      vectorResult = vectorLoop.getResult(0);
+    }
 
     Value scalarStep = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     auto tailLoop = rewriter.create<scf::ForOp>(
-        loc, vectorEnd, bounds->upperBound, scalarStep, ValueRange{vectorLoop.getResult(0)},
+        loc, vectorEnd, bounds->upperBound, scalarStep, ValueRange{vectorResult},
         [&](OpBuilder &builder, Location bodyLoc, Value index, ValueRange iterArgs) {
           Value lhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), index);
           Value rhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), index);
