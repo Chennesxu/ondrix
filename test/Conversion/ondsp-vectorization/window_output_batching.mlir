@@ -37,7 +37,7 @@ func.func @fir_runtime_coefficients(
 // CHECK: scf.for
 // CHECK: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = wrap, lanes = 8>
 // CHECK: ondsp.acc_zero : <storage = i32, frac = 30, signed, update_overflow = wrap, lanes = 8>
-// CHECK: memref.load %{{.*}} : memref<16xi16, strided<[-1], offset: 15>>
+// CHECK: arith.constant -9037 : i16
 // CHECK-COUNT-8: ondsp.mac
 // CHECK: ondsp.acc_export {{.*}} -> vector<8xi32>
 // CHECK: ondsp.acc_add_term {{.*}} lanes = 8>, vector<8xi32>)

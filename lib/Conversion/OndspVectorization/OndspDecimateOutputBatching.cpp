@@ -65,6 +65,9 @@ struct DecimateLoopShape {
   Value input;
   /// Coefficient sequence exactly as the ordered reduction indexed it.
   Value coefficients;
+  /// The same sequence as compile-time constants when its storage is an
+  /// immutable global, so each tap reads an immediate instead of a load.
+  std::optional<SmallVector<llvm::APInt>> constantCoefficients;
   Value output;
   ondrix::ondsp::AccType accumulator;
   ondrix::ondsp::FixedAttr numeric;
@@ -355,8 +358,9 @@ FailureOr<DecimateLoopShape> matchDecimateLoop(scf::ForOp loop, int64_t vectorWi
   // A saturating profile keeps its clamp per lane unless a constant coefficient
   // sequence certifies that no ordered prefix reaches the rail; a wrapping
   // profile needs no rail certificate, only the group one for narrow terms.
-  std::optional<SmallVector<llvm::APInt>> constants =
+  shape.constantCoefficients =
       getConstantCoefficientsInReadOrder(shape.coefficients, shape.coefficientLength);
+  const std::optional<SmallVector<llvm::APInt>> &constants = shape.constantCoefficients;
   if (!constants)
     return shape;
   if (accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Saturate)
@@ -450,8 +454,17 @@ void batchDecimateOutputs(const DecimateLoopShape &shape, int64_t vectorWidth, O
           Value values = span;
           if (shape.factor != 1)
             values = blockBuilder.create<vector::ShuffleOp>(blockLoc, span, span, evenLanes);
-          Value coefficient = blockBuilder.create<memref::LoadOp>(blockLoc, shape.coefficients,
-                                                                  ValueRange{tapIndices[tap]});
+          Value coefficient =
+              shape.constantCoefficients
+                  ? blockBuilder
+                        .create<arith::ConstantOp>(
+                            blockLoc, IntegerAttr::get(shape.numeric.getStorage(),
+                                                       (*shape.constantCoefficients)[tap]))
+                        .getResult()
+                  : blockBuilder
+                        .create<memref::LoadOp>(blockLoc, shape.coefficients,
+                                                ValueRange{tapIndices[tap]})
+                        .getResult();
           if (!grouped) {
             accumulator = blockBuilder.create<ondrix::ondsp::MacOp>(
                 blockLoc, laneAccumulator, accumulator, values, coefficient, shape.numeric,
