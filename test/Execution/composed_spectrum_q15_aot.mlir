@@ -32,7 +32,7 @@
 // agree with the reference.
 // RUN: ondrix-compile --emit=contracts %S/../Frontend/Inputs/q15_filtered_spectrum.ox | ondrix-opt --ondrix-default-pipeline="vector-bits=256" | FileCheck %s --check-prefix=SCHEDULED
 // SCHEDULED: llvm.func @q15_filtered_spectrum
-// SCHEDULED: vector<8xi64>
+// SCHEDULED: vector<8xi32>
 
 // The composed four-stage spectral program from .ox source to executed bits:
 // compile-time windowed-sinc lowpass design, valid-boundary FIR over the

@@ -12,13 +12,13 @@
 // RUN: FileCheck %s --check-prefix=AVX2 < %t.s
 
 // PROVEN-LABEL: func.func @q15_proven_vector
-// PROVEN: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// PROVEN: vector.reduction <add>, {{.*}} : vector<2xi32> into i32
 // PROVEN-NOT: ondsp.reduce_mac
 // PROVEN-LABEL: func.func @q15_scalar_reference
 // PROVEN: ondsp.reduce_mac
 // PROVEN-NOT: vector.reduction
 // PROVEN-LABEL: func.func @q15_proven_offset
-// PROVEN: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// PROVEN: vector.reduction <add>, {{.*}} : vector<2xi32> into i32
 // PROVEN-NOT: ondsp.reduce_mac
 // PROVEN-LABEL: func.func @q31_proven_vector
 // PROVEN: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
@@ -31,6 +31,8 @@
 // TRACE-DAG: "subject_ordinal":{{ *}}0
 // TRACE-DAG: "subject_ordinal":{{ *}}2
 // TRACE-DAG: "subject_ordinal":{{ *}}3
+// TRACE-DAG: "implementation_term_width":{{ *}}32
+// TRACE-DAG: "implementation_term_width":{{ *}}64
 
 // AVX2-LABEL: q15_proven_vector:
 // AVX2: vpmaddwd

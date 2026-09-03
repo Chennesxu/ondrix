@@ -28,7 +28,7 @@ func.func @wide_chunk(%input: memref<16xi16>)
 
 // CHECK-LABEL: func.func @wide_chunk
 // CHECK: vector.load {{.*}} : memref<16xi16>, vector<16xi16>
-// CHECK: vector.reduction <add>, {{.*}} : vector<16xi64> into i64
+// CHECK: vector.reduction <add>, {{.*}} : vector<8xi32> into i32
 // CHECK-NOT: ondsp.reduce_mac
 
 // Eight coefficients cannot fill the widest rung; the ladder steps down rather
@@ -49,13 +49,14 @@ func.func @narrow_chunk(%input: memref<8xi16>)
 
 // CHECK-LABEL: func.func @narrow_chunk
 // CHECK: vector.load {{.*}} : memref<8xi16>, vector<8xi16>
-// CHECK: vector.reduction <add>, {{.*}} : vector<8xi64> into i64
+// CHECK: vector.reduction <add>, {{.*}} : vector<4xi32> into i32
 // CHECK-NOT: ondsp.reduce_mac
 
 // The width is per subject in the record, not per module.
 // TRACE-DAG: "chunk_multiple":{{ *}}4
 // TRACE-DAG: "chunk_width":{{ *}}16
 // TRACE-DAG: "chunk_width":{{ *}}8
+// TRACE-DAG: "implementation_term_width":{{ *}}32
 
 // REPLAY-LABEL: func.func @wide_chunk
 

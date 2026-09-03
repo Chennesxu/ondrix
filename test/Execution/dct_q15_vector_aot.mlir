@@ -23,13 +23,14 @@
 // replayed against the original bufferized IR, and the object is checked
 // against an independent C reference that embeds mpmath-derived tables.
 
-// Every row must be proof-authorized: no memref-form reduction may survive.
+// Every row must be proof-authorized: no memref-form reduction may survive;
+// adjacent products are pre-added in pairs, so eight lanes reduce as four.
 // PROVEN-LABEL: func.func @dct8_q15_vector
-// PROVEN: vector.reduction <add>, {{.*}} : vector<8xi64> into i64
+// PROVEN: vector.reduction <add>, {{.*}} : vector<4xi{{32|64}}> into i{{32|64}}
 // PROVEN-LABEL: func.func @dct32_q15_vector
-// PROVEN: vector.reduction <add>, {{.*}} : vector<8xi64> into i64
+// PROVEN: vector.reduction <add>, {{.*}} : vector<4xi{{32|64}}> into i{{32|64}}
 // PROVEN-LABEL: func.func @dct64_q15_vector
-// PROVEN: vector.reduction <add>, {{.*}} : vector<8xi64> into i64
+// PROVEN: vector.reduction <add>, {{.*}} : vector<4xi{{32|64}}> into i{{32|64}}
 
 // No ondsp operation may survive the pipeline.
 // VECTOR-NOT: ondsp.
@@ -37,11 +38,11 @@
 // The labels are anchored to line start so they cannot match the
 // `_mlir_ciface_...` interface thunk emitted for the same kernel.
 // AVX2-LABEL: {{^}}dct8_q15_vector:
-// AVX2: vpmulld
+// AVX2: vpmaddwd
 // AVX2-LABEL: {{^}}dct32_q15_vector:
-// AVX2: vpmulld
+// AVX2: vpmaddwd
 // AVX2-LABEL: {{^}}dct64_q15_vector:
-// AVX2: vpmulld
+// AVX2: vpmaddwd
 
 // N = 8 is exactly one width-8 chunk per row: the reduction reassociates
 // completely and no ordered scalar tail remains.

@@ -93,14 +93,14 @@ func.func @dct4_q15(%input: tensor<4xi16>) -> tensor<4xi16> {
 // FULL-VECTOR-LABEL: func.func @dct8_q15
 // FULL-VECTOR-COUNT-2: vector.load {{.*}} vector<4xi16>
 // FULL-VECTOR: arith.muli {{.*}} : vector<4xi32>
-// FULL-VECTOR: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
-// FULL-VECTOR: ondsp.acc_add_term {{.*}} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, i64) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+// FULL-VECTOR: vector.reduction <add>, {{.*}} : vector<2xi{{32|64}}> into i{{32|64}}
+// FULL-VECTOR: ondsp.acc_add_term {{.*}} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, i{{32|64}}) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
 // FULL-VECTOR: ondsp.acc_export {{.*}} -> i64
 // FULL-VECTOR: ondsp.round_shift
 // FULL-VECTOR-LABEL: func.func @dct8_shared_tables_q15
-// FULL-VECTOR: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// FULL-VECTOR: vector.reduction <add>, {{.*}} : vector<2xi{{32|64}}> into i{{32|64}}
 // FULL-VECTOR-LABEL: func.func @dct4_q15
-// FULL-VECTOR: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// FULL-VECTOR: vector.reduction <add>, {{.*}} : vector<2xi{{32|64}}> into i{{32|64}}
 
 // Every DCT row is recorded as its own audit subject, with the saturating
 // accumulator that made the proof necessary.

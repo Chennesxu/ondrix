@@ -76,7 +76,7 @@ func.func @q15_moving_average(%input: tensor<40xi16>) -> tensor<38xi16> {
 // scalars, and width zero keeps the whole chain ordered.
 // CHECK: llvm.func @q15_composed_spectrum
 // CHECK: vector<8xi16>
-// CHECK: vector<8xi64>
+// CHECK: vector<8xi32>
 // SCALAR: llvm.func @q15_composed_spectrum
 func.func @q15_composed_spectrum(%signal: tensor<72xi16>) -> tensor<33xi16> {
   %taps = ondrix.fir_design_windowed_sinc {

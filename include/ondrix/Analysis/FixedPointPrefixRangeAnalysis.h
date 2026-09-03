@@ -31,7 +31,7 @@ struct FixedPointRawInterval {
 /// reassociation. This is an audit artifact, not a legality authority: every
 /// consumer must revalidate it against the current IR and planner result.
 struct NoOverflowChunkReassociationTrace {
-  static constexpr int64_t schemaVersion = 1;
+  static constexpr int64_t schemaVersion = 2;
 
   int64_t subjectOrdinal = -1;
   unsigned numericStorageWidth = 0;
@@ -41,6 +41,14 @@ struct NoOverflowChunkReassociationTrace {
   unsigned productRawWidth = 0;
   unsigned productFrac = 0;
   int64_t chunkWidth = 0;
+  /// Width of the integer that holds one chunk's horizontal sum: 32 when every
+  /// chunk sum provably fits it (then every partial sum of the chunk does too,
+  /// since each product interval contains zero), 64 otherwise.
+  unsigned implementationTermWidth = 0;
+  /// Width of the integer that holds the sum of two adjacent products: 32 when
+  /// every such pair provably fits it, 64 otherwise. Pairs are pre-added at
+  /// this width before the chunk sum is formed.
+  unsigned pairTermWidth = 0;
   llvm::SmallVector<llvm::APInt> coefficients;
   llvm::SmallVector<FixedPointRawInterval> originalPrefixes;
   llvm::SmallVector<FixedPointRawInterval> reassociatedPrefixes;

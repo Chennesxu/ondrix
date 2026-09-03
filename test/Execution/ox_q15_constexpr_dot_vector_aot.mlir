@@ -10,6 +10,6 @@
 // RUN: %t
 
 // PROVEN-LABEL: func.func @q15_dot_constexpr
-// PROVEN: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// PROVEN: vector.reduction <add>, {{.*}} : vector<2xi32> into i32
 // PROVEN: ondsp.acc_add_term
 // PROVEN-NOT: ondsp.reduce_mac

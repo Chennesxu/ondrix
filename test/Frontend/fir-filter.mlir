@@ -70,7 +70,7 @@
 // PROVEN-LABEL: func.func @q15_fir_filter_constexpr(
 // PROVEN-SAME: memref<8xi16>) -> memref<5xi16>
 // PROVEN: memref.get_global @__ox_q15_fir_filter_constexpr_coefficients
-// PROVEN: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// PROVEN: vector.reduction <add>, {{.*}} : vector<2xi32> into i32
 // PROVEN: ondsp.acc_add_term
 // PROVEN-NOT: ondsp.reduce_mac
 

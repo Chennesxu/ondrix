@@ -31,7 +31,7 @@ func.func @safe_q15(%input: memref<8xi16>)
 // CHECK-LABEL: func.func @safe_q15
 // CHECK: scf.for
 // CHECK: vector.load {{.*}} : memref<8xi16>, vector<4xi16>
-// CHECK: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// CHECK: vector.reduction <add>, {{.*}} : vector<2xi32> into i32
 // CHECK: ondsp.acc_add_term {{.*}} update_overflow = saturate
 // CHECK-NOT: ondsp.reduce_mac
 
@@ -100,7 +100,7 @@ func.func @safe_q15_dynamic_cast(%input_static: memref<8xi16>)
 }
 
 // CHECK-LABEL: func.func @safe_q15_dynamic_cast
-// CHECK: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// CHECK: vector.reduction <add>, {{.*}} : vector<2xi32> into i32
 // CHECK: ondsp.acc_add_term
 // CHECK-NOT: ondsp.reduce_mac
 
@@ -121,7 +121,7 @@ func.func @safe_q15_full_subview(%input: memref<8xi16>)
 }
 
 // CHECK-LABEL: func.func @safe_q15_full_subview
-// CHECK: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// CHECK: vector.reduction <add>, {{.*}} : vector<2xi32> into i32
 // CHECK: ondsp.acc_add_term
 // CHECK-NOT: ondsp.reduce_mac
 
@@ -249,7 +249,7 @@ func.func @dynamic_q15(%input: memref<?xi16>)
 
 // CHECK-LABEL: func.func @dynamic_q15
 // CHECK: cf.assert
-// CHECK: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// CHECK: vector.reduction <add>, {{.*}} : vector<2xi32> into i32
 // CHECK-NOT: ondsp.reduce_mac
 
 func.func @nonzero_memory_space_q15(%input: memref<8xi16, 1>)

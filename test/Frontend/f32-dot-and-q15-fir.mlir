@@ -69,7 +69,7 @@
 // CONST-DOT: ondrix.dot
 
 // PROVEN-DOT-LABEL: func.func @q15_dot_constexpr
-// PROVEN-DOT: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// PROVEN-DOT: vector.reduction <add>, {{.*}} : vector<2xi32> into i32
 // PROVEN-DOT: ondsp.acc_add_term
 // PROVEN-DOT-NOT: ondsp.reduce_mac
 

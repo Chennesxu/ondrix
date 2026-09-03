@@ -77,7 +77,7 @@
 // TILED-VECTOR-NOT: math.fma
 
 // TILED-VECTOR-LABEL: func.func @q15_proven_fir_filter_value
-// TILED-VECTOR: %[[Q15_SUM:.*]] = vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// TILED-VECTOR: %[[Q15_SUM:.*]] = vector.reduction <add>, {{.*}} : vector<2xi32> into i32
 // TILED-VECTOR: ondsp.acc_add_term {{.*}}, %[[Q15_SUM]]
 // TILED-VECTOR-NOT: vector.extract
 // TILED-VECTOR-NOT: ondsp.reduce_mac

@@ -327,6 +327,8 @@ json::Object toJSON(const NoOverflowChunkReassociationTrace &trace) {
       {"product_raw_width", static_cast<int64_t>(trace.productRawWidth)},
       {"product_frac", static_cast<int64_t>(trace.productFrac)},
       {"chunk_width", trace.chunkWidth},
+      {"implementation_term_width", static_cast<int64_t>(trace.implementationTermWidth)},
+      {"pair_term_width", static_cast<int64_t>(trace.pairTermWidth)},
       {"coefficients", std::move(coefficientValues)},
       {"original_prefixes", std::move(originalPrefixes)},
       {"reassociated_prefixes", std::move(reassociatedPrefixes)},
@@ -353,6 +355,8 @@ parseNoOverflowChunkReassociationTrace(const json::Value &value,
   std::optional<int64_t> productRawWidth = object->getInteger("product_raw_width");
   std::optional<int64_t> productFrac = object->getInteger("product_frac");
   std::optional<int64_t> chunkWidth = object->getInteger("chunk_width");
+  std::optional<int64_t> termWidth = object->getInteger("implementation_term_width");
+  std::optional<int64_t> pairWidth = object->getInteger("pair_term_width");
   auto isUnsignedField = [](std::optional<int64_t> field) {
     return field && *field >= 0 && *field <= std::numeric_limits<unsigned>::max();
   };
@@ -364,7 +368,8 @@ parseNoOverflowChunkReassociationTrace(const json::Value &value,
       !accumulatorSignedness || *accumulatorSignedness != "signed" || !accumulatorOverflow ||
       *accumulatorOverflow != "saturate" || !productSelection || *productSelection != "full" ||
       !isUnsignedField(productRawWidth) || !isUnsignedField(productFrac) || !chunkWidth ||
-      *chunkWidth <= 1)
+      *chunkWidth <= 1 || !termWidth || (*termWidth != 32 && *termWidth != 64) || !pairWidth ||
+      (*pairWidth != 32 && *pairWidth != 64))
     return failure();
 
   if (limits.maxCoefficients == 0 || limits.maxPrefixes == 0 || limits.maxAPIntWidth == 0)
@@ -393,6 +398,8 @@ parseNoOverflowChunkReassociationTrace(const json::Value &value,
   trace.productRawWidth = static_cast<unsigned>(*productRawWidth);
   trace.productFrac = static_cast<unsigned>(*productFrac);
   trace.chunkWidth = *chunkWidth;
+  trace.implementationTermWidth = static_cast<unsigned>(*termWidth);
+  trace.pairTermWidth = static_cast<unsigned>(*pairWidth);
   trace.coefficients = std::move(*coefficients);
   trace.originalPrefixes = std::move(*originalPrefixes);
   trace.reassociatedPrefixes = std::move(*reassociatedPrefixes);
@@ -406,6 +413,8 @@ bool areEquivalent(const NoOverflowChunkReassociationTrace &lhs,
          lhs.accumulatorStorageWidth == rhs.accumulatorStorageWidth &&
          lhs.accumulatorFrac == rhs.accumulatorFrac && lhs.productRawWidth == rhs.productRawWidth &&
          lhs.productFrac == rhs.productFrac && lhs.chunkWidth == rhs.chunkWidth &&
+         lhs.implementationTermWidth == rhs.implementationTermWidth &&
+         lhs.pairTermWidth == rhs.pairTermWidth &&
          equalCoefficients(lhs.coefficients, rhs.coefficients) &&
          equalIntervals(lhs.originalPrefixes, rhs.originalPrefixes) &&
          equalIntervals(lhs.reassociatedPrefixes, rhs.reassociatedPrefixes);
@@ -419,13 +428,21 @@ verifyNoOverflowChunkReassociationTrace(const NoOverflowChunkReassociationTrace 
       trace.numericFrac > std::numeric_limits<unsigned>::max() / 2 ||
       trace.productRawWidth != trace.numericStorageWidth * 2 ||
       trace.productFrac != trace.numericFrac * 2 || trace.accumulatorFrac != trace.productFrac ||
-      trace.coefficients.size() < static_cast<size_t>(trace.chunkWidth))
+      trace.coefficients.size() < static_cast<size_t>(trace.chunkWidth) ||
+      (trace.implementationTermWidth != 32 && trace.implementationTermWidth != 64) ||
+      (trace.pairTermWidth != 32 && trace.pairTermWidth != 64))
     return failure();
 
   ConstantChunkReassociationAnalysis schedule = analyzeZeroSeededConstantChunkReassociation(
       trace.numericStorageWidth, trace.numericFrac, trace.accumulatorStorageWidth,
-      trace.coefficients, trace.chunkWidth, /*implementationTermWidth=*/64);
+      trace.coefficients, trace.chunkWidth, trace.implementationTermWidth);
   if (schedule.status != ConstantChunkReassociationStatus::Authorized)
+    return failure();
+  if (trace.pairTermWidth == 32 &&
+      analyzeZeroSeededConstantChunkReassociation(trace.numericStorageWidth, trace.numericFrac,
+                                                  trace.accumulatorStorageWidth, trace.coefficients,
+                                                  /*chunkWidth=*/2, /*implementationTermWidth=*/32)
+              .status != ConstantChunkReassociationStatus::Authorized)
     return failure();
 
   FixedPointRawInterval initial{APInt(trace.accumulatorStorageWidth, 0),
@@ -651,6 +668,18 @@ FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
       /*implementationTermWidth=*/64);
   if (schedule.status != ConstantChunkReassociationStatus::Authorized)
     return failure();
+  // The same coefficients are re-classified against a 32-bit term, once per
+  // chunk and once per adjacent pair; each pass the trace records admits that
+  // narrow pre-addition in the emitted schedule.
+  auto fitsNarrowTerm = [&](int64_t width) {
+    return productSemantics->rawWidth <= 32 &&
+           analyzeZeroSeededConstantChunkReassociation(numericStorage.getWidth(), numeric.getFrac(),
+                                                       accumulatorStorage.getWidth(), coefficients,
+                                                       width, /*implementationTermWidth=*/32)
+                   .status == ConstantChunkReassociationStatus::Authorized;
+  };
+  unsigned implementationTermWidth = fitsNarrowTerm(chunkWidth) ? 32 : 64;
+  unsigned pairTermWidth = fitsNarrowTerm(2) ? 32 : 64;
 
   FixedPointRawInterval initial{APInt(accumulatorStorage.getWidth(), 0),
                                 APInt(accumulatorStorage.getWidth(), 0), accumulator.getFrac()};
@@ -669,6 +698,8 @@ FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
   trace.productRawWidth = productSemantics->rawWidth;
   trace.productFrac = productSemantics->frac;
   trace.chunkWidth = chunkWidth;
+  trace.implementationTermWidth = implementationTermWidth;
+  trace.pairTermWidth = pairTermWidth;
   trace.coefficients.assign(coefficients.begin(), coefficients.end());
   trace.originalPrefixes = std::move(*originalPrefixes);
   trace.reassociatedPrefixes = std::move(*reassociatedPrefixes);

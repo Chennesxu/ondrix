@@ -24,7 +24,7 @@
 // rails) stays with dct_q15_vector_aot.mlir.
 
 // PROVEN-LABEL: func.func @q15_dct8
-// PROVEN: vector.reduction <add>, {{.*}} : vector<8xi64> into i64
+// PROVEN: vector.reduction <add>, {{.*}} : vector<4xi{{32|64}}> into i{{32|64}}
 
 // No ondsp operation may survive the pipeline.
 // VECTOR-NOT: ondsp.
@@ -32,4 +32,4 @@
 // The label is anchored to line start so it cannot match the
 // `_mlir_ciface_...` interface thunk emitted for the same kernel.
 // AVX2-LABEL: {{^}}q15_dct8:
-// AVX2: vpmulld
+// AVX2: vpmaddwd

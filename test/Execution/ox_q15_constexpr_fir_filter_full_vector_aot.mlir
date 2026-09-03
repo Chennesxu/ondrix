@@ -13,7 +13,7 @@
 // PROVEN: scf.for
 // PROVEN: ondsp.mac
 // PROVEN: scf.for
-// PROVEN: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// PROVEN: vector.reduction <add>, {{.*}} : vector<2xi32> into i32
 // PROVEN: ondsp.acc_add_term
 // PROVEN: scf.for
 // PROVEN: ondsp.mac

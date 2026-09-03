@@ -29,4 +29,4 @@
 // and Helium vectors, here the two this reduction's extent can fill.
 // CHECK-NOT: vector<
 // SPECTRUM-NOT: vector<
-// NARROW: vector<8xi64>
+// NARROW: vector<8xi32>

@@ -57,7 +57,7 @@ func.func @safe_second(%input: memref<8xi16>)
 // ORIGINAL-LABEL: func.func @safe_second
 // ORIGINAL: ondsp.reduce_mac
 
-// TRACE-DAG: "schema_version":{{ *}}1
+// TRACE-DAG: "schema_version":{{ *}}2
 // TRACE-DAG: "vector_width":{{ *}}4
 // TRACE-DAG: "analysis_max_elements":{{ *}}8
 // TRACE-DAG: "candidate_reduction_count":{{ *}}2
@@ -65,6 +65,7 @@ func.func @safe_second(%input: memref<8xi16>)
 // TRACE-DAG: "subject_ordinal":{{ *}}0
 // TRACE-DAG: "subject_ordinal":{{ *}}1
 // TRACE-DAG: "numeric_storage_width":{{ *}}16
+// TRACE-DAG: "implementation_term_width":{{ *}}32
 // TRACE-DAG: "accumulator_storage_width":{{ *}}40
 // TRACE-DAG: "chunk_width":{{ *}}4
 // TRACE-DAG: "coefficients":[

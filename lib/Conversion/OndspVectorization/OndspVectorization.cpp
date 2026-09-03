@@ -184,14 +184,45 @@ bool isVectorizableMemRefReduction(ondrix::ondsp::ReduceMacOp op) {
   return hasSupportedReductionShape(op, /*allowReversedLayout=*/true);
 }
 
-Value createHorizontalAccumulatorUpdate(ondrix::ondsp::ReduceMacOp op, Value accumulator, Value lhs,
-                                        Value rhs, OpBuilder &builder) {
+/// One chunk's products folded into the accumulator. Adjacent products are
+/// pre-added in i32 when the trace certifies the pair width, the shape the
+/// backends select a packed multiply-add for; the chunk sum is then formed in
+/// i32 when the trace certifies that width too, and widened to i64 otherwise.
+Value createHorizontalAccumulatorUpdate(
+    ondrix::ondsp::ReduceMacOp op, Value accumulator, Value lhs, Value rhs,
+    const ondrix::analysis::NoOverflowChunkReassociationTrace &trace, OpBuilder &builder) {
   auto accumulatorType = cast<ondrix::ondsp::AccType>(accumulator.getType());
   auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
   FailureOr<ondrix::conversion::FixedVectorProductTerms> terms =
       ondrix::conversion::lowerFixedVectorProductTerms(op, accumulatorType, numeric,
                                                        *op.getProduct(), lhs, rhs, builder);
   assert(succeeded(terms) && "validated fixed Vector product domain must lower");
+  auto termType = cast<VectorType>(terms->getTerms().getType());
+  Location loc = op.getLoc();
+  if (trace.pairTermWidth == 32 && termType.getElementTypeBitWidth() == 32 &&
+      termType.getNumElements() % 2 == 0) {
+    SmallVector<int64_t> even, odd;
+    for (int64_t lane = 0; lane < termType.getNumElements(); lane += 2) {
+      even.push_back(lane);
+      odd.push_back(lane + 1);
+    }
+    Value evens =
+        builder.create<vector::ShuffleOp>(loc, terms->getTerms(), terms->getTerms(), even);
+    Value odds = builder.create<vector::ShuffleOp>(loc, terms->getTerms(), terms->getTerms(), odd);
+    Value pairs = builder.create<arith::AddIOp>(loc, evens, odds);
+    Type sumStorage = builder.getI32Type();
+    if (trace.implementationTermWidth != 32) {
+      sumStorage = builder.getI64Type();
+      pairs = builder.create<arith::ExtSIOp>(
+          loc, VectorType::get({termType.getNumElements() / 2}, sumStorage), pairs);
+    }
+    Value sum = builder.create<vector::ReductionOp>(loc, vector::CombiningKind::ADD, pairs);
+    auto sumNumeric =
+        ondrix::ondsp::FixedAttr::get(builder.getContext(), terms->getNumeric().getSignedness(),
+                                      sumStorage, terms->getNumeric().getFrac());
+    return builder.create<ondrix::ondsp::AccAddTermOp>(loc, accumulator.getType(), accumulator, sum,
+                                                       sumNumeric);
+  }
   FailureOr<ondrix::conversion::FixedVectorHorizontalSum> horizontal =
       ondrix::conversion::lowerFixedVectorHorizontalSum(op, *terms, builder);
   assert(succeeded(horizontal) && "validated fixed Vector horizontal sum must lower");
@@ -305,8 +336,8 @@ public:
                         builder.create<vector::LoadOp>(bodyLoc, vectorType, op.getLhs(), base);
                     Value rhs =
                         builder.create<vector::LoadOp>(bodyLoc, vectorType, op.getRhs(), base);
-                    Value next =
-                        createHorizontalAccumulatorUpdate(op, iterArgs.front(), lhs, rhs, builder);
+                    Value next = createHorizontalAccumulatorUpdate(op, iterArgs.front(), lhs, rhs,
+                                                                   proofTrace, builder);
                     builder.create<scf::YieldOp>(bodyLoc, next);
                   });
 

@@ -23,7 +23,7 @@
 // EVALUATED-SAME: dense<[0, -747, 0, 9025, 16384, 9025, 0, -747, 0]> : tensor<9xi16>
 
 // PROVEN-LABEL: func.func @fir_design_lowpass_q15
-// PROVEN: vector.reduction <add>, {{.*}} : vector<4xi64> into i64
+// PROVEN: vector.reduction <add>, {{.*}} : vector<2xi32> into i32
 // PROVEN-NOT: = ondsp.reduce_mac
 
 func.func @fir_design_lowpass_q15(%input: tensor<64xi16>) -> tensor<56xi16>
