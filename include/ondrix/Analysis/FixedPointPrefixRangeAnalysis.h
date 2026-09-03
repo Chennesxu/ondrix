@@ -213,6 +213,14 @@ public:
                                        const ondrix::ConstantIntegerMemRefFacts &coefficients,
                                        int64_t chunkWidth);
 
+  /// Proves that no prefix of the ordered zero-seeded reduction over these
+  /// constant coefficients, read in this order, leaves the accumulator storage.
+  /// No schedule is authorized by it; it lets an order-preserving consumer
+  /// carry the accumulator wrapping.
+  static mlir::LogicalResult
+  proveOrderedZeroSeededConstantReduction(ondsp::ReduceMacOp reduction,
+                                          llvm::ArrayRef<llvm::APInt> coefficientsInReadOrder);
+
   /// The same plan over coefficients already listed in the order the reduction
   /// reads them, for a coefficient operand that is a reversed view of a
   /// constant; `coefficientSource` is the operand value the plan is bound to.

@@ -649,6 +649,31 @@ FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(
                                               constant.getSource(), chunkWidth);
 }
 
+LogicalResult FixedPointPrefixRangePlanner::proveOrderedZeroSeededConstantReduction(
+    ondsp::ReduceMacOp reduction, ArrayRef<APInt> coefficients) {
+  auto numeric = dyn_cast<ondsp::FixedAttr>(reduction.getNumeric());
+  auto accumulator = dyn_cast<ondsp::AccType>(reduction.getInitial().getType());
+  if (!numeric || !accumulator || !reduction.getProduct() || coefficients.size() < 2 ||
+      !reduction.getInitial().getDefiningOp<ondsp::AccZeroOp>())
+    return failure();
+  auto accumulatorStorage = dyn_cast<IntegerType>(accumulator.getStorage());
+  auto numericStorage = dyn_cast<IntegerType>(numeric.getStorage());
+  if (!accumulatorStorage || !accumulatorStorage.isSignless() || !numericStorage)
+    return failure();
+  FailureOr<ondsp::ProductSemantics> productSemantics =
+      ondsp::inferProductSemantics(reduction, numeric, *reduction.getProduct());
+  if (failed(productSemantics) || productSemantics->selection != ondsp::ProductSelection::Full ||
+      accumulator.getSignedness() != numeric.getSignedness() ||
+      accumulator.getFrac() != productSemantics->frac)
+    return failure();
+  // One chunk spanning the whole sequence: its original-schedule prefixes are
+  // exactly the ordered prefixes, and the chunk sum is their last one.
+  ConstantChunkReassociationAnalysis schedule = analyzeZeroSeededConstantChunkReassociation(
+      numericStorage.getWidth(), numeric.getFrac(), accumulatorStorage.getWidth(), coefficients,
+      static_cast<int64_t>(coefficients.size()), /*implementationTermWidth=*/64);
+  return success(schedule.status == ConstantChunkReassociationStatus::Authorized);
+}
+
 FailureOr<NoOverflowChunkReassociationPlan>
 FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(ondsp::ReduceMacOp reduction,
                                                                    ArrayRef<APInt> coefficients,

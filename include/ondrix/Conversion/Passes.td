@@ -541,10 +541,11 @@ def VectorizeOndspFixedMemRefReduce
 
 def VectorizeOndspFixedDecimateOutputs
     : Pass<"vectorize-ondsp-fixed-decimate-outputs", "::mlir::ModuleOp"> {
-  let summary = "Batch independent decimation outputs across accumulator lanes";
+  let summary = "Batch independent window outputs across accumulator lanes";
   let description = [{
-    Rewrite the leading full blocks of a bufferized `ondrix.fir_decimate`
-    output loop to compute `vector-width` outputs at a time in a
+    Rewrite the leading full blocks of a bufferized sliding-window output
+    loop -- `ondrix.fir_filter`, `ondrix.conv1d`, or `ondrix.fir_decimate`
+    at factor two -- to compute `vector-width` outputs at a time in a
     multi-lane accumulator, and leave the remaining outputs on the
     untouched ordered loop.
 
@@ -560,17 +561,24 @@ def VectorizeOndspFixedDecimateOutputs
 
     The canonical pipeline runs this pass inside its schedule stage; the
     standalone flag remains an ablation and oracle interface. It fires only
-    for the loop shape decimation bufferization emits with a static factor of
-    two, a static coefficient count, a static output length, contiguous
-    rank-1 operand layouts in the default memory space, and a single-lane
-    accumulator profile whose per-lane arithmetic the scalar lowering
-    implements. Every other loop is left byte-identical, so an unmatched
-    program keeps the ordered schedule rather than a partially batched one.
+    for the loop shape the window bufferizations emit with a window stride of
+    one or two, a static coefficient count, a static output length, contiguous
+    rank-1 sample and output layouts in the default memory space, a
+    coefficient sequence read one scalar per tap (a reversed view, the
+    convolution's flipped kernel, is admitted), and a single-lane accumulator
+    profile whose per-lane arithmetic the scalar lowering implements. Every
+    other loop is left byte-identical, so an unmatched program keeps the
+    ordered schedule rather than a partially batched one.
 
     Per tap, one full block issues a single contiguous load of
-    `factor * vector-width` elements and one even-lane shuffle, which is what
-    a factor of two makes exact. The block containing the final output stays
-    on the ordered loop so that contiguous load never reads past the input.
+    `factor * vector-width` elements, plus one even-lane shuffle at factor
+    two. Only blocks whose last-tap load stays inside the input are batched.
+
+    A saturating accumulator keeps its clamp in every lane unless the
+    coefficients are a constant sequence for which the prefix-range analysis
+    proves that no ordered prefix reaches the accumulator rail; the lanes
+    then update wrapping, which is the same function on every reachable
+    value, and the export keeps the declared destination policy.
 
     Aliasing is a separately discharged legality obligation, not an aside.
     The rewrite defers a block's stores past all of that block's tap loads,

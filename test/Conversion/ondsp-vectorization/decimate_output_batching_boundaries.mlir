@@ -70,13 +70,13 @@ func.func @even_extent_remainder_outputs(
   return %result : tensor<19xi16>
 }
 
-// N - K = 31 is odd, so the final input element is never read by any window;
-// M = 16 is still a multiple of the width, so the last eight outputs still stay
-// ordered. The extra slack must not change where the batched loop stops.
+// N - K = 31 is odd, so the final input element is never read by any window
+// and the last block's span still ends inside the input: all sixteen outputs
+// are batched and the ordered loop is left empty.
 // CHECK-LABEL: func.func @odd_extent_multiple_outputs
 // CHECK-SAME: memref<39xi16>
 // CHECK: %[[TOTAL:.*]] = arith.constant 16 : index
-// CHECK: %[[BATCHED_END:.*]] = arith.constant 8 : index
+// CHECK: %[[BATCHED_END:.*]] = arith.constant 16 : index
 // CHECK: %[[BATCH_STEP:.*]] = arith.constant 8 : index
 // CHECK: scf.for %{{.*}} = %{{.*}} to %[[BATCHED_END]] step %[[BATCH_STEP]] {
 // CHECK: vector.store {{.*}} : memref<16xi16>, vector<8xi16>

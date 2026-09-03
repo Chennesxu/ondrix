@@ -47,32 +47,8 @@ func.func @refuse_dynamic_extents(
   return %result : tensor<?xi16>
 }
 
-// A valid-boundary FIR bufferizes to a loop with the same accumulator, the same
-// reduction, the same export and the same store, differing only in that the
-// window offset is the output index itself rather than a scaled one. The
-// matcher must not touch it: batching it would need a different span and a
-// different lane extraction.
-// CHECK-LABEL: func.func @refuse_unit_stride_fir_filter
-// CHECK: ondsp.reduce_mac
-
-func.func @refuse_unit_stride_fir_filter(
-    %input: tensor<24xi16>, %coeffs: tensor<8xi16>, %init: tensor<17xi16>) -> tensor<17xi16> {
-  %result = ondrix.fir_filter %input, %coeffs, %init {
-    accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
-    boundary = #ondrix.fir_boundary<valid>,
-    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
-    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
-    overflow = #ondsp.overflow<saturate>,
-    product = #ondsp.product<full>,
-    rounding = #ondsp.rounding<nearest_even>
-  } : (tensor<24xi16>, tensor<8xi16>, tensor<17xi16>) -> tensor<17xi16>
-  return %result : tensor<17xi16>
-}
-
-// Exactly one block of outputs leaves nothing to batch: the block that holds
-// the final output always stays on the ordered loop, because its contiguous
-// factor * width span at the last tap would end one element past what the
-// ordered schedule reads.
+// Exactly one block of outputs leaves nothing to batch: its contiguous
+// factor * width span at the last tap would end one element past the input.
 // CHECK-LABEL: func.func @refuse_single_short_block
 // CHECK: ondsp.reduce_mac
 

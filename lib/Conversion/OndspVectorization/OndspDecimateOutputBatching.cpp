@@ -1,3 +1,5 @@
+#include "ondrix/Analysis/ConstantSequenceAnalysis.h"
+#include "ondrix/Analysis/FixedPointPrefixRangeAnalysis.h"
 #include "ondrix/Conversion/OndspVectorization/OndspVectorization.h"
 #include "ondrix/Conversion/Utils/FixedPointDomainUtils.h"
 #include "ondrix/Conversion/Utils/MemRefLayoutUtils.h"
@@ -29,11 +31,11 @@ using namespace mlir;
 
 namespace {
 
-/// Decimation factor this slice batches. A factor of two makes the contiguous
-/// span covering W outputs exactly 2W elements, so one load plus one even-lane
-/// shuffle produces the whole batch. Other factors need a different extraction
-/// and stay on the ordered path.
-constexpr int64_t kSupportedFactor = 2;
+/// Window strides this pass batches: one (a sliding window, the FIR and
+/// convolution shape) loads the W samples of a tap directly; two (phase-zero
+/// decimation) loads a 2W span and keeps its even lanes. Other strides need a
+/// different extraction and stay on the ordered path.
+constexpr int64_t kMaxSupportedFactor = 2;
 
 /// Tap count above which the batched body is not emitted. The taps are
 /// unrolled so that the multi-lane accumulator stays in vector registers, and
@@ -51,6 +53,10 @@ constexpr int64_t kMaxVectorWidth = 4096;
 /// matcher never leaves a partially understood loop behind.
 struct DecimateLoopShape {
   scf::ForOp loop;
+  /// Window stride between consecutive outputs, one or two.
+  int64_t factor = 1;
+  /// Number of full blocks the batched loop computes.
+  int64_t fullBlocks = 0;
   /// Number of outputs the ordered loop computes.
   int64_t outputLength = 0;
   /// Static coefficient count, which is also the window length.
@@ -67,7 +73,58 @@ struct DecimateLoopShape {
   ondrix::ondsp::FixedAttr destination;
   ondrix::ondsp::RoundingMode rounding = ondrix::ondsp::RoundingMode::NearestEven;
   ondrix::ondsp::OverflowMode overflow = ondrix::ondsp::OverflowMode::Saturate;
+  /// Set when a constant coefficient sequence certifies that no ordered prefix
+  /// reaches the accumulator rail, so the lanes may update wrapping.
+  bool certifiedWrap = false;
 };
+
+/// The coefficient memref of one tap read: rank-1, default memory space, unit
+/// or reversed stride. Only scalar loads address it, so the stride is free.
+bool isTapReadableRankOneMemRef(Value value) {
+  auto type = dyn_cast<MemRefType>(value.getType());
+  if (!type || type.getRank() != 1 || type.isDynamicDim(0) ||
+      !ondrix::conversion::hasDefaultLLVMVectorMemorySpace(type))
+    return false;
+  SmallVector<int64_t> strides;
+  int64_t offset = 0;
+  return succeeded(getStridesAndOffset(type, strides, offset)) && strides.size() == 1 &&
+         (strides[0] == 1 || strides[0] == -1);
+}
+
+/// The coefficients in the order the taps read them, when the memref is a
+/// constant global or a static reversed view of one.
+std::optional<SmallVector<llvm::APInt>> getConstantCoefficientsInReadOrder(Value coefficients,
+                                                                           int64_t length) {
+  auto type = cast<MemRefType>(coefficients.getType());
+  SmallVector<int64_t> strides;
+  int64_t offset = 0;
+  if (failed(getStridesAndOffset(type, strides, offset)) || strides.size() != 1)
+    return std::nullopt;
+  Value source = coefficients;
+  if (strides[0] == -1) {
+    auto subview = coefficients.getDefiningOp<memref::SubViewOp>();
+    if (!subview || ShapedType::isDynamic(offset))
+      return std::nullopt;
+    source = subview.getSource();
+  }
+  FailureOr<ondrix::ConstantIntegerMemRefFacts> constant =
+      ondrix::analyzeConstantIntegerMemRef(source, kMaxUnrolledTaps);
+  if (failed(constant))
+    return std::nullopt;
+  ArrayRef<llvm::APInt> values = constant->getSequence().getValues();
+  SmallVector<llvm::APInt> readOrder;
+  if (strides[0] == 1) {
+    if (static_cast<int64_t>(values.size()) != length)
+      return std::nullopt;
+    readOrder.assign(values.begin(), values.end());
+    return readOrder;
+  }
+  if (offset >= static_cast<int64_t>(values.size()) || length > offset + 1)
+    return std::nullopt;
+  for (int64_t index = 0; index < length; ++index)
+    readOrder.push_back(values[offset - index]);
+  return readOrder;
+}
 
 /// Rank-1 memref whose single dimension is contiguous and whose memory space
 /// the Vector to LLVM lowering accepts.
@@ -139,21 +196,31 @@ FailureOr<DecimateLoopShape> matchDecimateLoop(scf::ForOp loop, int64_t vectorWi
       continue;
     operations.push_back(&operation);
   }
-  if (operations.size() != 6)
+  // A stride-two window is offset by `iv * 2` computed in the body; a
+  // stride-one window is offset by the induction variable itself.
+  if (operations.size() != 5 && operations.size() != 6)
     return failure();
+  int64_t factor = 1;
+  Value windowOffsetValue = inductionVariable;
+  if (operations.size() == 6) {
+    auto offset = dyn_cast<arith::MulIOp>(operations[0]);
+    if (!offset)
+      return failure();
+    std::optional<int64_t> scale =
+        matchInductionVariableScale(offset.getResult(), inductionVariable);
+    if (!scale || *scale != kMaxSupportedFactor)
+      return failure();
+    factor = *scale;
+    windowOffsetValue = offset.getResult();
+    operations.erase(operations.begin());
+  }
 
-  auto offset = dyn_cast<arith::MulIOp>(operations[0]);
-  auto window = dyn_cast<memref::SubViewOp>(operations[1]);
-  auto zero = dyn_cast<ondrix::ondsp::AccZeroOp>(operations[2]);
-  auto reduce = dyn_cast<ondrix::ondsp::ReduceMacOp>(operations[3]);
-  auto exportOp = dyn_cast<ondrix::ondsp::AccExportOp>(operations[4]);
-  auto store = dyn_cast<memref::StoreOp>(operations[5]);
-  if (!offset || !window || !zero || !reduce || !exportOp || !store)
-    return failure();
-
-  std::optional<int64_t> factor =
-      matchInductionVariableScale(offset.getResult(), inductionVariable);
-  if (!factor || *factor != kSupportedFactor)
+  auto window = dyn_cast<memref::SubViewOp>(operations[0]);
+  auto zero = dyn_cast<ondrix::ondsp::AccZeroOp>(operations[1]);
+  auto reduce = dyn_cast<ondrix::ondsp::ReduceMacOp>(operations[2]);
+  auto exportOp = dyn_cast<ondrix::ondsp::AccExportOp>(operations[3]);
+  auto store = dyn_cast<memref::StoreOp>(operations[4]);
+  if (!window || !zero || !reduce || !exportOp || !store)
     return failure();
 
   if (exportOp.getAcc() != reduce.getResult())
@@ -184,7 +251,7 @@ FailureOr<DecimateLoopShape> matchDecimateLoop(scf::ForOp loop, int64_t vectorWi
       window.getMixedSizes().size() != 1 || window.getMixedStrides().size() != 1)
     return failure();
   auto windowOffset = window.getMixedOffsets().front().dyn_cast<Value>();
-  if (!windowOffset || windowOffset != offset.getResult())
+  if (!windowOffset || windowOffset != windowOffsetValue)
     return failure();
   std::optional<int64_t> windowStride = getConstantIntValue(window.getMixedStrides().front());
   std::optional<int64_t> windowLength = getConstantIntValue(window.getMixedSizes().front());
@@ -194,6 +261,7 @@ FailureOr<DecimateLoopShape> matchDecimateLoop(scf::ForOp loop, int64_t vectorWi
 
   DecimateLoopShape shape;
   shape.loop = loop;
+  shape.factor = factor;
   shape.outputLength = *upperBound;
   shape.coefficientLength = *windowLength;
   shape.input = window.getSource();
@@ -210,8 +278,9 @@ FailureOr<DecimateLoopShape> matchDecimateLoop(scf::ForOp loop, int64_t vectorWi
     return failure();
   shape.coefficients = lookThroughMemRefCasts(shape.coefficients);
 
-  // Layouts the batched body can address contiguously.
-  if (!isBatchableRankOneMemRef(shape.input) || !isBatchableRankOneMemRef(shape.coefficients) ||
+  // Layouts the batched body can address: contiguous samples and outputs, and
+  // a coefficient sequence read one scalar at a time.
+  if (!isBatchableRankOneMemRef(shape.input) || !isTapReadableRankOneMemRef(shape.coefficients) ||
       !isBatchableRankOneMemRef(shape.output))
     return failure();
   // The batched loop is placed immediately before the ordered one, so every
@@ -261,26 +330,35 @@ FailureOr<DecimateLoopShape> matchDecimateLoop(scf::ForOp loop, int64_t vectorWi
     return failure();
   int64_t inputLength = inputType.getDimSize(0);
   if (inputLength <= 0 ||
-      inputLength > std::numeric_limits<int64_t>::max() / (kSupportedFactor + 1))
+      inputLength > std::numeric_limits<int64_t>::max() / (kMaxSupportedFactor + 1))
     return failure();
   if (shape.outputLength > inputLength || shape.coefficientLength > inputLength)
     return failure();
 
-  // Full blocks are restricted to those whose contiguous `factor * W` load
-  // stays inside the input: the span covering outputs `m .. m + W - 1` at the
-  // last tap ends one element past the last element the ordered schedule
-  // reads, so the block containing the final output is always left to the
-  // ordered loop. With `W` not dividing the output length this costs nothing,
-  // and it is what keeps the batched load in bounds when it does.
-  int64_t fullBlocks = (shape.outputLength - 1) / vectorWidth;
+  // Full blocks are those whose contiguous `factor * W` load at the last tap
+  // stays inside the input; a stride-two span ends one element past the last
+  // element the ordered schedule reads, so its final block stays ordered.
+  int64_t fullBlocks = shape.outputLength / vectorWidth;
+  auto lastLoadEnd = [&](int64_t blocks) {
+    return (blocks - 1) * vectorWidth * factor + shape.coefficientLength - 1 + factor * vectorWidth;
+  };
+  while (fullBlocks >= 1 && lastLoadEnd(fullBlocks) > inputLength)
+    --fullBlocks;
   if (fullBlocks < 1)
     return failure();
+  shape.fullBlocks = fullBlocks;
 
-  // Independently of the argument above, pin the actual extent.
-  int64_t lastBlockStart = (fullBlocks - 1) * vectorWidth;
-  int64_t lastLoadBase = lastBlockStart * kSupportedFactor + shape.coefficientLength - 1;
-  if (lastLoadBase + kSupportedFactor * vectorWidth > inputLength)
-    return failure();
+  // A saturating profile keeps its clamp per lane unless a constant coefficient
+  // sequence certifies that no ordered prefix reaches the rail.
+  if (accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Saturate) {
+    std::optional<SmallVector<llvm::APInt>> constants =
+        getConstantCoefficientsInReadOrder(shape.coefficients, shape.coefficientLength);
+    shape.certifiedWrap =
+        constants &&
+        succeeded(
+            ondrix::analysis::FixedPointPrefixRangePlanner::proveOrderedZeroSeededConstantReduction(
+                reduce, *constants));
+  }
 
   return shape;
 }
@@ -293,26 +371,27 @@ void batchDecimateOutputs(const DecimateLoopShape &shape, int64_t vectorWidth, O
   scf::ForOp loop = shape.loop;
   Location loc = loop.getLoc();
   MLIRContext *context = builder.getContext();
-  int64_t fullBlocks = (shape.outputLength - 1) / vectorWidth;
-  int64_t batchedOutputs = fullBlocks * vectorWidth;
+  int64_t batchedOutputs = shape.fullBlocks * vectorWidth;
 
-  auto laneAccumulator = ondrix::ondsp::AccType::get(
-      context, shape.accumulator.getStorage(), shape.accumulator.getFrac(),
-      shape.accumulator.getSignedness(), shape.accumulator.getUpdateOverflow(),
-      static_cast<unsigned>(vectorWidth));
+  auto laneAccumulator =
+      ondrix::ondsp::AccType::get(context, shape.accumulator.getStorage(),
+                                  shape.accumulator.getFrac(), shape.accumulator.getSignedness(),
+                                  shape.certifiedWrap ? ondrix::ondsp::OverflowMode::Wrap
+                                                      : shape.accumulator.getUpdateOverflow(),
+                                  static_cast<unsigned>(vectorWidth));
   auto storage = cast<IntegerType>(shape.numeric.getStorage());
-  auto spanType = VectorType::get({kSupportedFactor * vectorWidth}, storage);
+  auto spanType = VectorType::get({shape.factor * vectorWidth}, storage);
   auto sampleType =
       VectorType::get({vectorWidth}, cast<IntegerType>(shape.destination.getStorage()));
 
   // Phase-zero decimation keeps every `factor`-th element of the span.
   SmallVector<int64_t> evenLanes;
   for (int64_t lane = 0; lane < vectorWidth; ++lane)
-    evenLanes.push_back(lane * kSupportedFactor);
+    evenLanes.push_back(lane * shape.factor);
 
   builder.setInsertionPoint(loop);
   Value zeroIndex = builder.create<arith::ConstantIndexOp>(loc, 0);
-  Value factorIndex = builder.create<arith::ConstantIndexOp>(loc, kSupportedFactor);
+  Value factorIndex = builder.create<arith::ConstantIndexOp>(loc, shape.factor);
   Value batchedEnd = builder.create<arith::ConstantIndexOp>(loc, batchedOutputs);
   Value batchStep = builder.create<arith::ConstantIndexOp>(loc, vectorWidth);
   SmallVector<Value> tapIndices;
@@ -324,7 +403,10 @@ void batchDecimateOutputs(const DecimateLoopShape &shape, int64_t vectorWidth, O
       [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
         Value accumulator =
             blockBuilder.create<ondrix::ondsp::AccZeroOp>(blockLoc, laneAccumulator);
-        Value windowBase = blockBuilder.create<arith::MulIOp>(blockLoc, blockStart, factorIndex);
+        Value windowBase =
+            shape.factor == 1
+                ? blockStart
+                : blockBuilder.create<arith::MulIOp>(blockLoc, blockStart, factorIndex).getResult();
         // Taps are emitted in increasing order and each lane folds its own
         // products in that order, so this is the declared ordered update for
         // every one of the W outputs. The taps are unrolled rather than looped
@@ -337,7 +419,9 @@ void batchDecimateOutputs(const DecimateLoopShape &shape, int64_t vectorWidth, O
                        : blockBuilder.create<arith::AddIOp>(blockLoc, windowBase, tapIndices[tap]);
           Value span = blockBuilder.create<vector::LoadOp>(blockLoc, spanType, shape.input,
                                                            ValueRange{base});
-          Value values = blockBuilder.create<vector::ShuffleOp>(blockLoc, span, span, evenLanes);
+          Value values = span;
+          if (shape.factor != 1)
+            values = blockBuilder.create<vector::ShuffleOp>(blockLoc, span, span, evenLanes);
           Value coefficient = blockBuilder.create<memref::LoadOp>(blockLoc, shape.coefficients,
                                                                   ValueRange{tapIndices[tap]});
           accumulator = blockBuilder.create<ondrix::ondsp::MacOp>(blockLoc, laneAccumulator,

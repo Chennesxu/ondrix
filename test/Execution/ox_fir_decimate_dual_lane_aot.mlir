@@ -20,8 +20,5 @@
 // DUAL-COUNT-4: ortumcore.dmac
 // DUAL: ortumcore.acc_out %{{.*}} {shift = 14
 // DUAL: ortumcore.acc_out %{{.*}} {shift = 14
-// The uncovered remainder outputs keep the ordered schedule: the scalarized
-// reduction is a plain scalar MAC loop with the same readout composition.
-// DUAL: scf.for
-// DUAL: ortumcore.mac_add
-// DUAL: ortumcore.acc_out %{{.*}} {shift = 14
+// Every output is covered by a lane pair, so no ordered remainder loop remains.
+// DUAL-NOT: ortumcore.mac_add
