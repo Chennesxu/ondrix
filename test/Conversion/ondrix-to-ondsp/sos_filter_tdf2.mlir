@@ -32,6 +32,10 @@ func.func @dynamic_fma(
 
 // CHECK-LABEL: func.func @static_off
 // CHECK-NOT: math.fma
+// CHECK-COUNT-16: tensor.extract
+// CHECK: %[[LOOP:.*]]:5 = scf.for
+// CHECK: tensor.extract
+// CHECK-NOT: tensor.extract
 // CHECK: arith.mulf
 // CHECK: arith.mulf
 // CHECK: arith.addf
@@ -42,6 +46,8 @@ func.func @dynamic_fma(
 // CHECK: arith.mulf
 // CHECK: arith.mulf
 // CHECK: arith.addf
+// CHECK: scf.yield
+// CHECK-COUNT-4: tensor.insert %[[LOOP]]#
 // CHECK-NOT: ondrix.sos_filter_tdf2
 func.func @static_off(
     %input: tensor<4xf32>, %coeffs: tensor<2x5xf32>,

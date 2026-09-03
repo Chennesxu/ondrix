@@ -40,13 +40,22 @@ func.func @q15_dynamic(
   return %output, %next : tensor<?xi16>, tensor<?x2xi16>
 }
 
+// Straight line: coefficients and state leave the tensors once, ahead of the
+// sample loop, and the loop carries the four delay elements as scalars.
 // CHECK-LABEL: func.func @q31_static
+// CHECK-COUNT-16: tensor.extract
+// CHECK: %[[LOOP:.*]]:5 = scf.for
+// CHECK: tensor.extract
+// CHECK-NOT: tensor.extract
 // CHECK: ondsp.acc_zero : <storage = i64, frac = 62, signed, update_overflow = wrap>
 // CHECK-COUNT-3: ondsp.mac
 // CHECK: ondsp.acc_export
 // CHECK: ondsp.acc_zero
 // CHECK-COUNT-3: ondsp.mac
 // CHECK: ondsp.acc_export
+// CHECK-NOT: tensor.extract
+// CHECK: scf.yield
+// CHECK-COUNT-4: tensor.insert %[[LOOP]]#
 // CHECK-NOT: ondrix.sos_filter_df2_fixed
 func.func @q31_static(
     %input: tensor<4xi32>, %coeffs: tensor<2x5xi32>,

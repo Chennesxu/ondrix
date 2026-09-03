@@ -44,98 +44,160 @@ static void assertValidSosSectionShape(Location loc, Value coefficientSections, 
       builder.getStringAttr("SOS coefficient, scale, and state section counts must match"));
 }
 
+constexpr int64_t kMaxStraightLineSections = 8;
+
+/// The cascade length, when all three sectioned operands carry the same static
+/// count. A count only the coefficients declare is not one: the loop bound and
+/// the runtime assert are what keep the other two operands in range.
+static std::optional<int64_t> getStraightLineSectionCount(ShapedType coeffs, ShapedType scales,
+                                                          ShapedType state) {
+  int64_t sections = coeffs.getDimSize(0);
+  if (ShapedType::isDynamic(sections) || sections > kMaxStraightLineSections)
+    return std::nullopt;
+  if (scales.getDimSize(0) != sections || state.getDimSize(0) != sections)
+    return std::nullopt;
+  return sections;
+}
+
+/// One section's scale, b0 b1 b2 a1 a2 and its two delay elements.
+struct SosSection {
+  Value scale, b0, b1, b2, a1, a2, z1, z2;
+};
+
+/// The section arithmetic: (input, section) -> (output, next z1, next z2).
+using SosSectionBody = std::function<std::tuple<Value, Value, Value>(OpBuilder &, Location, Value,
+                                                                     const SosSection &)>;
+
+static SosSection extractSosCoefficients(OpBuilder &builder, Location loc, Value coeffs,
+                                         Value scales, Value section, ArrayRef<Value> columns) {
+  SosSection s;
+  s.scale = builder.create<tensor::ExtractOp>(loc, scales, ValueRange{section});
+  s.b0 = builder.create<tensor::ExtractOp>(loc, coeffs, ValueRange{section, columns[0]});
+  s.b1 = builder.create<tensor::ExtractOp>(loc, coeffs, ValueRange{section, columns[1]});
+  s.b2 = builder.create<tensor::ExtractOp>(loc, coeffs, ValueRange{section, columns[2]});
+  s.a1 = builder.create<tensor::ExtractOp>(loc, coeffs, ValueRange{section, columns[3]});
+  s.a2 = builder.create<tensor::ExtractOp>(loc, coeffs, ValueRange{section, columns[4]});
+  return s;
+}
+
+/// Runs `body` over the cascade for every sample. A straight-line cascade
+/// extracts every coefficient once ahead of the sample loop and carries the
+/// state as loop scalars, so the sample loop reaches memory only for its input
+/// and output; the general form loops over sections with the state in a tensor.
+static SmallVector<Value, 2> lowerSosCascade(Location loc, Value input, Value coeffs, Value scales,
+                                             Value state, RankedTensorType outputType,
+                                             const SosSectionBody &body,
+                                             ConversionPatternRewriter &rewriter) {
+  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value two = rewriter.create<arith::ConstantIndexOp>(loc, 2);
+  Value three = rewriter.create<arith::ConstantIndexOp>(loc, 3);
+  Value four = rewriter.create<arith::ConstantIndexOp>(loc, 4);
+  Value columns[5] = {zero, one, two, three, four};
+  Value inputLength = rewriter.create<tensor::DimOp>(loc, input, zero);
+  Value coefficientSections = rewriter.create<tensor::DimOp>(loc, coeffs, zero);
+  Value scaleSections = rewriter.create<tensor::DimOp>(loc, scales, zero);
+  Value stateSections = rewriter.create<tensor::DimOp>(loc, state, zero);
+  assertValidSosSectionShape(loc, coefficientSections, scaleSections, stateSections, zero,
+                             rewriter);
+  Value emptyOutput = createEmptyTensor(loc, outputType, inputLength, rewriter);
+
+  std::optional<int64_t> straightLine = getStraightLineSectionCount(
+      cast<ShapedType>(coeffs.getType()), cast<ShapedType>(scales.getType()),
+      cast<ShapedType>(state.getType()));
+  if (straightLine) {
+    SmallVector<SosSection> sections;
+    SmallVector<Value> sectionIndices;
+    SmallVector<Value> iterArgs{emptyOutput};
+    for (int64_t index = 0; index < *straightLine; ++index) {
+      Value section = rewriter.create<arith::ConstantIndexOp>(loc, index);
+      sectionIndices.push_back(section);
+      sections.push_back(extractSosCoefficients(rewriter, loc, coeffs, scales, section, columns));
+      iterArgs.push_back(rewriter.create<tensor::ExtractOp>(loc, state, ValueRange{section, zero}));
+      iterArgs.push_back(rewriter.create<tensor::ExtractOp>(loc, state, ValueRange{section, one}));
+    }
+    auto sampleLoop = rewriter.create<scf::ForOp>(
+        loc, zero, inputLength, one, iterArgs,
+        [&](OpBuilder &builder, Location sampleLoc, Value sampleIndex, ValueRange sampleArgs) {
+          Value carried =
+              builder.create<tensor::ExtractOp>(sampleLoc, input, ValueRange{sampleIndex});
+          SmallVector<Value> next{Value()};
+          for (size_t index = 0; index < sections.size(); ++index) {
+            SosSection section = sections[index];
+            section.z1 = sampleArgs[1 + 2 * index];
+            section.z2 = sampleArgs[2 + 2 * index];
+            auto [output, nextZ1, nextZ2] = body(builder, sampleLoc, carried, section);
+            carried = output;
+            next.push_back(nextZ1);
+            next.push_back(nextZ2);
+          }
+          next[0] = builder.create<tensor::InsertOp>(sampleLoc, carried, sampleArgs[0],
+                                                     ValueRange{sampleIndex});
+          builder.create<scf::YieldOp>(sampleLoc, next);
+        });
+    Value nextState = state;
+    for (size_t index = 0; index < sectionIndices.size(); ++index) {
+      Value section = sectionIndices[index];
+      nextState = rewriter.create<tensor::InsertOp>(loc, sampleLoop.getResult(1 + 2 * index),
+                                                    nextState, ValueRange{section, zero});
+      nextState = rewriter.create<tensor::InsertOp>(loc, sampleLoop.getResult(2 + 2 * index),
+                                                    nextState, ValueRange{section, one});
+    }
+    return {sampleLoop.getResult(0), nextState};
+  }
+
+  auto sampleLoop = rewriter.create<scf::ForOp>(
+      loc, zero, inputLength, one, ValueRange{emptyOutput, state},
+      [&](OpBuilder &builder, Location sampleLoc, Value sampleIndex, ValueRange sampleArgs) {
+        Value sample = builder.create<tensor::ExtractOp>(sampleLoc, input, ValueRange{sampleIndex});
+        auto sectionLoop = builder.create<scf::ForOp>(
+            sampleLoc, zero, coefficientSections, one, ValueRange{sample, sampleArgs[1]},
+            [&](OpBuilder &sectionBuilder, Location sectionLoc, Value section,
+                ValueRange sectionArgs) {
+              SosSection s = extractSosCoefficients(sectionBuilder, sectionLoc, coeffs, scales,
+                                                    section, columns);
+              s.z1 = sectionBuilder.create<tensor::ExtractOp>(sectionLoc, sectionArgs[1],
+                                                              ValueRange{section, zero});
+              s.z2 = sectionBuilder.create<tensor::ExtractOp>(sectionLoc, sectionArgs[1],
+                                                              ValueRange{section, one});
+              auto [output, nextZ1, nextZ2] = body(sectionBuilder, sectionLoc, sectionArgs[0], s);
+              Value withZ1 = sectionBuilder.create<tensor::InsertOp>(
+                  sectionLoc, nextZ1, sectionArgs[1], ValueRange{section, zero});
+              Value nextState = sectionBuilder.create<tensor::InsertOp>(sectionLoc, nextZ2, withZ1,
+                                                                        ValueRange{section, one});
+              sectionBuilder.create<scf::YieldOp>(sectionLoc, ValueRange{output, nextState});
+            });
+        Value nextOutput = builder.create<tensor::InsertOp>(sampleLoc, sectionLoop.getResult(0),
+                                                            sampleArgs[0], ValueRange{sampleIndex});
+        builder.create<scf::YieldOp>(sampleLoc, ValueRange{nextOutput, sectionLoop.getResult(1)});
+      });
+  return {sampleLoop.getResult(0), sampleLoop.getResult(1)};
+}
+
 class SosFilterTdf2OpLowering final : public OpConversionPattern<ondrix::ir::SosFilterTdf2Op> {
 public:
   using OpConversionPattern<ondrix::ir::SosFilterTdf2Op>::OpConversionPattern;
 
   LogicalResult matchAndRewrite(ondrix::ir::SosFilterTdf2Op op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-    Value inputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInput(), zero);
-    Value coefficientSections = rewriter.create<tensor::DimOp>(loc, adaptor.getCoeffs(), zero);
-    Value scaleSections = rewriter.create<tensor::DimOp>(loc, adaptor.getScales(), zero);
-    Value stateSections = rewriter.create<tensor::DimOp>(loc, adaptor.getState(), zero);
-
-    assertValidSosSectionShape(loc, coefficientSections, scaleSections, stateSections, zero,
-                               rewriter);
-
-    Value emptyOutput = createEmptyTensor(loc, op.getOutput().getType(), inputLength, rewriter);
     auto numeric = cast<ondrix::ondsp::FpAttr>(op.getNumeric());
-    Value coefficientZero = zero;
-    Value coefficientOne = one;
-    Value coefficientTwo = rewriter.create<arith::ConstantIndexOp>(loc, 2);
-    Value coefficientThree = rewriter.create<arith::ConstantIndexOp>(loc, 3);
-    Value coefficientFour = rewriter.create<arith::ConstantIndexOp>(loc, 4);
-
-    auto sampleLoop = rewriter.create<scf::ForOp>(
-        loc, zero, inputLength, one, ValueRange{emptyOutput, adaptor.getState()},
-        [&](OpBuilder &builder, Location sampleLoc, Value sampleIndex, ValueRange sampleArgs) {
-          Value sample = builder.create<tensor::ExtractOp>(sampleLoc, adaptor.getInput(),
-                                                           ValueRange{sampleIndex});
-          auto sectionLoop = builder.create<scf::ForOp>(
-              sampleLoc, zero, coefficientSections, one, ValueRange{sample, sampleArgs[1]},
-              [&](OpBuilder &sectionBuilder, Location sectionLoc, Value section,
-                  ValueRange sectionArgs) {
-                auto extractCoefficient = [&](Value column) {
-                  return sectionBuilder.create<tensor::ExtractOp>(sectionLoc, adaptor.getCoeffs(),
-                                                                  ValueRange{section, column});
-                };
-                Value scale = sectionBuilder.create<tensor::ExtractOp>(
-                    sectionLoc, adaptor.getScales(), ValueRange{section});
-                Value b0 = extractCoefficient(coefficientZero);
-                Value b1 = extractCoefficient(coefficientOne);
-                Value b2 = extractCoefficient(coefficientTwo);
-                Value a1 = extractCoefficient(coefficientThree);
-                Value a2 = extractCoefficient(coefficientFour);
-                Value z1 = sectionBuilder.create<tensor::ExtractOp>(
-                    sectionLoc, sectionArgs[1], ValueRange{section, coefficientZero});
-                Value z2 = sectionBuilder.create<tensor::ExtractOp>(
-                    sectionLoc, sectionArgs[1], ValueRange{section, coefficientOne});
-
-                Value scaled = createFpMultiply(sectionLoc, sectionArgs[0], scale, sectionBuilder);
-                Value output =
-                    createFpAccumulatorUpdate(sectionLoc, scaled, b0, z1, numeric, sectionBuilder);
-                Value feedback1 = createFpMultiply(sectionLoc, output, a1, sectionBuilder);
-                Value firstTerm = createFpAccumulatorUpdate(sectionLoc, scaled, b1, feedback1,
-                                                            numeric, sectionBuilder);
-                Value nextZ1 = createFpAdd(sectionLoc, z2, firstTerm, sectionBuilder);
-                Value feedback2 = createFpMultiply(sectionLoc, output, a2, sectionBuilder);
-                Value nextZ2 = createFpAccumulatorUpdate(sectionLoc, scaled, b2, feedback2, numeric,
-                                                         sectionBuilder);
-                Value stateWithZ1 = sectionBuilder.create<tensor::InsertOp>(
-                    sectionLoc, nextZ1, sectionArgs[1], ValueRange{section, coefficientZero});
-                Value nextState = sectionBuilder.create<tensor::InsertOp>(
-                    sectionLoc, nextZ2, stateWithZ1, ValueRange{section, coefficientOne});
-                sectionBuilder.create<scf::YieldOp>(sectionLoc, ValueRange{output, nextState});
-              });
-          Value nextOutput = builder.create<tensor::InsertOp>(
-              sampleLoc, sectionLoop.getResult(0), sampleArgs[0], ValueRange{sampleIndex});
-          builder.create<scf::YieldOp>(sampleLoc, ValueRange{nextOutput, sectionLoop.getResult(1)});
-        });
-
-    rewriter.replaceOp(op, sampleLoop.getResults());
+    SosSectionBody body = [&](OpBuilder &builder, Location loc, Value input,
+                              const SosSection &s) -> std::tuple<Value, Value, Value> {
+      Value scaled = createFpMultiply(loc, input, s.scale, builder);
+      Value output = createFpAccumulatorUpdate(loc, scaled, s.b0, s.z1, numeric, builder);
+      Value feedback1 = createFpMultiply(loc, output, s.a1, builder);
+      Value firstTerm = createFpAccumulatorUpdate(loc, scaled, s.b1, feedback1, numeric, builder);
+      Value nextZ1 = createFpAdd(loc, s.z2, firstTerm, builder);
+      Value feedback2 = createFpMultiply(loc, output, s.a2, builder);
+      Value nextZ2 = createFpAccumulatorUpdate(loc, scaled, s.b2, feedback2, numeric, builder);
+      return {output, nextZ1, nextZ2};
+    };
+    rewriter.replaceOp(op, lowerSosCascade(op.getLoc(), adaptor.getInput(), adaptor.getCoeffs(),
+                                           adaptor.getScales(), adaptor.getState(),
+                                           op.getOutput().getType(), body, rewriter));
     return success();
   }
 };
-
-/// Longest cascade emitted straight-line; the measured argument is the
-/// `convert-ondrix-to-ondsp` pass description's.
-constexpr int64_t kMaxStraightLineSections = 8;
-
-/// The cascade length, when all three sectioned operands carry the same static
-/// count. A count only the coefficients declare is not one: the loop bound and
-/// the runtime assert are what keep the other two operands in range.
-static std::optional<int64_t> getStraightLineSectionCount(ondrix::ir::SosFilterDf2FixedOp op) {
-  int64_t sections = op.getCoeffs().getType().getDimSize(0);
-  if (ShapedType::isDynamic(sections) || sections > kMaxStraightLineSections)
-    return std::nullopt;
-  if (op.getScales().getType().getDimSize(0) != sections ||
-      op.getState().getType().getDimSize(0) != sections)
-    return std::nullopt;
-  return sections;
-}
 
 class SosFilterDf2FixedOpLowering final
     : public OpConversionPattern<ondrix::ir::SosFilterDf2FixedOp> {
@@ -144,105 +206,33 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ir::SosFilterDf2FixedOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-    Value two = rewriter.create<arith::ConstantIndexOp>(loc, 2);
-    Value three = rewriter.create<arith::ConstantIndexOp>(loc, 3);
-    Value four = rewriter.create<arith::ConstantIndexOp>(loc, 4);
-    Value inputLength = rewriter.create<tensor::DimOp>(loc, adaptor.getInput(), zero);
-    Value coefficientSections = rewriter.create<tensor::DimOp>(loc, adaptor.getCoeffs(), zero);
-    Value scaleSections = rewriter.create<tensor::DimOp>(loc, adaptor.getScales(), zero);
-    Value stateSections = rewriter.create<tensor::DimOp>(loc, adaptor.getState(), zero);
-
-    assertValidSosSectionShape(loc, coefficientSections, scaleSections, stateSections, zero,
-                               rewriter);
-
-    Value emptyOutput = createEmptyTensor(loc, op.getOutput().getType(), inputLength, rewriter);
-    auto createMac = [&](OpBuilder &builder, Location updateLoc, Value accumulator, Value lhs,
+    auto createMac = [&](OpBuilder &builder, Location loc, Value accumulator, Value lhs,
                          Value rhs) {
-      return builder.create<ondrix::ondsp::MacOp>(updateLoc, op.getAccumulator(), accumulator, lhs,
-                                                  rhs, op.getNumeric(), op.getProduct());
+      return builder.create<ondrix::ondsp::MacOp>(loc, op.getAccumulator(), accumulator, lhs, rhs,
+                                                  op.getNumeric(), op.getProduct());
     };
-
-    auto emitSection = [&](OpBuilder &sectionBuilder, Location sectionLoc, Value section,
-                           Value sectionInput, Value state) -> std::pair<Value, Value> {
-      auto extractCoefficient = [&](Value column) {
-        return sectionBuilder.create<tensor::ExtractOp>(sectionLoc, adaptor.getCoeffs(),
-                                                        ValueRange{section, column});
-      };
-      Value scale = sectionBuilder.create<tensor::ExtractOp>(sectionLoc, adaptor.getScales(),
-                                                             ValueRange{section});
-      Value b0 = extractCoefficient(zero);
-      Value b1 = extractCoefficient(one);
-      Value b2 = extractCoefficient(two);
-      Value a1 = extractCoefficient(three);
-      Value a2 = extractCoefficient(four);
-      Value d1 =
-          sectionBuilder.create<tensor::ExtractOp>(sectionLoc, state, ValueRange{section, zero});
-      Value d2 =
-          sectionBuilder.create<tensor::ExtractOp>(sectionLoc, state, ValueRange{section, one});
-
-      Value stateAccumulator =
-          sectionBuilder.create<ondrix::ondsp::AccZeroOp>(sectionLoc, op.getAccumulator());
-      stateAccumulator =
-          createMac(sectionBuilder, sectionLoc, stateAccumulator, sectionInput, scale);
-      stateAccumulator = createMac(sectionBuilder, sectionLoc, stateAccumulator, d1, a1);
-      stateAccumulator = createMac(sectionBuilder, sectionLoc, stateAccumulator, d2, a2);
-      Value nextD1 = sectionBuilder.create<ondrix::ondsp::AccExportOp>(
-          sectionLoc, op.getNumeric().getStorage(), stateAccumulator, op.getNumeric(),
+    SosSectionBody body = [&](OpBuilder &builder, Location loc, Value input,
+                              const SosSection &s) -> std::tuple<Value, Value, Value> {
+      Value stateAccumulator = builder.create<ondrix::ondsp::AccZeroOp>(loc, op.getAccumulator());
+      stateAccumulator = createMac(builder, loc, stateAccumulator, input, s.scale);
+      stateAccumulator = createMac(builder, loc, stateAccumulator, s.z1, s.a1);
+      stateAccumulator = createMac(builder, loc, stateAccumulator, s.z2, s.a2);
+      Value nextD1 = builder.create<ondrix::ondsp::AccExportOp>(
+          loc, op.getNumeric().getStorage(), stateAccumulator, op.getNumeric(),
           op.getStateRounding(), op.getStateOverflow());
 
-      Value outputAccumulator =
-          sectionBuilder.create<ondrix::ondsp::AccZeroOp>(sectionLoc, op.getAccumulator());
-      outputAccumulator = createMac(sectionBuilder, sectionLoc, outputAccumulator, nextD1, b0);
-      outputAccumulator = createMac(sectionBuilder, sectionLoc, outputAccumulator, d1, b1);
-      outputAccumulator = createMac(sectionBuilder, sectionLoc, outputAccumulator, d2, b2);
-      Value output = sectionBuilder.create<ondrix::ondsp::AccExportOp>(
-          sectionLoc, op.getNumeric().getStorage(), outputAccumulator, op.getNumeric(),
+      Value outputAccumulator = builder.create<ondrix::ondsp::AccZeroOp>(loc, op.getAccumulator());
+      outputAccumulator = createMac(builder, loc, outputAccumulator, nextD1, s.b0);
+      outputAccumulator = createMac(builder, loc, outputAccumulator, s.z1, s.b1);
+      outputAccumulator = createMac(builder, loc, outputAccumulator, s.z2, s.b2);
+      Value output = builder.create<ondrix::ondsp::AccExportOp>(
+          loc, op.getNumeric().getStorage(), outputAccumulator, op.getNumeric(),
           op.getOutputRounding(), op.getOutputOverflow());
-
-      Value stateWithD1 = sectionBuilder.create<tensor::InsertOp>(sectionLoc, nextD1, state,
-                                                                  ValueRange{section, zero});
-      Value nextState = sectionBuilder.create<tensor::InsertOp>(sectionLoc, d1, stateWithD1,
-                                                                ValueRange{section, one});
-      return {output, nextState};
+      return {output, nextD1, s.z1};
     };
-
-    std::optional<int64_t> straightLineSections = getStraightLineSectionCount(op);
-    auto emitCascade = [&](OpBuilder &builder, Location sampleLoc, Value sample,
-                           Value state) -> std::pair<Value, Value> {
-      if (straightLineSections) {
-        Value carried = sample;
-        for (int64_t index = 0; index < *straightLineSections; ++index) {
-          Value section = builder.create<arith::ConstantIndexOp>(sampleLoc, index);
-          std::tie(carried, state) = emitSection(builder, sampleLoc, section, carried, state);
-        }
-        return {carried, state};
-      }
-      auto sectionLoop = builder.create<scf::ForOp>(
-          sampleLoc, zero, coefficientSections, one, ValueRange{sample, state},
-          [&](OpBuilder &sectionBuilder, Location sectionLoc, Value section,
-              ValueRange sectionArgs) {
-            auto [output, nextState] =
-                emitSection(sectionBuilder, sectionLoc, section, sectionArgs[0], sectionArgs[1]);
-            sectionBuilder.create<scf::YieldOp>(sectionLoc, ValueRange{output, nextState});
-          });
-      return {sectionLoop.getResult(0), sectionLoop.getResult(1)};
-    };
-
-    auto sampleLoop = rewriter.create<scf::ForOp>(
-        loc, zero, inputLength, one, ValueRange{emptyOutput, adaptor.getState()},
-        [&](OpBuilder &builder, Location sampleLoc, Value sampleIndex, ValueRange sampleArgs) {
-          Value sample = builder.create<tensor::ExtractOp>(sampleLoc, adaptor.getInput(),
-                                                           ValueRange{sampleIndex});
-          auto [cascaded, nextState] = emitCascade(builder, sampleLoc, sample, sampleArgs[1]);
-          Value nextOutput = builder.create<tensor::InsertOp>(sampleLoc, cascaded, sampleArgs[0],
-                                                              ValueRange{sampleIndex});
-          builder.create<scf::YieldOp>(sampleLoc, ValueRange{nextOutput, nextState});
-        });
-
-    rewriter.replaceOp(op, sampleLoop.getResults());
+    rewriter.replaceOp(op, lowerSosCascade(op.getLoc(), adaptor.getInput(), adaptor.getCoeffs(),
+                                           adaptor.getScales(), adaptor.getState(),
+                                           op.getOutput().getType(), body, rewriter));
     return success();
   }
 };
