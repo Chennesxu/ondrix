@@ -78,11 +78,11 @@ func.func @q15_loop_chain(%lhs: i16, %rhs: i16, %count: index) -> i32 {
 // CHECK-LABEL: func.func @ntp_export(
 // CHECK-SAME: %[[ACC:.*]]: !ortumcore.acc
 // CHECK: %[[OUT:.*]] = ortumcore.acc_out %[[ACC]] {shift = 14 : i64} : (!ortumcore.acc) -> i32
-// CHECK: %[[WIDE:.*]] = arith.extsi %[[OUT]] : i32 to i64
-// CHECK: %[[ONE:.*]] = arith.constant 1 : i64
-// CHECK: %[[INC:.*]] = arith.addi %[[WIDE]], %[[ONE]]
-// CHECK: %[[HALF:.*]] = arith.shrsi %[[INC]], %[[ONE]]
-// CHECK: %[[RES:.*]] = arith.trunci %[[HALF]] : i64 to i32
+// CHECK: %[[ONE:.*]] = arith.constant 1 : i32
+// CHECK: %[[HALF:.*]] = arith.shrsi %[[OUT]], %[[ONE]]
+// CHECK: %[[BIT:.*]] = arith.andi %[[OUT]], %[[ONE]]
+// CHECK: %[[RES:.*]] = arith.addi %[[HALF]], %[[BIT]]
+// CHECK-NOT: i64
 // CHECK: return %[[RES]] : i32
 func.func @ntp_export(
     %acc: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i32 {
@@ -94,7 +94,8 @@ func.func @ntp_export(
 // CHECK-LABEL: func.func @ntp_export_i16(
 // CHECK: ortumcore.acc_out %{{.*}} {shift = 14 : i64}
 // CHECK: arith.shrsi
-// CHECK: arith.trunci %{{.*}} : i64 to i32
+// CHECK: arith.andi
+// CHECK: arith.addi
 // CHECK: arith.cmpi slt
 // CHECK: arith.cmpi sgt
 // CHECK: arith.trunci %{{.*}} : i32 to i16

@@ -54,16 +54,15 @@ Value emitOrtumCoreReadout(OpBuilder &builder, Location loc, Value acc,
   Value out;
   if (policy.rounding == ondsp::RoundingMode::NearestTiesPositive && policy.shift > 0 &&
       tail == 0) {
-    // floor((acc + 2^(s-1)) / 2^s) == ((acc >> (s-1)) + 1) >> 1, and in the
-    // admitted range the narrower readout cannot clip (Passes.td carries the
-    // argument), so the composition is exact for every accumulator.
+    // floor((acc + 2^(s-1)) / 2^s) == (r >> 1) + (r & 1) for r = acc >> (s-1),
+    // total in i32 (no widening), and in the admitted range the narrower
+    // readout cannot clip (Passes.td carries the argument), so it is exact.
     Value narrower =
         builder.create<ortumcore::AccOutOp>(loc, builder.getI32Type(), acc, policy.shift - 1);
-    Value wide = builder.create<arith::ExtSIOp>(loc, builder.getI64Type(), narrower);
-    Value one = builder.create<arith::ConstantIntOp>(loc, 1, 64);
-    Value incremented = builder.create<arith::AddIOp>(loc, wide, one);
-    Value halved = builder.create<arith::ShRSIOp>(loc, incremented, one);
-    out = builder.create<arith::TruncIOp>(loc, builder.getI32Type(), halved);
+    Value one = builder.create<arith::ConstantIntOp>(loc, 1, 32);
+    Value halved = builder.create<arith::ShRSIOp>(loc, narrower, one);
+    Value roundBit = builder.create<arith::AndIOp>(loc, narrower, one);
+    out = builder.create<arith::AddIOp>(loc, halved, roundBit);
   } else if (policy.rounding == ondsp::RoundingMode::NearestTiesPositive && tail > 0) {
     // Past the capability range the half-add commutes over the always-exact
     // max-shift readout (2^15 divides 2^(s-1)), landing as one base add on

@@ -413,13 +413,16 @@ lowerPackedCfftLoops(Location loc, Value input, int64_t extent, ondrix::ir::Cfft
       loc, lowerStage, stages, one, ValueRange{current},
       [&](OpBuilder &builder, Location loc, Value stage, ValueRange stageArgs) {
         Value half = builder.create<arith::ShLIOp>(loc, one, stage);
+        Value halfMask = builder.create<arith::SubIOp>(loc, half, one);
         Value doubled = builder.create<arith::AddIOp>(loc, half, half);
         if (!inventoryPaired) {
           auto butterflyLoop = builder.create<scf::ForOp>(
               loc, zero, halfExtent, one, ValueRange{stageArgs.front()},
               [&](OpBuilder &builder, Location loc, Value pair, ValueRange pairArgs) {
-                Value group = builder.create<arith::DivUIOp>(loc, pair, half);
-                Value phase = builder.create<arith::RemUIOp>(loc, pair, half);
+                // `half` is 2^stage, so the group and phase are a shift and a
+                // mask; a division by the loop-variant power of two is not.
+                Value group = builder.create<arith::ShRUIOp>(loc, pair, stage);
+                Value phase = builder.create<arith::AndIOp>(loc, pair, halfMask);
                 Value base = builder.create<arith::MulIOp>(loc, group, doubled);
                 Value upper = builder.create<arith::AddIOp>(loc, base, phase);
                 Value twiddleIndex = builder.create<arith::AddIOp>(loc, half, phase);

@@ -111,8 +111,9 @@ def ConvertOndspToOrtumCore
     accumulator within 2^(s-1) of the positive rail would export one below
     the true value, whereas the post-readout increment sees the saturated
     accumulator exactly as the ondsp reference does. The increment and
-    halve run at i64 because the readout can be exactly INT32_MAX (s = 9,
-    accumulator at the rail), where an i32 increment would wrap.
+    halve are spelled (r >> 1) + (r & 1) on the i32 readout r, which equals
+    floor((r + 1) / 2) for every r including INT32_MAX (s = 9, accumulator
+    at the rail), where an i32 increment would wrap.
 
     Shifts past the capability's 15 compose, up to 15 + 31: the shift-15
     floor readout is always exact from an i40 (|acc >> 15| < 2^24, no
