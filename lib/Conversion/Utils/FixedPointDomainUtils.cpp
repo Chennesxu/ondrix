@@ -1,5 +1,9 @@
 #include "ondrix/Conversion/Utils/FixedPointDomainUtils.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/TypeUtilities.h"
+
 using namespace mlir;
 
 namespace ondrix::conversion {
@@ -18,8 +22,13 @@ static bool isSignedQ15FullDomain(ondrix::ondsp::AccType accumulator,
 static bool isSignedQ31FullDomain(ondrix::ondsp::AccType accumulator,
                                   ondrix::ondsp::FixedAttr numeric,
                                   ondrix::ondsp::ProductAttr product) {
+  // The accumulator sits at the term's fractional position: 62 for the exact
+  // product, 62 - s for a product requantized by s.
+  auto storage = dyn_cast<IntegerType>(accumulator.getStorage());
   return ondrix::ondsp::isSignedQ31(numeric) && ondrix::ondsp::isFullProduct(product) &&
-         ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator);
+         accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed && storage &&
+         storage.getWidth() == 64 && product.getShift() <= 62 &&
+         accumulator.getFrac() == 62 - product.getShift();
 }
 
 static bool isSignedQ31RawHighDomain(ondrix::ondsp::AccType accumulator,
@@ -122,6 +131,64 @@ getSupportedFixedVectorMacDomain(Operation *op, ondrix::ondsp::AccType accumulat
   if (!isSupportedFixedVectorMacDomain(accumulator, numeric, product))
     return failure();
   return materializeFixedMacDomain(op, numeric, product);
+}
+
+Value createRoundedSignedRightShift(Location loc, Value input, unsigned shift,
+                                    ondrix::ondsp::RoundingMode roundingMode, OpBuilder &builder) {
+  Type type = input.getType();
+  if (shift == 0)
+    return input;
+  auto element = cast<IntegerType>(getElementTypeOrSelf(type));
+  auto constant = [&](int64_t value) -> Value {
+    Attribute attr = builder.getIntegerAttr(element, value);
+    if (auto vector = dyn_cast<VectorType>(type))
+      attr = SplatElementsAttr::get(vector, attr);
+    return builder.create<arith::ConstantOp>(loc, type, cast<TypedAttr>(attr));
+  };
+  Value quotient = builder.create<arith::ShRSIOp>(loc, input, constant(shift));
+  if (roundingMode == ondrix::ondsp::RoundingMode::TowardNegative)
+    return quotient;
+  // The remainder is taken from the low `shift` bits, so no add-half in the
+  // input width can overflow near its maximum; the increment is total.
+  Type remainderBitsType = IntegerType::get(builder.getContext(), shift);
+  if (auto vector = dyn_cast<VectorType>(type))
+    remainderBitsType = VectorType::get(vector.getShape(), remainderBitsType);
+  Value remainderBits = builder.create<arith::TruncIOp>(loc, remainderBitsType, input);
+  Value remainder = builder.create<arith::ExtUIOp>(loc, type, remainderBits);
+  Value zero = constant(0);
+  Value one = constant(1);
+  Value increment;
+  switch (roundingMode) {
+  case ondrix::ondsp::RoundingMode::TowardNegative:
+    llvm_unreachable("toward-negative rounding returned above");
+  case ondrix::ondsp::RoundingMode::TowardZero: {
+    Value isNegative = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, input, zero);
+    Value hasRemainder =
+        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, remainder, zero);
+    increment = builder.create<arith::AndIOp>(loc, isNegative, hasRemainder);
+    break;
+  }
+  case ondrix::ondsp::RoundingMode::NearestTiesPositive: {
+    Value half = constant(int64_t{1} << (shift - 1));
+    increment = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, remainder, half);
+    break;
+  }
+  case ondrix::ondsp::RoundingMode::NearestEven: {
+    Value half = constant(int64_t{1} << (shift - 1));
+    Value aboveHalf =
+        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, remainder, half);
+    Value exactlyHalf =
+        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, remainder, half);
+    Value quotientLowBit = builder.create<arith::AndIOp>(loc, quotient, one);
+    Value quotientIsOdd =
+        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, quotientLowBit, zero);
+    Value halfAndOdd = builder.create<arith::AndIOp>(loc, exactlyHalf, quotientIsOdd);
+    increment = builder.create<arith::OrIOp>(loc, aboveHalf, halfAndOdd);
+    break;
+  }
+  }
+  Value incrementValue = builder.create<arith::SelectOp>(loc, increment, one, zero);
+  return builder.create<arith::AddIOp>(loc, quotient, incrementValue);
 }
 
 } // namespace ondrix::conversion

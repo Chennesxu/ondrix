@@ -3,6 +3,8 @@
 
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
+#include "mlir/IR/Builders.h"
+
 #include "mlir/IR/BuiltinTypes.h"
 
 namespace ondrix::conversion {
@@ -48,6 +50,12 @@ mlir::FailureOr<SupportedFixedMacDomain>
 getSupportedFixedVectorMacDomain(mlir::Operation *op, ondrix::ondsp::AccType accumulator,
                                  ondrix::ondsp::FixedAttr numeric,
                                  ondrix::ondsp::ProductAttr product);
+
+/// Signed right shift of a scalar or fixed-length vector integer value by
+/// `shift` under the declared rounding mode; total in the input width.
+mlir::Value createRoundedSignedRightShift(mlir::Location loc, mlir::Value input, unsigned shift,
+                                          ondrix::ondsp::RoundingMode roundingMode,
+                                          mlir::OpBuilder &builder);
 
 } // namespace ondrix::conversion
 

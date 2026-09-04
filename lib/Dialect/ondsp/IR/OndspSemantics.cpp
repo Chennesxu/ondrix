@@ -239,14 +239,19 @@ FailureOr<ProductSemantics> inferProductSemantics(Operation *op, FixedAttr numer
 
   uint64_t productFrac = frac * 2;
   switch (product.getSelection()) {
-  case ProductSelection::Full:
+  case ProductSelection::Full: {
     if (storageWidth > std::numeric_limits<unsigned>::max() / 2)
       return op->emitOpError("full product storage width is unrepresentable");
     if (storageWidth * 2 > std::numeric_limits<unsigned>::max() ||
         productFrac > std::numeric_limits<unsigned>::max())
       return op->emitOpError("product fractional position is unrepresentable");
+    unsigned shift = product.getShift();
+    if (shift >= storageWidth * 2 || shift > productFrac)
+      return op->emitOpError("product requantization shift exceeds the product");
     return ProductSemantics{static_cast<unsigned>(storageWidth * 2),
-                            static_cast<unsigned>(productFrac), ProductSelection::Full};
+                            static_cast<unsigned>(productFrac - shift), ProductSelection::Full,
+                            shift, product.getRounding()};
+  }
   case ProductSelection::HighRaw:
     if (productFrac < storageWidth)
       return op->emitOpError("raw high product fractional position would be negative");

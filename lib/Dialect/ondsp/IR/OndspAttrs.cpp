@@ -50,6 +50,17 @@ LogicalResult FpAttr::verify(function_ref<InFlightDiagnostic()> emitError, Type 
   return success();
 }
 
+LogicalResult ProductAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                                  ProductSelection selection, unsigned shift,
+                                  RoundingMode rounding) {
+  (void)rounding;
+  if (selection == ProductSelection::HighRaw && shift != 0)
+    return emitError() << "the raw high product admits no requantization shift";
+  if (shift >= 64)
+    return emitError() << "product requantization shift must be below 64";
+  return success();
+}
+
 LogicalResult ScaleAttr::verify(function_ref<InFlightDiagnostic()> emitError, unsigned preShiftLeft,
                                 unsigned postShiftRight, RoundingMode rounding,
                                 OverflowMode overflow, Type saturateTo) {

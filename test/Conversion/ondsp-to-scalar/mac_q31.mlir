@@ -38,14 +38,16 @@ func.func @q15_in_mixed_module(
 // CHECK: %[[LHS_EXT:.*]] = arith.extsi %[[LHS]] : i32 to i64
 // CHECK: %[[RHS_EXT:.*]] = arith.extsi %[[RHS]] : i32 to i64
 // CHECK: %[[PRODUCT:.*]] = arith.muli %[[LHS_EXT]], %[[RHS_EXT]] : i64
-// CHECK: %[[ACC_EXT:.*]] = arith.extsi %[[ACC]] : i64 to i65
-// CHECK: %[[PRODUCT_EXT:.*]] = arith.extsi %[[PRODUCT]] : i64 to i65
-// CHECK: %[[UPDATED:.*]] = arith.addi %[[ACC_EXT]], %[[PRODUCT_EXT]] : i65
-// CHECK: %[[MIN:.*]] = arith.constant -9223372036854775808 : i65
-// CHECK: %[[MAX:.*]] = arith.constant 9223372036854775807 : i65
-// CHECK: %[[LOWER:.*]] = arith.maxsi %[[UPDATED]], %[[MIN]] : i65
-// CHECK: arith.minsi %[[LOWER]], %[[MAX]] : i65
-// CHECK: %[[RESULT:.*]] = arith.trunci {{.*}} : i65 to i64
+// The i64 storage is the carrier: the overflow flag selects a rail that
+// depends on the product's sign alone, off the accumulator chain.
+// CHECK: %[[PAIR:.*]] = "llvm.intr.sadd.with.overflow"(%[[ACC]], %[[PRODUCT]]) : (i64, i64) -> !llvm.struct<(i64, i1)>
+// CHECK: %[[SUM:.*]] = llvm.extractvalue %[[PAIR]][0]
+// CHECK: %[[OVERFLOW:.*]] = llvm.extractvalue %[[PAIR]][1]
+// CHECK: %[[C63:.*]] = arith.constant 63 : i64
+// CHECK: %[[SIGN:.*]] = arith.shrui %[[PRODUCT]], %[[C63]] : i64
+// CHECK: %[[MAX:.*]] = arith.constant 9223372036854775807 : i64
+// CHECK: %[[RAIL:.*]] = arith.addi %[[MAX]], %[[SIGN]] : i64
+// CHECK: %[[RESULT:.*]] = arith.select %[[OVERFLOW]], %[[RAIL]], %[[SUM]] : i64
 // CHECK: return %[[RESULT]] : i64
 
 // CHECK-LABEL: func.func @q31_high_raw_wrap(

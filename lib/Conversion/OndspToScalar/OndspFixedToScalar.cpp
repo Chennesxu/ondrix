@@ -16,6 +16,7 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
@@ -44,12 +45,21 @@ static bool isSignedFixed(ondrix::ondsp::FixedAttr numeric, unsigned width, unsi
          numeric.getFrac() == frac && numeric.getSignedness() == ondrix::ondsp::Signedness::Signed;
 }
 
+/// A signed i64 accumulator at any fractional position a Q31 product term
+/// can take: 62 for the exact product, less by the declared product shift.
+static bool isSignedI64Accumulator(ondrix::ondsp::AccType accumulator) {
+  auto storage = dyn_cast<IntegerType>(accumulator.getStorage());
+  return storage && storage.isSignless() && storage.getWidth() == 64 &&
+         accumulator.getFrac() <= 62 &&
+         accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed;
+}
+
 static bool isSupportedAccumulator(ondrix::ondsp::AccType accumulator) {
   auto storage = dyn_cast<IntegerType>(accumulator.getStorage());
   bool isSignedFrac30 = storage && storage.isSignless() && storage.getWidth() >= 32 &&
                         accumulator.getFrac() == 30 &&
                         accumulator.getSignedness() == ondrix::ondsp::Signedness::Signed;
-  return isSignedFrac30 || ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator);
+  return isSignedFrac30 || isSignedI64Accumulator(accumulator);
 }
 
 static bool isSupportedImport(ondrix::ondsp::AccType accumulator, ondrix::ondsp::FixedAttr source) {
@@ -72,8 +82,10 @@ static bool isSignedFixedStorage(ondrix::ondsp::FixedAttr numeric, unsigned widt
 
 static bool isSupportedExport(ondrix::ondsp::AccType accumulator,
                               ondrix::ondsp::FixedAttr destination) {
-  if (ondrix::ondsp::isSignedI64Frac62Accumulator(accumulator))
-    return ondrix::ondsp::isSignedQ31(destination);
+  if (accumulator.getFrac() != 30 && isSignedI64Accumulator(accumulator))
+    return isSignedFixedStorage(destination, 32) ||
+           (isSignedFixedStorage(destination, 64) &&
+            destination.getFrac() == accumulator.getFrac());
   if (!isSupportedAccumulator(accumulator) || accumulator.getFrac() != 30)
     return false;
   // Every export is a value-preserving format conversion: the destination
@@ -301,6 +313,38 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
   case ondrix::ondsp::OverflowMode::Wrap:
     return narrowToCarrier(updated);
   case ondrix::ondsp::OverflowMode::Saturate: {
+    // A saturating update whose storage IS the carrier (i64 products into an
+    // i64 accumulator) uses the overflow-flag intrinsic: the saturation value
+    // follows the product's sign alone, so it leaves the accumulator chain.
+    if (storageWidth == carrierWidth && intermediateWidth > carrierWidth &&
+        productElement.getWidth() <= carrierWidth && !isa<VectorType>(carrierType)) {
+      bool add = operation == ondrix::fixedpoint::AccumulatorUpdateOperation::Add;
+      Type resultType = LLVM::LLVMStructType::getLiteral(builder.getContext(),
+                                                         {carrierType, builder.getI1Type()});
+      Value narrowProduct = product;
+      if (getIntegerElementType(product.getType()).getWidth() != carrierWidth)
+        narrowProduct = builder.create<arith::ExtSIOp>(loc, carrierType, product);
+      Value pair =
+          add ? builder
+                    .create<LLVM::SAddWithOverflowOp>(loc, resultType, accumulator, narrowProduct)
+                    .getResult()
+              : builder
+                    .create<LLVM::SSubWithOverflowOp>(loc, resultType, accumulator, narrowProduct)
+                    .getResult();
+      Value sum = builder.create<LLVM::ExtractValueOp>(loc, pair, 0);
+      Value overflow = builder.create<LLVM::ExtractValueOp>(loc, pair, 1);
+      // MAX + signbit(p) is MAX for a positive product and wraps to MIN for a
+      // negative one; a subtraction takes MIN - signbit(p). This spelling is
+      // not refolded into a saturating add whose rail would sit on the chain.
+      Value signShift = createIntegerConstant(loc, carrierType, carrierWidth - 1, builder);
+      Value signBit = builder.create<arith::ShRUIOp>(loc, narrowProduct, signShift);
+      llvm::APInt rail = add ? llvm::APInt::getSignedMaxValue(carrierWidth)
+                             : llvm::APInt::getSignedMinValue(carrierWidth);
+      Value railValue = createIntegerConstant(loc, carrierType, rail, builder);
+      Value saturated = add ? builder.create<arith::AddIOp>(loc, railValue, signBit).getResult()
+                            : builder.create<arith::SubIOp>(loc, railValue, signBit).getResult();
+      return builder.create<arith::SelectOp>(loc, overflow, saturated, sum);
+    }
     // Signed min/max rather than a compare/select pair: the same function
     // either way, but this is the form that reaches cmov and packed min/max.
     llvm::APInt minimum = llvm::APInt::getSignedMinValue(storageWidth).sext(intermediateWidth);
@@ -318,61 +362,8 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
 static Value roundSignedRightShift(Location loc, Value input, unsigned shift,
                                    ondrix::ondsp::RoundingMode roundingMode,
                                    ConversionPatternRewriter &rewriter) {
-  Type type = input.getType();
-  if (shift == 0)
-    return input;
-
-  Value shiftValue = createIntegerConstant(loc, type, shift, rewriter);
-  Value quotient = rewriter.create<arith::ShRSIOp>(loc, input, shiftValue);
-  if (roundingMode == ondrix::ondsp::RoundingMode::TowardNegative)
-    return quotient;
-
-  Type remainderBitsType = getIntegerTypeLike(type, shift, rewriter);
-  Value remainderBits = rewriter.create<arith::TruncIOp>(loc, remainderBitsType, input);
-  Value remainder = rewriter.create<arith::ExtUIOp>(loc, type, remainderBits);
-  Value zero = createIntegerConstant(loc, type, 0, rewriter);
-  Value one = createIntegerConstant(loc, type, 1, rewriter);
-  Value incrementCondition;
-
-  switch (roundingMode) {
-  case ondrix::ondsp::RoundingMode::TowardNegative:
-    llvm_unreachable("toward-negative rounding returned above");
-  case ondrix::ondsp::RoundingMode::TowardZero: {
-    Value isNegative = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, input, zero);
-    Value hasRemainder =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, remainder, zero);
-    incrementCondition = rewriter.create<arith::AndIOp>(loc, isNegative, hasRemainder);
-    break;
-  }
-  case ondrix::ondsp::RoundingMode::NearestTiesPositive: {
-    // Ties toward +infinity. The textbook add-half-then-shift form is
-    // deliberately NOT used: adding 2^(shift-1) in the input width overflows
-    // near the maximum representable value, which would silently change the
-    // result of exactly the inputs a saturating boundary cares about. The
-    // quotient/remainder form is total: floor already happened, so a
-    // remainder of at least half moves the result one step up.
-    Value half = createIntegerConstant(loc, type, int64_t{1} << (shift - 1), rewriter);
-    incrementCondition =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, remainder, half);
-    break;
-  }
-  case ondrix::ondsp::RoundingMode::NearestEven: {
-    Value half = createIntegerConstant(loc, type, int64_t{1} << (shift - 1), rewriter);
-    Value aboveHalf =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, remainder, half);
-    Value exactlyHalf =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, remainder, half);
-    Value quotientLowBit = rewriter.create<arith::AndIOp>(loc, quotient, one);
-    Value quotientIsOdd =
-        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, quotientLowBit, zero);
-    Value halfAndOdd = rewriter.create<arith::AndIOp>(loc, exactlyHalf, quotientIsOdd);
-    incrementCondition = rewriter.create<arith::OrIOp>(loc, aboveHalf, halfAndOdd);
-    break;
-  }
-  }
-
-  Value increment = rewriter.create<arith::SelectOp>(loc, incrementCondition, one, zero);
-  return rewriter.create<arith::AddIOp>(loc, quotient, increment);
+  return ondrix::conversion::createRoundedSignedRightShift(loc, input, shift, roundingMode,
+                                                           rewriter);
 }
 
 static Value narrowSignedValue(Location loc, Value input, Type destinationType,
@@ -484,7 +475,8 @@ static Value lowerSignedProduct(Location loc, Value lhs, Value rhs,
   Value rhsExtended = widen(rhs);
   Value fullProduct = builder.create<arith::MulIOp>(loc, lhsExtended, rhsExtended);
   if (semantics.selection == ondrix::ondsp::ProductSelection::Full)
-    return fullProduct;
+    return ondrix::conversion::createRoundedSignedRightShift(loc, fullProduct, semantics.shift,
+                                                             semantics.rounding, builder);
 
   Value shift = createIntegerConstant(loc, fullProductType, storageWidth, builder);
   Value shifted = builder.create<arith::ShRSIOp>(loc, fullProduct, shift);

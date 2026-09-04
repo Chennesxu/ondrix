@@ -11,6 +11,7 @@ add_ondrix_library(OndspToScalar
   MLIRFuncDialect
   MLIRFuncTransforms
   MLIRIR
+  MLIRLLVMDialect
   MLIRMathDialect
   MLIRMemRefDialect
   MLIRPass

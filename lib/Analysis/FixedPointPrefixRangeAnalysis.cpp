@@ -654,7 +654,8 @@ int64_t FixedPointPrefixRangePlanner::largestCertifiedTermGroup(ondsp::ReduceMac
                                                                 unsigned termWidth) {
   auto numeric = dyn_cast<ondsp::FixedAttr>(reduction.getNumeric());
   auto accumulator = dyn_cast<ondsp::AccType>(reduction.getInitial().getType());
-  if (!numeric || !accumulator || !reduction.getProduct())
+  if (!numeric || !accumulator || !reduction.getProduct() ||
+      reduction.getProduct()->getShift() != 0)
     return 0;
   auto accumulatorStorage = dyn_cast<IntegerType>(accumulator.getStorage());
   auto numericStorage = dyn_cast<IntegerType>(numeric.getStorage());
@@ -686,7 +687,7 @@ LogicalResult FixedPointPrefixRangePlanner::proveOrderedZeroSeededConstantReduct
   FailureOr<ondsp::ProductSemantics> productSemantics =
       ondsp::inferProductSemantics(reduction, numeric, *reduction.getProduct());
   if (failed(productSemantics) || productSemantics->selection != ondsp::ProductSelection::Full ||
-      accumulator.getSignedness() != numeric.getSignedness() ||
+      productSemantics->shift != 0 || accumulator.getSignedness() != numeric.getSignedness() ||
       accumulator.getFrac() != productSemantics->frac)
     return failure();
   // One chunk spanning the whole sequence: its original-schedule prefixes are
@@ -705,7 +706,7 @@ FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(ondsp::Reduce
   auto numeric = dyn_cast<ondsp::FixedAttr>(reduction.getNumeric());
   auto accumulator = dyn_cast<ondsp::AccType>(reduction.getInitial().getType());
   if (!numeric || !accumulator || !reduction.getProduct() ||
-      reduction.getRhs() != coefficientSource ||
+      reduction.getProduct()->getShift() != 0 || reduction.getRhs() != coefficientSource ||
       !reduction.getInitial().getDefiningOp<ondsp::AccZeroOp>())
     return failure();
   ondsp::ProductAttr product = *reduction.getProduct();
@@ -720,7 +721,7 @@ FixedPointPrefixRangePlanner::planZeroSeededConstantChunkReduction(ondsp::Reduce
   FailureOr<ondsp::ProductSemantics> productSemantics =
       ondsp::inferProductSemantics(reduction, numeric, product);
   if (failed(productSemantics) || productSemantics->selection != ondsp::ProductSelection::Full ||
-      accumulator.getSignedness() != numeric.getSignedness() ||
+      productSemantics->shift != 0 || accumulator.getSignedness() != numeric.getSignedness() ||
       accumulator.getFrac() != productSemantics->frac)
     return failure();
 

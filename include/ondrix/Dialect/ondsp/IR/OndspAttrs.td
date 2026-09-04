@@ -36,15 +36,33 @@ def Ondsp_FixedAttr : Ondsp_Attr<"Fixed", "fixed"> {
 }
 
 def Ondsp_ProductAttr : Ondsp_Attr<"Product", "product"> {
-  let summary = "Select the full product or signed raw high half";
+  let summary = "Select the full product or signed raw high half, optionally requantized";
   let description = [{
     For two signed `W`-bit operands, `full` returns the exact signed `2W`-bit
     product. `high_raw` returns `trunc_W(ashr(P, W))`, where `P` is that exact
     signed product. Raw-high selection does not double, round, or saturate the
     product.
+
+    `full` may carry a per-term requantization, `shift = s, rounding = m`: the
+    term is `round_m(P / 2^s)` in the same `2W` bits, at fractional position
+    `2f - s`. No saturation is involved because `|P| <= 2^(2W-2)`. This is the
+    product boundary a wide-storage reduction declares when the exact sum of
+    its full products would not fit the accumulator; `high_raw` admits no
+    shift.
   }];
-  let parameters = (ins "ProductSelection":$selection);
-  let assemblyFormat = "`<` $selection `>`";
+  let parameters = (ins
+    "ProductSelection":$selection,
+    DefaultValuedParameter<"unsigned", "0">:$shift,
+    DefaultValuedParameter<"RoundingMode", "RoundingMode::TowardNegative">:$rounding
+  );
+  let builders = [
+    AttrBuilder<(ins "ProductSelection":$selection), [{
+      return $_get($_ctxt, selection, 0, RoundingMode::TowardNegative);
+    }]>
+  ];
+  let genVerifyDecl = 1;
+  let assemblyFormat =
+      "`<` $selection (`,` `shift` `=` $shift^ `,` `rounding` `=` $rounding)? `>`";
 }
 
 def Ondsp_FpAttr : Ondsp_Attr<"Fp", "fp"> {

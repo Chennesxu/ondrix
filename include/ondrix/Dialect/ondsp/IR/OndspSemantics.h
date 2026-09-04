@@ -73,6 +73,10 @@ struct ProductSemantics {
   unsigned rawWidth;
   unsigned frac;
   ProductSelection selection;
+  /// Per-term requantization of a full product: the exact product is shifted
+  /// right by `shift` under `rounding` before it becomes the term.
+  unsigned shift = 0;
+  RoundingMode rounding = RoundingMode::TowardNegative;
 };
 
 /// Classifies whether an ordered fixed-point reduction may be reassociated.
