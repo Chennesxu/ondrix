@@ -43,11 +43,16 @@ func.func @matmul_columns(%a: memref<8x8xi16>, %b: memref<8x8xi16>) -> memref<8x
   return %alloc : memref<8x8xi16>
 }
 
-// Three columns under width 4: one three-lane block takes every column.
+// Three columns under width 4: one four-lane block takes every column; the
+// last row's segment is loaded narrow and zero-padded, and only three lanes store.
 // CHECK-LABEL: func.func @matmul_narrow_columns
-// CHECK: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = wrap, lanes = 3>
+// CHECK: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = wrap, lanes = 4>
+// CHECK: vector.load %{{.*}} : memref<16x3xi16>, vector<4xi16>
+// CHECK-COUNT-15: ondsp.mac
 // CHECK: vector.load %{{.*}} : memref<16x3xi16>, vector<3xi16>
-// CHECK-COUNT-16: ondsp.mac
+// CHECK: vector.shuffle {{.*}} [0, 1, 2, 3] : vector<3xi16>, vector<3xi16>
+// CHECK: ondsp.mac
+// CHECK: vector.extract_strided_slice {{.*}} {offsets = [0], sizes = [3], strides = [1]}
 // CHECK: vector.store %{{.*}} : memref<4x3xi16>, vector<3xi16>
 // CHECK-NOT: ondsp.reduce_mac
 func.func @matmul_narrow_columns(%a: memref<4x16xi16>, %b: memref<16x3xi16>) -> memref<4x3xi16> {

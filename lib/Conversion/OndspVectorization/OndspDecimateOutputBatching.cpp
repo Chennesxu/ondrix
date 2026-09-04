@@ -21,6 +21,7 @@
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <limits>
 #include <optional>
@@ -559,7 +560,11 @@ Value matchPackNest(scf::ForOp outer, Value packed) {
     return nullptr;
   Value source = load.getMemRef();
   auto sourceType = dyn_cast<MemRefType>(source.getType());
-  if (!isRowContiguousMatrix(source) || sourceType.getDimSize(0) != packedType.getDimSize(1) ||
+  SmallVector<int64_t> strides;
+  int64_t offset = 0;
+  if (!isRowContiguousMatrix(source) || failed(getStridesAndOffset(sourceType, strides, offset)) ||
+      strides[0] != sourceType.getDimSize(1) ||
+      sourceType.getDimSize(0) != packedType.getDimSize(1) ||
       sourceType.getDimSize(1) != packedType.getDimSize(0) ||
       sourceType.getElementType() != packedType.getElementType())
     return nullptr;
@@ -724,25 +729,37 @@ FailureOr<ColumnLoopShape> matchColumnLoop(scf::ForOp loop) {
 /// Rewrites the leading full blocks of a column loop to compute `lanes`
 /// columns at a time: each term loads a contiguous row segment of the right
 /// operand and broadcasts the row element, so no packed copy is read. A column
-/// count below the vector width takes every column in one narrower block.
+/// count below the vector width takes every column in one block of the next
+/// power-of-two width; the surplus lanes read the following row while that
+/// stays inside the matrix and zeros afterwards, and are never stored.
 void batchColumnOutputs(const ColumnLoopShape &shape, int64_t vectorWidth, OpBuilder &builder) {
   scf::ForOp loop = shape.loop;
   Location loc = loop.getLoc();
   MLIRContext *context = builder.getContext();
   int64_t lanes = std::min(vectorWidth, shape.columnCount);
-  int64_t batchedColumns = (shape.columnCount / lanes) * lanes;
+  int64_t storedLanes = lanes;
+  if (shape.columnCount < vectorWidth)
+    lanes = std::min(vectorWidth, static_cast<int64_t>(llvm::PowerOf2Ceil(shape.columnCount)));
+  int64_t batchedColumns = (shape.columnCount / storedLanes) * storedLanes;
+  // Elements the matrix holds; a wide load of the last rows would run past it.
+  int64_t matrixElements = shape.innerCount * shape.columnCount;
 
   auto laneAccumulator = ondrix::ondsp::AccType::get(
       context, shape.accumulator.getStorage(), shape.accumulator.getFrac(),
       shape.accumulator.getSignedness(), shape.accumulator.getUpdateOverflow(),
       static_cast<unsigned>(lanes));
-  auto segmentType = VectorType::get({lanes}, cast<IntegerType>(shape.numeric.getStorage()));
+  auto storage = cast<IntegerType>(shape.numeric.getStorage());
+  auto segmentType = VectorType::get({lanes}, storage);
+  auto narrowSegmentType = VectorType::get({storedLanes}, storage);
   auto sampleType = VectorType::get({lanes}, cast<IntegerType>(shape.destination.getStorage()));
+  SmallVector<int64_t> padMask;
+  for (int64_t lane = 0; lane < lanes; ++lane)
+    padMask.push_back(lane < storedLanes ? lane : storedLanes);
 
   builder.setInsertionPoint(loop);
   Value zeroIndex = builder.create<arith::ConstantIndexOp>(loc, 0);
   Value batchedEnd = builder.create<arith::ConstantIndexOp>(loc, batchedColumns);
-  Value batchStep = builder.create<arith::ConstantIndexOp>(loc, lanes);
+  Value batchStep = builder.create<arith::ConstantIndexOp>(loc, storedLanes);
   SmallVector<Value> termIndices;
   for (int64_t term = 0; term < shape.innerCount; ++term)
     termIndices.push_back(builder.create<arith::ConstantIndexOp>(loc, term));
@@ -754,9 +771,23 @@ void batchColumnOutputs(const ColumnLoopShape &shape, int64_t vectorWidth, OpBui
             blockBuilder.create<ondrix::ondsp::AccZeroOp>(blockLoc, laneAccumulator);
         // Ascending k for every lane, which is the declared ordered update of
         // each of the `lanes` column reductions.
+        Value zeroSegment;
         for (int64_t term = 0; term < shape.innerCount; ++term) {
-          Value segment = blockBuilder.create<vector::LoadOp>(
-              blockLoc, segmentType, shape.matrix, ValueRange{termIndices[term], blockStart});
+          Value segment;
+          if (term * shape.columnCount + lanes <= matrixElements) {
+            segment = blockBuilder.create<vector::LoadOp>(
+                blockLoc, segmentType, shape.matrix, ValueRange{termIndices[term], blockStart});
+          } else {
+            if (!zeroSegment)
+              zeroSegment = blockBuilder.create<arith::ConstantOp>(
+                  blockLoc,
+                  DenseElementsAttr::get(narrowSegmentType, builder.getZeroAttr(storage)));
+            Value narrow =
+                blockBuilder.create<vector::LoadOp>(blockLoc, narrowSegmentType, shape.matrix,
+                                                    ValueRange{termIndices[term], blockStart});
+            segment =
+                blockBuilder.create<vector::ShuffleOp>(blockLoc, narrow, zeroSegment, padMask);
+          }
           Value element = blockBuilder.create<memref::LoadOp>(blockLoc, shape.row,
                                                               ValueRange{termIndices[term]});
           accumulator = blockBuilder.create<ondrix::ondsp::MacOp>(blockLoc, laneAccumulator,
@@ -765,6 +796,10 @@ void batchColumnOutputs(const ColumnLoopShape &shape, int64_t vectorWidth, OpBui
         }
         Value samples = blockBuilder.create<ondrix::ondsp::AccExportOp>(
             blockLoc, sampleType, accumulator, shape.destination, shape.rounding, shape.overflow);
+        if (storedLanes < lanes)
+          samples = blockBuilder.create<vector::ExtractStridedSliceOp>(
+              blockLoc, samples, ArrayRef<int64_t>{0}, ArrayRef<int64_t>{storedLanes},
+              ArrayRef<int64_t>{1});
         SmallVector<Value> indices(shape.outputLeadingIndices);
         indices.push_back(blockStart);
         blockBuilder.create<vector::StoreOp>(blockLoc, samples, shape.output, indices);

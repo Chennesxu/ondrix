@@ -475,8 +475,13 @@ static Value lowerSignedProduct(Location loc, Value lhs, Value rhs,
                                 ondrix::ondsp::ProductSemantics semantics, OpBuilder &builder) {
   unsigned storageWidth = cast<IntegerType>(numeric.getStorage()).getWidth();
   Type fullProductType = getIntegerTypeLike(lhs.getType(), storageWidth * 2, builder);
-  Value lhsExtended = builder.create<arith::ExtSIOp>(loc, fullProductType, lhs);
-  Value rhsExtended = builder.create<arith::ExtSIOp>(loc, fullProductType, rhs);
+  auto widen = [&](Value value) -> Value {
+    if (value.getType() == fullProductType)
+      return value;
+    return builder.create<arith::ExtSIOp>(loc, fullProductType, value);
+  };
+  Value lhsExtended = widen(lhs);
+  Value rhsExtended = widen(rhs);
   Value fullProduct = builder.create<arith::MulIOp>(loc, lhsExtended, rhsExtended);
   if (semantics.selection == ondrix::ondsp::ProductSelection::Full)
     return fullProduct;
@@ -517,11 +522,18 @@ public:
       if (!valueType || valueType.isScalable() || valueType.getRank() != 1 ||
           valueType.getNumElements() != static_cast<int64_t>(accumulator.getLanes()))
         return op.emitOpError("fixed scalar lowering requires one value lane per accumulator lane");
-      // The declared broadcast of the scalar coefficient across the lanes. It
-      // is materialized here rather than assumed by the caller because it is
-      // part of the operation's meaning.
+      // The declared broadcast of the scalar coefficient across the lanes. A
+      // runtime coefficient against runtime lanes in one 128-bit register is
+      // widened before the splat, which is the form the backend folds best.
+      Type splatElement = coefficient.getType();
+      unsigned productWidth = 2 * cast<IntegerType>(op.getNumeric().getStorage()).getWidth();
+      if (!matchPattern(coefficient, m_Constant()) && !matchPattern(value, m_Constant()) &&
+          valueType.getNumElements() * productWidth <= 128) {
+        splatElement = rewriter.getIntegerType(productWidth);
+        coefficient = rewriter.create<arith::ExtSIOp>(loc, splatElement, coefficient);
+      }
       coefficient = rewriter.create<vector::BroadcastOp>(
-          loc, VectorType::get(valueType.getShape(), coefficient.getType()), coefficient);
+          loc, VectorType::get(valueType.getShape(), splatElement), coefficient);
     }
 
     Value product =

@@ -50,3 +50,29 @@ func.func @dynamic_keeps_one_vector(
 
 // CHECK-LABEL: func.func @dynamic_keeps_one_vector
 // CHECK: vector.load {{.*}} : memref<?xi16>, vector<4xi16>
+
+// A wrapping sum of squares folds term pairs in i32 and widens them unsigned:
+// two nonnegative squares reach at most 2^31, which the unsigned reading holds.
+// CHECK-LABEL: func.func @wrapping_sum_of_squares
+// CHECK: scf.for {{.*}} iter_args(%[[LANES:.*]] = %{{.*}}) -> (vector<4xi64>)
+// CHECK: %[[X:.*]] = vector.load %{{.*}} : memref<64xi16>, vector<16xi16>
+// CHECK: vector.extract_strided_slice %[[X]] {offsets = [0], sizes = [8], strides = [1]} : vector<16xi16> to vector<8xi16>
+// CHECK: %[[SLICE:.*]] = arith.muli {{.*}} : vector<8xi32>
+// CHECK: %[[EVEN:.*]] = vector.shuffle %[[SLICE]], %[[SLICE]] [0, 2, 4, 6]
+// CHECK: %[[ODD:.*]] = vector.shuffle %[[SLICE]], %[[SLICE]] [1, 3, 5, 7]
+// CHECK: %[[PAIR:.*]] = arith.addi %[[EVEN]], %[[ODD]] : vector<4xi32>
+// CHECK: %[[WIDE:.*]] = arith.extui %[[PAIR]] : vector<4xi32> to vector<4xi64>
+// CHECK: arith.addi %[[LANES]], %[[WIDE]] : vector<4xi64>
+// CHECK: vector.extract_strided_slice {{.*}} {offsets = [8], sizes = [8], strides = [1]}
+// CHECK-NOT: arith.extsi {{.*}} to vector<4xi64>
+// CHECK: vector.reduction <add>
+func.func @wrapping_sum_of_squares(
+    %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>,
+    %input: memref<64xi16>)
+    -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap> {
+  %result = ondsp.reduce_mac %initial, %input, %input {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<full>
+  } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, memref<64xi16>, memref<64xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+}

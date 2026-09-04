@@ -82,7 +82,9 @@ func.func @lane_update_wrap(
 
 // CHECK-LABEL: func.func @lane_update_wrap(
 // CHECK-SAME: %[[ACC:.*]]: vector<4xi64>, %[[VALUE:.*]]: vector<4xi16>, %[[COEFFICIENT:.*]]: i16) -> vector<4xi64>
-// CHECK: vector.broadcast %[[COEFFICIENT]] : i16 to vector<4xi16>
+// Four runtime lanes fit one 128-bit register, so the splat is widened first.
+// CHECK: %[[COEFFICIENT_EXT:.*]] = arith.extsi %[[COEFFICIENT]] : i16 to i32
+// CHECK: vector.broadcast %[[COEFFICIENT_EXT]] : i32 to vector<4xi32>
 // CHECK: arith.muli {{.*}} : vector<4xi32>
 // CHECK: %[[PRODUCT_EXT:.*]] = arith.extsi {{.*}} : vector<4xi32> to vector<4xi64>
 // CHECK: %[[UPDATED:.*]] = arith.addi %[[ACC]], %[[PRODUCT_EXT]] : vector<4xi64>

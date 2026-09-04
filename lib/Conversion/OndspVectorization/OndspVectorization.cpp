@@ -650,6 +650,11 @@ public:
             ondrix::ondsp::ReductionReassociationSafety::ExactModulo &&
         ondrix::conversion::isSupportedFixedHorizontalMacDomain(accumulator, numeric,
                                                                 *op.getProduct());
+    // A reduction of a sequence against itself with 32-bit full products (a
+    // Q15 sum of squares) folds pairs of terms in i32 before widening.
+    bool squarePairs = exactModulo && adaptor.getLhs() == adaptor.getRhs() &&
+                       op.getProduct()->getSelection() == ondrix::ondsp::ProductSelection::Full &&
+                       elementType.getWidth() <= 16 && chunkWidth % (2 * vectorWidth) == 0;
     Value vectorResult;
     if (exactModulo) {
       // Wrapping updates commute modulo 2^W, so one machine vector of i64 lane
@@ -661,11 +666,41 @@ public:
           loc, bounds->lowerBound, vectorEnd, vectorStep, ValueRange{zeroLanes},
           [&](OpBuilder &builder, Location bodyLoc, Value base, ValueRange iterArgs) {
             auto [lhs, rhs] = loadChunks(builder, bodyLoc, base);
+            Value lanes = iterArgs.front();
+            if (squarePairs) {
+              // Squares are nonnegative, so two of them sum below 2^31 + 1: the
+              // i32 pair sum read unsigned is exact, including the one carry.
+              // The products are formed per pair slice so the backend sees one
+              // multiply feeding one even/odd fold.
+              SmallVector<int64_t> even, odd;
+              for (int64_t lane = 0; lane < vectorWidth; ++lane) {
+                even.push_back(2 * lane);
+                odd.push_back(2 * lane + 1);
+              }
+              for (int64_t offset = 0; offset < chunkWidth; offset += 2 * vectorWidth) {
+                Value slice = lhs;
+                if (chunkWidth != 2 * vectorWidth)
+                  slice = builder.create<vector::ExtractStridedSliceOp>(
+                      bodyLoc, slice, ArrayRef<int64_t>{offset}, ArrayRef<int64_t>{2 * vectorWidth},
+                      ArrayRef<int64_t>{1});
+                FailureOr<ondrix::conversion::FixedVectorProductTerms> sliceTerms =
+                    ondrix::conversion::lowerFixedVectorProductTerms(
+                        op, accumulator, numeric, *op.getProduct(), slice, slice, builder);
+                assert(succeeded(sliceTerms) && "validated fixed Vector product domain must lower");
+                Value products = sliceTerms->getTerms();
+                Value evens = builder.create<vector::ShuffleOp>(bodyLoc, products, products, even);
+                Value odds = builder.create<vector::ShuffleOp>(bodyLoc, products, products, odd);
+                Value pairs = builder.create<arith::AddIOp>(bodyLoc, evens, odds);
+                Value widened = builder.create<arith::ExtUIOp>(bodyLoc, laneType, pairs);
+                lanes = builder.create<arith::AddIOp>(bodyLoc, lanes, widened);
+              }
+              builder.create<scf::YieldOp>(bodyLoc, lanes);
+              return;
+            }
             FailureOr<ondrix::conversion::FixedVectorProductTerms> terms =
                 ondrix::conversion::lowerFixedVectorProductTerms(
                     op, accumulator, numeric, *op.getProduct(), lhs, rhs, builder);
             assert(succeeded(terms) && "validated fixed Vector product domain must lower");
-            Value lanes = iterArgs.front();
             for (int64_t offset = 0; offset < chunkWidth; offset += vectorWidth) {
               Value slice = terms->getTerms();
               if (chunkWidth != vectorWidth)
