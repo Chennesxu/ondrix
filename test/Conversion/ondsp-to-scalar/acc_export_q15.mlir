@@ -93,10 +93,10 @@ func.func @export_same_width_saturate(
 // CHECK: %[[ONE:.*]] = arith.constant 1 : i64
 // CHECK: %[[HALF:.*]] = arith.constant 16384 : i64
 // CHECK: %[[ABOVE:.*]] = arith.cmpi ugt, %[[REMAINDER]], %[[HALF]] : i64
-// CHECK: %[[EQUAL:.*]] = arith.cmpi eq, %[[REMAINDER]], %[[HALF]] : i64
-// CHECK: %[[LOW_BIT:.*]] = arith.andi %[[QUOTIENT]], %[[ONE]] : i64
-// CHECK: %[[ODD:.*]] = arith.cmpi ne, %[[LOW_BIT]], %[[ZERO]] : i64
-// CHECK: %[[TIE_ODD:.*]] = arith.andi %[[EQUAL]], %[[ODD]] : i1
+// CHECK: %[[TIE_MASK:.*]] = arith.constant 65535 : i64
+// CHECK: %[[TIE_BITS:.*]] = arith.andi %[[ACC]], %[[TIE_MASK]] : i64
+// CHECK: %[[TIE_ODD_PATTERN:.*]] = arith.constant 49152 : i64
+// CHECK: %[[TIE_ODD:.*]] = arith.cmpi eq, %[[TIE_BITS]], %[[TIE_ODD_PATTERN]] : i64
 // CHECK: %[[INCREMENT_IF:.*]] = arith.ori %[[ABOVE]], %[[TIE_ODD]] : i1
 // CHECK: %[[INCREMENT:.*]] = arith.select %[[INCREMENT_IF]], %[[ONE]], %[[ZERO]] : i64
 // CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[INCREMENT]] : i64

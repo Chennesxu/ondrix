@@ -49,10 +49,10 @@ func.func @lane_lifecycle_saturate(%value: vector<8xi16>, %coefficient: i16) -> 
 // CHECK: %[[ONE:.*]] = arith.constant dense<1> : vector<8xi64>
 // CHECK: %[[HALF:.*]] = arith.constant dense<16384> : vector<8xi64>
 // CHECK: %[[ABOVE_HALF:.*]] = arith.cmpi ugt, %[[REMAINDER]], %[[HALF]] : vector<8xi64>
-// CHECK: %[[EXACT_HALF:.*]] = arith.cmpi eq, %[[REMAINDER]], %[[HALF]] : vector<8xi64>
-// CHECK: %[[LOW_BIT:.*]] = arith.andi %[[QUOTIENT]], %[[ONE]] : vector<8xi64>
-// CHECK: %[[IS_ODD:.*]] = arith.cmpi ne, %[[LOW_BIT]], %[[EXPORT_ZERO]] : vector<8xi64>
-// CHECK: %[[HALF_AND_ODD:.*]] = arith.andi %[[EXACT_HALF]], %[[IS_ODD]] : vector<8xi1>
+// CHECK: %[[TIE_MASK:.*]] = arith.constant dense<65535> : vector<8xi64>
+// CHECK: %[[TIE_BITS:.*]] = arith.andi %[[ACC]], %[[TIE_MASK]] : vector<8xi64>
+// CHECK: %[[TIE_ODD_PATTERN:.*]] = arith.constant dense<49152> : vector<8xi64>
+// CHECK: %[[HALF_AND_ODD:.*]] = arith.cmpi eq, %[[TIE_BITS]], %[[TIE_ODD_PATTERN]] : vector<8xi64>
 // CHECK: %[[ROUND_UP:.*]] = arith.ori %[[ABOVE_HALF]], %[[HALF_AND_ODD]] : vector<8xi1>
 // CHECK: %[[INCREMENT:.*]] = arith.select %[[ROUND_UP]], %[[ONE]], %[[EXPORT_ZERO]] : vector<8xi1>, vector<8xi64>
 // CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[INCREMENT]] : vector<8xi64>

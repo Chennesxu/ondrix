@@ -59,6 +59,8 @@ func.func @export_q30(
 // CHECK: %[[BITS:.*]] = arith.trunci %[[ACC]] : i64 to i31
 // CHECK: %[[REMAINDER:.*]] = arith.extui %[[BITS]] : i31 to i64
 // CHECK: %[[HALF:.*]] = arith.constant 1073741824 : i64
+// CHECK: %[[TIE_BITS:.*]] = arith.andi %[[ACC]], {{.*}} : i64
+// CHECK: arith.cmpi eq, %[[TIE_BITS]], {{.*}} : i64
 // CHECK: %[[RESULT:.*]] = arith.trunci {{.*}} : i64 to i32
 // CHECK: return %[[RESULT]] : i32
 

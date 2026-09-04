@@ -177,12 +177,18 @@ Value createRoundedSignedRightShift(Location loc, Value input, unsigned shift,
     Value half = constant(int64_t{1} << (shift - 1));
     Value aboveHalf =
         builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, remainder, half);
-    Value exactlyHalf =
-        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, remainder, half);
-    Value quotientLowBit = builder.create<arith::AndIOp>(loc, quotient, one);
-    Value quotientIsOdd =
-        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, quotientLowBit, zero);
-    Value halfAndOdd = builder.create<arith::AndIOp>(loc, exactlyHalf, quotientIsOdd);
+    // A tie with an odd quotient is one pattern of the low shift+1 bits of the
+    // input, tested in the input width: a narrower lane type would be
+    // legalized through packs on wide vectors.
+    Value tieBits =
+        shift + 1 < element.getWidth()
+            ? builder
+                  .create<arith::AndIOp>(
+                      loc, input, constant(static_cast<int64_t>((uint64_t{1} << (shift + 1)) - 1)))
+                  .getResult()
+            : input;
+    Value halfAndOdd = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, tieBits,
+                                                     constant(int64_t{3} << (shift - 1)));
     increment = builder.create<arith::OrIOp>(loc, aboveHalf, halfAndOdd);
     break;
   }
