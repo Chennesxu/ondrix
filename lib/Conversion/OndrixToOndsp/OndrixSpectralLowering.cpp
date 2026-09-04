@@ -413,24 +413,29 @@ lowerPackedCfftLoops(Location loc, Value input, int64_t extent, ondrix::ir::Cfft
       loc, lowerStage, stages, one, ValueRange{current},
       [&](OpBuilder &builder, Location loc, Value stage, ValueRange stageArgs) {
         Value half = builder.create<arith::ShLIOp>(loc, one, stage);
-        Value halfMask = builder.create<arith::SubIOp>(loc, half, one);
+        Value stagePlusOne = builder.create<arith::AddIOp>(loc, stage, one);
         Value doubled = builder.create<arith::AddIOp>(loc, half, half);
         if (!inventoryPaired) {
-          auto butterflyLoop = builder.create<scf::ForOp>(
-              loc, zero, halfExtent, one, ValueRange{stageArgs.front()},
-              [&](OpBuilder &builder, Location loc, Value pair, ValueRange pairArgs) {
-                // `half` is 2^stage, so the group and phase are a shift and a
-                // mask; a division by the loop-variant power of two is not.
-                Value group = builder.create<arith::ShRUIOp>(loc, pair, stage);
-                Value phase = builder.create<arith::AndIOp>(loc, pair, halfMask);
+          // Group-major nested loops: the butterflies of one stage are
+          // independent, so this order is the flat pair order element for
+          // element, and both index streams advance at stride one.
+          Value groups = builder.create<arith::ShRUIOp>(loc, extentValue, stagePlusOne);
+          auto groupLoop = builder.create<scf::ForOp>(
+              loc, zero, groups, one, ValueRange{stageArgs.front()},
+              [&](OpBuilder &builder, Location loc, Value group, ValueRange groupArgs) {
                 Value base = builder.create<arith::MulIOp>(loc, group, doubled);
-                Value upper = builder.create<arith::AddIOp>(loc, base, phase);
-                Value twiddleIndex = builder.create<arith::AddIOp>(loc, half, phase);
-                builder.create<scf::YieldOp>(
-                    loc, buildLeg(builder, loc, pairArgs.front(), half, upper, twiddleIndex,
-                                  ondrix::ondsp::CxButterflyVariant::Plain));
+                auto phaseLoop = builder.create<scf::ForOp>(
+                    loc, zero, half, one, ValueRange{groupArgs.front()},
+                    [&](OpBuilder &builder, Location loc, Value phase, ValueRange phaseArgs) {
+                      Value upper = builder.create<arith::AddIOp>(loc, base, phase);
+                      Value twiddleIndex = builder.create<arith::AddIOp>(loc, half, phase);
+                      builder.create<scf::YieldOp>(
+                          loc, buildLeg(builder, loc, phaseArgs.front(), half, upper, twiddleIndex,
+                                        ondrix::ondsp::CxButterflyVariant::Plain));
+                    });
+                builder.create<scf::YieldOp>(loc, phaseLoop.getResult(0));
               });
-          builder.create<scf::YieldOp>(loc, butterflyLoop.getResult(0));
+          builder.create<scf::YieldOp>(loc, groupLoop.getResult(0));
           return;
         }
         // Paired form as group-nested unit-stride loops: each inner body
