@@ -58,6 +58,7 @@ tools = [
     "ondrix-ortumcore-target-profile-test",
     "FileCheck",
     "llc",
+    "opt",
     "not",
 ]
 

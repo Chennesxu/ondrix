@@ -4,9 +4,8 @@
 // RUN: cc %S/Inputs/rms_q31_aot.c %t.o -o %t -lm
 // RUN: %t
 // The canonical pipeline is a SEPARATE route: it preserves bufferizable
-// reductions, so a profile the reduce_mac vocabulary cannot carry has to fall
-// back here rather than fail. Compiling through it is the only thing that
-// checks that.
+// reductions, so these kernels reach the reduce_mac bufferization there and
+// the tensor lowering here. Compiling both is what pins them together.
 // RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256" > %t.pipeline.mlir
 // RUN: ondrix-translate %t.pipeline.mlir --mlir-to-llvmir > %t.pipeline.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.pipeline.ll -o %t.pipeline.o

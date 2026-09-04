@@ -651,6 +651,59 @@ def VectorizeOndspFixedDecimateOutputs
   ];
 }
 
+def VectorizeOndspFixedElementwiseLoops
+    : Pass<"vectorize-ondsp-fixed-elementwise-loops", "::mlir::ModuleOp"> {
+  let summary = "Batch a bufferized elementwise requantization loop across vector lanes";
+  let description = [{
+    Rewrite the leading full blocks of a bufferized elementwise loop to
+    transform `vector-width` elements at a time, and leave the remaining
+    elements on the untouched ordered loop. The shape this serves is the input
+    requantization the Q31 `ondrix.rms` bufferization emits ahead of its
+    reduction: per index, one load, one declared `ondsp.round_shift` boundary,
+    and one store to a different sequence.
+
+    This is a vertical transformation of an elementwise map: element `i` reads
+    only `in[i]` and writes only `out[i]`, so the iterations are independent
+    and the lanes carry the ordered iterations themselves. No value is folded
+    with another, nothing is reassociated, and the rewrite therefore needs no
+    range, overflow, or prefix proof at all -- it is the same mechanism class
+    as `vectorize-ondsp-fixed-elementwise-updates`, and the same contrast with
+    the horizontal reduction passes, whose lanes do change the fold order.
+    Each declared boundary runs in the carrier it was declared in, one lane
+    per ordered element, so the batched result is the ordered result element
+    by element.
+
+    It fires only for an `scf.for` from zero to a static bound in steps of one
+    with no iteration arguments, whose body is exactly one `memref.load` at
+    the induction variable, a chain of single-use `ondsp.round_shift`,
+    `arith.extsi`, and `arith.trunci` operations, and one `memref.store` at
+    the same induction variable. The operation count of the body must equal
+    the matched chain, so nothing unrecognized -- and therefore no unmodelled
+    side effect or second consumer -- can be hiding in the loop. Both
+    sequences must be rank-1 memrefs with a static extent, a contiguous
+    layout, and a memory space the Vector to LLVM lowering accepts. Every
+    other loop is left byte-identical.
+
+    Aliasing is refused the same way the other batchers refuse it: a block's
+    store is deferred past that block's loads, so the two sequences must be
+    distinct storage. The static half fails closed through the shared
+    provenance resolution, and the residual entry-argument precondition is the
+    one stated in `vectorize-ondsp-fixed-decimate-outputs`.
+  }];
+  let constructor = "ondrix::createVectorizeOndspFixedElementwiseLoopsPass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
+           "Number of independent elements transformed per vector">,
+  ];
+}
+
 def VectorizeOndspFixedElementwiseUpdates
     : Pass<"vectorize-ondsp-fixed-elementwise-updates", "::mlir::ModuleOp"> {
   let summary = "Batch elementwise fixed-point state updates across vector lanes";

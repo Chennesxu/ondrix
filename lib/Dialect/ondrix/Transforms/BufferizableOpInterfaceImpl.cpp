@@ -379,11 +379,12 @@ static FailureOr<Value> createProducedResultBuffer(RewriterBase &rewriter, Value
   return rewriter.create<bufferization::ToMemrefOp>(loc, memrefType, *allocated).getResult();
 }
 
-/// Signed frac-30 wrapping accumulator of the requested width. Wrap is the
-/// exact-modulo reassociation class, so a reduction seeded at zero with a
-/// provably non-wrapping range is reassociable without a prefix proof.
-static ondrix::ondsp::AccType getExactWrapAccumulator(MLIRContext *context, unsigned width) {
-  return ondrix::ondsp::AccType::get(context, IntegerType::get(context, width), /*frac=*/30,
+/// Signed wrapping accumulator of the requested width and fractional position.
+/// Wrap is the exact-modulo reassociation class, so a reduction seeded at zero
+/// with a provably non-wrapping range is reassociable without a prefix proof.
+static ondrix::ondsp::AccType getExactWrapAccumulator(MLIRContext *context, unsigned width,
+                                                      unsigned frac = 30) {
+  return ondrix::ondsp::AccType::get(context, IntegerType::get(context, width), frac,
                                      ondrix::ondsp::Signedness::Signed,
                                      ondrix::ondsp::OverflowMode::Wrap);
 }
@@ -486,11 +487,24 @@ struct MatmulOpInterface
       return success();
     }
 
-    auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
-    // Wrap alone authorizes reassociation (exact-modulo); the range bound
-    // tying the wrapped i40 value to the contract's exact K-sum is derived
-    // in the Ondrix_MatmulOp description.
-    ondrix::ondsp::AccType accumulatorType = getExactWrapAccumulator(context, /*width=*/40);
+    auto fixed = cast<ondrix::ondsp::FixedAttr>(numeric);
+    unsigned storageWidth = cast<IntegerType>(fixed.getStorage()).getWidth();
+    // The per-term requantization the inner extent forces: zero at Q15, where
+    // the exact K-sum already fits, and the shift the verifier pairs with
+    // product_rounding at Q31.
+    unsigned productShift = ondrix::ir::getReductionProductShift(storageWidth, innerCount);
+    auto product =
+        productShift > 0
+            ? ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full,
+                                              productShift, *op.getProductRounding())
+            : ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
+    // Wrap alone authorizes reassociation (exact-modulo); the range bounds
+    // tying the wrapped accumulator to the contract's exact K-sum, at both
+    // widths, are derived in the Ondrix_MatmulOp description.
+    ondrix::ondsp::AccType accumulatorType =
+        storageWidth == 16
+            ? getExactWrapAccumulator(context, /*width=*/40)
+            : getExactWrapAccumulator(context, /*width=*/64, /*frac=*/62 - productShift);
 
     // The columns of B have stride N and would be refused by the unit-stride
     // Vector legality gate. Pack B once into a transposed scratch buffer so
@@ -533,12 +547,12 @@ struct MatmulOpInterface
                     columnBuilder.create<ondrix::ondsp::AccZeroOp>(columnLoc, accumulatorType);
                 Value reduced = columnBuilder.create<ondrix::ondsp::ReduceMacOp>(
                     columnLoc, accumulatorType, initial, lhsRow, packedRow, numeric, product);
-                // Dividing the raw accumulator by 2^(30 - 15) with nearest-even
-                // rounding and saturating to i16 is exactly the `round_shift`
-                // boundary of the tensor-form lowering.
+                // Dividing the raw accumulator by 2^(acc.frac - (W - 1)) under the
+                // declared rounding and saturating to the storage width is
+                // exactly the `round_shift` boundary of the tensor-form lowering.
                 Value element = columnBuilder.create<ondrix::ondsp::AccExportOp>(
-                    columnLoc, elementType, reduced, cast<ondrix::ondsp::FixedAttr>(numeric),
-                    *op.getRounding(), ondrix::ondsp::OverflowMode::Saturate);
+                    columnLoc, elementType, reduced, fixed, *op.getRounding(),
+                    ondrix::ondsp::OverflowMode::Saturate);
                 columnBuilder.create<memref::StoreOp>(columnLoc, element, *output,
                                                       ValueRange{row, column});
                 columnBuilder.create<scf::YieldOp>(columnLoc);
@@ -601,37 +615,78 @@ struct RmsOpInterface : public BufferizableOpInterface::ExternalModel<RmsOpInter
     }
     unsigned meanShift = llvm::Log2_64(extent);
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    auto storage = cast<IntegerType>(numeric.getStorage());
+    unsigned preShift = ondrix::ir::getRmsInputPreShift(storage.getWidth(), extent);
     auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
-    // As with matmul, wrap alone authorizes reassociation; the 2^42 bound is
-    // derived in the Ondrix_RmsOp description. An i40 accumulator would NOT
-    // suffice (2^42 > 2^39): this reduction needs the wider wrapping width
-    // admitted by the horizontal-domain predicate.
-    ondrix::ondsp::AccType accumulatorType = getExactWrapAccumulator(context, /*width=*/64);
+
+    // The pre-shift is a boundary on the INPUT, so it lands once per element in
+    // a scratch copy the reduction squares exactly; that copy reads as Q31 of
+    // the rescaled signal, and the left shift by 2k below restores the scale.
+    Value samples = *input;
+    Value scratch;
+    if (preShift > 0) {
+      FailureOr<Value> allocated =
+          options.createAlloc(rewriter, loc, MemRefType::get({extent}, storage), /*dynShape=*/{});
+      if (failed(allocated))
+        return failure();
+      scratch = *allocated;
+      auto inputScale = ondrix::ondsp::ScaleAttr::get(
+          context, /*preShiftLeft=*/0, preShift, *op.getInputRounding(),
+          ondrix::ondsp::OverflowMode::Saturate, storage);
+      Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+      Value bound = rewriter.create<arith::ConstantIndexOp>(loc, extent);
+      rewriter.create<scf::ForOp>(
+          loc, zero, bound, one, ValueRange{},
+          [&](OpBuilder &builder, Location elementLoc, Value position, ValueRange) {
+            Value element = builder.create<memref::LoadOp>(elementLoc, *input, position);
+            Value scaled = builder.create<ondrix::ondsp::RoundShiftOp>(elementLoc, storage, element,
+                                                                       inputScale);
+            builder.create<memref::StoreOp>(elementLoc, scaled, scratch, position);
+            builder.create<scf::YieldOp>(elementLoc);
+          });
+      samples = scratch;
+    }
+
+    // As with matmul, wrap alone authorizes reassociation; the 2^42 bound at
+    // Q15 and the 2^(62 - 2k) bound the pre-shift buys at Q31 are derived in
+    // the Ondrix_RmsOp description. An i40 accumulator would not hold either.
+    ondrix::ondsp::AccType accumulatorType =
+        getExactWrapAccumulator(context, /*width=*/64, /*frac=*/2 * (storage.getWidth() - 1));
     Value initial = rewriter.create<ondrix::ondsp::AccZeroOp>(loc, accumulatorType);
     Value reduced = rewriter.create<ondrix::ondsp::ReduceMacOp>(loc, accumulatorType, initial,
-                                                                *input, *input, numeric, product);
-    // Materialize the exact raw sum at its own reading (identity export at
-    // frac 30), then apply the nearest-even saturating mean by 2^m as a
-    // declared ARITHMETIC `round_shift` — the same boundary op the
+                                                                samples, samples, numeric, product);
+    // Materialize the exact raw sum at its own reading (identity export at the
+    // accumulator frac), then apply the nearest-even saturating mean by 2^m as
+    // a declared ARITHMETIC `round_shift` — the same boundary op the
     // tensor-form lowering uses. `acc_export`'s destination frac is a
     // value-preserving reading, never a shift selector; the mean changes
     // the represented value and therefore must not be expressed through
-    // it. The declared i32 saturation of the mean is unreachable because
-    // the mean of squares is at most 2^30.
+    // it. The declared saturation of the mean is unreachable: a Q15 mean of
+    // squares is at most 2^30 and a Q31 one at most 2^(62 - 2k).
     auto sumFormat = ondrix::ondsp::FixedAttr::get(context, ondrix::ondsp::Signedness::Signed, i64,
-                                                   /*frac=*/30);
+                                                   accumulatorType.getFrac());
     Value sum = rewriter.create<ondrix::ondsp::AccExportOp>(
         loc, i64, reduced, sumFormat, ondrix::ondsp::RoundingMode::NearestEven,
         ondrix::ondsp::OverflowMode::Saturate);
+    IntegerType meanType = storage.getWidth() == 16 ? i32 : i64;
     auto meanScale = ondrix::ondsp::ScaleAttr::get(
         context, /*preShiftLeft=*/0, /*postShiftRight=*/meanShift,
-        ondrix::ondsp::RoundingMode::NearestEven, ondrix::ondsp::OverflowMode::Saturate, i32);
-    Value mean = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, i32, sum, meanScale);
-    Value meanWide = rewriter.create<arith::ExtSIOp>(loc, i64, mean);
-    Value root = rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, rewriter.getI16Type(), meanWide,
-                                                             op.getRoundingAttr());
+        ondrix::ondsp::RoundingMode::NearestEven, ondrix::ondsp::OverflowMode::Saturate, meanType);
+    Value mean = rewriter.create<ondrix::ondsp::RoundShiftOp>(loc, meanType, sum, meanScale);
+    Value meanWide =
+        meanType == i64 ? mean : rewriter.create<arith::ExtSIOp>(loc, i64, mean).getResult();
+    // Restoring the 2k before the root, not the k after it, resolves the low
+    // bits a post-root shift would leave zero.
+    if (preShift > 0) {
+      Value restore = rewriter.create<arith::ConstantIntOp>(loc, 2 * preShift, 64);
+      meanWide = rewriter.create<arith::ShLIOp>(loc, meanWide, restore);
+    }
+    Value root =
+        rewriter.create<ondrix::ondsp::SqrtFixedOp>(loc, storage, meanWide, op.getRoundingAttr());
     rewriter.create<memref::StoreOp>(loc, root, *output, ValueRange{zero});
 
+    if (scratch && failed(options.createDealloc(rewriter, loc, scratch)))
+      return failure();
     replaceOpWithBufferizedValues(rewriter, op, *output);
     return success();
   }

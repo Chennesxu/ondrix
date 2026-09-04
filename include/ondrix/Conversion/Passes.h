@@ -30,6 +30,9 @@ createVectorizeOndspFixedMemRefReducePass(const VectorizeOndspFixedMemRefReduceO
 std::unique_ptr<mlir::Pass> createVectorizeOndspFixedDecimateOutputsPass();
 std::unique_ptr<mlir::Pass> createVectorizeOndspFixedDecimateOutputsPass(
     const VectorizeOndspFixedDecimateOutputsOptions &options);
+std::unique_ptr<mlir::Pass> createVectorizeOndspFixedElementwiseLoopsPass();
+std::unique_ptr<mlir::Pass> createVectorizeOndspFixedElementwiseLoopsPass(
+    const VectorizeOndspFixedElementwiseLoopsOptions &options);
 std::unique_ptr<mlir::Pass> createVectorizeOndspFixedElementwiseUpdatesPass();
 std::unique_ptr<mlir::Pass> createVectorizeOndspFixedElementwiseUpdatesPass(
     const VectorizeOndspFixedElementwiseUpdatesOptions &options);

@@ -1475,6 +1475,13 @@ def Ondrix_MatmulOp : Ondrix_Op<"matmul", [Pure]> {
     would spend one bit of precision at every non-power-of-two `K`. It is zero at every admitted Q15 shape and at `K = 1`, so
     `product_rounding` is required exactly where the boundary exists.
 
+    That shift is also what bounds the narrowed K-sum: at `W = 32` it is
+    `p = floor(log2 K)`, the `K <= 2^(p+1) - 1` terms are each at most
+    `2^(62 - p)`, and `|sum| <= 2^63 - 2^(62 - p)` stays inside signed i64 —
+    the counterpart of the `2^36` Q15 bound above. A wrapping i64 accumulator
+    therefore never wraps here either, so both profiles reach the
+    exact-modulo reassociation class without a prefix proof.
+
     The boundary is on the PRODUCT, not on the inputs, and that is a measured
     choice rather than a symmetry preference: narrowing an operand before the
     multiply scales its error by the OTHER operand's magnitude, so at `K = 64`
