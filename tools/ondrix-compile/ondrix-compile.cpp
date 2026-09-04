@@ -8,6 +8,16 @@
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Export.h"
+
+#include "llvm/Analysis/CGSCCPassManager.h"
+#include "llvm/Analysis/LoopAnalysisManager.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/Passes/PassBuilder.h"
 
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/CommandLine.h"
@@ -21,7 +31,7 @@
 using namespace llvm;
 
 namespace {
-enum class EmitKind { Contracts, LLVMDialect, Manifest };
+enum class EmitKind { Contracts, LLVMDialect, LLVMIR, Manifest };
 
 cl::opt<std::string> inputFilename(cl::Positional, cl::desc("<input .ox file>"), cl::Required);
 cl::opt<std::string> outputFilename("o", cl::desc("Output MLIR file"), cl::value_desc("filename"),
@@ -35,10 +45,17 @@ cl::opt<EmitKind> emitKind(
                clEnumValN(EmitKind::LLVMDialect, "llvm",
                           "LLVM-dialect MLIR produced by the canonical pipeline, "
                           "schedules selected automatically under their legality analyses"),
+               clEnumValN(EmitKind::LLVMIR, "llvmir",
+                          "LLVM IR: the --emit=llvm module translated and run through "
+                          "LLVM's middle end at --llvm-opt-level with its loop and SLP "
+                          "vectorizers off; the schedule stage owns every lane decision"),
                clEnumValN(EmitKind::Manifest, "manifest",
                           "JSON reproduction record of the compilation that "
                           "--emit=llvm would perform")),
     cl::init(EmitKind::Contracts));
+cl::opt<unsigned> llvmOptLevel("llvm-opt-level",
+                               cl::desc("LLVM middle-end level for --emit=llvmir (0-3)"),
+                               cl::init(3));
 
 // Target facts for the schedule stage. Both default to assuming nothing, so an
 // undeclared target compiles to the ordered program rather than to a guess.
@@ -90,6 +107,11 @@ void emitManifest(mlir::ModuleOp module, const ondrix::OndrixDefaultPipelineOpti
       // decision the caller makes, and no target description determines it.
       {"declared_schedule_choices",
        llvm::json::Object{{"fft_lowering", fftLoopsValue ? "loops" : "unrolled"}}},
+      // What --emit=llvmir runs after translation; exact by construction,
+      // since the translated IR carries no fast-math flag.
+      {"llvm_middle_end", llvm::json::Object{{"opt_level", int64_t(llvmOptLevel.getValue())},
+                                             {"loop_vectorize", false},
+                                             {"slp_vectorize", false}}},
       {"fast_permissions_used", std::move(permissions)},
       // Declared, not observed: the numeric model states these and every
       // reference is built to match them.
@@ -136,7 +158,7 @@ int main(int argc, char **argv) {
   if (!module)
     return 1;
 
-  if (emitKind == EmitKind::LLVMDialect || emitKind == EmitKind::Manifest) {
+  if (emitKind != EmitKind::Contracts) {
     mlir::PassManager passManager(&context, mlir::ModuleOp::getOperationName());
     ondrix::OndrixDefaultPipelineOptions options;
     options.vectorBits = vectorBits.getValue();
@@ -147,6 +169,46 @@ int main(int argc, char **argv) {
       return 1;
     if (emitKind == EmitKind::Manifest) {
       emitManifest(*module, options, output.os());
+      output.keep();
+      return 0;
+    }
+    if (emitKind == EmitKind::LLVMIR) {
+      if (llvmOptLevel > 3) {
+        errs() << "ondrix-compile: --llvm-opt-level must be 0 to 3\n";
+        return 1;
+      }
+      mlir::registerBuiltinDialectTranslation(context);
+      mlir::registerLLVMDialectTranslation(context);
+      llvm::LLVMContext llvmContext;
+      std::unique_ptr<llvm::Module> llvmModule =
+          mlir::translateModuleToLLVMIR(*module, llvmContext, inputFilename);
+      if (!llvmModule)
+        return 1;
+      // The schedule stage owns every lane decision, so LLVM's own
+      // vectorizers stay off; everything else at the requested level is exact
+      // on IR that carries no fast-math flag.
+      llvm::PipelineTuningOptions tuning;
+      tuning.LoopVectorization = false;
+      tuning.SLPVectorization = false;
+      llvm::PassBuilder passBuilder(nullptr, tuning);
+      llvm::LoopAnalysisManager loopAnalyses;
+      llvm::FunctionAnalysisManager functionAnalyses;
+      llvm::CGSCCAnalysisManager callGraphAnalyses;
+      llvm::ModuleAnalysisManager moduleAnalyses;
+      passBuilder.registerModuleAnalyses(moduleAnalyses);
+      passBuilder.registerCGSCCAnalyses(callGraphAnalyses);
+      passBuilder.registerFunctionAnalyses(functionAnalyses);
+      passBuilder.registerLoopAnalyses(loopAnalyses);
+      passBuilder.crossRegisterProxies(loopAnalyses, functionAnalyses, callGraphAnalyses,
+                                       moduleAnalyses);
+      const llvm::OptimizationLevel levels[] = {
+          llvm::OptimizationLevel::O0, llvm::OptimizationLevel::O1, llvm::OptimizationLevel::O2,
+          llvm::OptimizationLevel::O3};
+      llvm::ModulePassManager pipeline =
+          llvmOptLevel == 0 ? passBuilder.buildO0DefaultPipeline(levels[0])
+                            : passBuilder.buildPerModuleDefaultPipeline(levels[llvmOptLevel]);
+      pipeline.run(*llvmModule, moduleAnalyses);
+      llvmModule->print(output.os(), nullptr);
       output.keep();
       return 0;
     }

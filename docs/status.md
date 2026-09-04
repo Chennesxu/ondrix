@@ -100,7 +100,7 @@ lowering to the LLVM dialect.
 
 Every knob that can change a produced schedule or code shape belongs to
 exactly one of five classes. The canonical compilation path
-(`ondrix-compile --emit=llvm`, which runs `-ondrix-default-pipeline`) accepts
+(`ondrix-compile --emit=llvm`, which runs `-ondrix-default-pipeline`; `--emit=llvmir` additionally translates to LLVM IR and runs LLVM's middle end at `--llvm-opt-level` (default 3) with its loop and SLP vectorizers off, exact on IR that carries no fast-math flag, and the manifest records that level) accepts
 only the first two, and exposes no pass option at all: reaching anything in
 the fourth class requires dropping to `ondrix-opt` and naming passes.
 
