@@ -81,6 +81,13 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
     Option<"fftLoops", "fft-loops",
            "bool", /*default=*/"false",
            "Ablation interface: force the bit-reversal/stage-loop FFT lowering over in-memory twiddle tables, bit-identical to the unrolled default the canonical path uses">,
+    Option<"fftLoopsVectorWidth", "fft-loops-vector-width",
+           "int64_t", /*default=*/"0",
+           "With fft-loops, the number of consecutive butterflies of a stage "
+           "computed as one fixed-length vector once the stage's half length "
+           "reaches it (a power of two; 0 keeps every stage scalar). The "
+           "butterflies of a stage are independent, so the lanes change no "
+           "update order">,
   ];
 }
 

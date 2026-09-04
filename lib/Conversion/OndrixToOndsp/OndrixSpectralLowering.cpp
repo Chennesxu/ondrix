@@ -255,12 +255,14 @@ lowerPackedCfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirection 
 // Every width follows from the profile: the packed container carries both the
 // values and the twiddle table, and only the 16-bit packed target has the
 // paired inventory form.
-static Value
-lowerPackedCfftLoops(Location loc, Value input, int64_t extent, ondrix::ir::CfftDirection direction,
-                     ondrix::ondsp::PackedComplexProfile profile,
-                     ondrix::ondsp::CxLayoutAttr layout, Attribute numeric,
-                     ondrix::ondsp::ProductAttr product, ondrix::ondsp::ScaleAttr productScale,
-                     ondrix::ondsp::ScaleAttr outputScale, ConversionPatternRewriter &rewriter) {
+static Value lowerPackedCfftLoops(Location loc, Value input, int64_t extent,
+                                  ondrix::ir::CfftDirection direction,
+                                  ondrix::ondsp::PackedComplexProfile profile,
+                                  ondrix::ondsp::CxLayoutAttr layout, Attribute numeric,
+                                  ondrix::ondsp::ProductAttr product,
+                                  ondrix::ondsp::ScaleAttr productScale,
+                                  ondrix::ondsp::ScaleAttr outputScale, int64_t vectorWidth,
+                                  ConversionPatternRewriter &rewriter) {
   IntegerType container = rewriter.getIntegerType(profile.containerWidth);
   IntegerType i64 = rewriter.getI64Type();
   int64_t stageCount = llvm::Log2_64(extent);
@@ -409,35 +411,87 @@ lowerPackedCfftLoops(Location loc, Value input, int64_t extent, ondrix::ir::Cfft
     lowerStage = two;
   }
 
-  auto stageLoop = rewriter.create<scf::ForOp>(
-      loc, lowerStage, stages, one, ValueRange{current},
-      [&](OpBuilder &builder, Location loc, Value stage, ValueRange stageArgs) {
-        Value half = builder.create<arith::ShLIOp>(loc, one, stage);
-        Value stagePlusOne = builder.create<arith::AddIOp>(loc, stage, one);
-        Value doubled = builder.create<arith::AddIOp>(loc, half, half);
-        if (!inventoryPaired) {
-          // Group-major nested loops: the butterflies of one stage are
-          // independent, so this order is the flat pair order element for
-          // element, and both index streams advance at stride one.
+  // `lanes` consecutive plain butterflies of one stage as one vector leg: the
+  // pairs (upper + l, upper + half + l) and twiddles[half + phase + l] are
+  // contiguous for l < lanes once half >= lanes.
+  auto buildVectorLeg = [&](OpBuilder &builder, Location loc, Value data, Value half, Value upper,
+                            Value twiddleIndex, int64_t lanes) -> Value {
+    auto vectorType = VectorType::get({lanes}, container);
+    Value lower = builder.create<arith::AddIOp>(loc, upper, half);
+    SmallVector<bool> inBounds{true};
+    auto read = [&](Value tensor, Value index) -> Value {
+      return builder.create<vector::TransferReadOp>(loc, vectorType, tensor, ValueRange{index},
+                                                    ArrayRef<bool>(inBounds));
+    };
+    Value a = read(data, upper);
+    Value b = read(data, lower);
+    Value twiddle = read(twiddleTable, twiddleIndex);
+    auto butterfly = builder.create<ondrix::ondsp::CxButterflyOp>(
+        loc, vectorType, vectorType, a, b, twiddle, layout, numeric, product, productScale,
+        outputScale, ondrix::ondsp::CxButterflyVariantAttr());
+    Value written =
+        builder
+            .create<vector::TransferWriteOp>(loc, butterfly.getOut0(), data, ValueRange{upper},
+                                             ArrayRef<bool>(inBounds))
+            .getResult();
+    return builder
+        .create<vector::TransferWriteOp>(loc, butterfly.getOut1(), written, ValueRange{lower},
+                                         ArrayRef<bool>(inBounds))
+        .getResult();
+  };
+
+  // Group-major nested loops for the plain form: the butterflies of one
+  // stage are independent, so this order is the flat pair order element for
+  // element, and both index streams advance at stride one. Stages whose half
+  // length reaches `lanes` take the vector leg.
+  auto buildPlainStages = [&](OpBuilder &builder, Location loc, Value from, Value to, Value data,
+                              int64_t lanes) -> Value {
+    auto stageLoop = builder.create<scf::ForOp>(
+        loc, from, to, one, ValueRange{data},
+        [&](OpBuilder &builder, Location loc, Value stage, ValueRange stageArgs) {
+          Value half = builder.create<arith::ShLIOp>(loc, one, stage);
+          Value stagePlusOne = builder.create<arith::AddIOp>(loc, stage, one);
+          Value doubled = builder.create<arith::AddIOp>(loc, half, half);
           Value groups = builder.create<arith::ShRUIOp>(loc, extentValue, stagePlusOne);
+          Value step =
+              lanes > 1 ? builder.create<arith::ConstantIndexOp>(loc, lanes).getResult() : one;
           auto groupLoop = builder.create<scf::ForOp>(
               loc, zero, groups, one, ValueRange{stageArgs.front()},
               [&](OpBuilder &builder, Location loc, Value group, ValueRange groupArgs) {
                 Value base = builder.create<arith::MulIOp>(loc, group, doubled);
                 auto phaseLoop = builder.create<scf::ForOp>(
-                    loc, zero, half, one, ValueRange{groupArgs.front()},
+                    loc, zero, half, step, ValueRange{groupArgs.front()},
                     [&](OpBuilder &builder, Location loc, Value phase, ValueRange phaseArgs) {
                       Value upper = builder.create<arith::AddIOp>(loc, base, phase);
                       Value twiddleIndex = builder.create<arith::AddIOp>(loc, half, phase);
-                      builder.create<scf::YieldOp>(
-                          loc, buildLeg(builder, loc, phaseArgs.front(), half, upper, twiddleIndex,
-                                        ondrix::ondsp::CxButterflyVariant::Plain));
+                      Value next = lanes > 1 ? buildVectorLeg(builder, loc, phaseArgs.front(), half,
+                                                              upper, twiddleIndex, lanes)
+                                             : buildLeg(builder, loc, phaseArgs.front(), half,
+                                                        upper, twiddleIndex,
+                                                        ondrix::ondsp::CxButterflyVariant::Plain);
+                      builder.create<scf::YieldOp>(loc, next);
                     });
                 builder.create<scf::YieldOp>(loc, phaseLoop.getResult(0));
               });
           builder.create<scf::YieldOp>(loc, groupLoop.getResult(0));
-          return;
-        }
+        });
+    return stageLoop.getResult(0);
+  };
+
+  if (!inventoryPaired) {
+    int64_t lanes = vectorWidth > 1 && vectorWidth <= extent / 2 ? vectorWidth : 1;
+    if (lanes == 1)
+      return buildPlainStages(rewriter, loc, lowerStage, stages, current, 1);
+    Value vectorStage = rewriter.create<arith::ConstantIndexOp>(loc, llvm::Log2_64(lanes));
+    Value scalarStages = buildPlainStages(rewriter, loc, lowerStage, vectorStage, current, 1);
+    return buildPlainStages(rewriter, loc, vectorStage, stages, scalarStages, lanes);
+  }
+
+  auto stageLoop = rewriter.create<scf::ForOp>(
+      loc, lowerStage, stages, one, ValueRange{current},
+      [&](OpBuilder &builder, Location loc, Value stage, ValueRange stageArgs) {
+        Value half = builder.create<arith::ShLIOp>(loc, one, stage);
+        Value doubled = builder.create<arith::AddIOp>(loc, half, half);
         // Paired form as group-nested unit-stride loops: each inner body
         // carries one fixed variant and walks its data and twiddle streams
         // at stride one, and the group-major order matches the flat legs
@@ -794,9 +848,10 @@ static Value scaleFpTensorByInverseExtent(Location loc, Value tensor, int64_t el
 
 class CfftOpLowering final : public OpConversionPattern<ondrix::ir::CfftOp> {
 public:
-  CfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops)
-      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft), fftLoops(fftLoops) {
-  }
+  CfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops,
+                 int64_t fftLoopsVectorWidth)
+      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft), fftLoops(fftLoops),
+        fftLoopsVectorWidth(fftLoopsVectorWidth) {}
 
   LogicalResult matchAndRewrite(ondrix::ir::CfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -838,9 +893,10 @@ public:
     if (!hasAdmissiblePackedTwiddleTables(profile->storageWidth, op.getDirection(), extent))
       return rewriter.notifyMatchFailure(op, "the stage twiddle table is unavailable");
     if (fftLoops) {
-      Value result = lowerPackedCfftLoops(loc, adaptor.getInput(), extent, op.getDirection(),
-                                          *profile, layout, op.getNumeric(), *op.getProduct(),
-                                          *op.getProductScale(), *op.getOutputScale(), rewriter);
+      Value result =
+          lowerPackedCfftLoops(loc, adaptor.getInput(), extent, op.getDirection(), *profile, layout,
+                               op.getNumeric(), *op.getProduct(), *op.getProductScale(),
+                               *op.getOutputScale(), fftLoopsVectorWidth, rewriter);
       rewriter.replaceOp(op, result);
       return success();
     }
@@ -868,13 +924,15 @@ public:
 private:
   bool vectorizeStaticCfft;
   bool fftLoops;
+  int64_t fftLoopsVectorWidth;
 };
 
 class RfftOpLowering final : public OpConversionPattern<ondrix::ir::RfftOp> {
 public:
-  RfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops)
-      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft), fftLoops(fftLoops) {
-  }
+  RfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops,
+                 int64_t fftLoopsVectorWidth)
+      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft), fftLoops(fftLoops),
+        fftLoopsVectorWidth(fftLoopsVectorWidth) {}
 
   LogicalResult matchAndRewrite(ondrix::ir::RfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -951,10 +1009,10 @@ public:
                 builder.create<tensor::InsertOp>(loc, packed, iterArgs.front(), position);
             builder.create<scf::YieldOp>(loc, inserted);
           });
-      Value spectrum = lowerPackedCfftLoops(loc, packLoop.getResult(0), extent,
-                                            ondrix::ir::CfftDirection::Forward, profile,
-                                            op.getLayout(), op.getNumeric(), *op.getProduct(),
-                                            *op.getProductScale(), *op.getOutputScale(), rewriter);
+      Value spectrum = lowerPackedCfftLoops(
+          loc, packLoop.getResult(0), extent, ondrix::ir::CfftDirection::Forward, profile,
+          op.getLayout(), op.getNumeric(), *op.getProduct(), *op.getProductScale(),
+          *op.getOutputScale(), fftLoopsVectorWidth, rewriter);
       RankedTensorType resultType = op.getResult().getType();
       int64_t binCount = resultType.getDimSize(0);
       Value compact = rewriter.create<tensor::ExtractSliceOp>(
@@ -1000,13 +1058,15 @@ public:
 private:
   bool vectorizeStaticCfft;
   bool fftLoops;
+  int64_t fftLoopsVectorWidth;
 };
 
 class IrfftOpLowering final : public OpConversionPattern<ondrix::ir::IrfftOp> {
 public:
-  IrfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops)
-      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft), fftLoops(fftLoops) {
-  }
+  IrfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops,
+                  int64_t fftLoopsVectorWidth)
+      : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft), fftLoops(fftLoops),
+        fftLoopsVectorWidth(fftLoopsVectorWidth) {}
 
   LogicalResult matchAndRewrite(ondrix::ir::IrfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -1124,10 +1184,10 @@ public:
             Value full = builder.create<tensor::InsertOp>(loc, conjugated, direct, mirrored);
             builder.create<scf::YieldOp>(loc, full);
           });
-      Value outputs = lowerPackedCfftLoops(loc, mirrorLoop.getResult(0), extent,
-                                           ondrix::ir::CfftDirection::Inverse, profile,
-                                           op.getLayout(), op.getNumeric(), *op.getProduct(),
-                                           *op.getProductScale(), *op.getOutputScale(), rewriter);
+      Value outputs = lowerPackedCfftLoops(
+          loc, mirrorLoop.getResult(0), extent, ondrix::ir::CfftDirection::Inverse, profile,
+          op.getLayout(), op.getNumeric(), *op.getProduct(), *op.getProductScale(),
+          *op.getOutputScale(), fftLoopsVectorWidth, rewriter);
       RankedTensorType resultType = op.getResult().getType();
       Value resultEmpty =
           rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
@@ -1177,6 +1237,7 @@ public:
 private:
   bool vectorizeStaticCfft;
   bool fftLoops;
+  int64_t fftLoopsVectorWidth;
 };
 
 // One complex value of a half-size split schedule, carried as two i32 SSA
@@ -1647,10 +1708,11 @@ public:
 
 void ondrix::conversion::populateOndrixSpectralLoweringPatterns(RewritePatternSet &patterns,
                                                                 bool vectorizeStaticCfft,
-                                                                bool fftLoops) {
+                                                                bool fftLoops,
+                                                                int64_t fftLoopsVectorWidth) {
   MLIRContext *context = patterns.getContext();
   patterns.add<ButterflyOpLowering, RfftRadix4SplitOpLowering, RfftSplitOpLowering, DctOpLowering,
                CxMagnitudeOpLowering>(context);
   patterns.add<CfftOpLowering, RfftOpLowering, IrfftOpLowering>(context, vectorizeStaticCfft,
-                                                                fftLoops);
+                                                                fftLoops, fftLoopsVectorWidth);
 }

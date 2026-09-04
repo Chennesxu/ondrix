@@ -41,8 +41,12 @@ public:
     }
     ondrix::conversion::populateOndrixFirFamilyLoweringPatterns(patterns, slidingWindowReuse);
     ondrix::conversion::populateOndrixStatefulLoweringPatterns(patterns);
+    if (fftLoopsVectorWidth < 0 || (fftLoopsVectorWidth & (fftLoopsVectorWidth - 1)) != 0) {
+      module.emitError("fft-loops-vector-width must be zero or a power of two");
+      return signalPassFailure();
+    }
     ondrix::conversion::populateOndrixSpectralLoweringPatterns(patterns, vectorizeStaticCfft,
-                                                               fftLoops);
+                                                               fftLoops, fftLoopsVectorWidth);
     ondrix::conversion::populateOndrixElementwiseLoweringPatterns(patterns);
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,

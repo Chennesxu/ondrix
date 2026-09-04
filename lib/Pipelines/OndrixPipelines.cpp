@@ -112,7 +112,8 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   os << "lower-rank-one-memref-copy-to-scf,";
   os << "convert-ondsp-fixed-to-scalar,";
   os << "func.func(buffer-deallocation),";
-  os << "expand-strided-metadata,lower-affine,convert-scf-to-cf,convert-vector-to-llvm,"
+  os << "convert-vector-to-scf,expand-strided-metadata,lower-affine,convert-scf-to-cf,"
+        "convert-vector-to-llvm,"
         "finalize-memref-to-llvm,convert-math-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,"
         "convert-func-to-llvm,reconcile-unrealized-casts";
   return text;
