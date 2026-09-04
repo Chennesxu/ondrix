@@ -541,13 +541,27 @@ def VectorizeOndspFixedMemRefReduce
 
 def VectorizeOndspFixedDecimateOutputs
     : Pass<"vectorize-ondsp-fixed-decimate-outputs", "::mlir::ModuleOp"> {
-  let summary = "Batch independent window outputs across accumulator lanes";
+  let summary = "Batch independent outputs across accumulator lanes";
   let description = [{
     Rewrite the leading full blocks of a bufferized sliding-window output
     loop -- `ondrix.fir_filter`, `ondrix.conv1d`, or `ondrix.fir_decimate`
     at factor two -- to compute `vector-width` outputs at a time in a
     multi-lane accumulator, and leave the remaining outputs on the
     untouched ordered loop.
+
+    Two matrix-product shapes take the same lanes. The column loop of the
+    `ondrix.matmul` bufferization, whose right operand is read through a
+    transposed packed copy, is rewritten to load contiguous row segments of
+    the original right operand and broadcast the left row element per term;
+    when every column is batched the ordered loop and the packed copy are
+    removed. A column count below `vector-width` takes every column in one
+    narrower block. The unrolled outputs of a constant-table product, the
+    `ondrix.dct` bufferization, are grouped by consecutive output position
+    under one contract; each block reads the table columns as immediates and
+    the shared input one element per term, and its export, and a following
+    `round_shift`, apply elementwise. Every row must certify before a
+    saturating profile drops its clamp, and the i32 term group is the
+    narrowest certified across the lanes.
 
     This is a vertical transformation: the vector lanes carry independent
     outputs, not partial sums of one output. Each lane visits the same taps

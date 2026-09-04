@@ -10,13 +10,16 @@
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include <limits>
@@ -493,6 +496,559 @@ void batchDecimateOutputs(const DecimateLoopShape &shape, int64_t vectorWidth, O
   loop.getLowerBoundMutable().assign(batchedEnd);
 }
 
+//===----------------------------------------------------------------------===//
+// Matrix outputs: one lane per output column
+//===----------------------------------------------------------------------===//
+
+/// A loop over `[0, extent)` with unit step and no iteration arguments.
+bool isUnitStepLoop(scf::ForOp loop, int64_t extent) {
+  std::optional<int64_t> lower = getConstantIntValue(loop.getLowerBound());
+  std::optional<int64_t> upper = getConstantIntValue(loop.getUpperBound());
+  std::optional<int64_t> step = getConstantIntValue(loop.getStep());
+  return loop.getInitArgs().empty() && lower && upper && step && *lower == 0 && *step == 1 &&
+         *upper == extent;
+}
+
+/// Operations of a block that carry its shape, with constants and the
+/// layout-erasing casts skipped.
+SmallVector<Operation *> getShapeOperations(Block &body) {
+  SmallVector<Operation *> operations;
+  for (Operation &op : body.without_terminator()) {
+    if (matchPattern(&op, m_Constant()) || isa<memref::CastOp>(op))
+      continue;
+    operations.push_back(&op);
+  }
+  return operations;
+}
+
+/// Rank-2 memref with a static shape whose rows are contiguous, so a row
+/// segment is one vector load.
+bool isRowContiguousMatrix(Value value) {
+  auto type = dyn_cast<MemRefType>(value.getType());
+  if (!type || type.getRank() != 2 || !type.hasStaticShape() ||
+      !ondrix::conversion::hasDefaultLLVMVectorMemorySpace(type))
+    return false;
+  SmallVector<int64_t> strides;
+  int64_t offset = 0;
+  return succeeded(getStridesAndOffset(type, strides, offset)) && strides[1] == 1;
+}
+
+/// Matches the two perfectly nested loops that transpose `source[k][c]` into
+/// `packed[c][k]`, and returns the source matrix.
+Value matchPackNest(scf::ForOp outer, Value packed) {
+  auto packedType = cast<MemRefType>(packed.getType());
+  if (!isUnitStepLoop(outer, packedType.getDimSize(0)))
+    return nullptr;
+  SmallVector<Operation *> outerBody = getShapeOperations(*outer.getBody());
+  if (outerBody.size() != 1)
+    return nullptr;
+  auto inner = dyn_cast<scf::ForOp>(outerBody.front());
+  if (!inner || !isUnitStepLoop(inner, packedType.getDimSize(1)))
+    return nullptr;
+  SmallVector<Operation *> innerBody = getShapeOperations(*inner.getBody());
+  if (innerBody.size() != 2)
+    return nullptr;
+  auto load = dyn_cast<memref::LoadOp>(innerBody[0]);
+  auto store = dyn_cast<memref::StoreOp>(innerBody[1]);
+  if (!load || !store || store.getValueToStore() != load.getResult())
+    return nullptr;
+  Value column = outer.getInductionVar();
+  Value row = inner.getInductionVar();
+  if (!llvm::equal(load.getIndices(), ValueRange{row, column}) || store.getMemRef() != packed ||
+      !llvm::equal(store.getIndices(), ValueRange{column, row}))
+    return nullptr;
+  Value source = load.getMemRef();
+  auto sourceType = dyn_cast<MemRefType>(source.getType());
+  if (!isRowContiguousMatrix(source) || sourceType.getDimSize(0) != packedType.getDimSize(1) ||
+      sourceType.getDimSize(1) != packedType.getDimSize(0) ||
+      sourceType.getElementType() != packedType.getElementType())
+    return nullptr;
+  return source;
+}
+
+/// One bufferized matrix-product column loop: every output column of one row
+/// reduces the same row vector against a packed (transposed) column of the
+/// right operand.
+struct ColumnLoopShape {
+  scf::ForOp loop;
+  /// The transposing pack nest and the buffer it fills.
+  scf::ForOp packNest;
+  Value packed;
+  /// The right operand as the caller passed it, `[k][column]`.
+  Value matrix;
+  /// The row of the left operand, contiguous and indexed by `k`.
+  Value row;
+  Value output;
+  /// Leading store indices, defined outside the loop; the column is last.
+  SmallVector<Value> outputLeadingIndices;
+  int64_t columnCount = 0;
+  int64_t innerCount = 0;
+  ondrix::ondsp::AccType accumulator;
+  ondrix::ondsp::FixedAttr numeric;
+  ondrix::ondsp::ProductAttr product;
+  ondrix::ondsp::FixedAttr destination;
+  ondrix::ondsp::RoundingMode rounding;
+  ondrix::ondsp::OverflowMode overflow;
+};
+
+/// The pack nest that fills `packed`, found among the buffer's users.
+scf::ForOp findPackNest(Value packed, Value &matrix) {
+  for (Operation *user : packed.getUsers()) {
+    auto store = dyn_cast<memref::StoreOp>(user);
+    if (!store)
+      continue;
+    auto inner = dyn_cast<scf::ForOp>(store->getParentOp());
+    if (!inner)
+      continue;
+    auto outer = dyn_cast<scf::ForOp>(inner->getParentOp());
+    if (!outer)
+      continue;
+    if (Value source = matchPackNest(outer, packed)) {
+      matrix = source;
+      return outer;
+    }
+  }
+  return nullptr;
+}
+
+/// Matches the column loop the matrix-product bufferization emits: a row view
+/// of the packed buffer selected by the induction variable, a zeroed
+/// accumulator, one ordered reduction against a loop-invariant row, one export,
+/// and one store whose last index is the induction variable.
+FailureOr<ColumnLoopShape> matchColumnLoop(scf::ForOp loop) {
+  std::optional<int64_t> upperBound = getConstantIntValue(loop.getUpperBound());
+  if (!upperBound || *upperBound < 2 || !isUnitStepLoop(loop, *upperBound))
+    return failure();
+  Block &body = *loop.getBody();
+  Value column = loop.getInductionVar();
+
+  SmallVector<Operation *> operations = getShapeOperations(body);
+  if (operations.size() != 5)
+    return failure();
+  auto view = dyn_cast<memref::SubViewOp>(operations[0]);
+  auto zero = dyn_cast<ondrix::ondsp::AccZeroOp>(operations[1]);
+  auto reduce = dyn_cast<ondrix::ondsp::ReduceMacOp>(operations[2]);
+  auto exportOp = dyn_cast<ondrix::ondsp::AccExportOp>(operations[3]);
+  auto store = dyn_cast<memref::StoreOp>(operations[4]);
+  if (!view || !zero || !reduce || !exportOp || !store)
+    return failure();
+  if (reduce.getInitial() != zero.getAcc() || exportOp.getAcc() != reduce.getResult() ||
+      store.getValueToStore() != exportOp.getResult())
+    return failure();
+  if (!zero.getAcc().hasOneUse() || !reduce.getResult().hasOneUse() ||
+      !exportOp.getResult().hasOneUse() || !view.getResult().hasOneUse())
+    return failure();
+  if (lookThroughMemRefCasts(reduce.getRhs()) != view.getResult())
+    return failure();
+
+  // The view is row `column` of the packed buffer, all of its K elements.
+  Value packed = view.getSource();
+  auto packedType = dyn_cast<MemRefType>(packed.getType());
+  if (!packedType || packedType.getRank() != 2 || !packedType.hasStaticShape() ||
+      view.getType().getRank() != 1 || view.getMixedOffsets().size() != 2)
+    return failure();
+  auto viewColumn = view.getMixedOffsets()[0].dyn_cast<Value>();
+  if (!viewColumn || viewColumn != column || !isConstantIntValue(view.getMixedOffsets()[1], 0) ||
+      !isConstantIntValue(view.getMixedSizes()[0], 1) ||
+      !isConstantIntValue(view.getMixedSizes()[1], packedType.getDimSize(1)) ||
+      !isConstantIntValue(view.getMixedStrides()[0], 1) ||
+      !isConstantIntValue(view.getMixedStrides()[1], 1))
+    return failure();
+  if (packedType.getDimSize(0) != *upperBound)
+    return failure();
+
+  ColumnLoopShape shape;
+  shape.loop = loop;
+  shape.packed = packed;
+  shape.packNest = findPackNest(packed, shape.matrix);
+  if (!shape.packNest)
+    return failure();
+  shape.columnCount = *upperBound;
+  shape.innerCount = packedType.getDimSize(1);
+  if (shape.innerCount <= 0 || shape.innerCount > kMaxUnrolledTaps)
+    return failure();
+
+  // The reduced row is loop invariant, contiguous, and exactly K long.
+  shape.row = lookThroughMemRefCasts(reduce.getLhs());
+  std::optional<int64_t> rowLength = getStaticRankOneLength(shape.row);
+  if (!rowLength || *rowLength != shape.innerCount || !isBatchableRankOneMemRef(shape.row) ||
+      shape.row.getParentBlock() == &body)
+    return failure();
+
+  // The store addresses `output[..., column]` with a contiguous last dimension.
+  shape.output = store.getMemRef();
+  if (store.getIndices().empty() || store.getIndices().back() != column ||
+      shape.output.getParentBlock() == &body)
+    return failure();
+  auto outputType = dyn_cast<MemRefType>(shape.output.getType());
+  if (!outputType || !outputType.hasStaticShape() || !isLastMemrefDimUnitStride(outputType) ||
+      !ondrix::conversion::hasDefaultLLVMVectorMemorySpace(outputType) ||
+      outputType.getDimSize(outputType.getRank() - 1) != shape.columnCount)
+    return failure();
+  for (Value index : store.getIndices().drop_back()) {
+    if (index.getParentBlock() == &body)
+      return failure();
+    shape.outputLeadingIndices.push_back(index);
+  }
+
+  // The rewrite reads the right operand directly and moves the stores of a
+  // block past the loads of that block, so the three must be distinct storage.
+  if (ondrix::conversion::mayShareStorage(shape.output, shape.matrix) ||
+      ondrix::conversion::mayShareStorage(shape.output, shape.row) ||
+      ondrix::conversion::mayShareStorage(shape.matrix, shape.row))
+    return failure();
+
+  auto accumulator = dyn_cast<ondrix::ondsp::AccType>(reduce.getInitial().getType());
+  auto numeric = dyn_cast<ondrix::ondsp::FixedAttr>(reduce.getNumeric());
+  if (!accumulator || !numeric || !reduce.getProduct() ||
+      !ondrix::ondsp::isSingleLaneAccumulator(accumulator) ||
+      !ondrix::conversion::isSupportedFixedScalarMacDomain(accumulator, numeric,
+                                                           *reduce.getProduct()))
+    return failure();
+  auto storage = dyn_cast<IntegerType>(numeric.getStorage());
+  auto destinationStorage = dyn_cast<IntegerType>(exportOp.getDst().getStorage());
+  if (!storage || !destinationStorage ||
+      cast<MemRefType>(shape.matrix.getType()).getElementType() != storage ||
+      cast<MemRefType>(shape.row.getType()).getElementType() != storage ||
+      outputType.getElementType() != destinationStorage)
+    return failure();
+  shape.accumulator = accumulator;
+  shape.numeric = numeric;
+  shape.product = *reduce.getProduct();
+  shape.destination = exportOp.getDst();
+  shape.rounding = exportOp.getRounding();
+  shape.overflow = exportOp.getOverflow();
+  return shape;
+}
+
+/// Rewrites the leading full blocks of a column loop to compute `lanes`
+/// columns at a time: each term loads a contiguous row segment of the right
+/// operand and broadcasts the row element, so no packed copy is read. A column
+/// count below the vector width takes every column in one narrower block.
+void batchColumnOutputs(const ColumnLoopShape &shape, int64_t vectorWidth, OpBuilder &builder) {
+  scf::ForOp loop = shape.loop;
+  Location loc = loop.getLoc();
+  MLIRContext *context = builder.getContext();
+  int64_t lanes = std::min(vectorWidth, shape.columnCount);
+  int64_t batchedColumns = (shape.columnCount / lanes) * lanes;
+
+  auto laneAccumulator = ondrix::ondsp::AccType::get(
+      context, shape.accumulator.getStorage(), shape.accumulator.getFrac(),
+      shape.accumulator.getSignedness(), shape.accumulator.getUpdateOverflow(),
+      static_cast<unsigned>(lanes));
+  auto segmentType = VectorType::get({lanes}, cast<IntegerType>(shape.numeric.getStorage()));
+  auto sampleType = VectorType::get({lanes}, cast<IntegerType>(shape.destination.getStorage()));
+
+  builder.setInsertionPoint(loop);
+  Value zeroIndex = builder.create<arith::ConstantIndexOp>(loc, 0);
+  Value batchedEnd = builder.create<arith::ConstantIndexOp>(loc, batchedColumns);
+  Value batchStep = builder.create<arith::ConstantIndexOp>(loc, lanes);
+  SmallVector<Value> termIndices;
+  for (int64_t term = 0; term < shape.innerCount; ++term)
+    termIndices.push_back(builder.create<arith::ConstantIndexOp>(loc, term));
+
+  builder.create<scf::ForOp>(
+      loc, zeroIndex, batchedEnd, batchStep, ValueRange{},
+      [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
+        Value accumulator =
+            blockBuilder.create<ondrix::ondsp::AccZeroOp>(blockLoc, laneAccumulator);
+        // Ascending k for every lane, which is the declared ordered update of
+        // each of the `lanes` column reductions.
+        for (int64_t term = 0; term < shape.innerCount; ++term) {
+          Value segment = blockBuilder.create<vector::LoadOp>(
+              blockLoc, segmentType, shape.matrix, ValueRange{termIndices[term], blockStart});
+          Value element = blockBuilder.create<memref::LoadOp>(blockLoc, shape.row,
+                                                              ValueRange{termIndices[term]});
+          accumulator = blockBuilder.create<ondrix::ondsp::MacOp>(blockLoc, laneAccumulator,
+                                                                  accumulator, segment, element,
+                                                                  shape.numeric, shape.product);
+        }
+        Value samples = blockBuilder.create<ondrix::ondsp::AccExportOp>(
+            blockLoc, sampleType, accumulator, shape.destination, shape.rounding, shape.overflow);
+        SmallVector<Value> indices(shape.outputLeadingIndices);
+        indices.push_back(blockStart);
+        blockBuilder.create<vector::StoreOp>(blockLoc, samples, shape.output, indices);
+        blockBuilder.create<scf::YieldOp>(blockLoc);
+      });
+
+  if (batchedColumns < shape.columnCount) {
+    loop.getLowerBoundMutable().assign(batchedEnd);
+    return;
+  }
+  // Every column is batched: the ordered loop is dead, and with it the packed
+  // copy when nothing else reads it.
+  loop.erase();
+  Value packed = shape.packed;
+  SmallVector<Operation *> otherUsers;
+  for (Operation *user : packed.getUsers()) {
+    if (isa<memref::DeallocOp>(user) || shape.packNest->isAncestor(user))
+      continue;
+    otherUsers.push_back(user);
+  }
+  if (!otherUsers.empty())
+    return;
+  scf::ForOp packNest = shape.packNest;
+  packNest.erase();
+  for (Operation *user : llvm::make_early_inc_range(packed.getUsers()))
+    user->erase();
+  if (Operation *alloc = packed.getDefiningOp(); alloc && isa<memref::AllocOp>(alloc))
+    alloc->erase();
+}
+
+//===----------------------------------------------------------------------===//
+// Constant-table outputs: one lane per output row
+//===----------------------------------------------------------------------===//
+
+/// One unrolled output of a constant-table product: an ordered reduction of a
+/// shared input against an immutable constant row, exported, optionally
+/// requantized, and stored at a static position.
+struct ConstantRowOutput {
+  ondrix::ondsp::AccZeroOp zero;
+  ondrix::ondsp::ReduceMacOp reduce;
+  ondrix::ondsp::AccExportOp exportOp;
+  ondrix::ondsp::RoundShiftOp roundShift;
+  memref::StoreOp store;
+  int64_t position = 0;
+  SmallVector<llvm::APInt> coefficients;
+};
+
+/// Attributes two outputs must share to be lanes of one block.
+bool haveSameLaneContract(ConstantRowOutput &lhs, ConstantRowOutput &rhs) {
+  if (lhs.reduce.getLhs() != rhs.reduce.getLhs() ||
+      lhs.reduce.getInitial().getType() != rhs.reduce.getInitial().getType() ||
+      lhs.reduce.getNumeric() != rhs.reduce.getNumeric() ||
+      lhs.reduce.getProductAttr() != rhs.reduce.getProductAttr() ||
+      lhs.exportOp.getDst() != rhs.exportOp.getDst() ||
+      lhs.exportOp.getRounding() != rhs.exportOp.getRounding() ||
+      lhs.exportOp.getOverflow() != rhs.exportOp.getOverflow() ||
+      lhs.store.getMemRef() != rhs.store.getMemRef() ||
+      static_cast<bool>(lhs.roundShift) != static_cast<bool>(rhs.roundShift))
+    return false;
+  return !lhs.roundShift || lhs.roundShift.getScale() == rhs.roundShift.getScale();
+}
+
+/// Matches the chain around `reduce`, or nothing. The zero seed may be shared
+/// by several chains after common-subexpression elimination.
+std::optional<ConstantRowOutput> matchConstantRowOutput(ondrix::ondsp::ReduceMacOp reduce) {
+  ConstantRowOutput output;
+  output.reduce = reduce;
+  output.zero = reduce.getInitial().getDefiningOp<ondrix::ondsp::AccZeroOp>();
+  if (!output.zero || !reduce.getResult().hasOneUse() || !reduce.getProduct())
+    return std::nullopt;
+  output.exportOp =
+      dyn_cast<ondrix::ondsp::AccExportOp>(*output.reduce.getResult().getUsers().begin());
+  if (!output.exportOp || !output.exportOp.getResult().hasOneUse())
+    return std::nullopt;
+  Value stored = output.exportOp.getResult();
+  if (auto roundShift = dyn_cast<ondrix::ondsp::RoundShiftOp>(*stored.getUsers().begin())) {
+    if (!roundShift.getResult().hasOneUse())
+      return std::nullopt;
+    output.roundShift = roundShift;
+    stored = roundShift.getResult();
+  }
+  output.store = dyn_cast<memref::StoreOp>(*stored.getUsers().begin());
+  if (!output.store || output.store.getIndices().size() != 1)
+    return std::nullopt;
+  std::optional<int64_t> position = getConstantIntValue(output.store.getIndices().front());
+  if (!position)
+    return std::nullopt;
+  output.position = *position;
+
+  // Every operation of the chain sits in the block of the reduction.
+  Block *block = reduce->getBlock();
+  for (Operation *op : {output.zero.getOperation(), output.exportOp.getOperation(),
+                        output.roundShift ? output.roundShift.getOperation() : nullptr,
+                        output.store.getOperation()})
+    if (op && op->getBlock() != block)
+      return std::nullopt;
+
+  auto accumulator = dyn_cast<ondrix::ondsp::AccType>(reduce.getInitial().getType());
+  auto numeric = dyn_cast<ondrix::ondsp::FixedAttr>(output.reduce.getNumeric());
+  if (!accumulator || !numeric || !ondrix::ondsp::isSingleLaneAccumulator(accumulator) ||
+      !ondrix::conversion::isSupportedFixedScalarMacDomain(accumulator, numeric,
+                                                           *output.reduce.getProduct()))
+    return std::nullopt;
+
+  Value input = lookThroughMemRefCasts(output.reduce.getLhs());
+  Value row = lookThroughMemRefCasts(output.reduce.getRhs());
+  std::optional<int64_t> length = getStaticRankOneLength(input);
+  if (!length || *length > kMaxUnrolledTaps || getStaticRankOneLength(row) != length ||
+      !isBatchableRankOneMemRef(input) || !isTapReadableRankOneMemRef(row) ||
+      !isBatchableRankOneMemRef(output.store.getMemRef()))
+    return std::nullopt;
+  if (ondrix::conversion::mayShareStorage(input, output.store.getMemRef()))
+    return std::nullopt;
+  auto storage = dyn_cast<IntegerType>(numeric.getStorage());
+  if (!storage || cast<MemRefType>(input.getType()).getElementType() != storage ||
+      cast<MemRefType>(row.getType()).getElementType() != storage)
+    return std::nullopt;
+  std::optional<SmallVector<llvm::APInt>> coefficients =
+      getConstantCoefficientsInReadOrder(row, *length);
+  if (!coefficients)
+    return std::nullopt;
+  output.coefficients = std::move(*coefficients);
+  return output;
+}
+
+/// The store of the run that comes last in program order, when everything
+/// between the first reduction and it is either a member of the run or free of
+/// memory effects, so the run may be folded into one block placed there.
+memref::StoreOp findRunEnd(MutableArrayRef<ConstantRowOutput> outputs) {
+  DenseSet<Operation *> members;
+  Operation *begin = nullptr;
+  memref::StoreOp end;
+  for (ConstantRowOutput &output : outputs) {
+    for (Operation *op :
+         {output.zero.getOperation(), output.reduce.getOperation(), output.exportOp.getOperation(),
+          output.roundShift ? output.roundShift.getOperation() : nullptr,
+          output.store.getOperation()})
+      if (op)
+        members.insert(op);
+    if (!begin || output.reduce->isBeforeInBlock(begin))
+      begin = output.reduce;
+    if (!end || end->isBeforeInBlock(output.store))
+      end = output.store;
+  }
+  for (Operation *op = begin; op != end.getOperation(); op = op->getNextNode())
+    if (!members.contains(op) && !isMemoryEffectFree(op))
+      return nullptr;
+  return end;
+}
+
+/// Rewrites `outputs`, whose positions are consecutive, into one lane block.
+void batchConstantRowOutputs(MutableArrayRef<ConstantRowOutput> outputs, OpBuilder &builder) {
+  memref::StoreOp runEnd = findRunEnd(outputs);
+  if (!runEnd)
+    return;
+  ConstantRowOutput &first = outputs.front();
+  int64_t lanes = outputs.size();
+  int64_t length = first.coefficients.size();
+  Location loc = first.reduce.getLoc();
+  MLIRContext *context = builder.getContext();
+  auto accumulator = cast<ondrix::ondsp::AccType>(first.zero.getAcc().getType());
+  auto numeric = cast<ondrix::ondsp::FixedAttr>(first.reduce.getNumeric());
+  auto storage = cast<IntegerType>(numeric.getStorage());
+  Value input = lookThroughMemRefCasts(first.reduce.getLhs());
+
+  // A saturating profile drops its clamp only when every lane's row certifies
+  // that no ordered prefix reaches the rail; the group width is the smallest
+  // certified across the lanes.
+  bool certifiedWrap = accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Wrap;
+  if (!certifiedWrap)
+    certifiedWrap = llvm::all_of(outputs, [](ConstantRowOutput &output) {
+      return succeeded(
+          ondrix::analysis::FixedPointPrefixRangePlanner::proveOrderedZeroSeededConstantReduction(
+              output.reduce, output.coefficients));
+    });
+  int64_t termGroup = 0;
+  if (certifiedWrap) {
+    termGroup = std::numeric_limits<int64_t>::max();
+    for (ConstantRowOutput &output : outputs)
+      termGroup = std::min(
+          termGroup, ondrix::analysis::FixedPointPrefixRangePlanner::largestCertifiedTermGroup(
+                         output.reduce, output.coefficients, /*termWidth=*/32));
+  }
+  int64_t groupedTerms = termGroup >= 2 ? (length / termGroup) * termGroup : 0;
+
+  auto laneAccumulator = ondrix::ondsp::AccType::get(
+      context, accumulator.getStorage(), accumulator.getFrac(), accumulator.getSignedness(),
+      certifiedWrap ? ondrix::ondsp::OverflowMode::Wrap : accumulator.getUpdateOverflow(),
+      static_cast<unsigned>(lanes));
+  ondrix::ondsp::AccType groupAccumulator;
+  ondrix::ondsp::FixedAttr groupTermNumeric;
+  VectorType groupTermType;
+  if (groupedTerms > 0) {
+    groupAccumulator = ondrix::ondsp::AccType::get(
+        context, builder.getI32Type(), accumulator.getFrac(), accumulator.getSignedness(),
+        ondrix::ondsp::OverflowMode::Wrap, static_cast<unsigned>(lanes));
+    groupTermNumeric = ondrix::ondsp::FixedAttr::get(context, accumulator.getSignedness(),
+                                                     builder.getI32Type(), accumulator.getFrac());
+    groupTermType = VectorType::get({lanes}, builder.getI32Type());
+  }
+  auto columnType = VectorType::get({lanes}, storage);
+  auto sampleType =
+      VectorType::get({lanes}, cast<IntegerType>(first.exportOp.getDst().getStorage()));
+
+  builder.setInsertionPoint(runEnd);
+  Value acc = builder.create<ondrix::ondsp::AccZeroOp>(loc, laneAccumulator);
+  Value group;
+  for (int64_t term = 0; term < length; ++term) {
+    bool grouped = term < groupedTerms;
+    if (grouped && term % termGroup == 0)
+      group = builder.create<ondrix::ondsp::AccZeroOp>(loc, groupAccumulator);
+    // Lane l carries row l's coefficient for this term: the table column.
+    SmallVector<llvm::APInt> column;
+    for (const ConstantRowOutput &output : outputs)
+      column.push_back(output.coefficients[term]);
+    Value coefficients =
+        builder.create<arith::ConstantOp>(loc, DenseIntElementsAttr::get(columnType, column));
+    Value index = builder.create<arith::ConstantIndexOp>(loc, term);
+    Value element = builder.create<memref::LoadOp>(loc, input, ValueRange{index});
+    if (!grouped) {
+      acc = builder.create<ondrix::ondsp::MacOp>(loc, laneAccumulator, acc, coefficients, element,
+                                                 numeric, *first.reduce.getProduct());
+      continue;
+    }
+    group = builder.create<ondrix::ondsp::MacOp>(loc, groupAccumulator, group, coefficients,
+                                                 element, numeric, *first.reduce.getProduct());
+    if (term % termGroup == termGroup - 1) {
+      Value termValue = builder.create<ondrix::ondsp::AccExportOp>(
+          loc, groupTermType, group, groupTermNumeric, ondrix::ondsp::RoundingMode::TowardNegative,
+          ondrix::ondsp::OverflowMode::Wrap);
+      acc = builder.create<ondrix::ondsp::AccAddTermOp>(loc, laneAccumulator, acc, termValue,
+                                                        groupTermNumeric);
+    }
+  }
+  Value samples = builder.create<ondrix::ondsp::AccExportOp>(
+      loc, sampleType, acc, first.exportOp.getDst(), first.exportOp.getRounding(),
+      first.exportOp.getOverflow());
+  if (first.roundShift) {
+    auto storedType = VectorType::get({lanes}, first.roundShift.getResult().getType());
+    samples = builder.create<ondrix::ondsp::RoundShiftOp>(loc, storedType, samples,
+                                                          first.roundShift.getScale());
+  }
+  Value position = builder.create<arith::ConstantIndexOp>(loc, first.position);
+  builder.create<vector::StoreOp>(loc, samples, first.store.getMemRef(), ValueRange{position});
+
+  for (ConstantRowOutput &output : outputs) {
+    output.store.erase();
+    if (output.roundShift)
+      output.roundShift.erase();
+    output.exportOp.erase();
+    output.reduce.erase();
+    if (output.zero.getAcc().use_empty())
+      output.zero.erase();
+  }
+}
+
+/// Groups the unrolled constant-row outputs of one block into runs of
+/// `vectorWidth` consecutive positions under one contract, and batches each.
+void batchConstantRowOutputsInBlock(Block &block, int64_t vectorWidth, OpBuilder &builder) {
+  SmallVector<ConstantRowOutput> outputs;
+  for (auto reduce : block.getOps<ondrix::ondsp::ReduceMacOp>())
+    if (std::optional<ConstantRowOutput> output = matchConstantRowOutput(reduce))
+      outputs.push_back(std::move(*output));
+  if (static_cast<int64_t>(outputs.size()) < vectorWidth)
+    return;
+  llvm::stable_sort(outputs, [](const ConstantRowOutput &lhs, const ConstantRowOutput &rhs) {
+    return lhs.position < rhs.position;
+  });
+  size_t start = 0;
+  while (start + vectorWidth <= outputs.size()) {
+    bool run = true;
+    for (int64_t lane = 1; lane < vectorWidth && run; ++lane)
+      run = outputs[start + lane].position == outputs[start].position + lane &&
+            haveSameLaneContract(outputs[start], outputs[start + lane]);
+    if (!run) {
+      ++start;
+      continue;
+    }
+    batchConstantRowOutputs(MutableArrayRef<ConstantRowOutput>(outputs).slice(start, vectorWidth),
+                            builder);
+    start += vectorWidth;
+  }
+}
+
 class VectorizeOndspFixedDecimateOutputsPass final
     : public ondrix::impl::VectorizeOndspFixedDecimateOutputsBase<
           VectorizeOndspFixedDecimateOutputsPass> {
@@ -524,11 +1080,22 @@ public:
 
     OpBuilder builder(&getContext());
     for (scf::ForOp loop : candidates) {
-      FailureOr<DecimateLoopShape> shape = matchDecimateLoop(loop, vectorWidth);
-      if (failed(shape))
+      if (FailureOr<DecimateLoopShape> shape = matchDecimateLoop(loop, vectorWidth);
+          succeeded(shape)) {
+        batchDecimateOutputs(*shape, vectorWidth, builder);
         continue;
-      batchDecimateOutputs(*shape, vectorWidth, builder);
+      }
+      if (FailureOr<ColumnLoopShape> shape = matchColumnLoop(loop); succeeded(shape))
+        batchColumnOutputs(*shape, vectorWidth, builder);
     }
+
+    SmallVector<Block *> blocks;
+    getOperation().walk([&](func::FuncOp function) {
+      for (Block &block : function.getBody())
+        blocks.push_back(&block);
+    });
+    for (Block *block : blocks)
+      batchConstantRowOutputsInBlock(*block, vectorWidth, builder);
   }
 };
 
