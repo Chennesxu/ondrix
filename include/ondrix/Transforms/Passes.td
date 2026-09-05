@@ -274,6 +274,29 @@ def ForwardOndrixInsertExtract
   ];
 }
 
+def ForwardOndrixResultBuffers
+    : Pass<"forward-ondrix-result-buffers", "::mlir::ModuleOp"> {
+  let summary = "Write a function's result directly into its out-parameter";
+  let description = [{
+    After `buffer-results-to-out-params` a bufferized function still fills a
+    local allocation and copies it into the out-parameter at the end, so a
+    kernel whose caller supplies the destination pays an allocation and a
+    whole-buffer copy per call. This pass replaces such an allocation by the
+    out-parameter itself when the copy is the only use of that parameter, both
+    buffers have the same static identity-layout type, the allocation is
+    defined in the function's entry block, and nothing reads or writes the
+    allocation after the copy other than its deallocation; the copy, the
+    allocation and the deallocation are erased. Every store the function made
+    into the allocation now lands in the destination in the same order, so
+    the emitted values are unchanged. Anything else is left alone.
+  }];
+  let constructor = "ondrix::createForwardOndrixResultBuffersPass()";
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+    "mlir::memref::MemRefDialect",
+  ];
+}
+
 def ScalarizeOndspFixedReduceMac
     : Pass<"scalarize-ondsp-fixed-reduce-mac", "::mlir::ModuleOp"> {
   let summary = "Expand ordered fixed reduce_mac into its definitional mac loop";
