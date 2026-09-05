@@ -28,14 +28,11 @@ namespace {
 /// Largest accepted batch width, bounding every index the rewrite derives.
 constexpr int64_t kMaxVectorWidth = 4096;
 
-/// Longest accepted elementwise chain between the load and the store. The
-/// chain is re-emitted once per block, so an unbounded one would trade the
-/// ordered loop's compact body for an arbitrarily large one.
+/// Longest elementwise chain the matcher walks between the load and the
+/// store; a bound on the shapes this pass claims, not a cost model.
 constexpr size_t kMaxChainOperations = 8;
 
-/// Everything the matcher recovered from one bufferized elementwise loop. The
-/// loop is rewritten only when every field is present and consistent, so a
-/// partially understood loop is never left behind.
+/// Everything the matcher recovered from one bufferized elementwise loop.
 struct ElementwiseLoopShape {
   scf::ForOp loop;
   /// Number of elements the ordered loop transforms.
@@ -61,10 +58,9 @@ bool isBatchableElementwiseOp(Operation *operation) {
   return isa<ondrix::ondsp::RoundShiftOp, arith::ExtSIOp, arith::TruncIOp>(operation);
 }
 
-/// Matches the loop shape a bufferized elementwise requantization emits: per
-/// index, one load, a chain of elementwise integer transformations, and one
-/// store at the same index into a different sequence. Anything else fails
-/// closed and keeps the ordered schedule.
+/// Matches the loop a bufferized elementwise requantization emits: per index,
+/// one load, a chain of elementwise integer transformations, and one store at
+/// the same index into a different sequence.
 FailureOr<ElementwiseLoopShape> matchElementwiseLoop(scf::ForOp loop, int64_t vectorWidth) {
   if (!loop.getInitArgs().empty())
     return failure();
@@ -90,9 +86,8 @@ FailureOr<ElementwiseLoopShape> matchElementwiseLoop(scf::ForOp loop, int64_t ve
       load.getIndices().front() != index || store.getIndices().front() != index)
     return failure();
 
-  // In-order walk, each operation consuming the previous value with no second
-  // use: the operation count is then an exact cover, so no unrecognized side
-  // effect or escaping value can hide in the loop.
+  // Each operation must consume the previous value as its only use, so the
+  // operation count is an exact cover of the body.
   ElementwiseLoopShape shape;
   Value carried = load.getResult();
   for (Operation *operation : llvm::drop_begin(llvm::drop_end(operations))) {
@@ -113,9 +108,8 @@ FailureOr<ElementwiseLoopShape> matchElementwiseLoop(scf::ForOp loop, int64_t ve
   if (!isBatchableRankOneMemRef(shape.input) || !isBatchableRankOneMemRef(shape.output))
     return failure();
 
-  // The rewrite defers a block's store past that block's loads, so it is only
-  // sound when the two sequences are distinct storage; the refusal set and the
-  // residual precondition are in the pass description.
+  // A block's store is deferred past its loads, so the two sequences must be
+  // distinct storage.
   if (ondrix::conversion::mayShareStorage(shape.input, shape.output))
     return failure();
 
@@ -131,8 +125,7 @@ FailureOr<ElementwiseLoopShape> matchElementwiseLoop(scf::ForOp loop, int64_t ve
 
 /// Replaces the leading full blocks of an ordered elementwise loop with a
 /// batched loop over `vectorWidth` elements at a time and moves the ordered
-/// loop's lower bound past them. The ordered body is not touched, so the
-/// remaining elements keep exactly the schedule they had.
+/// loop's lower bound past them.
 void batchElementwiseLoop(const ElementwiseLoopShape &shape, int64_t vectorWidth,
                           OpBuilder &builder) {
   scf::ForOp loop = shape.loop;
@@ -166,8 +159,7 @@ void batchElementwiseLoop(const ElementwiseLoopShape &shape, int64_t vectorWidth
         blockBuilder.create<scf::YieldOp>(blockLoc);
       });
 
-  // A fully covered ordered loop is erased rather than left dead, which is the
-  // standing rule for every batcher here.
+  // A fully covered ordered loop is erased rather than left dead.
   if (batchedElements == shape.elementCount) {
     loop.erase();
     return;
@@ -196,8 +188,8 @@ public:
       return;
     }
 
-    // Collect first: the batched loop this pass creates must never be offered
-    // to the matcher, and the ordered loop is mutated in place.
+    // Collect first: the batched loop this pass creates must not be offered
+    // to the matcher.
     SmallVector<scf::ForOp> candidates;
     getOperation().walk([&](scf::ForOp loop) { candidates.push_back(loop); });
 

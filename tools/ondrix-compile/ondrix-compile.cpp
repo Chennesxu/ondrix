@@ -158,6 +158,11 @@ int main(int argc, char **argv) {
   if (!module)
     return 1;
 
+  if (llvmOptLevel > 3) {
+    errs() << "ondrix-compile: --llvm-opt-level must be 0 to 3\n";
+    return 1;
+  }
+
   if (emitKind != EmitKind::Contracts) {
     mlir::PassManager passManager(&context, mlir::ModuleOp::getOperationName());
     ondrix::OndrixDefaultPipelineOptions options;
@@ -173,10 +178,6 @@ int main(int argc, char **argv) {
       return 0;
     }
     if (emitKind == EmitKind::LLVMIR) {
-      if (llvmOptLevel > 3) {
-        errs() << "ondrix-compile: --llvm-opt-level must be 0 to 3\n";
-        return 1;
-      }
       mlir::registerBuiltinDialectTranslation(context);
       mlir::registerLLVMDialectTranslation(context);
       llvm::LLVMContext llvmContext;

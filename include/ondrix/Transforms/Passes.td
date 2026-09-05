@@ -284,12 +284,24 @@ def ForwardOndrixResultBuffers
     whole-buffer copy per call. This pass replaces such an allocation by the
     out-parameter itself when the copy is the only use of that parameter, both
     buffers have the same static identity-layout type, the allocation is
-    defined in the function's entry block, and nothing reads or writes the
-    allocation after the copy other than its deallocation; the copy, the
-    allocation and the deallocation are erased. Every store the function made
-    into the allocation now lands in the destination in the same order, so
-    the emitted values are unchanged. Anything else is left alone.
+    defined in the function's entry block, every use of the allocation is a
+    direct memory access (no view, cast, call or effect-free-unknown user
+    through which it could be reached again), and nothing uses it after the
+    copy other than its deallocation; the copy, the allocation and the
+    deallocation are erased.
+
+    Writing the destination before the inputs are fully read is the original
+    program only if the caller never passes the destination as, or
+    overlapping, another argument. That is a calling convention, so it is
+    declared with `distinct-out-params`; without the declaration the pass
+    forwards nothing. The same declaration authorizes recording the
+    destination's pointers for `apply-ondrix-llvm-argument-attributes`.
   }];
+  let options = [
+    Option<"distinctOutParams", "distinct-out-params", "bool", /*default=*/"false",
+           "Declares that every out-parameter is a caller buffer disjoint from "
+           "every other argument; required for any forwarding to happen">,
+  ];
   let constructor = "ondrix::createForwardOndrixResultBuffersPass()";
   let dependentDialects = [
     "mlir::func::FuncDialect",

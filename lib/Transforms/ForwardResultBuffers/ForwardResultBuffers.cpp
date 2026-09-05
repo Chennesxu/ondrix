@@ -3,6 +3,8 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/Interfaces/CallInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 
 namespace ondrix {
@@ -46,6 +48,15 @@ void markDestinationNoAlias(func::FuncOp function, BlockArgument destination) {
                     DenseI64ArrayAttr::get(function.getContext(), positions));
 }
 
+/// Whether `user` accesses the allocation directly, with no derived view, no
+/// call and no unknown effect through which the buffer could be reached again.
+bool isDirectMemoryUser(Operation *user) {
+  if (isa<CallOpInterface>(user) || !isa<MemoryEffectOpInterface>(user))
+    return false;
+  return llvm::none_of(user->getResultTypes(),
+                       [](Type type) { return isa<MemRefType, UnrankedMemRefType>(type); });
+}
+
 /// Whether `copy` is the whole-buffer hand-off of a local allocation into an
 /// otherwise untouched out-parameter, in the function's entry block, with no
 /// use of the allocation after it except its deallocation.
@@ -69,6 +80,8 @@ bool isForwardableResultCopy(memref::CopyOp copy) {
   for (Operation *user : source.getUsers()) {
     if (user == copy || isa<memref::DeallocOp>(user))
       continue;
+    if (!isDirectMemoryUser(user))
+      return false;
     Operation *ancestor = copy->getBlock()->findAncestorOpInBlock(*user);
     if (!ancestor || !ancestor->isBeforeInBlock(copy))
       return false;
@@ -79,7 +92,15 @@ bool isForwardableResultCopy(memref::CopyOp copy) {
 class ForwardOndrixResultBuffersPass final
     : public ondrix::impl::ForwardOndrixResultBuffersBase<ForwardOndrixResultBuffersPass> {
 public:
+  using ondrix::impl::ForwardOndrixResultBuffersBase<
+      ForwardOndrixResultBuffersPass>::ForwardOndrixResultBuffersBase;
+
   void runOnOperation() override {
+    // The rewrite reads inputs after writing the destination, which is only
+    // the original program when the caller keeps them apart; that is a
+    // calling convention the pipeline declares, never something inferred.
+    if (!distinctOutParams)
+      return;
     getOperation().walk([](func::FuncOp function) {
       if (function.isExternal())
         return;
@@ -111,4 +132,9 @@ public:
 
 std::unique_ptr<Pass> ondrix::createForwardOndrixResultBuffersPass() {
   return std::make_unique<ForwardOndrixResultBuffersPass>();
+}
+
+std::unique_ptr<Pass>
+ondrix::createForwardOndrixResultBuffersPass(const ForwardOndrixResultBuffersOptions &options) {
+  return std::make_unique<ForwardOndrixResultBuffersPass>(options);
 }

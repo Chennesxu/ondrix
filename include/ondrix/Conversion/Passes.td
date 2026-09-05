@@ -561,8 +561,11 @@ def VectorizeOndspFixedDecimateOutputs
     Two matrix-product shapes take the same lanes. The column loop of the
     `ondrix.matmul` bufferization, whose right operand is read through a
     transposed packed copy, is rewritten to load contiguous row segments of
-    the original right operand and broadcast the left row element per term;
-    when every column is batched the ordered loop and the packed copy are
+    the original right operand and broadcast the left row element per term,
+    which is the same value only while the packed copy is a snapshot: the
+    pack nest must precede the loop in a common block and nothing from the
+    pack to the loop may write memory, else the loop stays ordered. When
+    every column is batched the ordered loop and the packed copy are
     removed. A column count below `vector-width` takes every column in one
     narrower block. The unrolled outputs of a constant-table product, the
     `ondrix.dct` bufferization, are grouped by consecutive output position

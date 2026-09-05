@@ -616,6 +616,53 @@ scf::ForOp findPackNest(Value packed, Value &matrix) {
   return nullptr;
 }
 
+/// Whether `operation` and everything nested in it can only read memory.
+bool onlyReadsMemory(Operation *operation) {
+  if (isMemoryEffectFree(operation))
+    return true;
+  if (auto effects = dyn_cast<MemoryEffectOpInterface>(operation)) {
+    SmallVector<MemoryEffects::EffectInstance> instances;
+    effects.getEffects(instances);
+    return llvm::all_of(instances, [](const MemoryEffects::EffectInstance &instance) {
+      return isa<MemoryEffects::Read>(instance.getEffect());
+    });
+  }
+  if (!operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>())
+    return false;
+  for (Region &region : operation->getRegions())
+    for (Block &block : region)
+      for (Operation &nested : block)
+        if (!onlyReadsMemory(&nested))
+          return false;
+  return true;
+}
+
+/// The batched loop reads the source matrix where the ordered loop read its
+/// transposed copy, which is the same value only if nothing can write memory
+/// between the pack nest and the column loop: the pack nest must come first in
+/// a common block, and every operation from there to the loop, including the
+/// loop's enclosing operations but not the loop itself, may only read.
+bool isPackSnapshotIntact(scf::ForOp packNest, scf::ForOp loop) {
+  Block *block = packNest->getBlock();
+  Operation *ancestor = block->findAncestorOpInBlock(*loop);
+  if (!ancestor || !packNest->isBeforeInBlock(ancestor))
+    return false;
+  for (Operation *between = packNest->getNextNode(); between != ancestor;
+       between = between->getNextNode())
+    if (!onlyReadsMemory(between))
+      return false;
+  if (ancestor == loop)
+    return true;
+  WalkResult result = ancestor->walk<WalkOrder::PreOrder>([&](Operation *operation) {
+    if (operation == loop)
+      return WalkResult::skip();
+    if (operation->getNumRegions() > 0 && operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>())
+      return WalkResult::advance();
+    return onlyReadsMemory(operation) ? WalkResult::advance() : WalkResult::interrupt();
+  });
+  return !result.wasInterrupted();
+}
+
 /// Matches the column loop the matrix-product bufferization emits: a row view
 /// of the packed buffer selected by the induction variable, a zeroed
 /// accumulator, one ordered reduction against a loop-invariant row, one export,
@@ -666,7 +713,7 @@ FailureOr<ColumnLoopShape> matchColumnLoop(scf::ForOp loop) {
   shape.loop = loop;
   shape.packed = packed;
   shape.packNest = findPackNest(packed, shape.matrix);
-  if (!shape.packNest)
+  if (!shape.packNest || !isPackSnapshotIntact(shape.packNest, loop))
     return failure();
   shape.columnCount = *upperBound;
   shape.innerCount = packedType.getDimSize(1);

@@ -2,6 +2,7 @@
 // RUN: ondrix-compile %S/Inputs/f32_fir_filter_valid.ox --emit=llvmir --llvm-opt-level=0 | FileCheck %s --check-prefix=O0
 // RUN: not ondrix-compile %S/Inputs/f32_fir_filter_valid.ox --emit=llvmir --llvm-opt-level=4 2>&1 | FileCheck %s --check-prefix=BAD
 // RUN: ondrix-compile %S/Inputs/f32_fir_filter_valid.ox --emit=manifest | FileCheck %s --check-prefix=MANIFEST
+// RUN: not ondrix-compile %S/Inputs/f32_fir_filter_valid.ox --emit=manifest --llvm-opt-level=4 2>&1 | FileCheck %s --check-prefix=BAD
 
 // LLVM IR, not LLVM dialect, with the middle end already run at the requested
 // level; the O3 module carries no fast-math flag.

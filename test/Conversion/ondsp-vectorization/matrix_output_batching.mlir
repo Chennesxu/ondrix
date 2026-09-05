@@ -157,3 +157,36 @@ func.func @constant_rows_short(%input: memref<8xi16>) -> memref<3xi16> {
   memref.store %7, %alloc[%c2] : memref<3xi16>
   return %alloc : memref<3xi16>
 }
+
+// A write to the right operand between the pack nest and the column loop
+// means the packed copy is no longer a snapshot; the loop stays ordered.
+// CHECK-LABEL: func.func @matmul_source_written_after_pack
+// CHECK: ondsp.reduce_mac
+// CHECK-NOT: lanes
+func.func @matmul_source_written_after_pack(%a: memref<8x8xi16>, %b: memref<8x8xi16>) -> memref<8x8xi16> {
+  %c8 = arith.constant 8 : index
+  %c1 = arith.constant 1 : index
+  %c0 = arith.constant 0 : index
+  %zero = arith.constant 0 : i16
+  %alloc = memref.alloc() {alignment = 64 : i64} : memref<8x8xi16>
+  %packed = memref.alloc() {alignment = 64 : i64} : memref<8x8xi16>
+  scf.for %c = %c0 to %c8 step %c1 {
+    scf.for %k = %c0 to %c8 step %c1 {
+      %0 = memref.load %b[%k, %c] : memref<8x8xi16>
+      memref.store %0, %packed[%c, %k] : memref<8x8xi16>
+    }
+  }
+  memref.store %zero, %b[%c0, %c0] : memref<8x8xi16>
+  scf.for %i = %c0 to %c8 step %c1 {
+    %row = memref.subview %a[%i, 0] [1, 8] [1, 1] : memref<8x8xi16> to memref<8xi16, strided<[1], offset: ?>>
+    scf.for %j = %c0 to %c8 step %c1 {
+      %column = memref.subview %packed[%j, 0] [1, 8] [1, 1] : memref<8x8xi16> to memref<8xi16, strided<[1], offset: ?>>
+      %0 = ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = wrap>
+      %1 = ondsp.reduce_mac %0, %row, %column {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, memref<8xi16, strided<[1], offset: ?>>, memref<8xi16, strided<[1], offset: ?>>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+      %2 = ondsp.acc_export %1 {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<nearest_even>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>) -> i16
+      memref.store %2, %alloc[%i, %j] : memref<8x8xi16>
+    }
+  }
+  memref.dealloc %packed : memref<8x8xi16>
+  return %alloc : memref<8x8xi16>
+}
