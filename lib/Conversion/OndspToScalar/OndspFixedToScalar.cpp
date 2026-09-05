@@ -461,11 +461,16 @@ static Value saturatingNegatePackedQ15(Location loc, Value input,
   return rewriter.create<arith::SelectOp>(loc, isMinimum, maximum, negated);
 }
 
+/// `productWidth` widens the multiplication itself past the exact product
+/// width; the value is unchanged, but lanes that feed a wider carrier then
+/// multiply in that carrier and skip a second widening after the product.
 static Value lowerSignedProduct(Location loc, Value lhs, Value rhs,
                                 ondrix::ondsp::FixedAttr numeric,
-                                ondrix::ondsp::ProductSemantics semantics, OpBuilder &builder) {
+                                ondrix::ondsp::ProductSemantics semantics, OpBuilder &builder,
+                                unsigned productWidth = 0) {
   unsigned storageWidth = cast<IntegerType>(numeric.getStorage()).getWidth();
-  Type fullProductType = getIntegerTypeLike(lhs.getType(), storageWidth * 2, builder);
+  Type fullProductType =
+      getIntegerTypeLike(lhs.getType(), std::max(productWidth, storageWidth * 2), builder);
   auto widen = [&](Value value) -> Value {
     if (value.getType() == fullProductType)
       return value;
@@ -509,6 +514,16 @@ public:
     Location loc = op.getLoc();
     Value value = adaptor.getLhs();
     Value coefficient = adaptor.getRhs();
+    // Wrapping lanes feeding a carrier wider than the exact product multiply
+    // in the carrier: one widening multiply instead of a multiply and a
+    // widening. A saturating update keeps the exact width its rails need.
+    unsigned carrierWidth = getIntegerElementType(adaptor.getAcc().getType()).getWidth();
+    unsigned exactProductWidth = 2 * cast<IntegerType>(op.getNumeric().getStorage()).getWidth();
+    bool multiplyInCarrier = !ondrix::ondsp::isSingleLaneAccumulator(accumulator) &&
+                             accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Wrap &&
+                             domain->product.selection == ondrix::ondsp::ProductSelection::Full &&
+                             domain->product.shift == 0 && carrierWidth > exactProductWidth;
+    unsigned productWidth = multiplyInCarrier ? carrierWidth : 0;
     if (!ondrix::ondsp::isSingleLaneAccumulator(accumulator)) {
       auto valueType = dyn_cast<VectorType>(value.getType());
       if (!valueType || valueType.isScalable() || valueType.getRank() != 1 ||
@@ -518,18 +533,18 @@ public:
       // runtime coefficient against runtime lanes in one 128-bit register is
       // widened before the splat, which is the form the backend folds best.
       Type splatElement = coefficient.getType();
-      unsigned productWidth = 2 * cast<IntegerType>(op.getNumeric().getStorage()).getWidth();
       if (!matchPattern(coefficient, m_Constant()) && !matchPattern(value, m_Constant()) &&
-          valueType.getNumElements() * productWidth <= 128) {
-        splatElement = rewriter.getIntegerType(productWidth);
+          valueType.getNumElements() * exactProductWidth <= 128) {
+        splatElement =
+            rewriter.getIntegerType(multiplyInCarrier ? carrierWidth : exactProductWidth);
         coefficient = rewriter.create<arith::ExtSIOp>(loc, splatElement, coefficient);
       }
       coefficient = rewriter.create<vector::BroadcastOp>(
           loc, VectorType::get(valueType.getShape(), splatElement), coefficient);
     }
 
-    Value product =
-        lowerSignedProduct(loc, value, coefficient, op.getNumeric(), domain->product, rewriter);
+    Value product = lowerSignedProduct(loc, value, coefficient, op.getNumeric(), domain->product,
+                                       rewriter, productWidth);
     Value updated = lowerAccumulatorUpdate(loc, adaptor.getAcc(), product,
                                            cast<IntegerType>(accumulator.getStorage()).getWidth(),
                                            accumulator.getUpdateOverflow(), operation, rewriter);

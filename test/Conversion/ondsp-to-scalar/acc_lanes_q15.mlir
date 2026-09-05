@@ -82,12 +82,13 @@ func.func @lane_update_wrap(
 
 // CHECK-LABEL: func.func @lane_update_wrap(
 // CHECK-SAME: %[[ACC:.*]]: vector<4xi64>, %[[VALUE:.*]]: vector<4xi16>, %[[COEFFICIENT:.*]]: i16) -> vector<4xi64>
-// Four runtime lanes fit one 128-bit register, so the splat is widened first.
-// CHECK: %[[COEFFICIENT_EXT:.*]] = arith.extsi %[[COEFFICIENT]] : i16 to i32
-// CHECK: vector.broadcast %[[COEFFICIENT_EXT]] : i32 to vector<4xi32>
-// CHECK: arith.muli {{.*}} : vector<4xi32>
-// CHECK: %[[PRODUCT_EXT:.*]] = arith.extsi {{.*}} : vector<4xi32> to vector<4xi64>
-// CHECK: %[[UPDATED:.*]] = arith.addi %[[ACC]], %[[PRODUCT_EXT]] : vector<4xi64>
+// Four runtime lanes fit one 128-bit register, so the splat is widened first,
+// and a wrapping carrier wider than the product multiplies in the carrier.
+// CHECK: %[[COEFFICIENT_EXT:.*]] = arith.extsi %[[COEFFICIENT]] : i16 to i64
+// CHECK: %[[SPLAT:.*]] = vector.broadcast %[[COEFFICIENT_EXT]] : i64 to vector<4xi64>
+// CHECK: %[[VALUE_EXT:.*]] = arith.extsi %[[VALUE]] : vector<4xi16> to vector<4xi64>
+// CHECK: %[[PRODUCT:.*]] = arith.muli %[[VALUE_EXT]], %[[SPLAT]] : vector<4xi64>
+// CHECK: %[[UPDATED:.*]] = arith.addi %[[ACC]], %[[PRODUCT]] : vector<4xi64>
 // CHECK-NOT: arith.cmpi
 // CHECK-NOT: arith.trunci
 // CHECK: return %[[UPDATED]] : vector<4xi64>
