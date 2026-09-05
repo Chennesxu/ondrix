@@ -2,9 +2,12 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/CallInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
 
 namespace ondrix {
@@ -48,13 +51,63 @@ void markDestinationNoAlias(func::FuncOp function, BlockArgument destination) {
                     DenseI64ArrayAttr::get(function.getContext(), positions));
 }
 
-/// Whether `user` accesses the allocation directly, with no derived view, no
-/// call and no unknown effect through which the buffer could be reached again.
-bool isDirectMemoryUser(Operation *user) {
-  if (isa<CallOpInterface>(user) || !isa<MemoryEffectOpInterface>(user))
+/// Whether `user` is one of the plain accesses that read or write the buffer
+/// in place without letting its address or a view of it escape.
+bool isPlainAccess(Operation *user) {
+  return isa<memref::LoadOp, memref::StoreOp, memref::CopyOp, memref::DeallocOp, vector::LoadOp,
+             vector::StoreOp, vector::TransferReadOp, vector::TransferWriteOp>(user);
+}
+
+/// The buffer a memref value was derived from, through view-like operations.
+Value getRootBuffer(Value memref) {
+  while (auto view = memref.getDefiningOp<ViewLikeOpInterface>())
+    memref = view.getViewSource();
+  return memref;
+}
+
+/// Whether every memory access in `function` roots at one of its arguments, a
+/// local allocation, or a constant global: the storage set the declared
+/// calling convention speaks about. A call, an effect on unknown storage, or a
+/// mutable global reaches storage the destination could alias.
+bool accessesOnlyDeclaredStorage(func::FuncOp function) {
+  Block &entry = function.getBody().front();
+  auto isDeclaredRoot = [&](Value root) {
+    if (auto argument = dyn_cast<BlockArgument>(root))
+      return argument.getOwner() == &entry;
+    Operation *definition = root.getDefiningOp();
+    if (isa_and_nonnull<memref::AllocOp, memref::AllocaOp>(definition))
+      return true;
+    if (auto global = dyn_cast_or_null<memref::GetGlobalOp>(definition)) {
+      auto symbol =
+          SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(global, global.getNameAttr());
+      return symbol && symbol.getConstant();
+    }
     return false;
-  return llvm::none_of(user->getResultTypes(),
-                       [](Type type) { return isa<MemRefType, UnrankedMemRefType>(type); });
+  };
+  WalkResult result = function.walk([&](Operation *operation) {
+    if (operation == function.getOperation())
+      return WalkResult::advance();
+    if (isa<CallOpInterface>(operation))
+      return WalkResult::interrupt();
+    if (isMemoryEffectFree(operation))
+      return WalkResult::advance();
+    auto effects = dyn_cast<MemoryEffectOpInterface>(operation);
+    if (!effects)
+      return operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>() ? WalkResult::advance()
+                                                                       : WalkResult::interrupt();
+    SmallVector<MemoryEffects::EffectInstance> instances;
+    effects.getEffects(instances);
+    for (const MemoryEffects::EffectInstance &instance : instances) {
+      if (isa<MemoryEffects::Allocate, MemoryEffects::Free>(instance.getEffect()))
+        continue;
+      Value value = instance.getValue();
+      if (!value || !isa<MemRefType, UnrankedMemRefType>(value.getType()) ||
+          !isDeclaredRoot(getRootBuffer(value)))
+        return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return !result.wasInterrupted();
 }
 
 /// Whether `copy` is the whole-buffer hand-off of a local allocation into an
@@ -80,7 +133,7 @@ bool isForwardableResultCopy(memref::CopyOp copy) {
   for (Operation *user : source.getUsers()) {
     if (user == copy || isa<memref::DeallocOp>(user))
       continue;
-    if (!isDirectMemoryUser(user))
+    if (!isPlainAccess(user))
       return false;
     Operation *ancestor = copy->getBlock()->findAncestorOpInBlock(*user);
     if (!ancestor || !ancestor->isBeforeInBlock(copy))
@@ -102,7 +155,7 @@ public:
     if (!distinctOutParams)
       return;
     getOperation().walk([](func::FuncOp function) {
-      if (function.isExternal())
+      if (function.isExternal() || !accessesOnlyDeclaredStorage(function))
         return;
       SmallVector<memref::CopyOp> copies;
       for (Operation &operation : function.getBody().front())

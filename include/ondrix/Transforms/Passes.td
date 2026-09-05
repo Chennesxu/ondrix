@@ -285,22 +285,28 @@ def ForwardOndrixResultBuffers
     out-parameter itself when the copy is the only use of that parameter, both
     buffers have the same static identity-layout type, the allocation is
     defined in the function's entry block, every use of the allocation is a
-    direct memory access (no view, cast, call or effect-free-unknown user
-    through which it could be reached again), and nothing uses it after the
-    copy other than its deallocation; the copy, the allocation and the
-    deallocation are erased.
+    plain load, store, copy or deallocation (no view, cast, address
+    extraction or call through which it could be reached again), and nothing
+    uses it after the copy other than its deallocation; the copy, the
+    allocation and the deallocation are erased.
 
     Writing the destination before the inputs are fully read is the original
-    program only if the caller never passes the destination as, or
-    overlapping, another argument. That is a calling convention, so it is
-    declared with `distinct-out-params`; without the declaration the pass
-    forwards nothing. The same declaration authorizes recording the
+    program only if the destination overlaps no storage the function reads or
+    writes by any other route. That is a calling convention, declared with
+    `distinct-out-params`: every out-parameter is a caller buffer disjoint
+    from every other argument and from every global the function reaches.
+    Without the declaration the pass forwards nothing, and a function whose
+    memory accesses do not all root at its arguments, its local allocations
+    or constant globals (a call, an unknown effect, a mutable global) is left
+    alone even under the declaration, since the convention cannot speak for
+    storage it does not name. The same declaration authorizes recording the
     destination's pointers for `apply-ondrix-llvm-argument-attributes`.
   }];
   let options = [
     Option<"distinctOutParams", "distinct-out-params", "bool", /*default=*/"false",
            "Declares that every out-parameter is a caller buffer disjoint from "
-           "every other argument; required for any forwarding to happen">,
+           "every other argument and from every global the function reaches; "
+           "required for any forwarding to happen">,
   ];
   let constructor = "ondrix::createForwardOndrixResultBuffersPass()";
   let dependentDialects = [

@@ -9,4 +9,5 @@ add_ondrix_library(OndrixForwardResultBuffers
   MLIRIR
   MLIRMemRefDialect
   MLIRPass
+  MLIRVectorDialect
 )

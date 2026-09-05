@@ -96,3 +96,61 @@ func.func @source_viewed(%in: memref<8xi32>, %out: memref<8xi32>) {
   memref.dealloc %alloc : memref<8xi32>
   return
 }
+
+// -----
+
+// The allocation's address escapes through an index, so a later write through
+// it could not be seen; the copy stays.
+// CHECK-LABEL: func.func @address_escapes(
+// CHECK: memref.alloc
+// CHECK: memref.copy
+func.func @address_escapes(%in: memref<8xi32>, %out: memref<8xi32>) -> index {
+  %c0 = arith.constant 0 : index
+  %alloc = memref.alloc() {alignment = 64 : i64} : memref<8xi32>
+  %address = memref.extract_aligned_pointer_as_index %alloc : memref<8xi32> -> index
+  %v = memref.load %in[%c0] : memref<8xi32>
+  memref.store %v, %alloc[%c0] : memref<8xi32>
+  memref.copy %alloc, %out : memref<8xi32> to memref<8xi32>
+  memref.dealloc %alloc : memref<8xi32>
+  return %address : index
+}
+
+// -----
+
+// A mutable global is storage the declared convention does not name, so a
+// function reading one is not forwarded even under the declaration.
+// CHECK-LABEL: func.func @reads_mutable_global(
+// CHECK: memref.alloc
+// CHECK: memref.copy
+memref.global @state : memref<8xi32> = dense<7>
+func.func @reads_mutable_global(%out: memref<8xi32>) -> i32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : i32
+  %g = memref.get_global @state : memref<8xi32>
+  %alloc = memref.alloc() {alignment = 64 : i64} : memref<8xi32>
+  memref.store %c1, %alloc[%c0] : memref<8xi32>
+  %v = memref.load %g[%c0] : memref<8xi32>
+  memref.copy %alloc, %out : memref<8xi32> to memref<8xi32>
+  memref.dealloc %alloc : memref<8xi32>
+  return %v : i32
+}
+
+// -----
+
+// A constant global cannot be the destination of a legal write, so reading
+// one keeps the forwarding.
+// CHECK-LABEL: func.func @reads_constant_global(
+// CHECK-NOT: memref.alloc
+// CHECK-NOT: memref.copy
+memref.global "private" constant @table : memref<8xi32> = dense<7>
+func.func @reads_constant_global(%out: memref<8xi32>) -> i32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : i32
+  %g = memref.get_global @table : memref<8xi32>
+  %alloc = memref.alloc() {alignment = 64 : i64} : memref<8xi32>
+  memref.store %c1, %alloc[%c0] : memref<8xi32>
+  %v = memref.load %g[%c0] : memref<8xi32>
+  memref.copy %alloc, %out : memref<8xi32> to memref<8xi32>
+  memref.dealloc %alloc : memref<8xi32>
+  return %v : i32
+}
