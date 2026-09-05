@@ -1177,10 +1177,11 @@ def Ondrix_SineOp : Ondrix_TrigOp<"sine"> {
     `i64`, and its `1.7e-13` relative error is far under the value's own LSB.
 
     Distance to the correctly-rounded sine, measured offline over ALL `2^32`
-    phases: exact at 3022581719 of them, one LSB at 1272384953, two LSB at
-    624, and never more. The two-LSB bound is what the execution gate
-    enforces continuously, alongside bit-exactness against an independent
-    restatement of the contract above.
+    phases against a long double reference: exact at 3022581446 of them, one
+    LSB at 1272385226, two LSB at 624, and never more (a binary64 reference
+    misclassifies 273 near-ties as exact). The two-LSB bound is what the
+    execution gate enforces continuously, alongside bit-exactness against an
+    independent restatement of the contract above.
   }];
 }
 
@@ -1861,8 +1862,9 @@ def Ondrix_CxPhaseOp : Ondrix_Op<"cx_phase", [Pure]> {
     nearest-even; the second division truncates and its `2^-32` error is
     under a twentieth of an output LSB. The `2^64` input domain cannot be
     swept; measured over `2^30` pseudo-random Q31 pairs the result is exact
-    at 918798647 of them, one `Q0.32` LSB from the correctly rounded turn at
-    154943177, never more, and the gate enforces that one-LSB bound at both
+    at about 85.57% of them (918791410 on the recorded splitmix64 sample), one
+    `Q0.32` LSB from the correctly rounded turn at the rest, never more, and
+    the gate enforces that one-LSB bound at both
     component widths alongside bit-exactness against a restatement. The axes
     and diagonals are exact at both turn widths.
   }];
