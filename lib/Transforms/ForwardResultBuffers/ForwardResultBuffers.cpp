@@ -14,6 +14,38 @@ using namespace mlir;
 
 namespace {
 
+/// Position of the first LLVM argument that `argument` expands to under the
+/// default memref descriptor convention: a ranked memref becomes two pointers,
+/// an offset and a size and a stride per dimension; anything else stays one.
+int64_t getExpandedArgumentPosition(func::FuncOp function, unsigned argument) {
+  int64_t position = 0;
+  for (unsigned index = 0; index < argument; ++index) {
+    Type type = function.getArgument(index).getType();
+    if (auto memref = dyn_cast<MemRefType>(type))
+      position += 3 + 2 * memref.getRank();
+    else if (isa<UnrankedMemRefType>(type))
+      position += 2;
+    else
+      position += 1;
+  }
+  return position;
+}
+
+/// Records that the forwarded destination's allocated and aligned pointers may
+/// carry `noalias` once the descriptor is expanded: the parameter stands for a
+/// result the function used to allocate itself, which aliased nothing.
+void markDestinationNoAlias(func::FuncOp function, BlockArgument destination) {
+  int64_t first = getExpandedArgumentPosition(function, destination.getArgNumber());
+  SmallVector<int64_t> positions;
+  if (auto existing =
+          function->getAttrOfType<DenseI64ArrayAttr>(ondrix::kNoAliasPointerArgumentsAttr))
+    positions.assign(existing.asArrayRef().begin(), existing.asArrayRef().end());
+  positions.push_back(first);
+  positions.push_back(first + 1);
+  function->setAttr(ondrix::kNoAliasPointerArgumentsAttr,
+                    DenseI64ArrayAttr::get(function.getContext(), positions));
+}
+
 /// Whether `copy` is the whole-buffer hand-off of a local allocation into an
 /// otherwise untouched out-parameter, in the function's entry block, with no
 /// use of the allocation after it except its deallocation.
@@ -69,6 +101,7 @@ public:
         Operation *allocation = source.getDefiningOp();
         source.replaceAllUsesWith(destination);
         allocation->erase();
+        markDestinationNoAlias(function, cast<BlockArgument>(destination));
       }
     });
   }

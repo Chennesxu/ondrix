@@ -297,6 +297,25 @@ def ForwardOndrixResultBuffers
   ];
 }
 
+def ApplyOndrixLlvmArgumentAttributes
+    : Pass<"apply-ondrix-llvm-argument-attributes", "::mlir::ModuleOp"> {
+  let summary = "Attach recorded argument attributes after descriptor expansion";
+  let description = [{
+    `convert-func-to-llvm` expands a memref argument into its descriptor
+    fields and drops the argument's attributes on the way, so a fact known at
+    the memref level about one buffer cannot be stated to LLVM directly.
+    `forward-ondrix-result-buffers` records on the function the expanded
+    positions of the forwarded destination's two pointers; this pass, run
+    after the conversion, marks those `llvm.func` arguments `llvm.noalias`
+    and removes the record. The fact is the one the forwarding relied on: the
+    destination stands for a result the function used to allocate itself,
+    which aliased no other argument. Functions without the record are left
+    untouched.
+  }];
+  let constructor = "ondrix::createApplyOndrixLlvmArgumentAttributesPass()";
+  let dependentDialects = ["mlir::LLVM::LLVMDialect"];
+}
+
 def ScalarizeOndspFixedReduceMac
     : Pass<"scalarize-ondsp-fixed-reduce-mac", "::mlir::ModuleOp"> {
   let summary = "Expand ordered fixed reduce_mac into its definitional mac loop";

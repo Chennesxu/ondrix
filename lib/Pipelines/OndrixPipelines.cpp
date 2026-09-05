@@ -116,7 +116,7 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   os << "convert-vector-to-scf,expand-strided-metadata,lower-affine,convert-scf-to-cf,"
         "convert-vector-to-llvm,"
         "finalize-memref-to-llvm,convert-math-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,"
-        "convert-func-to-llvm,reconcile-unrealized-casts";
+        "convert-func-to-llvm,apply-ondrix-llvm-argument-attributes,reconcile-unrealized-casts";
   return text;
 }
 

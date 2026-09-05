@@ -53,3 +53,21 @@ func.func @source_read_after(%in: memref<8xi32>, %out: memref<8xi32>) -> i32 {
   memref.dealloc %alloc : memref<8xi32>
   return %w : i32
 }
+
+// -----
+
+// The forwarded destination's descriptor pointers are marked noalias once
+// the descriptor is expanded; the inputs are not.
+// RUN: ondrix-opt %s --forward-ondrix-result-buffers --split-input-file --finalize-memref-to-llvm --convert-arith-to-llvm --convert-func-to-llvm --apply-ondrix-llvm-argument-attributes --reconcile-unrealized-casts | FileCheck %s --check-prefix=LLVM
+// LLVM-LABEL: llvm.func @noalias_destination(
+// LLVM-SAME: %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: i64, %{{.*}}: i64, %{{.*}}: i64, %{{.*}}: !llvm.ptr {llvm.noalias}, %{{.*}}: !llvm.ptr {llvm.noalias}, %{{.*}}: i64
+// LLVM-NOT: ondrix.noalias_pointer_args
+func.func @noalias_destination(%in: memref<8xi32>, %out: memref<8xi32>) {
+  %c0 = arith.constant 0 : index
+  %alloc = memref.alloc() {alignment = 64 : i64} : memref<8xi32>
+  %v = memref.load %in[%c0] : memref<8xi32>
+  memref.store %v, %alloc[%c0] : memref<8xi32>
+  memref.copy %alloc, %out : memref<8xi32> to memref<8xi32>
+  memref.dealloc %alloc : memref<8xi32>
+  return
+}
