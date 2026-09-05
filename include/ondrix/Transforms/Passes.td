@@ -310,6 +310,7 @@ def ForwardOndrixResultBuffers
   ];
   let constructor = "ondrix::createForwardOndrixResultBuffersPass()";
   let dependentDialects = [
+    "mlir::cf::ControlFlowDialect",
     "mlir::func::FuncDialect",
     "mlir::memref::MemRefDialect",
   ];

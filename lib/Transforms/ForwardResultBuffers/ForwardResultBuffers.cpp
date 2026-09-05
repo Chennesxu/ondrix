@@ -1,5 +1,6 @@
 #include "ondrix/Transforms/Passes.h"
 
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -9,6 +10,9 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "forward-ondrix-result-buffers"
 
 namespace ondrix {
 #define GEN_PASS_DEF_FORWARDONDRIXRESULTBUFFERS
@@ -84,17 +88,25 @@ bool accessesOnlyDeclaredStorage(func::FuncOp function) {
     }
     return false;
   };
+  auto refuse = [&](Operation *operation, StringRef why) {
+    LLVM_DEBUG(llvm::dbgs() << "refusing " << function.getName() << ": " << why << " at "
+                            << *operation << "\n");
+    return WalkResult::interrupt();
+  };
   WalkResult result = function.walk([&](Operation *operation) {
     if (operation == function.getOperation())
       return WalkResult::advance();
     if (isa<CallOpInterface>(operation))
-      return WalkResult::interrupt();
-    if (isMemoryEffectFree(operation))
+      return refuse(operation, "call");
+    // A runtime assertion carries no effect declaration but touches no
+    // storage; the lowering's equal-length checks are this shape.
+    if (isMemoryEffectFree(operation) || isa<cf::AssertOp>(operation))
       return WalkResult::advance();
     auto effects = dyn_cast<MemoryEffectOpInterface>(operation);
     if (!effects)
-      return operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>() ? WalkResult::advance()
-                                                                       : WalkResult::interrupt();
+      return operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>()
+                 ? WalkResult::advance()
+                 : refuse(operation, "no memory-effect information");
     SmallVector<MemoryEffects::EffectInstance> instances;
     effects.getEffects(instances);
     for (const MemoryEffects::EffectInstance &instance : instances) {
@@ -103,7 +115,7 @@ bool accessesOnlyDeclaredStorage(func::FuncOp function) {
       Value value = instance.getValue();
       if (!value || !isa<MemRefType, UnrankedMemRefType>(value.getType()) ||
           !isDeclaredRoot(getRootBuffer(value)))
-        return WalkResult::interrupt();
+        return refuse(operation, "effect on storage the convention does not name");
     }
     return WalkResult::advance();
   });

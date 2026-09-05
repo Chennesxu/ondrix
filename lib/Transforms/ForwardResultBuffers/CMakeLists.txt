@@ -5,6 +5,7 @@ add_ondrix_library(OndrixForwardResultBuffers
   MLIROndrixTransformsPassesIncGen
 
   LINK_LIBS PUBLIC
+  MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRIR
   MLIRMemRefDialect

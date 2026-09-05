@@ -11,12 +11,15 @@
 // CHECK-NOT: memref.copy
 // CHECK-NOT: memref.dealloc
 // CHECK: return
-// Without the declared calling convention nothing is forwarded.
+// Without the declared calling convention nothing is forwarded. A runtime
+// assertion touches no storage and does not block the forwarding.
 // UNDECLARED-LABEL: func.func @forwarded(
 // UNDECLARED: memref.alloc
 // UNDECLARED: memref.copy
 func.func @forwarded(%in: memref<8xi32>, %out: memref<8xi32>) {
   %c0 = arith.constant 0 : index
+  %true = arith.constant true
+  cf.assert %true, "equal lengths"
   %alloc = memref.alloc() {alignment = 64 : i64} : memref<8xi32>
   %v = memref.load %in[%c0] : memref<8xi32>
   memref.store %v, %alloc[%c0] : memref<8xi32>
