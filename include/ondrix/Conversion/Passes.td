@@ -565,7 +565,10 @@ def VectorizeOndspFixedDecimateOutputs
   let description = [{
     Rewrite the leading full blocks of a bufferized sliding-window output
     loop -- `ondrix.fir_filter`, `ondrix.conv1d`, or `ondrix.fir_decimate`
-    at factor two -- to compute `vector-width` outputs at a time in a
+    at factor two -- to compute `vector-width` outputs at a time (or, when the
+    output count cannot fill that width, the widest halving of it that the
+    count admits, the rule the column and constant-row batchers below share:
+    the declared width is the target's register, not a per-kernel choice) in a
     multi-lane accumulator, and leave the remaining outputs on the
     untouched ordered loop.
 

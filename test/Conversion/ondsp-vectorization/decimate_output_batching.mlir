@@ -1,5 +1,6 @@
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --cse --canonicalize > %t.ordered.mlir
 // RUN: ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-decimate-outputs="vector-width=8" | FileCheck %s
+// RUN: ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-decimate-outputs="vector-width=32" | FileCheck %s --check-prefix=STEP
 // RUN: not ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-decimate-outputs="vector-width=1" 2>&1 | FileCheck %s --check-prefix=WIDTH
 // The width becomes the accumulator's unsigned lane count, so it is bounded
 // from above as well: an unchecked width could truncate on the way into the
@@ -15,6 +16,18 @@
 
 // WIDTH: vector-width must be greater than one
 // WIDE: vector-width must not exceed 4096
+
+// Nineteen outputs cannot fill a 32-lane batch: the width steps down by halves
+// to sixteen, the widest block the output count admits, and 16..18 stay ordered.
+// STEP-LABEL: func.func @batch_static_factor_two
+// STEP: %[[END:.*]] = arith.constant 16 : index
+// STEP: %[[STEP:.*]] = arith.constant 16 : index
+// STEP: scf.for %{{.*}} = %{{.*}} to %[[END]] step %[[STEP]] {
+// STEP: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = saturate, lanes = 16>
+// STEP: vector.load %{{.*}} : memref<44xi16>, vector<32xi16>
+// STEP: vector.store {{.*}} : memref<19xi16>, vector<16xi16>
+// STEP: scf.for %{{.*}} = %[[END]] to %{{.*}} step %{{.*}} {
+// STEP: ondsp.reduce_mac
 
 // CHECK-LABEL: func.func @batch_static_factor_two
 // The batched loop steps by the vector width over the full blocks.
@@ -82,4 +95,27 @@ func.func @batch_wrapping_accumulator(
     rounding = #ondsp.rounding<nearest_even>
   } : (tensor<28xi16>, tensor<8xi16>, tensor<11xi16>) -> tensor<11xi16>
   return %result : tensor<11xi16>
+}
+
+// Eight outputs over 22 samples: the eight-lane block would read past the
+// input at its last tap, so the width steps down to four and one block is batched.
+// STEP-LABEL: func.func @short_block_steps_down
+// STEP: %[[END4:.*]] = arith.constant 4 : index
+// STEP: scf.for %{{.*}} = %{{.*}} to %[[END4]] step %{{.*}} {
+// STEP: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = saturate, lanes = 4>
+// STEP: vector.store {{.*}} : memref<8xi16>, vector<4xi16>
+// STEP: scf.for %{{.*}} = %[[END4]] to %{{.*}} step %{{.*}} {
+// STEP: ondsp.reduce_mac
+func.func @short_block_steps_down(
+    %input: tensor<22xi16>, %coeffs: tensor<8xi16>, %init: tensor<8xi16>) -> tensor<8xi16> {
+  %result = ondrix.fir_decimate %input, %coeffs, %init {
+    accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    factor = 2,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>,
+    product = #ondsp.product<full>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<22xi16>, tensor<8xi16>, tensor<8xi16>) -> tensor<8xi16>
+  return %result : tensor<8xi16>
 }

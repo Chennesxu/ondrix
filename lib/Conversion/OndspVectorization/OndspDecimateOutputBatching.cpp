@@ -1160,13 +1160,19 @@ public:
     SmallVector<scf::ForOp> candidates;
     getOperation().walk([&](scf::ForOp loop) { candidates.push_back(loop); });
 
+    // The declared width is the widest batch; an output count that cannot
+    // fill it steps down by halves, the rule the column batcher applies.
     OpBuilder builder(&getContext());
     for (scf::ForOp loop : candidates) {
-      if (FailureOr<DecimateLoopShape> shape = matchDecimateLoop(loop, vectorWidth);
-          succeeded(shape)) {
-        batchDecimateOutputs(*shape, vectorWidth, builder);
-        continue;
+      bool batched = false;
+      for (int64_t lanes = vectorWidth; lanes > 1 && !batched; lanes /= 2) {
+        if (FailureOr<DecimateLoopShape> shape = matchDecimateLoop(loop, lanes); succeeded(shape)) {
+          batchDecimateOutputs(*shape, lanes, builder);
+          batched = true;
+        }
       }
+      if (batched)
+        continue;
       if (FailureOr<ColumnLoopShape> shape = matchColumnLoop(loop); succeeded(shape))
         batchColumnOutputs(*shape, vectorWidth, builder);
     }
@@ -1177,7 +1183,8 @@ public:
         blocks.push_back(&block);
     });
     for (Block *block : blocks)
-      batchConstantRowOutputsInBlock(*block, vectorWidth, builder);
+      for (int64_t lanes = vectorWidth; lanes > 1; lanes /= 2)
+        batchConstantRowOutputsInBlock(*block, lanes, builder);
   }
 };
 

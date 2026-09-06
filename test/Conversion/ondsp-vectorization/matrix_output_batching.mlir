@@ -133,10 +133,13 @@ func.func @constant_rows(%input: memref<8xi16>) -> memref<4xi16> {
   return %alloc : memref<4xi16>
 }
 
-// Three outputs never fill a width-4 block; the ordered reductions stay.
+// Three outputs cannot fill a width-4 block: the width steps down to two,
+// rows 0 and 1 become one block and row 2 keeps its ordered reduction.
 // CHECK-LABEL: func.func @constant_rows_short
-// CHECK-COUNT-3: ondsp.reduce_mac
-// CHECK-NOT: ondsp.mac
+// CHECK: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = wrap, lanes = 2>
+// CHECK-DAG: vector.store %{{.*}} : memref<3xi16>, vector<2xi16>
+// CHECK-DAG: ondsp.reduce_mac
+// CHECK-NOT: ondsp.reduce_mac
 func.func @constant_rows_short(%input: memref<8xi16>) -> memref<3xi16> {
   %c2 = arith.constant 2 : index
   %c1 = arith.constant 1 : index

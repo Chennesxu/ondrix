@@ -47,13 +47,13 @@ func.func @refuse_dynamic_extents(
   return %result : tensor<?xi16>
 }
 
-// Exactly one block of outputs leaves nothing to batch: its contiguous
-// factor * width span at the last tap would end one element past the input.
+// Two outputs over ten samples: even the two-lane block the width steps down
+// to would read one element past the input at its last tap, so nothing is batched.
 // CHECK-LABEL: func.func @refuse_single_short_block
 // CHECK: ondsp.reduce_mac
 
 func.func @refuse_single_short_block(
-    %input: tensor<22xi16>, %coeffs: tensor<8xi16>, %init: tensor<8xi16>) -> tensor<8xi16> {
+    %input: tensor<10xi16>, %coeffs: tensor<8xi16>, %init: tensor<2xi16>) -> tensor<2xi16> {
   %result = ondrix.fir_decimate %input, %coeffs, %init {
     accumulator = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
     dst = #ondsp.fixed<signed, storage = i16, frac = 15>,
@@ -62,8 +62,8 @@ func.func @refuse_single_short_block(
     overflow = #ondsp.overflow<saturate>,
     product = #ondsp.product<full>,
     rounding = #ondsp.rounding<nearest_even>
-  } : (tensor<22xi16>, tensor<8xi16>, tensor<8xi16>) -> tensor<8xi16>
-  return %result : tensor<8xi16>
+  } : (tensor<10xi16>, tensor<8xi16>, tensor<2xi16>) -> tensor<2xi16>
+  return %result : tensor<2xi16>
 }
 
 // A non-default memory space is outside what the Vector to LLVM lowering
