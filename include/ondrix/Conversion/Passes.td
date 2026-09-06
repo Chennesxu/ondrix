@@ -368,6 +368,8 @@ def ConvertOndspFixedToScalar
            "Ablation interface: use exact packed-Q15 identities for supported canonical twiddles (the canonical path keeps the generic product)">,
     Option<"sqrtEstimate", "sqrt-estimate", "bool", /*default=*/"false",
            "Ablation interface: lower sqrt_fixed via an IEEE estimate plus exact integer correction (the canonical path uses the bit-by-bit root)">,
+    Option<"wideningMultiplyLowHalves", "widening-multiply-low-halves", "bool", /*default=*/"true",
+           "Declared target capability: the lane-widening integer multiply reads its operands from the low halves of the wide lanes (x86 pmuldq), so a runtime multiplicand is widened to the carrier once before its broadcast; off, the broadcast stays at the exact product width and the lanes are sign-extended afterwards, the shape a narrow-operand widening multiply (NEON smull) selects">,
   ];
   let dependentDialects = [
     "ondrix::ondsp::OndspDialect",

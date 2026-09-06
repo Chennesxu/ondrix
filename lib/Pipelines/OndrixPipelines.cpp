@@ -111,7 +111,8 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   else
     os << "lower-ondsp-f32-reduce-to-scalar,";
   os << "lower-rank-one-memref-copy-to-scf,";
-  os << "convert-ondsp-fixed-to-scalar,";
+  os << llvm::formatv("convert-ondsp-fixed-to-scalar{{widening-multiply-low-halves={0}},",
+                      options.wideningMultiplyLowHalves ? "true" : "false");
   os << "func.func(buffer-deallocation),";
   os << "convert-vector-to-scf,expand-strided-metadata,lower-affine,convert-scf-to-cf,"
         "convert-vector-to-llvm,"

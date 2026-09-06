@@ -37,6 +37,15 @@ struct OndrixDefaultPipelineOptions
       llvm::cl::desc("Declared target capability: the target has an f32 vector fused "
                      "multiply-add"),
       llvm::cl::init(false)};
+  /// Whether the target's lane-widening integer multiply reads its operands
+  /// from the low halves of the wide lanes (x86 pmuldq) rather than from
+  /// sign-extended narrower lanes (NEON smull). Both answers are correct
+  /// code; the wrong one costs the multiply its instruction selection.
+  Option<bool> wideningMultiplyLowHalves{
+      *this, "widening-multiply-low-halves",
+      llvm::cl::desc("Declared target capability: the lane-widening multiply reads the low "
+                     "halves of the wide lanes"),
+      llvm::cl::init(true)};
   /// Which code shape the static transforms take. This is an explicit
   /// SCHEDULE CHOICE, not a target fact, and it must not be derived from a
   /// target description: whether the instruction memory holds the unrolled

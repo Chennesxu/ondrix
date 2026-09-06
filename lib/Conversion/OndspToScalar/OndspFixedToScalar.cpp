@@ -493,7 +493,10 @@ static Value lowerSignedProduct(Location loc, Value lhs, Value rhs,
 template <typename OpTy, ondrix::fixedpoint::AccumulatorUpdateOperation operation>
 class MacLikeOpLowering final : public OpConversionPattern<OpTy> {
 public:
-  using OpConversionPattern<OpTy>::OpConversionPattern;
+  MacLikeOpLowering(TypeConverter &typeConverter, MLIRContext *context,
+                    bool wideningMultiplyLowHalves)
+      : OpConversionPattern<OpTy>(typeConverter, context),
+        wideningMultiplyLowHalves(wideningMultiplyLowHalves) {}
 
   LogicalResult matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -531,12 +534,14 @@ public:
         return op.emitOpError("fixed scalar lowering requires one value lane per accumulator lane");
       // The declared broadcast of the scalar coefficient across the lanes. A
       // runtime coefficient against runtime lanes in one 128-bit register is
-      // widened before the splat, which is the form the backend folds best.
+      // widened before the splat, to the carrier only where the declared
+      // widening multiply reads low halves (otherwise the sign extension must
+      // stay visible on the lanes for the backend to select it).
       Type splatElement = coefficient.getType();
       if (!matchPattern(coefficient, m_Constant()) && !matchPattern(value, m_Constant()) &&
           valueType.getNumElements() * exactProductWidth <= 128) {
-        splatElement =
-            rewriter.getIntegerType(multiplyInCarrier ? carrierWidth : exactProductWidth);
+        splatElement = rewriter.getIntegerType(
+            multiplyInCarrier && wideningMultiplyLowHalves ? carrierWidth : exactProductWidth);
         coefficient = rewriter.create<arith::ExtSIOp>(loc, splatElement, coefficient);
       }
       coefficient = rewriter.create<vector::BroadcastOp>(
@@ -551,6 +556,9 @@ public:
     rewriter.replaceOp(op, updated);
     return success();
   }
+
+private:
+  bool wideningMultiplyLowHalves;
 };
 
 using MacOpLowering =
@@ -1229,9 +1237,11 @@ public:
     OndspFixedToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
-                 AddShiftOpLowering, BitrevAddOpLowering, MacOpLowering, MacSubOpLowering,
-                 ReduceMacOpLowering, RoundDivOpLowering, RoundShiftOpLowering, SatCastOpLowering,
-                 SubShiftOpLowering>(typeConverter, &getContext());
+                 AddShiftOpLowering, BitrevAddOpLowering, ReduceMacOpLowering, RoundDivOpLowering,
+                 RoundShiftOpLowering, SatCastOpLowering, SubShiftOpLowering>(typeConverter,
+                                                                              &getContext());
+    patterns.add<MacOpLowering, MacSubOpLowering>(typeConverter, &getContext(),
+                                                  wideningMultiplyLowHalves);
     patterns.add<SqrtFixedOpLowering>(typeConverter, &getContext(), sqrtEstimate);
     patterns.add<AccumulatorStorageCastLowering>(typeConverter, &getContext());
     patterns.add<CxButterflyOpLowering>(typeConverter, &getContext(), specializeCanonicalTwiddles);

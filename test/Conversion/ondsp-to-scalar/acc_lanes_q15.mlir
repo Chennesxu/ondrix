@@ -1,4 +1,5 @@
 // RUN: ondrix-opt %s --convert-ondsp-fixed-to-scalar | FileCheck %s --implicit-check-not=ondsp.
+// RUN: ondrix-opt %s --convert-ondsp-fixed-to-scalar=widening-multiply-low-halves=false | FileCheck %s --check-prefix=NARROW
 
 // A multi-lane accumulator lowers to one storage element per lane and runs the
 // identical per-lane arithmetic the single-lane path runs: the same i32 exact
@@ -92,3 +93,12 @@ func.func @lane_update_wrap(
 // CHECK-NOT: arith.cmpi
 // CHECK-NOT: arith.trunci
 // CHECK: return %[[UPDATED]] : vector<4xi64>
+
+// Without the low-halves capability the runtime coefficient is broadcast at the
+// exact product width and the lanes are sign-extended afterwards (NEON smull).
+// NARROW-LABEL: func.func @lane_update_wrap(
+// NARROW: %[[COEFFICIENT_EXT:.*]] = arith.extsi %{{.*}} : i16 to i32
+// NARROW: %[[SPLAT:.*]] = vector.broadcast %[[COEFFICIENT_EXT]] : i32 to vector<4xi32>
+// NARROW: %[[VALUE_EXT:.*]] = arith.extsi %{{.*}} : vector<4xi16> to vector<4xi64>
+// NARROW: %[[SPLAT_EXT:.*]] = arith.extsi %[[SPLAT]] : vector<4xi32> to vector<4xi64>
+// NARROW: arith.muli %[[VALUE_EXT]], %[[SPLAT_EXT]] : vector<4xi64>
