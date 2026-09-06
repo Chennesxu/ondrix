@@ -361,9 +361,9 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
 
 static Value roundSignedRightShift(Location loc, Value input, unsigned shift,
                                    ondrix::ondsp::RoundingMode roundingMode,
-                                   ConversionPatternRewriter &rewriter) {
+                                   ConversionPatternRewriter &rewriter, unsigned valueBits = 0) {
   return ondrix::conversion::createRoundedSignedRightShift(loc, input, shift, roundingMode,
-                                                           rewriter);
+                                                           rewriter, valueBits);
 }
 
 static Value narrowSignedValue(Location loc, Value input, Type destinationType,
@@ -479,9 +479,10 @@ static Value lowerSignedProduct(Location loc, Value lhs, Value rhs,
   Value lhsExtended = widen(lhs);
   Value rhsExtended = widen(rhs);
   Value fullProduct = builder.create<arith::MulIOp>(loc, lhsExtended, rhsExtended);
+  // A full product of two storageWidth-bit values fits 2*storageWidth-1 bits.
   if (semantics.selection == ondrix::ondsp::ProductSelection::Full)
-    return ondrix::conversion::createRoundedSignedRightShift(loc, fullProduct, semantics.shift,
-                                                             semantics.rounding, builder);
+    return ondrix::conversion::createRoundedSignedRightShift(
+        loc, fullProduct, semantics.shift, semantics.rounding, builder, 2 * storageWidth - 1);
 
   Value shift = createIntegerConstant(loc, fullProductType, storageWidth, builder);
   Value shifted = builder.create<arith::ShRSIOp>(loc, fullProduct, shift);
@@ -514,13 +515,12 @@ public:
     Location loc = op.getLoc();
     Value value = adaptor.getLhs();
     Value coefficient = adaptor.getRhs();
-    // Wrapping lanes feeding a carrier wider than the exact product multiply
+    // A wrapping update into a carrier wider than the exact product multiplies
     // in the carrier: one widening multiply instead of a multiply and a
     // widening. A saturating update keeps the exact width its rails need.
     unsigned carrierWidth = getIntegerElementType(adaptor.getAcc().getType()).getWidth();
     unsigned exactProductWidth = 2 * cast<IntegerType>(op.getNumeric().getStorage()).getWidth();
-    bool multiplyInCarrier = !ondrix::ondsp::isSingleLaneAccumulator(accumulator) &&
-                             accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Wrap &&
+    bool multiplyInCarrier = accumulator.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Wrap &&
                              domain->product.selection == ondrix::ondsp::ProductSelection::Full &&
                              domain->product.shift == 0 && carrierWidth > exactProductWidth;
     unsigned productWidth = multiplyInCarrier ? carrierWidth : 0;
@@ -801,8 +801,10 @@ public:
 
     unsigned shift = accumulator.getFrac() - op.getDst().getFrac();
     Value canonical = canonicalizeAccumulator(op.getLoc(), adaptor.getAcc(), accumulator, rewriter);
-    Value rounded =
-        roundSignedRightShift(op.getLoc(), canonical, shift, op.getRounding(), rewriter);
+    // The canonical accumulator lies in its storage's signed range inside the
+    // carrier, which is the headroom the ties-positive add-half needs.
+    Value rounded = roundSignedRightShift(op.getLoc(), canonical, shift, op.getRounding(), rewriter,
+                                          cast<IntegerType>(accumulator.getStorage()).getWidth());
     // A multi-lane accumulator exports one destination element per lane; the
     // rounding, narrowing, and clamping sequence below is exactly the
     // single-lane one applied elementwise.

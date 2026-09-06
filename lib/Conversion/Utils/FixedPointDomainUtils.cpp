@@ -4,6 +4,8 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/TypeUtilities.h"
 
+#include <algorithm>
+
 using namespace mlir;
 
 namespace ondrix::conversion {
@@ -133,8 +135,18 @@ getSupportedFixedVectorMacDomain(Operation *op, ondrix::ondsp::AccType accumulat
   return materializeFixedMacDomain(op, numeric, product);
 }
 
+/// Whether `2^(valueBits-1) + 2^(shift-1)` is below the signed rail of `width`
+/// bits, so the add-half of a ties-positive rounding cannot overflow.
+static bool halfAddCannotOverflow(unsigned valueBits, unsigned shift, unsigned width) {
+  if (valueBits == 0 || shift == 0 || valueBits >= width || shift >= width)
+    return false;
+  unsigned top = std::max(valueBits, shift);
+  return valueBits == shift ? top + 1 < width : top < width;
+}
+
 Value createRoundedSignedRightShift(Location loc, Value input, unsigned shift,
-                                    ondrix::ondsp::RoundingMode roundingMode, OpBuilder &builder) {
+                                    ondrix::ondsp::RoundingMode roundingMode, OpBuilder &builder,
+                                    unsigned valueBits) {
   Type type = input.getType();
   if (shift == 0)
     return input;
@@ -145,6 +157,11 @@ Value createRoundedSignedRightShift(Location loc, Value input, unsigned shift,
       attr = SplatElementsAttr::get(vector, attr);
     return builder.create<arith::ConstantOp>(loc, type, cast<TypedAttr>(attr));
   };
+  if (roundingMode == ondrix::ondsp::RoundingMode::NearestTiesPositive &&
+      halfAddCannotOverflow(valueBits, shift, element.getWidth())) {
+    Value biased = builder.create<arith::AddIOp>(loc, input, constant(int64_t{1} << (shift - 1)));
+    return builder.create<arith::ShRSIOp>(loc, biased, constant(shift));
+  }
   Value quotient = builder.create<arith::ShRSIOp>(loc, input, constant(shift));
   if (roundingMode == ondrix::ondsp::RoundingMode::TowardNegative)
     return quotient;

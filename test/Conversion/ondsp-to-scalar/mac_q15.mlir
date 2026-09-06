@@ -36,13 +36,14 @@ func.func @mac_sub_wrap(
 // CHECK-NOT: arith.trunci
 // CHECK: return %[[CLAMPED]] : i64
 
+// A wrapping update multiplies in the i64 carrier: no i32 product, no second widening.
 // CHECK-LABEL: func.func @mac_sub_wrap(
 // CHECK-SAME: %[[ACC:.*]]: i64, %[[LHS:.*]]: i16, %[[RHS:.*]]: i16) -> i64
-// CHECK: %[[LHS_EXT:.*]] = arith.extsi %[[LHS]] : i16 to i32
-// CHECK: %[[RHS_EXT:.*]] = arith.extsi %[[RHS]] : i16 to i32
-// CHECK: %[[PRODUCT:.*]] = arith.muli %[[LHS_EXT]], %[[RHS_EXT]] : i32
-// CHECK: %[[PRODUCT_EXT:.*]] = arith.extsi %[[PRODUCT]] : i32 to i64
-// CHECK: %[[UPDATED:.*]] = arith.subi %[[ACC]], %[[PRODUCT_EXT]] : i64
+// CHECK: %[[LHS_EXT:.*]] = arith.extsi %[[LHS]] : i16 to i64
+// CHECK: %[[RHS_EXT:.*]] = arith.extsi %[[RHS]] : i16 to i64
+// CHECK: %[[PRODUCT:.*]] = arith.muli %[[LHS_EXT]], %[[RHS_EXT]] : i64
+// CHECK-NOT: i32
+// CHECK: %[[UPDATED:.*]] = arith.subi %[[ACC]], %[[PRODUCT]] : i64
 // CHECK-NOT: arith.trunci
 // CHECK: return %[[UPDATED]] : i64
 // CHECK-NOT: ondsp.

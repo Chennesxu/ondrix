@@ -50,7 +50,8 @@ lowerFixedVectorProductTerms(Operation *anchor, ondrix::ondsp::AccType accumulat
   Value terms = fullProducts;
   if (domain->product.selection == ondrix::ondsp::ProductSelection::Full)
     terms = createRoundedSignedRightShift(anchor->getLoc(), fullProducts, domain->product.shift,
-                                          domain->product.rounding, builder);
+                                          domain->product.rounding, builder,
+                                          2 * domain->operandStorage.getWidth() - 1);
   if (domain->product.selection == ondrix::ondsp::ProductSelection::HighRaw) {
     IntegerAttr shiftValue =
         builder.getIntegerAttr(domain->fullProductStorage, domain->operandStorage.getWidth());
