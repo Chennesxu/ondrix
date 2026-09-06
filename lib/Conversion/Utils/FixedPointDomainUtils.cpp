@@ -157,7 +157,9 @@ Value createRoundedSignedRightShift(Location loc, Value input, unsigned shift,
       attr = SplatElementsAttr::get(vector, attr);
     return builder.create<arith::ConstantOp>(loc, type, cast<TypedAttr>(attr));
   };
-  if (roundingMode == ondrix::ondsp::RoundingMode::NearestTiesPositive &&
+  // Scalar only: on a vector the add-half lets LLVM narrow the surrounding
+  // lane arithmetic, which x86 then legalizes worse than the remainder form.
+  if (roundingMode == ondrix::ondsp::RoundingMode::NearestTiesPositive && !isa<VectorType>(type) &&
       halfAddCannotOverflow(valueBits, shift, element.getWidth())) {
     Value biased = builder.create<arith::AddIOp>(loc, input, constant(int64_t{1} << (shift - 1)));
     return builder.create<arith::ShRSIOp>(loc, biased, constant(shift));

@@ -53,8 +53,8 @@ getSupportedFixedVectorMacDomain(mlir::Operation *op, ondrix::ondsp::AccType acc
 
 /// Signed right shift of a scalar or fixed-length vector integer value by
 /// `shift` under the declared rounding mode; total in the input width. When
-/// the caller knows the input lies in the signed range of `valueBits` bits,
-/// a rounding whose add-half then cannot overflow is emitted as add-then-shift.
+/// the caller knows a scalar input lies in the signed range of `valueBits`
+/// bits, a ties-positive rounding is emitted as add-half-then-shift.
 mlir::Value createRoundedSignedRightShift(mlir::Location loc, mlir::Value input, unsigned shift,
                                           ondrix::ondsp::RoundingMode roundingMode,
                                           mlir::OpBuilder &builder, unsigned valueBits = 0);
