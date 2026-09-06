@@ -79,8 +79,9 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
         "vectorize-ondsp-constant-saturating-memref-reduce{{vector-width={0} chunk-multiple=4 "
         "max-elements=64},",
         lanes);
-    os << llvm::formatv("vectorize-ondsp-fixed-memref-reduce{{vector-width={0} chunk-multiple=4},",
-                        lanes);
+    os << llvm::formatv("vectorize-ondsp-fixed-memref-reduce{{vector-width={0} chunk-multiple=4 "
+                        "pair-fold-squares={1}},",
+                        lanes, options.multiplyAddAdjacentPairs ? "true" : "false");
     os << "parallelize-ondsp-fixed-wrap-vector-reduce,";
     os << "normalize-ondsp-fixed-vector-reduce,";
   } else {

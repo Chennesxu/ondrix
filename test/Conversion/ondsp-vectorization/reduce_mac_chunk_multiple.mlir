@@ -1,4 +1,5 @@
 // RUN: ondrix-opt %s --vectorize-ondsp-fixed-memref-reduce="vector-width=4 chunk-multiple=4" | FileCheck %s
+// RUN: ondrix-opt %s --vectorize-ondsp-fixed-memref-reduce="vector-width=4 chunk-multiple=4 pair-fold-squares=false" | FileCheck %s --check-prefix=UNFOLDED
 
 // A chunk wider than the extent would leave the vector loop empty and move the
 // whole reduction into the scalar tail, so each extent gets the widest chunk it
@@ -66,6 +67,14 @@ func.func @dynamic_keeps_one_vector(
 // CHECK: vector.extract_strided_slice {{.*}} {offsets = [8], sizes = [8], strides = [1]}
 // CHECK-NOT: arith.extsi {{.*}} to vector<4xi64>
 // CHECK: vector.reduction <add>
+// Declared off, each product widens on its own and no even/odd fold is formed.
+// UNFOLDED-LABEL: func.func @wrapping_sum_of_squares
+// UNFOLDED: %[[PRODUCTS:.*]] = arith.muli {{.*}} : vector<16xi32>
+// UNFOLDED-NOT: vector.shuffle
+// UNFOLDED: %[[SLICE:.*]] = vector.extract_strided_slice %[[PRODUCTS]] {offsets = [0], sizes = [4], strides = [1]} : vector<16xi32> to vector<4xi32>
+// UNFOLDED: arith.extsi %[[SLICE]] : vector<4xi32> to vector<4xi64>
+// UNFOLDED-NOT: vector.shuffle
+// UNFOLDED: vector.reduction <add>
 func.func @wrapping_sum_of_squares(
     %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>,
     %input: memref<64xi16>)

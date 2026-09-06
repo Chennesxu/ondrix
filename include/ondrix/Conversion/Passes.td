@@ -532,6 +532,13 @@ def VectorizeOndspFixedMemRefReduce
     the stride must be -1 and its origin static, both reached through the
     casts bufferization inserts, and the span must lie inside a contiguous
     source. Any other stride keeps the ordered schedule.
+
+    A wrapping reduction of a sequence against itself with full products folds
+    adjacent squares in the product width before widening them, the shape x86
+    selects a packed multiply-add for; `pair-fold-squares=false` widens each
+    product on its own instead, which is the shape a widening accumulate
+    (NEON `smull`/`saddw`) selects, because there the even/odd fold costs two
+    permutes per product vector.
 }];
   let constructor = "ondrix::createVectorizeOndspFixedMemRefReducePass()";
   let dependentDialects = [
@@ -547,6 +554,8 @@ def VectorizeOndspFixedMemRefReduce
            "Number of fixed-point lanes per vector chunk">,
     Option<"chunkMultiple", "chunk-multiple", "int64_t", /*default=*/"1",
            "Widest chunk in machine vectors; steps down to the static extent">,
+    Option<"pairFoldSquares", "pair-fold-squares", "bool", /*default=*/"true",
+           "Fold adjacent squares in the product width before widening them">,
   ];
 }
 

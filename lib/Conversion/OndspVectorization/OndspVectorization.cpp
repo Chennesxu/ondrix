@@ -603,8 +603,10 @@ public:
 
 class ReduceMacOpVectorization final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
 public:
-  ReduceMacOpVectorization(MLIRContext *context, int64_t vectorWidth, int64_t chunkMultiple)
-      : OpConversionPattern(context), vectorWidth(vectorWidth), chunkMultiple(chunkMultiple) {}
+  ReduceMacOpVectorization(MLIRContext *context, int64_t vectorWidth, int64_t chunkMultiple,
+                           bool pairFoldSquares)
+      : OpConversionPattern(context), vectorWidth(vectorWidth), chunkMultiple(chunkMultiple),
+        pairFoldSquares(pairFoldSquares) {}
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -651,8 +653,9 @@ public:
         ondrix::conversion::isSupportedFixedHorizontalMacDomain(accumulator, numeric,
                                                                 *op.getProduct());
     // A reduction of a sequence against itself with 32-bit full products (a
-    // Q15 sum of squares) folds pairs of terms in i32 before widening.
-    bool squarePairs = exactModulo && adaptor.getLhs() == adaptor.getRhs() &&
+    // Q15 sum of squares) folds pairs of terms in i32 before widening, where
+    // the declared target folds adjacent products in its multiply-add.
+    bool squarePairs = pairFoldSquares && exactModulo && adaptor.getLhs() == adaptor.getRhs() &&
                        op.getProduct()->getSelection() == ondrix::ondsp::ProductSelection::Full &&
                        elementType.getWidth() <= 16 && chunkWidth % (2 * vectorWidth) == 0;
     Value vectorResult;
@@ -752,6 +755,7 @@ public:
 private:
   int64_t vectorWidth;
   int64_t chunkMultiple;
+  bool pairFoldSquares;
 };
 
 class VectorizeOndspFixedMemRefReducePass final
@@ -773,7 +777,8 @@ public:
     }
 
     RewritePatternSet patterns(&getContext());
-    patterns.add<ReduceMacOpVectorization>(&getContext(), vectorWidth, chunkMultiple);
+    patterns.add<ReduceMacOpVectorization>(&getContext(), vectorWidth, chunkMultiple,
+                                           pairFoldSquares);
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, memref::MemRefDialect,

@@ -81,6 +81,12 @@ cl::opt<bool> wideningMultiplyLowHalves(
              "from the low halves of the wide lanes (x86); off for targets whose widening "
              "multiply takes sign-extended narrower lanes (NEON)"),
     cl::init(true));
+cl::opt<bool> multiplyAddAdjacentPairs(
+    "multiply-add-adjacent-pairs",
+    cl::desc("Declared target capability: the lane-widening integer multiply-add folds adjacent "
+             "products (x86 pmaddwd); off for targets that accumulate each widened product on "
+             "its own (NEON smull/saddw)"),
+    cl::init(true));
 } // namespace
 
 /// The decisions this compilation made, in the compiler's own terms. Not a
@@ -104,6 +110,7 @@ void emitManifest(mlir::ModuleOp module, const ondrix::OndrixDefaultPipelineOpti
   const int64_t vectorBitsValue = options.vectorBits;
   const bool fmaValue = options.supportsF32VectorFma;
   const bool lowHalvesValue = options.wideningMultiplyLowHalves;
+  const bool adjacentPairsValue = options.multiplyAddAdjacentPairs;
   const bool fftLoopsValue = options.fftLoops;
   llvm::json::Object manifest{
       {"llvm_version", LLVM_VERSION_STRING},
@@ -111,7 +118,8 @@ void emitManifest(mlir::ModuleOp module, const ondrix::OndrixDefaultPipelineOpti
       {"declared_target_facts",
        llvm::json::Object{{"vector_bits", vectorBitsValue},
                           {"supports_f32_vector_fma", fmaValue},
-                          {"widening_multiply_low_halves", lowHalvesValue}}},
+                          {"widening_multiply_low_halves", lowHalvesValue},
+                          {"multiply_add_adjacent_pairs", adjacentPairsValue}}},
       // Separate from the target facts on purpose: this one is a code-shape
       // decision the caller makes, and no target description determines it.
       {"declared_schedule_choices",
@@ -178,6 +186,7 @@ int main(int argc, char **argv) {
     options.vectorBits = vectorBits.getValue();
     options.supportsF32VectorFma = supportsF32VectorFma.getValue();
     options.wideningMultiplyLowHalves = wideningMultiplyLowHalves.getValue();
+    options.multiplyAddAdjacentPairs = multiplyAddAdjacentPairs.getValue();
     options.fftLoops = fftLoops.getValue();
     ondrix::buildOndrixDefaultPipeline(passManager, options);
     if (failed(passManager.run(*module)))

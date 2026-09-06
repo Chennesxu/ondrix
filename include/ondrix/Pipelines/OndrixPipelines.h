@@ -46,6 +46,15 @@ struct OndrixDefaultPipelineOptions
       llvm::cl::desc("Declared target capability: the lane-widening multiply reads the low "
                      "halves of the wide lanes"),
       llvm::cl::init(true)};
+  /// Whether the target's lane-widening integer multiply-add folds adjacent
+  /// products (x86 pmaddwd) rather than accumulating each widened product
+  /// (NEON smull/saddw). Both answers are correct code; the wrong one costs
+  /// a sum of squares two permutes per product vector, or the fold itself.
+  Option<bool> multiplyAddAdjacentPairs{
+      *this, "multiply-add-adjacent-pairs",
+      llvm::cl::desc("Declared target capability: the lane-widening multiply-add folds "
+                     "adjacent products"),
+      llvm::cl::init(true)};
   /// Which code shape the static transforms take. This is an explicit
   /// SCHEDULE CHOICE, not a target fact, and it must not be derived from a
   /// target description: whether the instruction memory holds the unrolled
