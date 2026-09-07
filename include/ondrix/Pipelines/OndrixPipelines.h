@@ -37,6 +37,15 @@ struct OndrixDefaultPipelineOptions
       llvm::cl::desc("Declared target capability: the target has an f32 vector fused "
                      "multiply-add"),
       llvm::cl::init(false)};
+  /// How many independent partial-sum chains the target's multiply-add
+  /// latency needs covered. Zero, the default, derives the count from the
+  /// declared width as the measured host classes do; a target whose latency
+  /// the width does not predict declares its own, once, for every kernel.
+  Option<int64_t> accumulatorChains{
+      *this, "accumulator-chains",
+      llvm::cl::desc("Declared target quantity: independent partial-sum chains the "
+                     "target's multiply-add latency needs (0 derives it from the width)"),
+      llvm::cl::init(0)};
   /// Whether the target's lane-widening integer multiply reads its operands
   /// from the low halves of the wide lanes (x86 pmuldq) rather than from
   /// sign-extended narrower lanes (NEON smull). Both answers are correct

@@ -86,6 +86,13 @@ lowering to the LLVM dialect.
   default**, so an undeclared target gets the schedule that is legal
   everywhere rather than a guess; 128 is the NEON/Helium lane count against
   256 for AVX2.
+- **Declared accumulator chains.** How many independent partial-sum chains
+  the target's multiply-add latency needs covered. Zero, the default,
+  derives the count from the declared width the way the measured host
+  classes do; a target the width mispredicts declares its own, once, for
+  every kernel of that target. Width and latency are different target
+  properties, and an in-order core with one vector pipe is where deriving
+  one from the other goes wrong.
 - **Cost model.** The fixed priority order plus each pass's own
   profitability guards. A measured regret evaluation against the best legal
   candidate is planned for the frozen-revision evaluation. The individual

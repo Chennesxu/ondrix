@@ -53,15 +53,16 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
     // 128-bit in-order class regresses under both (its load pipe serializes
     // the wider schedules' paired accesses).
     int64_t columnGroup = options.vectorBits >= 256 ? 2 : 1;
-    int64_t chainDepth = options.vectorBits >= 256 ? 8 : 4;
+    int64_t chainDepth = options.accumulatorChains > 0 ? options.accumulatorChains
+                                                       : (options.vectorBits >= 256 ? 8 : 4);
     os << llvm::formatv("vectorize-ondsp-fp-filter-outputs{{vector-width={0} "
                         "supports-vector-fma={1} interleave=4 column-group={2} "
                         "row-horizontal={3}},",
                         lanes, options.supportsF32VectorFma ? "true" : "false", columnGroup,
                         options.vectorBits >= 256 ? "true" : "false");
-    // Four chains: a host-class heuristic for the FMA latency-throughput
-    // product, not a target fact; the pass clamps to the block count per
-    // site, and a target schedule parameter can override it later.
+    // Chain count: derived from the width as a host-class heuristic for the
+    // FMA latency-throughput product unless the target declares its own
+    // (--accumulator-chains). The pass clamps to the block count per site.
     os << llvm::formatv("vectorize-ondsp-fp-fast-memref-reduce{{vector-width={0} "
                         "supports-vector-fma={1} interleave={2}},",
                         lanes, options.supportsF32VectorFma ? "true" : "false", chainDepth);
@@ -92,8 +93,9 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
     // Chain count is ILP, not lane count: the multi-chain rebuild pays on a
     // core with no usable lanes, so it is not gated on the SIMD stage.
     os << llvm::formatv("vectorize-ondsp-fp-fast-memref-reduce{{vector-width=1 "
-                        "supports-vector-fma={0} interleave=4},",
-                        options.supportsF32VectorFma ? "true" : "false");
+                        "supports-vector-fma={0} interleave={1}},",
+                        options.supportsF32VectorFma ? "true" : "false",
+                        options.accumulatorChains > 0 ? options.accumulatorChains : 4);
   }
 
   // Straight-line short chains are ILP, not lane count: dropping the per-term

@@ -71,6 +71,12 @@ cl::opt<bool> fftLoops("fft-loops",
                                 "the extents where the unrolled form still compiles"),
                        cl::init(false));
 
+cl::opt<int64_t> accumulatorChains(
+    "accumulator-chains",
+    cl::desc("Declared target quantity: independent partial-sum chains the target's "
+             "multiply-add latency needs (0 derives it from the width)"),
+    cl::init(0));
+
 cl::opt<bool> supportsF32VectorFma("supports-f32-vector-fma",
                                    cl::desc("Declared target capability: the target has an f32 "
                                             "vector fused multiply-add"),
@@ -108,6 +114,7 @@ void emitManifest(mlir::ModuleOp module, const ondrix::OndrixDefaultPipelineOpti
       permissions.push_back(mlir::cast<mlir::StringAttr>(entry).getValue());
 
   const int64_t vectorBitsValue = options.vectorBits;
+  const int64_t chainsValue = options.accumulatorChains;
   const bool fmaValue = options.supportsF32VectorFma;
   const bool lowHalvesValue = options.wideningMultiplyLowHalves;
   const bool adjacentPairsValue = options.multiplyAddAdjacentPairs;
@@ -117,6 +124,7 @@ void emitManifest(mlir::ModuleOp module, const ondrix::OndrixDefaultPipelineOpti
       {"pipeline", ondrix::getOndrixDefaultPipelineText(options)},
       {"declared_target_facts",
        llvm::json::Object{{"vector_bits", vectorBitsValue},
+                          {"accumulator_chains", chainsValue},
                           {"supports_f32_vector_fma", fmaValue},
                           {"widening_multiply_low_halves", lowHalvesValue},
                           {"multiply_add_adjacent_pairs", adjacentPairsValue}}},
@@ -185,6 +193,7 @@ int main(int argc, char **argv) {
     ondrix::OndrixDefaultPipelineOptions options;
     options.vectorBits = vectorBits.getValue();
     options.supportsF32VectorFma = supportsF32VectorFma.getValue();
+    options.accumulatorChains = accumulatorChains.getValue();
     options.wideningMultiplyLowHalves = wideningMultiplyLowHalves.getValue();
     options.multiplyAddAdjacentPairs = multiplyAddAdjacentPairs.getValue();
     options.fftLoops = fftLoops.getValue();
