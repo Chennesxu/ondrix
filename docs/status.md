@@ -99,13 +99,18 @@ lowering to the LLVM dialect.
   lowering that already replicated its reductions multiplies the per-site
   bound by that replication. Both the fixed-point pair and the f32
   `unroll-ondsp-fp-ordered-reduce` carry it. The transform is the identity on
-  the declared update sequence, so no permission is spent and `fast` sites,
-  whose spent-permission records must not be replicated, are excluded. What
-  it buys is a scalar target: the loop pays an index update and a branch per
-  term where there are no lanes to amortise them. Without it an ordered f32
-  reduction reached the backend as a loop whose unrolling was left to a
-  generic cost heuristic that prices a separate multiply and add as two, so
-  the same kernel unrolled or not depending on which contract it declared.
+  the declared update sequence at any number of chains, so no permission is
+  spent -- a relaxed site's record is written where the rewrite that spent it
+  happened and is a set, so replaying the body neither spends nor
+  double-counts one. What it buys is a scalar target: the loop pays an index
+  update and a branch per term where there are no lanes to amortise them.
+  Without it an ordered f32 reduction reached the backend as a loop whose
+  unrolling was left to a generic cost heuristic that prices a separate
+  multiply and add as two, so the same kernel unrolled or not depending on
+  which contract it declared. Where the target has lanes the reduction is
+  left alone: the scalar lowering's lane-blocked ordered schedule reads the
+  same terms in the same order and is the better claim, so only the
+  accumulator loops, which no lane stage takes, are straightened there.
 
 - **Cost model.** The fixed priority order plus each pass's own
   profitability guards. A measured regret evaluation against the best legal
