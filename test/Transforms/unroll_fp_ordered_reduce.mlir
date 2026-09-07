@@ -132,3 +132,29 @@ func.func @lanes_keep_the_reduction(%a: memref<4xf32>, %b: memref<4xf32>, %x: me
   }
   return %r, %acc : f32, f32
 }
+
+// -----
+
+// The interleaved chain loop a fast reduction leaves behind: several f32
+// accumulators, and bounds the producing pass built from constants that
+// nothing canonicalizes before this pass runs.
+// CHECK-LABEL: func.func @unrolls_multi_chain_loop(
+// CHECK-NOT: scf.for
+// CHECK-COUNT-8: arith.addf
+func.func @unrolls_multi_chain_loop(%x: memref<64xf32>, %seed: f32) -> f32 {
+  %c0 = arith.constant 0 : index
+  %c2 = arith.constant 2 : index
+  %c8 = arith.constant 8 : index
+  %end = arith.subi %c8, %c0 : index
+  %rem = arith.remui %end, %c2 : index
+  %stop = arith.subi %end, %rem : index
+  %r:2 = scf.for %i = %c0 to %stop step %c2 iter_args(%p = %seed, %q = %seed) -> (f32, f32) {
+    %a = memref.load %x[%i] : memref<64xf32>
+    %b = memref.load %x[%i] : memref<64xf32>
+    %pn = arith.addf %p, %a : f32
+    %qn = arith.addf %q, %b : f32
+    scf.yield %pn, %qn : f32, f32
+  }
+  %s = arith.addf %r#0, %r#1 : f32
+  return %s : f32
+}

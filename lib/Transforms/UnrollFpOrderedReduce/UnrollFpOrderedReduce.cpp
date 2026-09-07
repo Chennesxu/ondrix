@@ -34,7 +34,34 @@ bool isOrderDeclared(FpContractMode contract) {
   return contract == FpContractMode::Off || contract == FpContractMode::Fma;
 }
 
-std::optional<int64_t> getStaticIndex(Value value) { return getConstantIntValue(value); }
+/// A compile-time index, folded through the index arithmetic a producing pass
+/// leaves behind: the fast reduction's group bounds are `upper - upper % C`
+/// built from constants, and nothing canonicalizes between that pass and this
+/// one. Only all-constant operands fold, so the answer is exact where it is
+/// given at all; a division by zero or an overflow is refused.
+std::optional<int64_t> getStaticIndex(Value value, int depth = 0) {
+  if (std::optional<int64_t> constant = getConstantIntValue(value))
+    return constant;
+  Operation *op = value.getDefiningOp();
+  if (depth >= 8 || !op || op->getNumOperands() != 2)
+    return std::nullopt;
+  std::optional<int64_t> lhs = getStaticIndex(op->getOperand(0), depth + 1);
+  std::optional<int64_t> rhs = getStaticIndex(op->getOperand(1), depth + 1);
+  if (!lhs || !rhs)
+    return std::nullopt;
+  int64_t result;
+  if (isa<arith::AddIOp>(op))
+    return llvm::AddOverflow(*lhs, *rhs, result) ? std::nullopt : std::optional(result);
+  if (isa<arith::SubIOp>(op))
+    return llvm::SubOverflow(*lhs, *rhs, result) ? std::nullopt : std::optional(result);
+  if (isa<arith::MulIOp>(op))
+    return llvm::MulOverflow(*lhs, *rhs, result) ? std::nullopt : std::optional(result);
+  if (isa<arith::RemUIOp>(op) && *lhs >= 0 && *rhs > 0)
+    return *lhs % *rhs;
+  if (isa<arith::DivUIOp>(op) && *lhs >= 0 && *rhs > 0)
+    return *lhs / *rhs;
+  return std::nullopt;
+}
 
 /// Static extent of a rank-1 f32 memref operand, resolved through the casts
 /// bufferization inserts to state the runtime equal-length contract.
@@ -73,11 +100,18 @@ std::optional<int64_t> getStraightLineTerms(ReduceMacOp reduce, int64_t maxTerms
   return *lhs;
 }
 
-/// An accumulator loop the FIR family's tap lowering leaves behind: one f32
-/// iteration argument, no nested loop, and a body that advances it.
+/// An accumulator loop a lowering left behind: every iteration argument an f32
+/// accumulator, no nested loop, and a body that advances them. The FIR family's
+/// tap loop carries one; the fast reduction's chain loop carries its interleave
+/// count, and unrolling it is the same identity -- the permission its final
+/// fold records is already spent, and the record is a set, so replaying the
+/// body neither spends nor double-counts one.
 bool isF32AccLoop(scf::ForOp loop) {
-  if (loop.getNumRegionIterArgs() != 1 || !loop.getRegionIterArgs().front().getType().isF32())
+  if (loop.getNumRegionIterArgs() < 1)
     return false;
+  for (Value argument : loop.getRegionIterArgs())
+    if (!argument.getType().isF32())
+      return false;
   if (loop.getBody()->walk([](scf::ForOp) { return WalkResult::interrupt(); }).wasInterrupted())
     return false;
   return loop.getBody()
@@ -109,18 +143,21 @@ std::optional<int64_t> getUnrollableTripCount(scf::ForOp loop, int64_t maxTerms)
 void unrollAccLoop(scf::ForOp loop, int64_t lower, int64_t step, int64_t trip) {
   OpBuilder builder(loop);
   Location loc = loop.getLoc();
-  Value carried = loop.getInitArgs().front();
+  SmallVector<Value> carried(loop.getInitArgs().begin(), loop.getInitArgs().end());
   auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
   for (int64_t iteration = 0; iteration < trip; ++iteration) {
     IRMapping mapping;
     mapping.map(loop.getInductionVar(),
                 builder.create<arith::ConstantIndexOp>(loc, lower + iteration * step));
-    mapping.map(loop.getRegionIterArgs().front(), carried);
+    for (auto [argument, value] : llvm::zip(loop.getRegionIterArgs(), carried))
+      mapping.map(argument, value);
     for (Operation &op : loop.getBody()->without_terminator())
       builder.clone(op, mapping);
-    carried = mapping.lookupOrDefault(yield.getOperand(0));
+    for (auto [slot, operand] : llvm::zip(carried, yield.getOperands()))
+      slot = mapping.lookupOrDefault(operand);
   }
-  loop.getResult(0).replaceAllUsesWith(carried);
+  for (auto [result, value] : llvm::zip(loop.getResults(), carried))
+    result.replaceAllUsesWith(value);
   loop.erase();
 }
 
@@ -147,7 +184,7 @@ struct UnrollOndspFpOrderedReduce final
       if (auto loop = dyn_cast<scf::ForOp>(op))
         if (isF32AccLoop(loop))
           if (std::optional<int64_t> trip = getUnrollableTripCount(loop, maxStraightLineTerms))
-            totals[function] += *trip;
+            totals[function] += *trip * loop.getNumRegionIterArgs();
     });
     for (auto [function, total] : totals)
       if (total > maxUnrolledTerms)
