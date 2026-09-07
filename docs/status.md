@@ -93,6 +93,20 @@ lowering to the LLVM dialect.
   every kernel of that target. Width and latency are different target
   properties, and an in-order core with one vector pipe is where deriving
   one from the other goes wrong.
+- **Straight-line expansion.** A reduction whose fold order the contract
+  already fixed is emitted as a chain rather than a loop, under two budgets:
+  the terms one site may become and the terms a whole function may, because a
+  lowering that already replicated its reductions multiplies the per-site
+  bound by that replication. Both the fixed-point pair and the f32
+  `unroll-ondsp-fp-ordered-reduce` carry it. The transform is the identity on
+  the declared update sequence, so no permission is spent and `fast` sites,
+  whose spent-permission records must not be replicated, are excluded. What
+  it buys is a scalar target: the loop pays an index update and a branch per
+  term where there are no lanes to amortise them. Without it an ordered f32
+  reduction reached the backend as a loop whose unrolling was left to a
+  generic cost heuristic that prices a separate multiply and add as two, so
+  the same kernel unrolled or not depending on which contract it declared.
+
 - **Cost model.** The fixed priority order plus each pass's own
   profitability guards. A measured regret evaluation against the best legal
   candidate is planned for the frozen-revision evaluation. The individual

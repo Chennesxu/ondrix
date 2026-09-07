@@ -108,6 +108,10 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // per-row replication reaches 4096 terms and 15x its bytes to run SLOWER.
   os << "scalarize-ondsp-fixed-reduce-mac{max-unrolled-terms=128},"
         "unroll-ondsp-fixed-mac-loops{max-unrolled-terms=128},";
+  // The f32 sibling, same budget and same argument. Its own cap is the site
+  // length, because an ordered f32 site reaches the backend as a loop that no
+  // other pass claims: the fast reduction pass refuses an ordered contract.
+  os << "unroll-ondsp-fp-ordered-reduce{max-straight-line-terms=256 max-unrolled-terms=512},";
 
   // Lowering tail down to the LLVM dialect. The declared-off reduction batches
   // its products at the target width; the fold order is untouched, so this is

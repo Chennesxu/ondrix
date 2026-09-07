@@ -335,6 +335,50 @@ def ApplyOndrixLlvmArgumentAttributes
   let dependentDialects = ["mlir::LLVM::LLVMDialect"];
 }
 
+def UnrollOndspFpOrderedReduce
+    : Pass<"unroll-ondsp-fp-ordered-reduce", "::mlir::ModuleOp"> {
+  let summary = "Straight-line the f32 reductions whose contract already fixed their fold order";
+  let description = [{
+    Replaces two order-declared f32 shapes by the straight-line chain they
+    denote: a rank-1 memref `ondsp.reduce_mac` under `contract = off` or
+    `contract = fma` with static equal extents, and an `scf.for` carrying one
+    f32 accumulator over a compile-time trip count, which is what the FIR
+    family's tap lowering leaves behind. Both rewrites replay the same body at
+    constant induction values, so every product and every fold keeps its
+    operands, its position in the sequence, and its rounding; no numeric
+    permission is involved and `contract = fast` is excluded, its sites
+    carrying spent-permission records this pass must not replicate.
+
+    The motive is a scalar target: the loop form pays an index update and a
+    branch per term on a core with no lanes to amortise them, and a declared
+    tap count is exactly the static structure that makes the loop avoidable.
+    Nothing downstream chooses this shape otherwise -- the fast reduction pass
+    refuses an ordered contract by construction, so before this pass an ordered
+    f32 reduction reached the backend as a loop whose unrolling was left to a
+    generic cost heuristic that counts a separate multiply and add as two.
+
+    `max-straight-line-terms` caps one reduction or loop; `max-unrolled-terms`
+    bounds the terms a whole function may emit, because a lowering that already
+    replicated its reductions multiplies a per-site bound by that replication.
+    Past the budget every site in that function keeps its loop, so the shape
+    stays uniform. Zero disables either bound.
+  }];
+  let options = [
+    Option<"maxStraightLineTerms", "max-straight-line-terms", "int64_t", /*default=*/"64",
+           "Longest straight-line chain one site may become">,
+    Option<"maxUnrolledTerms", "max-unrolled-terms", "int64_t", /*default=*/"0",
+           "Per-function budget of straight-line terms; 0 leaves it unbounded">,
+  ];
+  let constructor = "ondrix::createUnrollOndspFpOrderedReducePass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::math::MathDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "ondrix::ondsp::OndspDialect",
+  ];
+}
+
 def ScalarizeOndspFixedReduceMac
     : Pass<"scalarize-ondsp-fixed-reduce-mac", "::mlir::ModuleOp"> {
   let summary = "Expand ordered fixed reduce_mac into its definitional mac loop";
