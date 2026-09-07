@@ -99,12 +99,14 @@ static LogicalResult verifySupportedMacPolicy(Operation *op, ondrix::ondsp::AccT
           *productDomain, ondrix::conversion::getOrtumCoreAccumulatorDomain(accumulator)))
     return success();
 
-  if (ondrix::ondsp::isSignedQ31(numeric) && ondrix::ondsp::isRawHighProduct(product))
-    return op->emitOpError(
-        "q31 raw-high target equivalence is not specified; lower through a proven scalar "
-        "sequence first");
+  return op->emitOpError("ortumcore MAC lowering supports only signed q15 full-product and signed "
+                         "q31 raw-high product semantics");
+}
 
-  return op->emitOpError("ortumcore MAC lowering supports only signed q15 full-product semantics");
+// The Q31 raw-high family shares the Q15 accumulator; the product selection
+// alone picks the target op.
+static bool isQ31RawHighMac(ondrix::ondsp::FixedAttr numeric, ondrix::ondsp::ProductAttr product) {
+  return ondrix::ondsp::isSignedQ31(numeric) && ondrix::ondsp::isRawHighProduct(product);
 }
 
 static bool containsOndspAccumulator(Type type) {
@@ -234,8 +236,12 @@ public:
         !isa<ondrix::ortumcore::AccumType>(resultType))
       return op.emitOpError("MAC lowering requires converted target accumulator types");
 
-    rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacAddOp>(op, resultType, adaptor.getAcc(),
-                                                             adaptor.getLhs(), adaptor.getRhs());
+    if (isQ31RawHighMac(op.getNumeric(), op.getProduct()))
+      rewriter.replaceOpWithNewOp<ondrix::ortumcore::Q31MacAddOp>(
+          op, resultType, adaptor.getAcc(), adaptor.getLhs(), adaptor.getRhs());
+    else
+      rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacAddOp>(op, resultType, adaptor.getAcc(),
+                                                               adaptor.getLhs(), adaptor.getRhs());
     return success();
   }
 };
@@ -256,8 +262,12 @@ public:
         !isa<ondrix::ortumcore::AccumType>(resultType))
       return op.emitOpError("MAC-sub lowering requires converted target accumulator types");
 
-    rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacSubOp>(op, resultType, adaptor.getAcc(),
-                                                             adaptor.getLhs(), adaptor.getRhs());
+    if (isQ31RawHighMac(op.getNumeric(), op.getProduct()))
+      rewriter.replaceOpWithNewOp<ondrix::ortumcore::Q31MacSubOp>(
+          op, resultType, adaptor.getAcc(), adaptor.getLhs(), adaptor.getRhs());
+    else
+      rewriter.replaceOpWithNewOp<ondrix::ortumcore::MacSubOp>(op, resultType, adaptor.getAcc(),
+                                                               adaptor.getLhs(), adaptor.getRhs());
     return success();
   }
 };

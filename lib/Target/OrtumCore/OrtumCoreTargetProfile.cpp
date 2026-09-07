@@ -22,7 +22,8 @@ bool OrtumCoreTargetProfile::supportsAccumulator(const AccumulatorDomain &accumu
 
 bool OrtumCoreTargetProfile::supportsMac(const ProductDomain &product,
                                          const AccumulatorDomain &accumulator) const {
-  return supportsAccumulator(accumulator) && matches(product, getSignedQ15FullProductDomain());
+  return supportsAccumulator(accumulator) && (matches(product, getSignedQ15FullProductDomain()) ||
+                                              matches(product, getSignedQ31RawHighProductDomain()));
 }
 
 bool OrtumCoreTargetProfile::supportsExport(const AccumulatorDomain &accumulator,

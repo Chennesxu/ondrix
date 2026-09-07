@@ -97,6 +97,14 @@ def ConvertOndspToOrtumCore
   let description = [{
     Lower ondsp semantic ops to ortumcore target semantic ops.
 
+    Two MAC families reach the target accumulator: the signed Q15 full
+    product (`mac_add`/`mac_sub`) and the signed Q31 raw-high product
+    (`q31_mac_add`/`q31_mac_sub`), whose term is the arithmetic high half of
+    the exact 32x32 product and therefore already sits at the accumulator's
+    frac30, so both share one accumulator domain and one readout path. A Q31
+    reduction on this profile exports at frac30 (the readout's own position);
+    the target has no left-shifting readout.
+
     Accumulator export selects the target readout capability only for the
     policies the readout provably realizes, with a saturating signed i32 or
     i16 destination. `toward_negative` maps to one readout at fractional

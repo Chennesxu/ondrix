@@ -22,8 +22,10 @@ bool isOrtumCoreLaneDomain(ondsp::AccType accumulator) {
 bool isOrtumCoreMacPolicy(ondsp::MacOp op) {
   // The pre-filter keeps the shared semantic inference silent: it only emits
   // diagnostics on shapes the pre-filter already rejects.
-  if (!ondsp::isSignedQ15(op.getNumeric()) ||
-      op.getProduct().getSelection() != ondsp::ProductSelection::Full)
+  bool q15Full = ondsp::isSignedQ15(op.getNumeric()) &&
+                 op.getProduct().getSelection() == ondsp::ProductSelection::Full;
+  bool q31RawHigh = ondsp::isSignedQ31(op.getNumeric()) && ondsp::isRawHighProduct(op.getProduct());
+  if (!q15Full && !q31RawHigh)
     return false;
   FailureOr<ondsp::ProductSemantics> semantics =
       ondsp::inferProductSemantics(op, op.getNumeric(), op.getProduct());

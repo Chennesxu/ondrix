@@ -140,9 +140,11 @@ into the same scalar contract, not a stable language surface.
 
 The executable Q31 profile (full products in i64/frac62 state, raw-high
 products in i40/frac30 state) is likewise defined in
-`fixed-point-semantics.md`. Q31 OrtumCore capability selection remains
-unsupported. Raw-high accumulation does not implicitly rescale from Q30 to
-Q31.
+`fixed-point-semantics.md`. Raw-high Q31 MACs select the OrtumCore
+`q31_mac_add`/`q31_mac_sub` on the shared i40/frac30 accumulator, and a
+raw-high reduction exports at frac30 through the same readout: raw-high
+accumulation does not implicitly rescale from Q30 to Q31, and the target has
+no left-shifting readout.
 
 ## Public OrtumCore Emulator
 
