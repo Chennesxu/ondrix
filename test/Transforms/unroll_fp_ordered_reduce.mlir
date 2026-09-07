@@ -104,3 +104,31 @@ func.func @budget_is_per_function(%a: memref<8xf32>, %b: memref<8xf32>) -> f32 {
   %r2 = ondsp.reduce_mac %r1, %a, %b {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, memref<8xf32>, memref<8xf32>) -> f32
   return %r2 : f32
 }
+
+// -----
+
+// RUN: ondrix-opt %s --unroll-ondsp-fp-ordered-reduce="vector-width=4 max-straight-line-terms=8" \
+// RUN:   --split-input-file | FileCheck %s --check-prefix=LANES
+
+// With lanes to fill, the reduction is left to the lane-blocked scalar
+// lowering while the accumulator loop, which no lane stage claims, is still
+// taken.
+// LANES-LABEL: func.func @lanes_keep_the_reduction(
+// LANES: ondsp.reduce_mac
+// LANES-NOT: scf.for
+func.func @lanes_keep_the_reduction(%a: memref<4xf32>, %b: memref<4xf32>, %x: memref<64xf32>,
+                                    %c: memref<4xf32>) -> (f32, f32) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  %seed = arith.constant 0.000000e+00 : f32
+  %r = ondsp.reduce_mac %seed, %a, %b {numeric = #ondsp.fp<format = f32, contract = off>} : (f32, memref<4xf32>, memref<4xf32>) -> f32
+  %acc = scf.for %tap = %c0 to %c4 step %c1 iter_args(%chain = %seed) -> (f32) {
+    %sample = memref.load %x[%tap] : memref<64xf32>
+    %coefficient = memref.load %c[%tap] : memref<4xf32>
+    %product = arith.mulf %sample, %coefficient : f32
+    %next = arith.addf %chain, %product : f32
+    scf.yield %next : f32
+  }
+  return %r, %acc : f32, f32
+}

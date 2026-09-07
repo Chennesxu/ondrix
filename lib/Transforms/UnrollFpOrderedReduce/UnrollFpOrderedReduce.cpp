@@ -139,7 +139,7 @@ struct UnrollOndspFpOrderedReduce final
       if (!function)
         return;
       if (auto reduce = dyn_cast<ReduceMacOp>(op)) {
-        if (isStraightLineCandidate(reduce))
+        if (vectorWidth <= 1 && isStraightLineCandidate(reduce))
           if (std::optional<int64_t> terms = getStraightLineTerms(reduce, maxStraightLineTerms))
             totals[function] += *terms;
         return;
@@ -181,8 +181,12 @@ struct UnrollOndspFpOrderedReduce final
   void runOnOperation() override {
     collectOverBudgetFunctions();
 
+    // Above one lane the lane-blocked scalar lowering owns the ordered
+    // reductions; only the accumulator loops, which no lane stage claims,
+    // are taken here.
     SmallVector<ReduceMacOp> reductions;
-    getOperation()->walk([&](ReduceMacOp op) { reductions.push_back(op); });
+    if (vectorWidth <= 1)
+      getOperation()->walk([&](ReduceMacOp op) { reductions.push_back(op); });
     for (ReduceMacOp reduce : reductions) {
       if (!isStraightLineCandidate(reduce) ||
           overBudget.contains(reduce->getParentOfType<func::FuncOp>()))

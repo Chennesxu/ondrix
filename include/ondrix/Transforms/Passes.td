@@ -357,6 +357,14 @@ def UnrollOndspFpOrderedReduce
     f32 reduction reached the backend as a loop whose unrolling was left to a
     generic cost heuristic that counts a separate multiply and add as two.
 
+    `vector-width` is the target's lane count at f32. Above one lane the
+    reduction rewrite stands down and only the loop rewrite runs: the scalar
+    lowering already gives an ordered contiguous `reduce_mac` a lane-blocked
+    schedule, which reads the same terms in the same order and beats this
+    chain, and claiming the site here would replace it with scalar loads
+    (measured: 12% on a 64-term dot and 14% on rms at 128 bits, against 32% the
+    other way on a matmul, whose accumulator loop no lane stage claims).
+
     `max-straight-line-terms` caps one reduction or loop; `max-unrolled-terms`
     bounds the terms a whole function may emit, because a lowering that already
     replicated its reductions multiplies a per-site bound by that replication.
@@ -364,6 +372,8 @@ def UnrollOndspFpOrderedReduce
     stays uniform. Zero disables either bound.
   }];
   let options = [
+    Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"1",
+           "Target lane count at f32; above one the reduction rewrite stands down">,
     Option<"maxStraightLineTerms", "max-straight-line-terms", "int64_t", /*default=*/"64",
            "Longest straight-line chain one site may become">,
     Option<"maxUnrolledTerms", "max-unrolled-terms", "int64_t", /*default=*/"0",
