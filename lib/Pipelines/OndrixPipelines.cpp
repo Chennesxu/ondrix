@@ -65,7 +65,11 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
     os << llvm::formatv("vectorize-ondsp-fp-fast-memref-reduce{{vector-width={0} "
                         "supports-vector-fma={1} interleave={2}},",
                         lanes, options.supportsF32VectorFma ? "true" : "false", chainDepth);
-    os << llvm::formatv("vectorize-ondsp-fixed-decimate-outputs{{vector-width={0}},", lanes);
+    // Two machine vectors of outputs per sliding-window block: a host-class
+    // heuristic like the chunk ladders below, held at two because the
+    // per-lane i64 accumulators of a four-vector block spill a 128-bit file.
+    os << llvm::formatv(
+        "vectorize-ondsp-fixed-decimate-outputs{{vector-width={0} chunk-multiple=2},", lanes);
     os << llvm::formatv("vectorize-ondsp-fixed-elementwise-updates{{vector-width={0}},", lanes);
     os << llvm::formatv("vectorize-ondsp-fixed-elementwise-loops{{vector-width={0}},", lanes);
     // The convolution-shaped reduction its operands walk in opposite

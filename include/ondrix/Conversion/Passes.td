@@ -565,12 +565,20 @@ def VectorizeOndspFixedDecimateOutputs
   let description = [{
     Rewrite the leading full blocks of a bufferized sliding-window output
     loop -- `ondrix.fir_filter`, `ondrix.conv1d`, or `ondrix.fir_decimate`
-    at factor two -- to compute `vector-width` outputs at a time (or, when the
-    output count cannot fill that width, the widest halving of it that the
-    count admits, the rule the column and constant-row batchers below share:
-    the declared width is the target's register, not a per-kernel choice) in a
+    at factor two -- to compute a block of outputs at a time in a
     multi-lane accumulator, and leave the remaining outputs on the
     untouched ordered loop.
+
+    The block is the widest the output count fills on a ladder of
+    `chunk-multiple` machine vectors down to one, then halves of one, the rule
+    the column and constant-row batchers below share: the declared width is
+    the target's register, not a per-kernel choice, and a block wider than one
+    vector amortizes each tap's coefficient broadcast and window load over
+    more outputs (a 32-tap convolution at eight i64 lanes: 0.82x of clang's
+    -O3 at one vector, 0.96x at two, parity at four on AVX2 -- while on a
+    128-bit NEON file the four-vector block's accumulators spill and the
+    two-vector block is the fastest of the three). The fold per output is
+    unchanged, so the block width carries no numeric obligation.
 
     Two matrix-product shapes take the same lanes. The column loop of the
     `ondrix.matmul` bufferization, whose right operand is read through a
@@ -665,6 +673,8 @@ def VectorizeOndspFixedDecimateOutputs
   let options = [
     Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"8",
            "Number of independent outputs batched per accumulator">,
+    Option<"chunkMultiple", "chunk-multiple", "int64_t", /*default=*/"1",
+           "Widest sliding-window block in machine vectors; steps down to the output count">,
   ];
 }
 

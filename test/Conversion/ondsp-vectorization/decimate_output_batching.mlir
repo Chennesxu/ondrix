@@ -1,6 +1,9 @@
 // RUN: ondrix-opt %s --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --cse --canonicalize > %t.ordered.mlir
 // RUN: ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-decimate-outputs="vector-width=8" | FileCheck %s
 // RUN: ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-decimate-outputs="vector-width=32" | FileCheck %s --check-prefix=STEP
+// A four-vector chunk at eight lanes reaches the same sixteen-output block from
+// below: the ladder tries 32, 24 and 16 outputs and the count fills 16.
+// RUN: ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-decimate-outputs="vector-width=8 chunk-multiple=4" | FileCheck %s --check-prefix=STEP
 // RUN: not ondrix-opt %t.ordered.mlir --vectorize-ondsp-fixed-decimate-outputs="vector-width=1" 2>&1 | FileCheck %s --check-prefix=WIDTH
 // The width becomes the accumulator's unsigned lane count, so it is bounded
 // from above as well: an unchecked width could truncate on the way into the

@@ -1154,21 +1154,34 @@ public:
       signalPassFailure();
       return;
     }
+    if (chunkMultiple < 1 || vectorWidth * chunkMultiple > kMaxVectorWidth) {
+      getOperation().emitError("chunk-multiple must be positive and keep the block within ")
+          << kMaxVectorWidth << " lanes";
+      signalPassFailure();
+      return;
+    }
 
     // Collect first: the batched loop this pass creates must never be offered
     // to the matcher, and the ordered loop is mutated in place.
     SmallVector<scf::ForOp> candidates;
     getOperation().walk([&](scf::ForOp loop) { candidates.push_back(loop); });
 
-    // The declared width is the widest batch; an output count that cannot
-    // fill it steps down by halves, the rule the column batcher applies.
+    // A sliding-window block may span chunk-multiple machine vectors of
+    // outputs, stepping down one vector at a time, then by halves below one
+    // vector: the widest block the output count fills, as the reduce ladders.
+    SmallVector<int64_t> ladder;
+    for (int64_t multiple = chunkMultiple; multiple >= 2; --multiple)
+      ladder.push_back(vectorWidth * multiple);
+    for (int64_t lanes = vectorWidth; lanes > 1; lanes /= 2)
+      ladder.push_back(lanes);
     OpBuilder builder(&getContext());
     for (scf::ForOp loop : candidates) {
       bool batched = false;
-      for (int64_t lanes = vectorWidth; lanes > 1 && !batched; lanes /= 2) {
+      for (int64_t lanes : ladder) {
         if (FailureOr<DecimateLoopShape> shape = matchDecimateLoop(loop, lanes); succeeded(shape)) {
           batchDecimateOutputs(*shape, lanes, builder);
           batched = true;
+          break;
         }
       }
       if (batched)
