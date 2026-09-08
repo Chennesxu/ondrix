@@ -886,9 +886,10 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
   if (grouping > 1)
     groupChains = std::max<int64_t>(1, std::min<int64_t>(chains, 8 / grouping));
 
+  SmallVector<scf::ForOp> emitted;
   auto emitBatchedLoop = [&](Value startIndex, Value endIndex, int64_t groups, int64_t perChains) {
     Value step = builder.create<arith::ConstantIndexOp>(loc, groups * vectorWidth);
-    builder.create<scf::ForOp>(
+    emitted.push_back(builder.create<scf::ForOp>(
         loc, startIndex, endIndex, step, ValueRange{},
         [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
           SmallVector<Value> bases{blockStart};
@@ -957,7 +958,7 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
             blockBuilder.create<vector::StoreOp>(blockLoc, lanes[group], shape.output,
                                                  ValueRange{shape.rowIndex, bases[group]});
           blockBuilder.create<scf::YieldOp>(blockLoc);
-        });
+        }));
   };
 
   int64_t groupedColumns = (fullBlocks / grouping) * grouping * vectorWidth;
@@ -970,9 +971,17 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
   // would still record a spend the audit can never observe.
   if (batchedColumns == shape.columnCount) {
     loop.erase();
-    return;
+  } else {
+    loop.getLowerBoundMutable().assign(batchedEnd);
+    emitted.push_back(loop);
   }
-  loop.getLowerBoundMutable().assign(batchedEnd);
+
+  // A block that covers its whole run is a body, not a loop: left as a
+  // one-trip loop it sits in its own region, and the batched columns and the
+  // ordered remainder then reach the backend as chains no scheduler can mix.
+  IRRewriter rewriter(builder.getContext());
+  for (scf::ForOp candidate : emitted)
+    (void)candidate.promoteIfSingleIteration(rewriter);
 }
 
 /// Whether `value` is the constant index zero.
@@ -1383,29 +1392,34 @@ public:
     SmallVector<scf::ForOp> candidates;
     getOperation().walk([&](scf::ForOp loop) { candidates.push_back(loop); });
 
+    // The declared width is the widest batch; an output count that cannot fill
+    // it steps down by halves, the rule the fixed-point batchers apply. The
+    // matcher order is the one the declared width already used.
     OpBuilder builder(&getContext());
     for (scf::ForOp loop : candidates) {
-      if (FailureOr<FpFilterLoopShape> shape = matchFpFilterLoop(loop, vectorWidth);
-          succeeded(shape)) {
-        batchFpFilterOutputs(*shape, vectorWidth, interleave, supportsVectorFma, builder);
-        continue;
-      }
-      if (FailureOr<FpWindowSumLoopShape> shape = matchFpWindowSumLoop(loop, vectorWidth);
-          succeeded(shape)) {
-        batchFpWindowSumOutputs(*shape, vectorWidth, interleave, builder);
-        continue;
-      }
-      if (FailureOr<FpColumnTileLoopShape> shape =
-              matchFpColumnTileLoop(loop, vectorWidth, supportsVectorFma);
-          succeeded(shape)) {
-        batchFpColumnTiles(*shape, vectorWidth, interleave, columnGroup, builder);
-        continue;
-      }
-      if (FailureOr<FpOutputTileLoopShape> shape =
-              matchFpOutputTileLoop(loop, vectorWidth, supportsVectorFma);
-          succeeded(shape)) {
-        if (!rowHorizontal || !rewriteFpOutputTileRowsHorizontal(*shape, vectorWidth, builder))
-          batchFpOutputTiles(*shape, vectorWidth, builder);
+      for (int64_t lanes = vectorWidth; lanes > 1; lanes /= 2) {
+        if (FailureOr<FpFilterLoopShape> shape = matchFpFilterLoop(loop, lanes); succeeded(shape)) {
+          batchFpFilterOutputs(*shape, lanes, interleave, supportsVectorFma, builder);
+          break;
+        }
+        if (FailureOr<FpWindowSumLoopShape> shape = matchFpWindowSumLoop(loop, lanes);
+            succeeded(shape)) {
+          batchFpWindowSumOutputs(*shape, lanes, interleave, builder);
+          break;
+        }
+        if (FailureOr<FpColumnTileLoopShape> shape =
+                matchFpColumnTileLoop(loop, lanes, supportsVectorFma);
+            succeeded(shape)) {
+          batchFpColumnTiles(*shape, lanes, interleave, columnGroup, builder);
+          break;
+        }
+        if (FailureOr<FpOutputTileLoopShape> shape =
+                matchFpOutputTileLoop(loop, lanes, supportsVectorFma);
+            succeeded(shape)) {
+          if (!rowHorizontal || !rewriteFpOutputTileRowsHorizontal(*shape, lanes, builder))
+            batchFpOutputTiles(*shape, lanes, builder);
+          break;
+        }
       }
     }
     ondrix::ondsp::summarizeFastPermissions(getOperation());

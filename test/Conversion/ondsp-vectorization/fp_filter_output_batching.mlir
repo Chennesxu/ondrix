@@ -87,10 +87,11 @@ func.func @fast_filter(%input: tensor<40xf32>, %coeffs: tensor<8xf32>,
   return %result : tensor<33xf32>
 }
 
-// Fewer outputs than lanes: no full block exists, the ordered loop stands.
+// Fewer outputs than lanes: the width steps down by halves to the four the
+// output count fills, so the whole axis is batched and no ordered loop stands.
 // CHECK-LABEL: func.func @narrow_filter
-// CHECK-NOT: vector.load
-// CHECK: ondsp.reduce_mac
+// CHECK: vector.store {{.*}} : memref<4xf32>, vector<4xf32>
+// CHECK-NOT: ondsp.reduce_mac
 func.func @narrow_filter(%input: tensor<11xf32>, %coeffs: tensor<8xf32>,
                          %init: tensor<4xf32>) -> tensor<4xf32> {
   %result = ondrix.fir_filter %input, %coeffs, %init {
@@ -201,15 +202,28 @@ func.func @matmul_columns_fast(%a: tensor<2x4xf32>, %b: tensor<4x20xf32>) -> ten
   return %r : tensor<2x20xf32>
 }
 
-// Fewer columns than lanes: no full block exists, the ordered nest stands.
+// Fewer columns than lanes: the width steps down to four, batching columns
+// zero through three and leaving the remaining two on the ordered nest.
 // CHECK-LABEL: func.func @matmul_narrow
-// CHECK-NOT: vector.load
+// CHECK: vector.store {{.*}} : memref<2x6xf32>, vector<4xf32>
 // CHECK: arith.mulf {{.*}} : f32
 func.func @matmul_narrow(%a: tensor<2x4xf32>, %b: tensor<4x6xf32>) -> tensor<2x6xf32> {
   %r = ondrix.matmul %a, %b {
     numeric = #ondsp.fp<format = f32, contract = off>
   } : (tensor<2x4xf32>, tensor<4x6xf32>) -> tensor<2x6xf32>
   return %r : tensor<2x6xf32>
+}
+
+// Three columns at eight lanes: the step-down halves twice, so a single
+// halving would leave this nest ordered.
+// CHECK-LABEL: func.func @matmul_three_columns
+// CHECK: vector.store {{.*}} : memref<4x3xf32>, vector<2xf32>
+// CHECK: arith.mulf {{.*}} : f32
+func.func @matmul_three_columns(%a: tensor<4x16xf32>, %b: tensor<16x3xf32>) -> tensor<4x3xf32> {
+  %r = ondrix.matmul %a, %b {
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<4x16xf32>, tensor<16x3xf32>) -> tensor<4x3xf32>
+  return %r : tensor<4x3xf32>
 }
 
 // A spend record is discardable audit metadata, so a forged one on an exact

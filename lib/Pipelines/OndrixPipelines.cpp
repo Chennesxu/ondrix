@@ -22,7 +22,8 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // form so the schedule stage sees their `reduce_mac` loops.
   os << "evaluate-ondrix-fir-design,";
   os << llvm::formatv("convert-ondrix-to-ondsp{{preserve-bufferizable-reductions=true "
-                      "fft-loops={0}},",
+                      "output-batch-vector-width={0} fft-loops={1}},",
+                      options.vectorBits >= 64 ? options.vectorBits / 32 : 1,
                       options.fftLoops ? "true" : "false");
   // Forwarding must precede bufferization so a forwarded intermediate is
   // never materialized as a buffer.

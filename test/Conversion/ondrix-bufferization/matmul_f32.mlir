@@ -73,14 +73,13 @@ func.func @f32_matmul_fma(%a: tensor<4x8xf32>, %b: tensor<8x6xf32>) -> tensor<4x
   return %c : tensor<4x6xf32>
 }
 
-// Two full blocks group into one pass: both blocks' term loads share one
-// splat, each block keeps its own chains, and R is recorded once per block.
+// Two full blocks group into one pass, and the pass covers the whole column
+// run, so it is a body rather than a one-trip loop.
 // CHECK-LABEL: func.func @f32_matmul_grouped
 // CHECK: {ondsp.numeric = #ondsp.fp<format = f32, contract = fast>}
 // CHAINED-LABEL: func.func @f32_matmul_grouped
 // CHAINED: %[[SP0:.*]] = vector.splat {{.*}} : vector<4xf32>
-// CHAINED: scf.for %[[BLK:.*]] = %c0{{.*}} step %c8
-// CHAINED: %[[G1:.*]] = arith.addi %[[BLK]], %c4
+// CHAINED: %[[G1:.*]] = arith.addi %[[BLK:c0[_0-9]*]], %c4
 // CHAINED: %[[L0:.*]] = vector.load %{{.*}}[%c0{{.*}}, %[[BLK]]] : memref<8x8xf32>, vector<4xf32>
 // CHAINED: %[[S0:.*]] = math.fma %[[SP0]], %[[L0]], %{{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<4xf32>
 // CHAINED: %[[L1:.*]] = vector.load %{{.*}}[%c0{{.*}}, %[[G1]]] : memref<8x8xf32>, vector<4xf32>
@@ -88,6 +87,9 @@ func.func @f32_matmul_fma(%a: tensor<4x8xf32>, %b: tensor<8x6xf32>) -> tensor<4x
 // CHAINED-COUNT-2: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : vector<4xf32>
 // CHAINED: vector.store {{.*}}[%{{.*}}, %[[BLK]]] : memref<4x8xf32>, vector<4xf32>
 // CHAINED: vector.store {{.*}}[%{{.*}}, %[[G1]]] : memref<4x8xf32>, vector<4xf32>
+// The base above is the constant, not a block loop's induction variable, and
+// the row walk is the only loop left.
+// CHAINED-NOT: scf.for
 func.func @f32_matmul_grouped(%a: tensor<4x8xf32>, %b: tensor<8x8xf32>) -> tensor<4x8xf32> {
   %c = ondrix.matmul %a, %b {
     numeric = #ondsp.fp<format = f32, contract = fast>

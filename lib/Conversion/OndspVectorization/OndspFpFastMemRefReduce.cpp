@@ -32,13 +32,30 @@ constexpr int64_t kMaxVectorWidth = 4096;
 /// any real register file.
 constexpr int64_t kMaxInterleave = 64;
 
-/// Reduction length when both operand extents are known at compile time.
-std::optional<int64_t> getStaticReductionLength(MemRefType lhsType, MemRefType rhsType) {
-  if (!lhsType.isDynamicDim(0))
-    return lhsType.getDimSize(0);
-  if (!rhsType.isDynamicDim(0))
-    return rhsType.getDimSize(0);
+/// The extent an operand actually carries: bufferization hands the reduction
+/// its window and its coefficient row through `memref.cast`, so the static
+/// dimension the producer knows sits one erasing cast away from the operand
+/// type. The walk reads types only.
+std::optional<int64_t> getStaticExtent(Value operand) {
+  while (operand) {
+    auto type = dyn_cast<MemRefType>(operand.getType());
+    if (!type)
+      return std::nullopt;
+    if (!type.isDynamicDim(0))
+      return type.getDimSize(0);
+    auto cast = operand.getDefiningOp<memref::CastOp>();
+    if (!cast)
+      return std::nullopt;
+    operand = cast.getSource();
+  }
   return std::nullopt;
+}
+
+/// Reduction length when either operand's extent is known at compile time.
+std::optional<int64_t> getStaticReductionLength(Value lhs, Value rhs) {
+  if (std::optional<int64_t> length = getStaticExtent(lhs))
+    return length;
+  return getStaticExtent(rhs);
 }
 
 bool isSupportedFastMemRefReduction(ondrix::ondsp::ReduceMacOp op, int64_t vectorWidth,
@@ -53,12 +70,17 @@ bool isSupportedFastMemRefReduction(ondrix::ondsp::ReduceMacOp op, int64_t vecto
   auto lhsType = dyn_cast<MemRefType>(op.getLhs().getType());
   auto rhsType = dyn_cast<MemRefType>(op.getRhs().getType());
   if (!lhsType || !rhsType || !ondrix::conversion::hasDefaultLLVMVectorMemorySpace(lhsType) ||
-      !ondrix::conversion::hasDefaultLLVMVectorMemorySpace(rhsType) ||
-      !isLastMemrefDimUnitStride(lhsType) || !isLastMemrefDimUnitStride(rhsType))
+      !ondrix::conversion::hasDefaultLLVMVectorMemorySpace(rhsType))
+    return false;
+  // Contiguity is the Vector lowering's obligation, not the reduction's: a
+  // single lane loads through the memref's own stride, so a reversed operand
+  // -- the convolution kernel -- is addressed correctly without it.
+  if (vectorWidth > 1 &&
+      (!isLastMemrefDimUnitStride(lhsType) || !isLastMemrefDimUnitStride(rhsType)))
     return false;
   // A statically short reduction has no lane to fill, so it keeps the ordered
   // schedule outright instead of carrying a branch that can never be taken.
-  std::optional<int64_t> length = getStaticReductionLength(lhsType, rhsType);
+  std::optional<int64_t> length = getStaticReductionLength(op.getLhs(), op.getRhs());
   // At width one the rebuild's only value is carrying several scalar chains;
   // a single chain would spend the permission on the ordered schedule.
   if (vectorWidth == 1)
@@ -128,7 +150,7 @@ public:
       Value groupEnd = vectorEnd;
       int64_t leftoverBlocks = 0;
       if (chains > 1) {
-        int64_t length = *getStaticReductionLength(bounds->lhsType, bounds->rhsType);
+        int64_t length = *getStaticReductionLength(adaptor.getLhs(), adaptor.getRhs());
         int64_t blocks = length / vectorWidth;
         leftoverBlocks = (blocks - chains) % chains;
         groupEnd = blockBase(builder, branchLoc, bounds->lowerBound, blocks - leftoverBlocks);
@@ -204,7 +226,7 @@ public:
     // never reaches this pattern. Interleaving needs the compile-time block
     // count, so a dynamic extent keeps the single chain.
     if (std::optional<int64_t> length =
-            getStaticReductionLength(bounds->lhsType, bounds->rhsType)) {
+            getStaticReductionLength(adaptor.getLhs(), adaptor.getRhs())) {
       int64_t chains = std::min(interleave, *length / vectorWidth);
       rewriter.replaceOp(op, buildBatched(rewriter, loc, chains));
       return success();

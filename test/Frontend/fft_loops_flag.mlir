@@ -20,6 +20,6 @@
 // MANIFEST-NEXT: "fft_lowering": "loops"
 // MANIFEST: "declared_target_facts"
 // MANIFEST-NOT: fft
-// MANIFEST: convert-ondrix-to-ondsp{preserve-bufferizable-reductions=true fft-loops=true}
+// MANIFEST: convert-ondrix-to-ondsp{preserve-bufferizable-reductions=true output-batch-vector-width={{[0-9]+}} fft-loops=true}
 // DEFAULT: "fft_lowering": "unrolled"
-// DEFAULT: convert-ondrix-to-ondsp{preserve-bufferizable-reductions=true fft-loops=false}
+// DEFAULT: convert-ondrix-to-ondsp{preserve-bufferizable-reductions=true output-batch-vector-width={{[0-9]+}} fft-loops=false}

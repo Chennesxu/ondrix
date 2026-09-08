@@ -1,5 +1,7 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp="sliding-window-reuse=true" | FileCheck %s --check-prefix=REUSE
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="preserve-bufferizable-reductions=true output-batch-vector-width=1" | FileCheck %s --check-prefix=NOLANES
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="preserve-bufferizable-reductions=true output-batch-vector-width=4" | FileCheck %s --check-prefix=LANES
 
 // The floating-point average declines the incremental form: the reuse is
 // value-neutral only for exact integer window sums, so both runs emit the
@@ -44,3 +46,12 @@ func.func @f32_dct(%input: tensor<8xf32>) -> tensor<8xf32> {
   } : (tensor<8xf32>) -> tensor<8xf32>
   return %result : tensor<8xf32>
 }
+
+// A binary32 DCT bufferizes to a row loop, not a reduce_mac, so only the
+// output batching claims the contract form: without lanes it would keep a
+// loop nobody wants in place of the scalar lowering's unrolled rows.
+// NOLANES-LABEL: func.func @f32_dct
+// NOLANES-NOT: ondrix.dct
+// NOLANES: math.fma
+// LANES-LABEL: func.func @f32_dct
+// LANES: ondrix.dct

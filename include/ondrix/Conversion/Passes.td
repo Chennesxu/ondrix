@@ -72,6 +72,12 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
            "(FIR filter/decimate, conv1d, matmul, rms, dct) in contract form, "
            "so the post-bufferization schedule stage sees their reduce_mac "
            "loops instead of pre-lowered scalar bodies">,
+    Option<"outputBatchVectorWidth", "output-batch-vector-width", "int64_t", /*default=*/"1",
+           "Declared lane count the schedule stage will batch outputs at. A "
+           "binary32 DCT row loop is kept in contract form only where those "
+           "lanes exist to claim it; below them the scalar tensor lowering's "
+           "unrolled rows are the better body and nothing downstream wants a "
+           "loop">,
     Option<"slidingWindowReuse", "sliding-window-reuse",
            "bool", /*default=*/"false",
            "Ablation interface: reuse exact moving-average window sums incrementally "

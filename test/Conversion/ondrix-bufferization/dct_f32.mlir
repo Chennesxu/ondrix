@@ -107,9 +107,8 @@ func.func @f32_dct8_fast(%input: tensor<8xf32>) -> tensor<8xf32> {
 // PARTIAL: scf.for %[[K:.*]] = %[[END]] to %{{.*}} step %{{.*}} {
 // PARTIAL: memref.store {{.*}}, %{{.*}}[%[[K]]] : memref<8xf32>
 
-// A tile wider than the whole output axis has no full block to fill, so the
-// batching refuses rather than emitting an empty batched loop beside the
-// ordered one.
+// A tile wider than the whole output axis steps down by halves to the widest
+// one the output count fills, so no output is left on the ordered loop.
 // TOOWIDE-LABEL: func.func @f32_dct8
-// TOOWIDE-NOT: vector.store
-// TOOWIDE: memref.store {{.*}} : memref<8xf32>
+// TOOWIDE: vector.store {{.*}} : memref<8xf32>, vector<8xf32>
+// TOOWIDE-NOT: memref.store {{.*}} : memref<8xf32>

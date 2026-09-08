@@ -76,7 +76,12 @@ public:
       target.addDynamicallyLegalOp<ondrix::ir::RmsOp>([&](ondrix::ir::RmsOp op) {
         return bufferizableReduction(op.getNumeric(), /*widestStorage=*/32);
       });
+      // A binary32 DCT bufferizes to a row loop, not a reduce_mac: only the
+      // output batching claims it, so below its lane count the contract form
+      // costs the scalar lowering's unrolled rows and buys nothing.
       target.addDynamicallyLegalOp<ondrix::ir::DctOp>([&](ondrix::ir::DctOp op) {
+        if (isa<ondrix::ondsp::FpAttr>(op.getInputNumeric()))
+          return outputBatchVectorWidth > 1;
         return bufferizableReduction(op.getInputNumeric(), /*widestStorage=*/16);
       });
       // The f32 moving average bufferizes to the windowed-sum loop the
