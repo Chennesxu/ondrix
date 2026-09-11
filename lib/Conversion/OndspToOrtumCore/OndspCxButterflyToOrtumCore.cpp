@@ -142,8 +142,17 @@ private:
                                                  llvm::ArrayRef<int32_t>(values)));
       conjugatedTables[table] = conjugatedTable;
     }
+    // Legs sharing one table read share its conjugated read when the first
+    // materialization already dominates (same block, earlier).
+    Value shared = conjugatedTwiddles.lookup(op.getTwiddle());
+    if (shared && shared.getDefiningOp()->getBlock() == op->getBlock() &&
+        shared.getDefiningOp()->isBeforeInBlock(op))
+      return shared;
     OpBuilder builder(op);
-    return builder.create<tensor::ExtractOp>(loc, conjugatedTable, extract.getIndices());
+    Value conjugated =
+        builder.create<tensor::ExtractOp>(loc, conjugatedTable, extract.getIndices());
+    conjugatedTwiddles[op.getTwiddle()] = conjugated;
+    return conjugated;
   }
 
   // Top-aligned rev32 composition: shifting the low `width` bits to the top
@@ -342,6 +351,7 @@ private:
   }
 
   llvm::DenseMap<Operation *, Value> conjugatedTables;
+  llvm::DenseMap<Value, Value> conjugatedTwiddles;
 };
 
 } // namespace

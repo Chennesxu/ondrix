@@ -254,7 +254,8 @@ lowerPackedCfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirection 
 // changes (loops and constant tables instead of unrolled SSA butterflies).
 // Every width follows from the profile: the packed container carries both the
 // values and the twiddle table, and only the 16-bit packed target has the
-// paired inventory form.
+// paired inventory form, whose dynamic stages run two at a time as radix-4
+// units (the target's fused stage-pair macro chain).
 static Value lowerPackedCfftLoops(Location loc, Value input, int64_t extent,
                                   ondrix::ir::CfftDirection direction,
                                   ondrix::ondsp::PackedComplexProfile profile,
@@ -487,44 +488,118 @@ static Value lowerPackedCfftLoops(Location loc, Value input, int64_t extent,
     return buildPlainStages(rewriter, loc, vectorStage, stages, scalarStages, lanes);
   }
 
-  auto stageLoop = rewriter.create<scf::ForOp>(
-      loc, lowerStage, stages, one, ValueRange{current},
-      [&](OpBuilder &builder, Location loc, Value stage, ValueRange stageArgs) {
-        Value half = builder.create<arith::ShLIOp>(loc, one, stage);
-        Value doubled = builder.create<arith::AddIOp>(loc, half, half);
-        // Paired form as group-nested unit-stride loops: each inner body
-        // carries one fixed variant and walks its data and twiddle streams
-        // at stride one, and the group-major order matches the flat legs
-        // it replaces element for element. Both legs of a pair read
-        // twiddles[H/2 + j]; only H >= 4 reaches here.
-        Value halfHalf = builder.create<arith::ShRUIOp>(loc, half, one);
-        Value groups = builder.create<arith::DivUIOp>(loc, extentValue, doubled);
-        auto legLoops = [&](Value data, Value phaseBase,
-                            ondrix::ondsp::CxButterflyVariant variant) -> Value {
-          auto groupLoop = builder.create<scf::ForOp>(
-              loc, zero, groups, one, ValueRange{data},
-              [&](OpBuilder &builder, Location loc, Value group, ValueRange groupArgs) {
-                Value base = builder.create<arith::MulIOp>(loc, group, doubled);
-                Value start = builder.create<arith::AddIOp>(loc, base, phaseBase);
-                auto innerLoop = builder.create<scf::ForOp>(
-                    loc, zero, halfHalf, one, ValueRange{groupArgs.front()},
-                    [&](OpBuilder &builder, Location loc, Value j, ValueRange innerArgs) {
-                      Value upper = builder.create<arith::AddIOp>(loc, start, j);
-                      Value twiddleIndex = builder.create<arith::AddIOp>(loc, halfHalf, j);
-                      builder.create<scf::YieldOp>(loc,
-                                                   buildLeg(builder, loc, innerArgs.front(), half,
-                                                            upper, twiddleIndex, variant));
-                    });
-                builder.create<scf::YieldOp>(loc, innerLoop.getResult(0));
-              });
-          return groupLoop.getResult(0);
-        };
-        Value afterPlain =
-            legLoops(stageArgs.front(), zero, ondrix::ondsp::CxButterflyVariant::Plain);
-        Value afterCross = legLoops(afterPlain, halfHalf, ondrix::ondsp::CxButterflyVariant::Cross);
-        builder.create<scf::YieldOp>(loc, afterCross);
-      });
-  return stageLoop.getResult(0);
+  // Paired form as static stages: the pair of stages (H, 2H) is one group
+  // loop of radix-4 units over 4H elements, and the pair's plain (j < H/2)
+  // and cross (j >= H/2) first-stage legs are separate inner loops so each
+  // body carries fixed variants. Positions (b + mH + j) pass the stage-H
+  // butterfly (x0, x1), (x2, x3) on twiddles[H/2 + j] and the stage-2H
+  // butterflies (y0, y2) plain and (y1, y3) cross on twiddles[H + j'].
+  auto index = [&](OpBuilder &builder, int64_t value) {
+    return builder.create<arith::ConstantIndexOp>(loc, value).getResult();
+  };
+  auto buildUnit = [&](OpBuilder &builder, Location loc, Value data, ArrayRef<Value> positions,
+                       Value twiddleA, Value twiddleB, bool crossFirst) -> Value {
+    SmallVector<Value> x;
+    for (Value position : positions)
+      x.push_back(builder.create<tensor::ExtractOp>(loc, data, position));
+    Value wa = builder.create<tensor::ExtractOp>(loc, twiddleTable, twiddleA);
+    Value wb = builder.create<tensor::ExtractOp>(loc, twiddleTable, twiddleB);
+    auto butterfly = [&](Value a, Value b, Value twiddle,
+                         ondrix::ondsp::CxButterflyVariant variant) {
+      auto attr = variant == ondrix::ondsp::CxButterflyVariant::Plain
+                      ? ondrix::ondsp::CxButterflyVariantAttr()
+                      : ondrix::ondsp::CxButterflyVariantAttr::get(builder.getContext(), variant);
+      return builder.create<ondrix::ondsp::CxButterflyOp>(loc, container, container, a, b, twiddle,
+                                                          layout, numeric, product, productScale,
+                                                          outputScale, attr);
+    };
+    auto first = crossFirst ? ondrix::ondsp::CxButterflyVariant::Cross
+                            : ondrix::ondsp::CxButterflyVariant::Plain;
+    auto lowerA = butterfly(x[0], x[1], wa, first);
+    auto lowerB = butterfly(x[2], x[3], wa, first);
+    auto upperPlain =
+        butterfly(lowerA.getOut0(), lowerB.getOut0(), wb, ondrix::ondsp::CxButterflyVariant::Plain);
+    auto upperCross =
+        butterfly(lowerA.getOut1(), lowerB.getOut1(), wb, ondrix::ondsp::CxButterflyVariant::Cross);
+    Value out = builder.create<tensor::InsertOp>(loc, upperPlain.getOut0(), data, positions[0]);
+    out = builder.create<tensor::InsertOp>(loc, upperCross.getOut0(), out, positions[1]);
+    out = builder.create<tensor::InsertOp>(loc, upperPlain.getOut1(), out, positions[2]);
+    return builder.create<tensor::InsertOp>(loc, upperCross.getOut1(), out, positions[3]);
+  };
+  auto fusedStagePair = [&](Value data, int64_t half) -> Value {
+    Value groups = index(rewriter, extent / (4 * half));
+    Value span = index(rewriter, 4 * half);
+    Value halfValue = index(rewriter, half);
+    Value halfHalf = index(rewriter, half / 2);
+    Value crossTwiddles = index(rewriter, half + half / 2);
+    auto groupLoop = rewriter.create<scf::ForOp>(
+        loc, zero, groups, one, ValueRange{data},
+        [&](OpBuilder &builder, Location loc, Value group, ValueRange groupArgs) {
+          Value base = builder.create<arith::MulIOp>(loc, group, span);
+          Value current = groupArgs.front();
+          for (bool crossFirst : {false, true}) {
+            Value start =
+                crossFirst ? builder.create<arith::AddIOp>(loc, base, halfHalf).getResult() : base;
+            auto innerLoop = builder.create<scf::ForOp>(
+                loc, zero, halfHalf, one, ValueRange{current},
+                [&](OpBuilder &builder, Location loc, Value j, ValueRange innerArgs) {
+                  SmallVector<Value> positions;
+                  Value position = builder.create<arith::AddIOp>(loc, start, j);
+                  for (int64_t leg = 0; leg < 4; ++leg) {
+                    positions.push_back(position);
+                    if (leg < 3)
+                      position = builder.create<arith::AddIOp>(loc, position, halfValue);
+                  }
+                  Value twiddleA = builder.create<arith::AddIOp>(loc, halfHalf, j);
+                  Value twiddleB =
+                      builder.create<arith::AddIOp>(loc, crossFirst ? crossTwiddles : halfValue, j);
+                  builder.create<scf::YieldOp>(loc,
+                                               buildUnit(builder, loc, innerArgs.front(), positions,
+                                                         twiddleA, twiddleB, crossFirst));
+                });
+            current = innerLoop.getResult(0);
+          }
+          builder.create<scf::YieldOp>(loc, current);
+        });
+    return groupLoop.getResult(0);
+  };
+  // A leftover single stage keeps the two-leg form: plain then cross, each
+  // walking its data and twiddle streams at stride one.
+  auto singleStage = [&](Value data, int64_t half) -> Value {
+    Value groups = index(rewriter, extent / (2 * half));
+    Value doubled = index(rewriter, 2 * half);
+    Value halfHalf = index(rewriter, half / 2);
+    Value halfValue = index(rewriter, half);
+    for (auto variant :
+         {ondrix::ondsp::CxButterflyVariant::Plain, ondrix::ondsp::CxButterflyVariant::Cross}) {
+      auto groupLoop = rewriter.create<scf::ForOp>(
+          loc, zero, groups, one, ValueRange{data},
+          [&](OpBuilder &builder, Location loc, Value group, ValueRange groupArgs) {
+            Value base = builder.create<arith::MulIOp>(loc, group, doubled);
+            Value start = variant == ondrix::ondsp::CxButterflyVariant::Cross
+                              ? builder.create<arith::AddIOp>(loc, base, halfHalf).getResult()
+                              : base;
+            auto innerLoop = builder.create<scf::ForOp>(
+                loc, zero, halfHalf, one, ValueRange{groupArgs.front()},
+                [&](OpBuilder &builder, Location loc, Value j, ValueRange innerArgs) {
+                  Value upper = builder.create<arith::AddIOp>(loc, start, j);
+                  Value twiddleIndex = builder.create<arith::AddIOp>(loc, halfHalf, j);
+                  builder.create<scf::YieldOp>(loc,
+                                               buildLeg(builder, loc, innerArgs.front(), halfValue,
+                                                        upper, twiddleIndex, variant));
+                });
+            builder.create<scf::YieldOp>(loc, innerLoop.getResult(0));
+          });
+      data = groupLoop.getResult(0);
+    }
+    return data;
+  };
+  int64_t half = 4;
+  for (; 4 * half <= extent; half *= 4)
+    current = fusedStagePair(current, half);
+  if (half < extent)
+    current = singleStage(current, half);
+  return current;
 }
 
 static Value canonicalizePackedReal(Location loc, Value packed,
