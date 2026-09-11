@@ -77,6 +77,12 @@ cl::opt<int64_t> accumulatorChains(
              "multiply-add latency needs (0 derives it from the width)"),
     cl::init(0));
 
+cl::opt<int64_t> columnGroup(
+    "column-group",
+    cl::desc("Declared target quantity: matrix column blocks per row iteration (0 derives it "
+             "from the width)"),
+    cl::init(0));
+
 cl::opt<bool> supportsF32VectorFma("supports-f32-vector-fma",
                                    cl::desc("Declared target capability: the target has an f32 "
                                             "vector fused multiply-add"),
@@ -115,6 +121,7 @@ void emitManifest(mlir::ModuleOp module, const ondrix::OndrixDefaultPipelineOpti
 
   const int64_t vectorBitsValue = options.vectorBits;
   const int64_t chainsValue = options.accumulatorChains;
+  const int64_t columnGroupValue = options.columnGroup;
   const bool fmaValue = options.supportsF32VectorFma;
   const bool lowHalvesValue = options.wideningMultiplyLowHalves;
   const bool adjacentPairsValue = options.multiplyAddAdjacentPairs;
@@ -125,6 +132,7 @@ void emitManifest(mlir::ModuleOp module, const ondrix::OndrixDefaultPipelineOpti
       {"declared_target_facts",
        llvm::json::Object{{"vector_bits", vectorBitsValue},
                           {"accumulator_chains", chainsValue},
+                          {"column_group", columnGroupValue},
                           {"supports_f32_vector_fma", fmaValue},
                           {"widening_multiply_low_halves", lowHalvesValue},
                           {"multiply_add_adjacent_pairs", adjacentPairsValue}}},
@@ -194,6 +202,7 @@ int main(int argc, char **argv) {
     options.vectorBits = vectorBits.getValue();
     options.supportsF32VectorFma = supportsF32VectorFma.getValue();
     options.accumulatorChains = accumulatorChains.getValue();
+    options.columnGroup = columnGroup.getValue();
     options.wideningMultiplyLowHalves = wideningMultiplyLowHalves.getValue();
     options.multiplyAddAdjacentPairs = multiplyAddAdjacentPairs.getValue();
     options.fftLoops = fftLoops.getValue();

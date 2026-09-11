@@ -74,6 +74,12 @@ bufferization (`forward-ondrix-insert-extract`, described under Spectral
 magnitude); boundary bufferization; the automatic schedule stage; and
 lowering to the LLVM dialect.
 
+- **Kernel-local temporaries.** Bufferization leaves deallocation to the
+  pipeline's own deallocation stage, so a temporary that never escapes the
+  kernel (a packed operand copy, an output consumed inside the kernel) is
+  promoted to the stack before deallocations are placed; only buffers the
+  kernel returns are heap allocations. A compiled kernel therefore pays no
+  heap round trip per call that a C baseline with stack arrays would not.
 - **Schedule selection.** Inside the schedule stage every candidate
   transform is filtered by its own legality analysis and applied in a
   documented priority order: order-preserving vertical batchings first,
@@ -139,7 +145,7 @@ the fourth class requires dropping to `ondrix-opt` and naming passes.
 | Class | Meaning | Members |
 | --- | --- | --- |
 | Semantic contract | Declared in source; changes the admissible result set | Per-call-site numeric contracts (`accumulator`, `rounding`, `overflow`, `contract=off\|fma\|fast`), FIR `boundary`, algorithm parameters (`factor`, `window`, `gain`, `step_size`, design `taps`/`cutoff`) |
-| Target configuration | Describes the machine, not the program | `vector-bits` (register width; lane counts derive from it; zero withdraws the lanes but not the schedule stage — exact contracts get the ordered scalar program, while a `fast` reduction still carries its multi-chain rebuild as scalar chains) |
+| Target configuration | Describes the machine, not the program | `vector-bits` (register width; lane counts derive from it; zero withdraws the lanes but not the schedule stage — exact contracts get the ordered scalar program, while a `fast` reduction still carries its multi-chain rebuild as scalar chains); `hardware-repeat-block` (the target's counted loops run on a zero-overhead repeat block, so the straight-line reduction budgets drop to one term and every counted reduction keeps the loop the block claims — the straight-line form's whole purchase is the index update and the branch, which the block has already deleted) |
 | Compiler auto decision | Fixed inside the pipeline, not user-facing | Schedule-stage candidate selection, `preserve-bufferizable-reductions`, the constant-reassociation analysis budget, frontend accumulator-width inference |
 | Ablation and oracle interface | Forces or measures one alternative; never required to compile | `fft-loops`, `vectorize-static-cfft`, `sliding-window-reuse`, `specialize-canonical-twiddles`, `sqrt-estimate`, `tile-size`, `max-taps`, `record-refusals`, proof-trace emission and replay, individual schedule-pass flags |
 | Legacy | Retained for compatibility, outside current claims | `--print-source-locations` |

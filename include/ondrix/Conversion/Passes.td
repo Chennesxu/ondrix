@@ -417,6 +417,29 @@ def NormalizeOndspFixedVectorReduce
   ];
 }
 
+def ForwardOndspPackedReductionOperands
+    : Pass<"forward-ondsp-packed-reduction-operands", "::mlir::ModuleOp"> {
+  let summary = "Read a column reduction through the source instead of a packed copy";
+  let description = [{
+    The matrix-product bufferization packs the right operand into a transposed
+    scratch buffer so every column reduction reads a unit-stride row, the form
+    the vector legality gate admits. A reduction the schedule stage left
+    ordered gains nothing from that copy and pays the pack loop, the
+    allocation and its release per call (a 4x16x3 Q31 product on a 128-bit
+    in-order core: 48 stores and loads for 192 multiply-adds). This pass runs
+    after the schedule stage and, for every packed copy whose only readers are
+    still `ondsp.reduce_mac` row views, points those reductions at a strided
+    column view of the original operand and deletes the copy. The fold order
+    is untouched; only the addresses the terms are read from change.
+  }];
+  let constructor = "ondrix::createForwardOndspPackedReductionOperandsPass()";
+  let dependentDialects = [
+    "ondrix::ondsp::OndspDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect"
+  ];
+}
+
 def ParallelizeOndspFixedWrapVectorReduce
     : Pass<"parallelize-ondsp-fixed-wrap-vector-reduce", "::mlir::ModuleOp"> {
   let summary = "Parallelize supported exact-modulo fixed-point vector reductions";

@@ -46,6 +46,14 @@ struct OndrixDefaultPipelineOptions
       llvm::cl::desc("Declared target quantity: independent partial-sum chains the "
                      "target's multiply-add latency needs (0 derives it from the width)"),
       llvm::cl::init(0)};
+  /// How many machine-vector column blocks one matrix output row computes per
+  /// iteration. Zero derives it from the width; a target declares its own when
+  /// the operand matrix fits its register file and should stay resident.
+  Option<int64_t> columnGroup{
+      *this, "column-group",
+      llvm::cl::desc("Declared target quantity: matrix column blocks per row iteration "
+                     "(0 derives it from the width)"),
+      llvm::cl::init(0)};
   /// Whether the target's lane-widening integer multiply reads its operands
   /// from the low halves of the wide lanes (x86 pmuldq) rather than from
   /// sign-extended narrower lanes (NEON smull). Both answers are correct
@@ -64,6 +72,17 @@ struct OndrixDefaultPipelineOptions
       llvm::cl::desc("Declared target capability: the lane-widening multiply-add folds "
                      "adjacent products"),
       llvm::cl::init(true)};
+  /// Whether the target's counted loops run on a zero-overhead hardware
+  /// repeat block. The straight-line reduction form buys its speed by
+  /// deleting the index update and the branch, and a repeat block has already
+  /// deleted both, so unrolling there only spends instruction memory and
+  /// denies the block the loop it needs. Off by default: a target without the
+  /// instruction pays a branch per term.
+  Option<bool> hardwareRepeatBlock{
+      *this, "hardware-repeat-block",
+      llvm::cl::desc("Declared target capability: counted loops run on a zero-overhead "
+                     "hardware repeat block, so reductions keep their loop form"),
+      llvm::cl::init(false)};
   /// Which code shape the static transforms take. This is an explicit
   /// SCHEDULE CHOICE, not a target fact, and it must not be derived from a
   /// target description: whether the instruction memory holds the unrolled

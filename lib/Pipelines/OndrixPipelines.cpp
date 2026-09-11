@@ -34,7 +34,7 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // already follow. The deallocation pass below frees only what does not
   // escape.
   os << "one-shot-bufferize{bufferize-function-boundaries=true allow-return-allocs=true "
-        "function-boundary-type-conversion=identity-layout-map},";
+        "function-boundary-type-conversion=identity-layout-map create-deallocs=false},";
   os << "cse,canonicalize,";
 
   // The automatic schedule stage. Every candidate transform is fail-closed —
@@ -49,11 +49,11 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // wider registers.
   if (options.vectorBits >= 64) {
     int64_t lanes = options.vectorBits / 32;
-    // Column grouping and chain depth are measured per-target policies: the
-    // 256-bit host class pays for grouping and for eight chains, while the
-    // 128-bit in-order class regresses under both (its load pipe serializes
-    // the wider schedules' paired accesses).
-    int64_t columnGroup = options.vectorBits >= 256 ? 2 : 1;
+    // Chain depth is a measured per-target policy: the 256-bit host class
+    // pays for eight chains, the 128-bit in-order class regresses under them.
+    // Two column blocks per row keep an 8x8 operand register-resident on both
+    // classes once the in-order backend stops pairing Q-register loads.
+    int64_t columnGroup = options.columnGroup > 0 ? options.columnGroup : 2;
     int64_t chainDepth = options.accumulatorChains > 0 ? options.accumulatorChains
                                                        : (options.vectorBits >= 256 ? 8 : 4);
     os << llvm::formatv("vectorize-ondsp-fp-filter-outputs{{vector-width={0} "
@@ -111,15 +111,24 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // The budget is a host-class measurement, not a target fact: at 32 terms a
   // filter tap chain runs 1.9x faster for 2.7x its bytes, while a DCT's
   // per-row replication reaches 4096 terms and 15x its bytes to run SLOWER.
-  os << "scalarize-ondsp-fixed-reduce-mac{max-unrolled-terms=128},"
-        "unroll-ondsp-fixed-mac-loops{max-unrolled-terms=128},";
+  // A declared repeat block already costs zero per trip, so the budget drops
+  // to one term and every counted reduction keeps the loop the block claims;
+  // unrolling there would spend instruction memory for nothing.
+  // A packed operand copy that no vector route consumed is dead weight on the
+  // ordered schedule; the pass description carries the measurement.
+  os << "forward-ondsp-packed-reduction-operands,";
+  int64_t straightLineTerms = options.hardwareRepeatBlock ? 1 : 128;
+  os << llvm::formatv("scalarize-ondsp-fixed-reduce-mac{{max-unrolled-terms={0}},"
+                      "unroll-ondsp-fixed-mac-loops{{max-unrolled-terms={0}},",
+                      straightLineTerms);
   // The f32 sibling, same budget and same argument. It takes the lane count
   // because above one lane the scalar lowering's lane-blocked ordered schedule
   // is the better claim on a reduction, and only the accumulator loops are
   // left for it.
   os << llvm::formatv("unroll-ondsp-fp-ordered-reduce{{vector-width={0} "
-                      "max-straight-line-terms=256 max-unrolled-terms=512},",
-                      options.vectorBits >= 64 ? options.vectorBits / 32 : 1);
+                      "max-straight-line-terms={1} max-unrolled-terms={2}},",
+                      options.vectorBits >= 64 ? options.vectorBits / 32 : 1,
+                      options.hardwareRepeatBlock ? 1 : 256, options.hardwareRepeatBlock ? 1 : 512);
 
   // Lowering tail down to the LLVM dialect. The declared-off reduction batches
   // its products at the target width; the fold order is untouched, so this is
@@ -132,7 +141,9 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   os << "lower-rank-one-memref-copy-to-scf,";
   os << llvm::formatv("convert-ondsp-fixed-to-scalar{{widening-multiply-low-halves={0}},",
                       options.wideningMultiplyLowHalves ? "true" : "false");
-  os << "func.func(buffer-deallocation),";
+  // Small kernel-local temporaries live on the stack; the C baselines never pay
+  // a heap round trip per call, so the compiled kernels must not either.
+  os << "func.func(promote-buffers-to-stack,buffer-deallocation),";
   os << "convert-vector-to-scf,expand-strided-metadata,lower-affine,convert-scf-to-cf,"
         "convert-vector-to-llvm,"
         "finalize-memref-to-llvm,convert-math-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,"

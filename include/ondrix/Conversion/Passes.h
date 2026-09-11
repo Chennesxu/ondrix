@@ -20,6 +20,7 @@ std::unique_ptr<mlir::Pass> createLowerOndspF32ReduceToScalarPass();
 std::unique_ptr<mlir::Pass> createLowerRankOneMemRefCopyToSCFPass();
 std::unique_ptr<mlir::Pass> createNormalizeOndspFixedVectorReducePass();
 std::unique_ptr<mlir::Pass> createParallelizeOndspFixedWrapVectorReducePass();
+std::unique_ptr<mlir::Pass> createForwardOndspPackedReductionOperandsPass();
 std::unique_ptr<mlir::Pass> createVectorizeOndspConstantSaturatingMemRefReducePass();
 std::unique_ptr<mlir::Pass> createVectorizeOndspConstantSaturatingMemRefReducePass(
     const VectorizeOndspConstantSaturatingMemRefReduceOptions &options);

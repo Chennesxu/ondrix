@@ -1,4 +1,5 @@
 add_ondrix_library(OndspVectorNormalization
+  OndspPackedOperandForwarding.cpp
   OndspVectorNormalization.cpp
 
   DEPENDS
@@ -7,6 +8,8 @@ add_ondrix_library(OndspVectorNormalization
   LINK_LIBS PUBLIC
   MLIRArithDialect
   MLIRIR
+  MLIRMemRefDialect
+  MLIRSCFDialect
   MLIRPass
   MLIRTransformUtils
   MLIRVectorDialect
