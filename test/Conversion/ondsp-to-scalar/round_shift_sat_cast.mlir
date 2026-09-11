@@ -10,11 +10,20 @@ func.func @round_shift_floor_keeps_width(%input: i32) -> i32 {
   return %0 : i32
 }
 
+// Nearest-even is the carry out of the 15-bit remainder window: the quotient's
+// low bit joins the remainder and 2^14 - 1 decides the tie, so no compare pair
+// and no select survive.
 // CHECK-LABEL: func.func @round_shift_nearest_even_saturating_narrow
-// CHECK: arith.shrsi
-// CHECK: arith.cmpi ugt
-// CHECK: arith.cmpi eq
-// CHECK: arith.select
+// CHECK: %[[Q:.*]] = arith.shrsi
+// CHECK: %[[REM:.*]] = arith.andi %{{.*}}, %{{.*}} : i32
+// CHECK: %[[LOW_BIT:.*]] = arith.andi %[[Q]], %{{.*}} : i32
+// CHECK: %[[SUM:.*]] = arith.addi %[[REM]], %[[LOW_BIT]] : i32
+// CHECK: %[[BELOW_HALF:.*]] = arith.constant 16383 : i32
+// CHECK: %[[BIASED:.*]] = arith.addi %[[SUM]], %[[BELOW_HALF]] : i32
+// CHECK: %[[CARRY:.*]] = arith.shrui %[[BIASED]], %{{.*}} : i32
+// CHECK: arith.addi %[[Q]], %[[CARRY]] : i32
+// CHECK-NOT: arith.cmpi
+// CHECK-NOT: arith.select
 // CHECK: arith.trunci %{{.*}} : i32 to i16
 func.func @round_shift_nearest_even_saturating_narrow(%input: i32) -> i16 {
   %0 = ondsp.round_shift %input {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (i32) -> i16

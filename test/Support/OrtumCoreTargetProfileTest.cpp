@@ -28,9 +28,10 @@ int main() {
   passed &= !profile.supportsMac(
       ProductDomain{32, 31, Signedness::Signed, ProductSemantics{64, 62, ProductSelection::Full}},
       targetAccumulator);
-  passed &= !profile.supportsMac(ProductDomain{32, 31, Signedness::Signed,
-                                               ProductSemantics{32, 30, ProductSelection::HighRaw}},
-                                 targetAccumulator);
+  // The Q31 raw-high MAC family is selected since 9c8808a.
+  passed &= profile.supportsMac(ProductDomain{32, 31, Signedness::Signed,
+                                              ProductSemantics{32, 30, ProductSelection::HighRaw}},
+                                targetAccumulator);
 
   // The composed export ladder: shifts past 15 ride the always-exact
   // shift-15 readout plus a base tail of at most 31; NTP inside (0, 9)

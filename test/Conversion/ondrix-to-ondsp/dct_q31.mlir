@@ -1,4 +1,12 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="preserve-bufferizable-reductions=true" | FileCheck %s --check-prefix=KEEP
+
+// Q31 now has a bufferized reduce_mac spelling, so the contract form survives
+// for it exactly as it does for Q15; expanding here would strand the schedule
+// stage with no reduction to claim.
+// KEEP-LABEL: func.func @dct8_q31
+// KEEP: ondrix.dct
+// KEEP-NOT: ondsp.round_shift
 
 // The Q31 profile narrows each product before it joins the row sum. Two
 // extents derive two different product shifts, so a lowering that pinned one

@@ -570,6 +570,10 @@ def VectorizeOndspFixedMemRefReduce
            "Widest chunk in machine vectors; steps down to the static extent">,
     Option<"pairFoldSquares", "pair-fold-squares", "bool", /*default=*/"true",
            "Fold adjacent squares in the product width before widening them">,
+    Option<"requantizedProducts", "requantized-products", "bool", /*default=*/"true",
+           "Chunk reductions whose per-term product carries a requantization; the same "
+           "128-bit measurement as the output batcher's option, applied to the route that "
+           "takes the sites it declines">,
   ];
 }
 
@@ -689,6 +693,11 @@ def VectorizeOndspFixedDecimateOutputs
            "Number of independent outputs batched per accumulator">,
     Option<"chunkMultiple", "chunk-multiple", "int64_t", /*default=*/"1",
            "Widest sliding-window block in machine vectors; steps down to the output count">,
+    Option<"requantizedProducts", "requantized-products", "bool", /*default=*/"true",
+           "Batch sites whose per-term product carries a requantization (the Q31 matmul and "
+           "DCT profiles). Off, such a site keeps its ordered schedule: on a 128-bit file the "
+           "rounded i64 product lanes cost more than they save (gem5 HPI, matmul4x16x3 Q31 "
+           "3136 vs 1844 ordered cycles, dct64 56940 vs 47927), while at 256 bits they win">,
   ];
 }
 

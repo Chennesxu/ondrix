@@ -167,6 +167,30 @@ Value createRoundedSignedRightShift(Location loc, Value input, unsigned shift,
   Value quotient = builder.create<arith::ShRSIOp>(loc, input, constant(shift));
   if (roundingMode == ondrix::ondsp::RoundingMode::TowardNegative)
     return quotient;
+  // Scalar nearest-even with a bounded input: bias by half - 1 + (q & 1) and
+  // shift once; the bias never exceeds half, so the overflow guard is the same
+  // one the ties-positive form needs. AArch64 folds `(q & 1)` into one ubfx.
+  if (roundingMode == ondrix::ondsp::RoundingMode::NearestEven && !isa<VectorType>(type) &&
+      halfAddCannotOverflow(valueBits, shift, element.getWidth())) {
+    Value lowBit = builder.create<arith::AndIOp>(loc, quotient, constant(1));
+    Value biased = builder.create<arith::AddIOp>(loc, input, lowBit);
+    biased = builder.create<arith::AddIOp>(loc, biased, constant((int64_t{1} << (shift - 1)) - 1));
+    return builder.create<arith::ShRSIOp>(loc, biased, constant(shift));
+  }
+  // Unbounded scalar input: the carry out of the remainder window `r + (q & 1)
+  // + half - 1` stays below 2^(shift+1), so no bound is needed and the compare
+  // pair is still gone. Vectors keep the remainder form: a provably narrow
+  // lane value is what lets LLVM shrink the surrounding arithmetic into a
+  // worse x86 legalization.
+  if (roundingMode == ondrix::ondsp::RoundingMode::NearestEven && !isa<VectorType>(type)) {
+    Value mask = constant(static_cast<int64_t>((uint64_t{1} << shift) - 1));
+    Value remainder = builder.create<arith::AndIOp>(loc, input, mask);
+    Value lowBit = builder.create<arith::AndIOp>(loc, quotient, constant(1));
+    Value biased = builder.create<arith::AddIOp>(loc, remainder, lowBit);
+    biased = builder.create<arith::AddIOp>(loc, biased, constant((int64_t{1} << (shift - 1)) - 1));
+    Value carry = builder.create<arith::ShRUIOp>(loc, biased, constant(shift));
+    return builder.create<arith::AddIOp>(loc, quotient, carry);
+  }
   // The remainder is taken from the low `shift` bits, so no add-half in the
   // input width can overflow near its maximum; the increment is total.
   Type remainderBitsType = IntegerType::get(builder.getContext(), shift);

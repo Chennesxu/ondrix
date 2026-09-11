@@ -29,24 +29,22 @@ func.func @export_mean_floor_saturate(
 }
 
 // Dividing by 2^(30 - 24) = 2^6 with a nearest-even tie at 2^5, then
-// saturating into the i32 destination range.
+// saturating into the i32 destination range. The tie test is the carry out of
+// the six-bit remainder window, so the constants pin the shift and the tie.
 // CHECK-LABEL: func.func @export_mean_nearest_even_saturate(
 // CHECK-SAME: %[[ACC:.*]]: i64) -> i32
 // CHECK: %[[SHIFT:.*]] = arith.constant 6 : i64
 // CHECK: %[[QUOTIENT:.*]] = arith.shrsi %[[ACC]], %[[SHIFT]] : i64
-// CHECK: %[[BITS:.*]] = arith.trunci %[[ACC]] : i64 to i6
-// CHECK: %[[REMAINDER:.*]] = arith.extui %[[BITS]] : i6 to i64
-// CHECK: %[[ZERO:.*]] = arith.constant 0 : i64
+// CHECK: %[[MASK:.*]] = arith.constant 63 : i64
+// CHECK: %[[REMAINDER:.*]] = arith.andi %[[ACC]], %[[MASK]] : i64
 // CHECK: %[[ONE:.*]] = arith.constant 1 : i64
-// CHECK: %[[HALF:.*]] = arith.constant 32 : i64
-// CHECK: %[[ABOVE:.*]] = arith.cmpi ugt, %[[REMAINDER]], %[[HALF]] : i64
-// CHECK: %[[TIE_MASK:.*]] = arith.constant 127 : i64
-// CHECK: %[[TIE_BITS:.*]] = arith.andi %[[ACC]], %[[TIE_MASK]] : i64
-// CHECK: %[[TIE_ODD_PATTERN:.*]] = arith.constant 96 : i64
-// CHECK: %[[TIE_ODD:.*]] = arith.cmpi eq, %[[TIE_BITS]], %[[TIE_ODD_PATTERN]] : i64
-// CHECK: %[[INCREMENT_IF:.*]] = arith.ori %[[ABOVE]], %[[TIE_ODD]] : i1
-// CHECK: %[[INCREMENT:.*]] = arith.select %[[INCREMENT_IF]], %[[ONE]], %[[ZERO]] : i64
-// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[INCREMENT]] : i64
+// CHECK: %[[LOW_BIT:.*]] = arith.andi %[[QUOTIENT]], %[[ONE]] : i64
+// CHECK: %[[SUM:.*]] = arith.addi %[[REMAINDER]], %[[LOW_BIT]] : i64
+// CHECK: %[[BELOW_HALF:.*]] = arith.constant 31 : i64
+// CHECK: %[[BIASED:.*]] = arith.addi %[[SUM]], %[[BELOW_HALF]] : i64
+// CHECK: %[[CARRY:.*]] = arith.shrui %[[BIASED]], %{{.*}} : i64
+// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[CARRY]] : i64
+// CHECK-NOT: arith.select
 // CHECK: %[[MIN:.*]] = arith.constant -2147483648 : i64
 // CHECK: %[[MAX:.*]] = arith.constant 2147483647 : i64
 // CHECK: %[[LOWER:.*]] = arith.maxsi %[[ROUNDED]], %[[MIN]] : i64
@@ -81,12 +79,12 @@ func.func @export_identity_sum(
   return %result : i64
 }
 
-// The frac 0 endpoint of the widened domain: the full 30-position shift with
-// the nearest-even half constant 2^29.
+// The frac 0 endpoint of the widened domain: the full 30-position shift, whose
+// remainder window carries the nearest-even bias 2^29 - 1.
 // CHECK-LABEL: func.func @export_integer_reading(
 // CHECK: arith.constant 30 : i64
 // CHECK: arith.shrsi
-// CHECK: arith.constant 536870912 : i64
+// CHECK: arith.constant 536870911 : i64
 // CHECK: arith.trunci {{.*}} : i64 to i32
 func.func @export_integer_reading(
     %acc: !ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>)

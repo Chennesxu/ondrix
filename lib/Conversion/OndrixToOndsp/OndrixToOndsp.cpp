@@ -60,10 +60,9 @@ public:
     if (preserveBufferizableReductions) {
       target.addLegalOp<ondrix::ir::FirFilterOp, ondrix::ir::FirDecimateOp, ondrix::ir::Conv1DOp>();
       // Only the profiles whose reduction bufferizes to a reduce_mac stay in
-      // contract form. Matmul and rms carry the extent-derived narrowing at
-      // Q31 too -- as a requantized product and as a pre-requantized input
-      // copy -- but a Q31 DCT still has no reduce_mac spelling, so it keeps
-      // the scalar tensor lowering until it does.
+      // contract form. Matmul, rms and the DCT all carry the extent-derived
+      // narrowing at Q31 -- as a requantized product, a pre-requantized input
+      // copy, and a requantized product against a constant row table.
       auto bufferizableReduction = [](Attribute numeric, unsigned widestStorage) {
         if (isa<ondrix::ondsp::FpAttr>(numeric))
           return true;
@@ -82,7 +81,7 @@ public:
       target.addDynamicallyLegalOp<ondrix::ir::DctOp>([&](ondrix::ir::DctOp op) {
         if (isa<ondrix::ondsp::FpAttr>(op.getInputNumeric()))
           return outputBatchVectorWidth > 1;
-        return bufferizableReduction(op.getInputNumeric(), /*widestStorage=*/16);
+        return bufferizableReduction(op.getInputNumeric(), /*widestStorage=*/32);
       });
       // The f32 moving average bufferizes to the windowed-sum loop the
       // schedule stage batches; the fixed profile keeps its tensor lowering.

@@ -604,9 +604,9 @@ public:
 class ReduceMacOpVectorization final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
 public:
   ReduceMacOpVectorization(MLIRContext *context, int64_t vectorWidth, int64_t chunkMultiple,
-                           bool pairFoldSquares)
+                           bool pairFoldSquares, bool requantizedProducts)
       : OpConversionPattern(context), vectorWidth(vectorWidth), chunkMultiple(chunkMultiple),
-        pairFoldSquares(pairFoldSquares) {}
+        pairFoldSquares(pairFoldSquares), requantizedProducts(requantizedProducts) {}
 
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -614,6 +614,8 @@ public:
       return op.emitOpError(
           "integer memory space must be nonnegative and fit in an unsigned LLVM address space");
     if (!isVectorizableMemRefReduction(op))
+      return failure();
+    if (!requantizedProducts && op.getProduct()->getShift() != 0)
       return failure();
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     auto elementType = cast<IntegerType>(numeric.getStorage());
@@ -756,6 +758,7 @@ private:
   int64_t vectorWidth;
   int64_t chunkMultiple;
   bool pairFoldSquares;
+  bool requantizedProducts;
 };
 
 class VectorizeOndspFixedMemRefReducePass final
@@ -778,14 +781,18 @@ public:
 
     RewritePatternSet patterns(&getContext());
     patterns.add<ReduceMacOpVectorization>(&getContext(), vectorWidth, chunkMultiple,
-                                           pairFoldSquares);
+                                           pairFoldSquares, requantizedProducts);
 
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, memref::MemRefDialect,
                            ondrix::ondsp::OndspDialect, scf::SCFDialect, vector::VectorDialect>();
-    target.addDynamicallyLegalOp<ondrix::ondsp::ReduceMacOp>([](ondrix::ondsp::ReduceMacOp op) {
-      return !hasInvalidLLVMIntegerMemorySpace(op) && !isVectorizableMemRefReduction(op);
-    });
+    bool keepRequantized = !requantizedProducts;
+    target.addDynamicallyLegalOp<ondrix::ondsp::ReduceMacOp>(
+        [keepRequantized](ondrix::ondsp::ReduceMacOp op) {
+          return !hasInvalidLLVMIntegerMemorySpace(op) &&
+                 (!isVectorizableMemRefReduction(op) ||
+                  (keepRequantized && op.getProduct()->getShift() != 0));
+        });
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       signalPassFailure();

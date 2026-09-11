@@ -1105,11 +1105,13 @@ void batchConstantRowOutputs(MutableArrayRef<ConstantRowOutput> outputs, OpBuild
 
 /// Groups the unrolled constant-row outputs of one block into runs of
 /// `vectorWidth` consecutive positions under one contract, and batches each.
-void batchConstantRowOutputsInBlock(Block &block, int64_t vectorWidth, OpBuilder &builder) {
+void batchConstantRowOutputsInBlock(Block &block, int64_t vectorWidth, bool requantizedProducts,
+                                    OpBuilder &builder) {
   SmallVector<ConstantRowOutput> outputs;
   for (auto reduce : block.getOps<ondrix::ondsp::ReduceMacOp>())
     if (std::optional<ConstantRowOutput> output = matchConstantRowOutput(reduce))
-      outputs.push_back(std::move(*output));
+      if (requantizedProducts || output->reduce.getProduct()->getShift() == 0)
+        outputs.push_back(std::move(*output));
   if (static_cast<int64_t>(outputs.size()) < vectorWidth)
     return;
   llvm::stable_sort(outputs, [](const ConstantRowOutput &lhs, const ConstantRowOutput &rhs) {
@@ -1179,6 +1181,8 @@ public:
       bool batched = false;
       for (int64_t lanes : ladder) {
         if (FailureOr<DecimateLoopShape> shape = matchDecimateLoop(loop, lanes); succeeded(shape)) {
+          if (!requantizedProducts && shape->product.getShift() != 0)
+            break;
           batchDecimateOutputs(*shape, lanes, builder);
           batched = true;
           break;
@@ -1187,7 +1191,8 @@ public:
       if (batched)
         continue;
       if (FailureOr<ColumnLoopShape> shape = matchColumnLoop(loop); succeeded(shape))
-        batchColumnOutputs(*shape, vectorWidth, builder);
+        if (requantizedProducts || shape->product.getShift() == 0)
+          batchColumnOutputs(*shape, vectorWidth, builder);
     }
 
     SmallVector<Block *> blocks;
@@ -1197,7 +1202,7 @@ public:
     });
     for (Block *block : blocks)
       for (int64_t lanes = vectorWidth; lanes > 1; lanes /= 2)
-        batchConstantRowOutputsInBlock(*block, lanes, builder);
+        batchConstantRowOutputsInBlock(*block, lanes, requantizedProducts, builder);
   }
 };
 

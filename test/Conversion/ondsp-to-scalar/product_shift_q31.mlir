@@ -2,15 +2,18 @@
 // RUN: ondrix-opt %s --vectorize-ondsp-fixed-memref-reduce="vector-width=4" --convert-ondsp-fixed-to-scalar | FileCheck %s --check-prefix=VEC
 
 // A requantized full product: the exact i64 product is rounded right by the
-// declared shift before it joins the wrapping accumulator at frac 62 - 3.
+// declared shift before it joins the wrapping accumulator at frac 62 - 3. The
+// product is bounded, so nearest-even is the biased-input form: one shift.
 // CHECK-LABEL: func.func @q31_shifted_product_mac(
 // CHECK: %[[P:.*]] = arith.muli {{.*}} : i64
 // CHECK: %[[C3:.*]] = arith.constant 3 : i64
 // CHECK: %[[Q:.*]] = arith.shrsi %[[P]], %[[C3]] : i64
-// CHECK: arith.trunci %[[P]] : i64 to i3
-// CHECK: arith.cmpi ugt
-// CHECK: arith.cmpi eq
-// CHECK: %[[TERM:.*]] = arith.addi %[[Q]], %{{.*}} : i64
+// CHECK: %[[BIT:.*]] = arith.andi %[[Q]], %{{.*}} : i64
+// CHECK: %[[SUM:.*]] = arith.addi %[[P]], %[[BIT]] : i64
+// CHECK: %[[BELOW_HALF:.*]] = arith.constant 3 : i64
+// CHECK: %[[BIASED:.*]] = arith.addi %[[SUM]], %[[BELOW_HALF]] : i64
+// CHECK: %[[TERM:.*]] = arith.shrsi %[[BIASED]], %{{.*}} : i64
+// CHECK-NOT: arith.shrui
 // CHECK: arith.addi %{{.*}}, %[[TERM]] : i64
 func.func @q31_shifted_product_mac(
     %acc: !ondsp.acc<storage = i64, frac = 59, signed, update_overflow = wrap>,

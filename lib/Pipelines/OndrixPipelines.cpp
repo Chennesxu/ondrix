@@ -70,8 +70,11 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
     // Two machine vectors of outputs per sliding-window block: a host-class
     // heuristic like the chunk ladders below, held at two because the
     // per-lane i64 accumulators of a four-vector block spill a 128-bit file.
-    os << llvm::formatv(
-        "vectorize-ondsp-fixed-decimate-outputs{{vector-width={0} chunk-multiple=2},", lanes);
+    // Requantized-product sites are batched only from 256 bits; the option's
+    // description carries the 128-bit measurement.
+    os << llvm::formatv("vectorize-ondsp-fixed-decimate-outputs{{vector-width={0} chunk-multiple=2 "
+                        "requantized-products={1}},",
+                        lanes, options.vectorBits >= 256 ? "true" : "false");
     os << llvm::formatv("vectorize-ondsp-fixed-elementwise-updates{{vector-width={0}},", lanes);
     os << llvm::formatv("vectorize-ondsp-fixed-elementwise-loops{{vector-width={0}},", lanes);
     // The convolution-shaped reduction its operands walk in opposite
@@ -86,8 +89,9 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
         "max-elements=64},",
         lanes);
     os << llvm::formatv("vectorize-ondsp-fixed-memref-reduce{{vector-width={0} chunk-multiple=4 "
-                        "pair-fold-squares={1}},",
-                        lanes, options.multiplyAddAdjacentPairs ? "true" : "false");
+                        "pair-fold-squares={1} requantized-products={2}},",
+                        lanes, options.multiplyAddAdjacentPairs ? "true" : "false",
+                        options.vectorBits >= 256 ? "true" : "false");
     os << "parallelize-ondsp-fixed-wrap-vector-reduce,";
     os << "normalize-ondsp-fixed-vector-reduce,";
   } else {

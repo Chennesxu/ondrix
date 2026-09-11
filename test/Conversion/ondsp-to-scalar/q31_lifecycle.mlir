@@ -56,11 +56,14 @@ func.func @export_q30(
 // CHECK-SAME: %[[ACC:.*]]: i64) -> i32
 // CHECK: %[[SHIFT:.*]] = arith.constant 31 : i64
 // CHECK: %[[QUOTIENT:.*]] = arith.shrsi %[[ACC]], %[[SHIFT]] : i64
-// CHECK: %[[BITS:.*]] = arith.trunci %[[ACC]] : i64 to i31
-// CHECK: %[[REMAINDER:.*]] = arith.extui %[[BITS]] : i31 to i64
-// CHECK: %[[HALF:.*]] = arith.constant 1073741824 : i64
-// CHECK: %[[TIE_BITS:.*]] = arith.andi %[[ACC]], {{.*}} : i64
-// CHECK: arith.cmpi eq, %[[TIE_BITS]], {{.*}} : i64
+// CHECK: %[[MASK:.*]] = arith.constant 2147483647 : i64
+// CHECK: %[[REMAINDER:.*]] = arith.andi %[[ACC]], %[[MASK]] : i64
+// CHECK: %[[LOW_BIT:.*]] = arith.andi %[[QUOTIENT]], {{.*}} : i64
+// CHECK: %[[SUM:.*]] = arith.addi %[[REMAINDER]], %[[LOW_BIT]] : i64
+// CHECK: %[[BELOW_HALF:.*]] = arith.constant 1073741823 : i64
+// CHECK: %[[BIASED:.*]] = arith.addi %[[SUM]], %[[BELOW_HALF]] : i64
+// CHECK: %[[CARRY:.*]] = arith.shrui %[[BIASED]], {{.*}} : i64
+// CHECK: arith.addi %[[QUOTIENT]], %[[CARRY]] : i64
 // CHECK: %[[RESULT:.*]] = arith.trunci {{.*}} : i64 to i32
 // CHECK: return %[[RESULT]] : i32
 

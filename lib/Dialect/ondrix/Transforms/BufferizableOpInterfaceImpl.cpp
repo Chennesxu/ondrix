@@ -745,24 +745,26 @@ static Value getOrCreateDctTable(RewriterBase &rewriter, Location loc, ModuleOp 
   return rewriter.create<memref::GetGlobalOp>(loc, tableType, symbol);
 }
 
-/// One immutable Q15 global per DCT row, because that is what the constant
-/// analysis accepts: `resolveConstantGlobalRoot` walks only rank-1 views back
-/// to a `memref.get_global`, so a rank-2 table behind rank-reducing subviews
-/// would silently lose the constant-coefficient route.
+/// One immutable global per DCT row and storage width, because that is what
+/// the constant analysis accepts: `resolveConstantGlobalRoot` walks only
+/// rank-1 views back to a `memref.get_global`, so a rank-2 table behind
+/// rank-reducing subviews would silently lose the constant-coefficient route.
+/// The width is in the symbol so the two profiles never share a table.
 static Value getOrCreateDctRowTable(RewriterBase &rewriter, Location loc, ModuleOp module,
-                                    int64_t extent, int64_t row) {
-  IntegerType elementType = rewriter.getI16Type();
+                                    int64_t extent, int64_t row, unsigned storageWidth) {
+  IntegerType elementType = rewriter.getIntegerType(storageWidth);
   auto tableType = MemRefType::get({extent}, elementType);
   SmallVector<llvm::APInt> coefficients;
   coefficients.reserve(extent);
   for (int64_t column = 0; column < extent; ++column) {
     // The caller checked complete admissibility before emitting any table.
-    int64_t coefficient = *ondrix::getDctCoefficientQ15(extent, row, column);
+    int64_t coefficient = *ondrix::getDctCoefficientFixed(storageWidth, extent, row, column);
     coefficients.emplace_back(elementType.getWidth(), static_cast<uint64_t>(coefficient),
                               /*isSigned=*/true);
   }
+  StringRef profile = storageWidth == 32 ? "_q31" : "";
   return getOrCreateDctTable(
-      rewriter, loc, module, ("__ondrix_dct" + Twine(extent) + "_row" + Twine(row)).str(),
+      rewriter, loc, module, ("__ondrix_dct" + Twine(extent) + profile + "_row" + Twine(row)).str(),
       tableType,
       DenseIntElementsAttr::get(RankedTensorType::get({extent}, elementType), coefficients));
 }
@@ -811,7 +813,11 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
     // one shared table generator. Bufferization has no alternative pattern to
     // fall back to, so the refusal is a diagnostic rather than a silent match
     // failure. The binary32 profile has no tie guard to satisfy.
-    if (!fp && !ondrix::hasAdmissibleDctCoefficients(extent))
+    unsigned storageWidth =
+        fp ? 0u
+           : cast<IntegerType>(cast<ondrix::ondsp::FixedAttr>(op.getInputNumeric()).getStorage())
+                 .getWidth();
+    if (!fp && !ondrix::hasAdmissibleDctCoefficients(extent, storageWidth))
       return op.emitOpError("DCT coefficient quantization is not tie-guard admissible");
     if (fp && !fp.getFormat().isF32())
       return op.emitOpError("bufferized DCT supports the binary32 floating-point profile only");
@@ -881,13 +887,28 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
 
     IntegerType i16 = rewriter.getI16Type();
     IntegerType i64 = rewriter.getIntegerType(64);
+    IntegerType storage = rewriter.getIntegerType(storageWidth);
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getInputNumeric());
-    auto product = ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
-    // The right operand is a constant table, so this reduction declares a
+    // The per-term requantization the extent forces: zero at Q15, where the
+    // exact N-sum already fits the accumulator, and the shift the verifier
+    // pairs with product_rounding at Q31.
+    unsigned productShift = ondrix::ir::getReductionProductShift(storageWidth, extent);
+    auto product =
+        productShift > 0
+            ? ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full,
+                                              productShift, *op.getProductRounding())
+            : ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
+    // Q15: the right operand is a constant table, so this reduction declares a
     // SATURATING i40 accumulator: every prefix is bounded by
     // 64 * 32767 * 32768 < 2^39, and saturating updates are not exact-modulo,
     // so the Vector consumer must route through planConstantSaturatingReduction.
-    ondrix::ondsp::AccType accumulatorType = getSaturatingAccumulator(context, /*width=*/40);
+    // Q31: the product shift caps the N-term sum at 2^62, so the accumulator is
+    // exact-modulo and takes the wrap form matmul's Q31 route takes; wrap alone
+    // is what authorizes the reassociation the schedule stage needs.
+    ondrix::ondsp::AccType accumulatorType =
+        storageWidth == 16
+            ? getSaturatingAccumulator(context, /*width=*/40)
+            : getExactWrapAccumulator(context, /*width=*/64, /*frac=*/62 - productShift);
     // Identity materialization of the raw frac-30 accumulator. This is a
     // WIDENING export (i40 -> i64 at the same frac), the exact
     // sign-extension leg of `acc_export`, and this is its first in-tree
@@ -911,7 +932,7 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
     // Unrolled over the output index, matching the tensor-form authority: the
     // verifier admits at most 64 rows.
     for (int64_t k = 0; k < extent; ++k) {
-      Value row = getOrCreateDctRowTable(rewriter, loc, module, extent, k);
+      Value row = getOrCreateDctRowTable(rewriter, loc, module, extent, k, storageWidth);
       if (!row)
         return op.emitOpError("a foreign symbol occupies the reserved DCT coefficient table name ")
                << "or carries contents that differ from the required coefficients";
@@ -919,7 +940,14 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
       Value reduced = rewriter.create<ondrix::ondsp::ReduceMacOp>(loc, accumulatorType, initial,
                                                                   *input, row, numeric, product);
       Value element;
-      if (boundaryRounding == ondrix::ondsp::RoundingMode::NearestEven) {
+      if (storageWidth == 32) {
+        // Accumulator frac 62 - p read down to the declared output frac
+        // 30 - log2(N) is a shift of 32 whatever the extent, which is the
+        // tensor lowering's single round_shift boundary exactly.
+        element = rewriter.create<ondrix::ondsp::AccExportOp>(
+            loc, storage, reduced, outputNumeric, boundaryRounding,
+            ondrix::ondsp::OverflowMode::Saturate);
+      } else if (boundaryRounding == ondrix::ondsp::RoundingMode::NearestEven) {
         Value raw = rewriter.create<ondrix::ondsp::AccExportOp>(
             loc, i64, reduced, rawFormat, ondrix::ondsp::RoundingMode::NearestEven,
             ondrix::ondsp::OverflowMode::Saturate);
