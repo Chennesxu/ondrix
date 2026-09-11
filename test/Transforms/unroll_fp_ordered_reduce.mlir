@@ -158,3 +158,31 @@ func.func @unrolls_multi_chain_loop(%x: memref<64xf32>, %seed: f32) -> f32 {
   %s = arith.addf %r#0, %r#1 : f32
   return %s : f32
 }
+
+// -----
+
+// RUN: ondrix-opt %s --unroll-ondsp-fp-ordered-reduce="max-straight-line-terms=8 max-block-terms=6" \
+// RUN:   --split-input-file | FileCheck %s --check-prefix=BLOCK
+
+// A loop that stores an output every trip is a sample recurrence: it is replayed
+// in blocks (here two trips of three terms), never as one straight line.
+// BLOCK-LABEL: func.func @blocks_sample_recurrence(
+// BLOCK: %[[STEP:.*]] = arith.constant 2 : index
+// BLOCK: scf.for %{{.*}} = %{{.*}} to %{{.*}} step %[[STEP]] iter_args(%[[D1:.*]] = %{{.*}}, %[[D2:.*]] = %{{.*}})
+// BLOCK-COUNT-2: memref.store
+// BLOCK: scf.yield
+// BLOCK-NOT: memref.store
+func.func @blocks_sample_recurrence(%x: memref<8xf32>, %y: memref<8xf32>, %b: f32, %seed: f32) -> f32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c8 = arith.constant 8 : index
+  %r:2 = scf.for %i = %c0 to %c8 step %c1 iter_args(%d1 = %seed, %d2 = %seed) -> (f32, f32) {
+    %in = memref.load %x[%i] : memref<8xf32>
+    %w = math.fma %d1, %b, %in : f32
+    %wn = math.fma %d2, %b, %w : f32
+    %out = arith.addf %wn, %d1 : f32
+    memref.store %out, %y[%i] : memref<8xf32>
+    scf.yield %wn, %d1 : f32, f32
+  }
+  return %r#0 : f32
+}

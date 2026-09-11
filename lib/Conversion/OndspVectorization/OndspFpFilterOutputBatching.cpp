@@ -818,6 +818,53 @@ FailureOr<FpColumnTileLoopShape> matchFpColumnTileLoop(scf::ForOp loop, int64_t 
   return shape;
 }
 
+/// Rebuilds the ordered remainder column's inner axis into `chains` scalar
+/// chains, the rebuild the batched blocks already take. The seed stays the
+/// first leaf of chain zero, every other chain is seeded by its own real
+/// product, and the chains merge pairwise into the single R-recording top
+/// fold.
+void rebuildOrderedColumnChains(
+    const FpColumnTileLoopShape &shape, scf::ForOp remainder, ArrayRef<Value> rowElements,
+    int64_t chains, llvm::function_ref<Value(OpBuilder &, Location, Value, Value, Value)> update) {
+  scf::ForOp terms;
+  for (Operation &operation : remainder.getBody()->without_terminator())
+    if (auto candidate = dyn_cast<scf::ForOp>(&operation))
+      terms = candidate;
+  if (!terms)
+    return;
+
+  Location loc = terms.getLoc();
+  OpBuilder inner(terms);
+  Value columnIndex = remainder.getInductionVar();
+  auto loadTerm = [&](int64_t term) -> Value {
+    Value index = inner.create<arith::ConstantIndexOp>(loc, term);
+    return inner.create<memref::LoadOp>(loc, shape.rhs, ValueRange{index, columnIndex});
+  };
+
+  SmallVector<Value> folds;
+  folds.push_back(update(inner, loc, rowElements[0], loadTerm(0), terms.getInitArgs().front()));
+  for (int64_t chain = 1; chain < chains; ++chain)
+    folds.push_back(inner.create<arith::MulFOp>(loc, rowElements[chain], loadTerm(chain)));
+  for (int64_t term = chains; term < shape.innerCount; ++term)
+    folds[term % chains] =
+        update(inner, loc, rowElements[term], loadTerm(term), folds[term % chains]);
+
+  while (folds.size() > 1) {
+    SmallVector<Value> merged;
+    for (size_t i = 0; i + 1 < folds.size(); i += 2)
+      merged.push_back(inner.create<arith::AddFOp>(loc, folds[i], folds[i + 1]));
+    if (folds.size() % 2 != 0)
+      merged.push_back(folds.back());
+    folds = std::move(merged);
+  }
+  Value result = folds.front();
+  if (Operation *top = result.getDefiningOp(); isa<arith::AddFOp>(top))
+    result = ondrix::ondsp::consumeFastPermission(
+        top, ondrix::ondsp::FastPermission::RebuildReductionTree);
+  terms.getResult(0).replaceAllUsesWith(result);
+  terms.erase();
+}
+
 /// Batches W columns of one matmul output row into vector lanes: the inner
 /// axis stays a loop carrying a vector accumulator, `A[i,k]` is broadcast, and
 /// `B[k,j]` becomes one contiguous load. Each lane runs its declared
@@ -858,12 +905,14 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
   // above the batched loop and the inner axis unrolls, mirroring the filter
   // batcher's tap treatment.
   bool unrolled = shape.innerCount <= kMaxUnrolledTerms;
+  SmallVector<Value> rowElements;
   SmallVector<Value> rowSplats;
   if (unrolled) {
     for (int64_t term = 0; term < shape.innerCount; ++term) {
       Value index = builder.create<arith::ConstantIndexOp>(loc, term);
       Value element =
           builder.create<memref::LoadOp>(loc, shape.lhs, ValueRange{shape.rowIndex, index});
+      rowElements.push_back(element);
       rowSplats.push_back(builder.create<vector::SplatOp>(loc, laneType, element));
     }
   }
@@ -973,6 +1022,12 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
     loop.erase();
   } else {
     loop.getLowerBoundMutable().assign(batchedEnd);
+    // A column count that does not fill the lanes leaves the ordered loop its
+    // remainder, and with it the serial inner axis the batched blocks no
+    // longer carry. The same declared permission buys the same rebuild at one
+    // lane, so the remainder is not the row's critical path.
+    if (chains > 1)
+      rebuildOrderedColumnChains(shape, loop, rowElements, chains, updateLanes);
     emitted.push_back(loop);
   }
 

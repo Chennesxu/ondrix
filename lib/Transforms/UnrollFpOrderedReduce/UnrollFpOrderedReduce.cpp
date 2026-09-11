@@ -140,6 +140,67 @@ std::optional<int64_t> getUnrollableTripCount(scf::ForOp loop, int64_t maxTerms)
   return trip;
 }
 
+/// A sample loop stores an output every trip; its accumulators are the filter
+/// state carried into the next sample, so replaying the whole trip count hands
+/// the backend one block whose independent products it hoists into spills.
+bool storesEachTrip(scf::ForOp loop) {
+  return loop.getBody()
+      ->walk([](memref::StoreOp) { return WalkResult::interrupt(); })
+      .wasInterrupted();
+}
+
+int64_t countBodyTerms(scf::ForOp loop) {
+  int64_t terms = 0;
+  loop.getBody()->walk([&](Operation *op) {
+    if (isa<arith::MulFOp, arith::AddFOp, math::FmaOp>(op))
+      ++terms;
+  });
+  return terms;
+}
+
+/// The largest divisor of the trip count whose block stays within the term
+/// budget; one means the loop is left alone.
+int64_t chooseBlockFactor(int64_t trip, int64_t bodyTerms, int64_t maxBlockTerms) {
+  if (maxBlockTerms <= 0 || bodyTerms <= 0)
+    return 1;
+  int64_t best = 1;
+  for (int64_t factor = 2; factor <= trip; ++factor)
+    if (trip % factor == 0 && factor * bodyTerms <= maxBlockTerms)
+      best = factor;
+  return best;
+}
+
+/// Replay `factor` consecutive trips per iteration of a loop stepping by
+/// `factor * step`; the carried state threads through the block in trip order.
+void unrollLoopByBlock(scf::ForOp loop, int64_t step, int64_t factor) {
+  OpBuilder builder(loop);
+  Location loc = loop.getLoc();
+  auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+  Value blockStep = builder.create<arith::ConstantIndexOp>(loc, step * factor);
+  auto blocked = builder.create<scf::ForOp>(
+      loc, loop.getLowerBound(), loop.getUpperBound(), blockStep, loop.getInitArgs(),
+      [&](OpBuilder &body, Location bodyLoc, Value induction, ValueRange iterArgs) {
+        SmallVector<Value> carried(iterArgs.begin(), iterArgs.end());
+        for (int64_t trip = 0; trip < factor; ++trip) {
+          IRMapping mapping;
+          Value index = induction;
+          if (trip > 0)
+            index = body.create<arith::AddIOp>(
+                bodyLoc, induction, body.create<arith::ConstantIndexOp>(bodyLoc, trip * step));
+          mapping.map(loop.getInductionVar(), index);
+          for (auto [argument, value] : llvm::zip(loop.getRegionIterArgs(), carried))
+            mapping.map(argument, value);
+          for (Operation &op : loop.getBody()->without_terminator())
+            body.clone(op, mapping);
+          for (auto [slot, operand] : llvm::zip(carried, yield.getOperands()))
+            slot = mapping.lookupOrDefault(operand);
+        }
+        body.create<scf::YieldOp>(bodyLoc, carried);
+      });
+  loop.replaceAllUsesWith(blocked.getResults());
+  loop.erase();
+}
+
 void unrollAccLoop(scf::ForOp loop, int64_t lower, int64_t step, int64_t trip) {
   OpBuilder builder(loop);
   Location loc = loop.getLoc();
@@ -184,11 +245,18 @@ struct UnrollOndspFpOrderedReduce final
       if (auto loop = dyn_cast<scf::ForOp>(op))
         if (isF32AccLoop(loop))
           if (std::optional<int64_t> trip = getUnrollableTripCount(loop, maxStraightLineTerms))
-            totals[function] += *trip * loop.getNumRegionIterArgs();
+            totals[function] += replayedTrips(loop, *trip) * loop.getNumRegionIterArgs();
     });
     for (auto [function, total] : totals)
       if (total > maxUnrolledTerms)
         overBudget.insert(function);
+  }
+
+  /// Trips one iteration of the rewritten loop replays: all of them for an
+  /// accumulator loop, one block of a sample loop.
+  int64_t replayedTrips(scf::ForOp loop, int64_t trip) {
+    return storesEachTrip(loop) ? chooseBlockFactor(trip, countBodyTerms(loop), maxBlockTerms)
+                                : trip;
   }
 
   /// Replace one ordered reduction by the straight-line chain its contract
@@ -242,8 +310,13 @@ struct UnrollOndspFpOrderedReduce final
     for (scf::ForOp loop : loops) {
       if (overBudget.contains(loop->getParentOfType<func::FuncOp>()))
         continue;
-      unrollAccLoop(loop, *getStaticIndex(loop.getLowerBound()), *getStaticIndex(loop.getStep()),
-                    *getUnrollableTripCount(loop, maxStraightLineTerms));
+      int64_t step = *getStaticIndex(loop.getStep());
+      int64_t trip = *getUnrollableTripCount(loop, maxStraightLineTerms);
+      int64_t replayed = replayedTrips(loop, trip);
+      if (replayed == trip)
+        unrollAccLoop(loop, *getStaticIndex(loop.getLowerBound()), step, trip);
+      else if (replayed > 1)
+        unrollLoopByBlock(loop, step, replayed);
     }
   }
 };

@@ -370,6 +370,16 @@ def UnrollOndspFpOrderedReduce
     replicated its reductions multiplies a per-site bound by that replication.
     Past the budget every site in that function keeps its loop, so the shape
     stays uniform. Zero disables either bound.
+
+    A loop that stores an output every trip is a sample recurrence, not an
+    accumulator: replaying all its trips hands the backend one block of
+    independent per-sample products that it hoists into register spills
+    (measured on an in-order AArch64 model: 128 straight-lined f32 SOS samples
+    ran 16% slower than the same chain in blocks of 16, and a four-section
+    filter left as a loop ran 21% slower than in blocks of 4; 112-term blocks
+    were the best of 28 to 224). Such a loop is replayed in blocks instead: the
+    largest divisor of the trip count whose block holds at most
+    `max-block-terms` multiplies and folds, one left as the loop.
   }];
   let options = [
     Option<"vectorWidth", "vector-width", "int64_t", /*default=*/"1",
@@ -378,6 +388,8 @@ def UnrollOndspFpOrderedReduce
            "Longest straight-line chain one site may become">,
     Option<"maxUnrolledTerms", "max-unrolled-terms", "int64_t", /*default=*/"0",
            "Per-function budget of straight-line terms; 0 leaves it unbounded">,
+    Option<"maxBlockTerms", "max-block-terms", "int64_t", /*default=*/"128",
+           "Terms one replayed block of a storing sample loop may hold; 0 keeps such loops">,
   ];
   let constructor = "ondrix::createUnrollOndspFpOrderedReducePass()";
   let dependentDialects = [

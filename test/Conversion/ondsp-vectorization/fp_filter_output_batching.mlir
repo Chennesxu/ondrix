@@ -226,6 +226,19 @@ func.func @matmul_three_columns(%a: tensor<4x16xf32>, %b: tensor<16x3xf32>) -> t
   return %r : tensor<4x3xf32>
 }
 
+// The columns a narrow output count leaves over take the same declared chain
+// rebuild at one lane, so the remainder is not the row's serial critical path.
+// CHAINED-LABEL: func.func @matmul_three_columns_fast
+// CHAINED: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : vector<2xf32>
+// CHAINED: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
+// CHAINED: memref.store
+func.func @matmul_three_columns_fast(%a: tensor<4x16xf32>, %b: tensor<16x3xf32>) -> tensor<4x3xf32> {
+  %r = ondrix.matmul %a, %b {
+    numeric = #ondsp.fp<format = f32, contract = fast>
+  } : (tensor<4x16xf32>, tensor<16x3xf32>) -> tensor<4x3xf32>
+  return %r : tensor<4x3xf32>
+}
+
 // A spend record is discardable audit metadata, so a forged one on an exact
 // fused body must never select different arithmetic: no de-fusing, ever.
 // FUSEDFAST-LABEL: func.func @forged_record_stays_fused
