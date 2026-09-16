@@ -53,7 +53,11 @@ The executable Q31 paths support two separate domains:
   explicitly exported as signed i32/frac30.
 
 The raw-high path cannot be exported directly as Q31 because value-preserving
-`acc_export` does not increase the accumulator fractional position.
+`acc_export` does not increase the accumulator fractional position. A Q31
+reading of a raw-high sum is therefore a composition the program spells: the
+identity export into a wider carrier, one exact left shift there, and one
+`round_shift` narrowing under the declared overflow, which is how the `.ox`
+`product=raw_high` profile returns a `q31`.
 
 ## Accumulator Updates
 

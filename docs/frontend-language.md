@@ -87,8 +87,29 @@ def q31_dot(lhs: buffer[q31], rhs: buffer[q31]) -> q31:
 ```
 
 `constexpr[q31]` reduction operands follow the same static-length rule and
-must fit signed i32 storage. Raw-high Q31 products and implicit rescaling are
-not part of the source profile.
+must fit signed i32 storage.
+
+A Q31 `dot` or `fir` may lead its policy with `product=raw_high`, the
+selection a fixed-point DSP's Q31 multiply-accumulate makes natively: each
+term is the upper 32 bits of the exact 64-bit product, a floor at frac 30,
+accumulated in the exact `exact[40, ...]` state the target shares with its
+Q15 family. The result is still a `q31` value: the export is the identity
+into a wide carrier, one exact doubling brings the frac-30 sum to the Q31
+position, and the declared `overflow` narrows it, so `rounding` is declared
+but vacuous on this profile, the way a left shift declares a tie rule. The
+two profiles are different contracts, not two implementations of one: sixteen
+products of small values sum to `-16` floors under `raw_high` where the full
+product rounds to zero. `product=full` (the default) keeps the exact i64/frac62
+accumulator; the selection is refused at Q15 and on every other builtin.
+
+```python
+def q31_dot_raw_high(lhs: buffer[q31], rhs: buffer[q31]) -> q31:
+  return dot(lhs, rhs,
+             product=raw_high,
+             accumulator=exact[40, saturate],
+             rounding=nearest_even,
+             overflow=saturate)
+```
 
 Ordered f32 dot and FIR-sample kernels name their contraction policy instead
 of a fixed-point accumulator and export policy:

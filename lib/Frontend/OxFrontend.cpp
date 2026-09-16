@@ -423,6 +423,7 @@ struct BuiltinCallAst {
   int64_t amount = 0;
   int64_t divisor = 0;
   std::string nonpositive;
+  std::string product;
   SourceType target = SourceType::Q15;
   bool literal = false;
   SourcePosition position;
@@ -2055,6 +2056,17 @@ private:
   }
 
   bool parseFixedPolicy(BuiltinCallAst &result) {
+    // The product selection leads the spelled policy; left out, it is the
+    // exact full product every profile starts from.
+    if (isIdentifier("product")) {
+      advance();
+      if (!expect(TokenKind::Equal, "expected '=' after product"))
+        return false;
+      auto product = parseIdentifier("expected product selection 'full' or 'raw_high'");
+      if (!product || !expect(TokenKind::Comma, "expected ',' before accumulator policy"))
+        return false;
+      result.product = product->spelling.str();
+    }
     if (!parseAccumulatorPolicy(result) ||
         !expect(TokenKind::Comma, "expected ',' before rounding policy") ||
         !expectIdentifier("rounding", "expected rounding policy") ||
@@ -3978,12 +3990,32 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     ast.result.accumulatorWidth = inferQ15FullAccumulatorWidth(productCount);
   }
 
-  uint64_t requiredAccumulatorWidth = ast.primaryResult().type == SourceType::Q15 ? 40 : 64;
+  // The raw high half is the Q31 target's native product: each term keeps the
+  // upper 32 bits of the exact product at frac 30, so the accumulator is the
+  // shared i40/frac30 one and the readout doubles once to reach Q31.
+  bool rawHigh = ast.result.product == "raw_high";
+  if (!ast.result.product.empty() && ast.result.product != "full" && !rawHigh) {
+    diagnostics.error(ast.result.position, llvm::Twine("unsupported product selection '") +
+                                               ast.result.product + "'; use full or raw_high");
+    return std::nullopt;
+  }
+  if (rawHigh &&
+      (ast.primaryResult().type != SourceType::Q31 ||
+       (ast.result.kind != ReductionKind::Dot && ast.result.kind != ReductionKind::Fir))) {
+    diagnostics.error(ast.result.position,
+                      "product=raw_high is the Q31 dot and fir profile: each term is the raw high "
+                      "half of the product, accumulated at frac 30");
+    return std::nullopt;
+  }
+  uint64_t requiredAccumulatorWidth =
+      ast.primaryResult().type == SourceType::Q15 || rawHigh ? 40 : 64;
   if (!ast.result.accumulatorAuto && ast.result.accumulatorWidth != requiredAccumulatorWidth) {
     diagnostics.error(ast.result.position,
                       ast.primaryResult().type == SourceType::Q15
                           ? "the executable Q15 profile requires exact accumulator width 40"
-                          : "the executable Q31 profile requires exact accumulator width 64");
+                      : rawHigh ? "the executable Q31 raw-high profile requires exact accumulator "
+                                  "width 40"
+                                : "the executable Q31 profile requires exact accumulator width 64");
     return std::nullopt;
   }
 
@@ -4738,10 +4770,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     unsigned storageWidth = cast<IntegerType>(elementType).getWidth();
     unsigned fractionalBits = storageWidth - 1;
     unsigned accumulatorWidth = kernel.ast.result.accumulatorWidth;
-    unsigned accumulatorFractionalBits = fractionalBits * 2;
+    bool rawHigh = kernel.ast.result.product == "raw_high";
+    unsigned accumulatorFractionalBits =
+        rawHigh ? 2 * fractionalBits - storageWidth : fractionalBits * 2;
     auto numeric =
         ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, elementType, fractionalBits);
-    auto product = ondsp::ProductAttr::get(&context, ondsp::ProductSelection::Full);
+    auto product = ondsp::ProductAttr::get(&context, rawHigh ? ondsp::ProductSelection::HighRaw
+                                                             : ondsp::ProductSelection::Full);
     auto accumulatorType = ondsp::AccType::get(&context, builder.getIntegerType(accumulatorWidth),
                                                accumulatorFractionalBits, ondsp::Signedness::Signed,
                                                *kernel.updateOverflow);
@@ -4754,10 +4789,29 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       accumulator =
           builder.create<ir::FirOp>(expressionLocation, accumulatorType, lhs, rhs, numeric, product)
               .getResult();
-    auto result =
-        builder.create<ondsp::AccExportOp>(expressionLocation, elementType, accumulator, numeric,
-                                           *kernel.rounding, *kernel.destinationOverflow);
-    builder.create<func::ReturnOp>(expressionLocation, result.getResult());
+    Value result;
+    if (rawHigh) {
+      // The raw high half reads one bit below Q31, and an export never raises
+      // the fractional position: the identity export into the i64 carrier, one
+      // exact doubling there, then the declared narrowing.
+      auto i64 = builder.getI64Type();
+      auto carrier = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, i64,
+                                           accumulatorFractionalBits);
+      Value wide =
+          builder.create<ondsp::AccExportOp>(expressionLocation, i64, accumulator, carrier,
+                                             *kernel.rounding, *kernel.destinationOverflow);
+      Value one = builder.create<arith::ConstantIntOp>(expressionLocation, 1, i64);
+      Value doubled = builder.create<arith::ShLIOp>(expressionLocation, wide, one);
+      result = builder.create<ondsp::RoundShiftOp>(
+          expressionLocation, elementType, doubled,
+          ondsp::ScaleAttr::get(&context, 0, 0, *kernel.rounding, *kernel.destinationOverflow,
+                                elementType));
+    } else {
+      result =
+          builder.create<ondsp::AccExportOp>(expressionLocation, elementType, accumulator, numeric,
+                                             *kernel.rounding, *kernel.destinationOverflow);
+    }
+    builder.create<func::ReturnOp>(expressionLocation, result);
   } else {
     auto numeric = ondsp::FpAttr::get(&context, elementType, *kernel.fpContract);
     Value result;
