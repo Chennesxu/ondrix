@@ -100,8 +100,8 @@ FailureOr<EntryRecord> readRecord(Operation *op) {
   auto malformed = [&] { return op->emitOpError("carries a malformed C entry record"); };
   if (!type || !isSupportedEntrySignature(type) || !names || !groups)
     return malformed();
-  size_t numBuffers = getEntryBuffers(type).size();
-  if (names.size() != numBuffers || groups.size() != numBuffers ||
+  int64_t numBuffers = getEntryBuffers(type).size();
+  if (static_cast<int64_t>(names.size()) != numBuffers || groups.size() != numBuffers ||
       !llvm::all_of(names, [](Attribute name) { return isa<StringAttr>(name); }))
     return malformed();
   EntryRecord record{type, {}, {}};
@@ -246,13 +246,15 @@ void emitAbort(ModuleOp module, OpBuilder &builder, Location loc, StringRef mess
     if (!symbols.lookup(name))
       break;
   }
-  Value text = LLVM::createGlobalString(loc, builder, name, message, LLVM::Linkage::Private,
+  std::string terminated = message.str();
+  terminated.push_back('\0');
+  Value text = LLVM::createGlobalString(loc, builder, name, terminated, LLVM::Linkage::Private,
                                         /*useOpaquePointers=*/true);
   builder.create<LLVM::CallOp>(loc, puts, text);
   builder.create<LLVM::CallOp>(loc, abortFn, ValueRange());
 }
 
-LogicalResult emitEntry(ModuleOp module, LLVM::LLVMFuncOp kernel) {
+LogicalResult emitEntry(ModuleOp module, LLVM::LLVMFuncOp kernel, bool checked) {
   FailureOr<EntryRecord> record = readRecord(kernel);
   if (failed(record))
     return failure();
@@ -303,27 +305,6 @@ LogicalResult emitEntry(ModuleOp module, LLVM::LLVMFuncOp kernel) {
   Block *body = entry.addEntryBlock();
   builder.setInsertionPointToStart(body);
 
-  // A length is read back as a signed index, so it must fit that range.
-  Value fits;
-  for (int64_t position : layout.lengthPosition) {
-    Value bound = builder.create<LLVM::ConstantOp>(
-        loc, indexType,
-        builder.getIntegerAttr(indexType, APInt::getSignedMaxValue(indexType.getWidth())));
-    Value inRange = builder.create<LLVM::ICmpOp>(loc, LLVM::ICmpPredicate::ule,
-                                                 body->getArgument(position), bound);
-    fits = fits ? builder.create<LLVM::AndOp>(loc, fits, inRange).getResult() : inRange;
-  }
-  if (fits) {
-    Block *call = entry.addBlock();
-    Block *refuse = entry.addBlock();
-    builder.create<LLVM::CondBrOp>(loc, fits, call, refuse);
-    builder.setInsertionPointToStart(refuse);
-    emitAbort(module, builder, loc,
-              llvm::formatv("{0}: a length exceeds the signed index range", entry.getName()).str());
-    builder.create<LLVM::UnreachableOp>(loc);
-    builder.setInsertionPointToStart(call);
-  }
-
   DenseMap<int64_t, Value> constants;
   auto constant = [&](int64_t value) {
     Value &cached = constants[value];
@@ -331,6 +312,75 @@ LogicalResult emitEntry(ModuleOp module, LLVM::LLVMFuncOp kernel) {
       cached = builder.create<LLVM::ConstantOp>(loc, indexType, value);
     return cached;
   };
+  auto elementBytes = [](MemRefType buffer) -> int64_t {
+    return llvm::divideCeil(buffer.getElementType().getIntOrFloatBitWidth(), 8);
+  };
+  auto allOf = [&](Value all, Value term) {
+    return all ? builder.create<LLVM::AndOp>(loc, all, term).getResult() : term;
+  };
+  // Each check refuses with its own message; a passing call falls through.
+  auto refuseUnless = [&](Value ok, StringRef message) {
+    if (!ok)
+      return;
+    Block *proceed = entry.addBlock();
+    Block *refuse = entry.addBlock();
+    builder.create<LLVM::CondBrOp>(loc, ok, proceed, refuse);
+    builder.setInsertionPointToStart(refuse);
+    emitAbort(module, builder, loc, llvm::formatv("{0}: {1}", entry.getName(), message).str());
+    builder.create<LLVM::UnreachableOp>(loc);
+    builder.setInsertionPointToStart(proceed);
+  };
+
+  // A length is read back as a signed index and scaled to bytes, so the widest
+  // member of its group bounds it.
+  SmallVector<int64_t> groupBytes(layout.lengthPosition.size(), 1);
+  for (auto [index, buffer] : llvm::enumerate(buffers))
+    if (groups[index] >= 0)
+      groupBytes[groups[index]] = std::max(groupBytes[groups[index]], elementBytes(buffer));
+  Value fits;
+  for (auto [group, position] : llvm::enumerate(layout.lengthPosition)) {
+    APInt bound = APInt::getSignedMaxValue(indexType.getWidth()).udiv(groupBytes[group]);
+    Value limit =
+        builder.create<LLVM::ConstantOp>(loc, indexType, builder.getIntegerAttr(indexType, bound));
+    fits = allOf(fits, builder.create<LLVM::ICmpOp>(loc, LLVM::ICmpPredicate::ule,
+                                                    body->getArgument(position), limit));
+  }
+  refuseUnless(fits, "a length exceeds the addressable range");
+
+  if (checked) {
+    SmallVector<Value> begins, ends;
+    Value nonNull;
+    for (auto [index, buffer] : llvm::enumerate(buffers)) {
+      Value pointer = body->getArgument(layout.pointerPosition[index]);
+      Value begin = builder.create<LLVM::PtrToIntOp>(loc, indexType, pointer);
+      Value bytes = buffer.hasStaticShape()
+                        ? constant(buffer.getNumElements() * elementBytes(buffer))
+                        : builder
+                              .create<LLVM::MulOp>(
+                                  loc, body->getArgument(layout.lengthPosition[groups[index]]),
+                                  constant(elementBytes(buffer)))
+                              .getResult();
+      begins.push_back(begin);
+      ends.push_back(builder.create<LLVM::AddOp>(loc, begin, bytes));
+      Value empty = builder.create<LLVM::ICmpOp>(loc, LLVM::ICmpPredicate::eq, bytes, constant(0));
+      Value present =
+          builder.create<LLVM::ICmpOp>(loc, LLVM::ICmpPredicate::ne, begin, constant(0));
+      nonNull = allOf(nonNull, builder.create<LLVM::OrOp>(loc, empty, present));
+    }
+    // Half-open byte ranges are disjoint when the later start is at or past
+    // the earlier end; an empty range overlaps nothing.
+    Value disjoint;
+    for (unsigned first = 0; first < begins.size(); ++first)
+      for (unsigned second = first + 1; second < begins.size(); ++second) {
+        Value start = builder.create<LLVM::UMaxOp>(loc, begins[first], begins[second]);
+        Value stop = builder.create<LLVM::UMinOp>(loc, ends[first], ends[second]);
+        disjoint = allOf(disjoint,
+                         builder.create<LLVM::ICmpOp>(loc, LLVM::ICmpPredicate::uge, start, stop));
+      }
+    refuseUnless(nonNull, "a null buffer has elements");
+    refuseUnless(disjoint, "two buffers overlap");
+  }
+
   SmallVector<Value> operands;
   for (auto [index, buffer] : llvm::enumerate(buffers)) {
     Value pointer = body->getArgument(layout.pointerPosition[index]);
@@ -360,6 +410,9 @@ LogicalResult emitEntry(ModuleOp module, LLVM::LLVMFuncOp kernel) {
 class EmitOndrixCEntryPointsPass final
     : public ondrix::impl::EmitOndrixCEntryPointsBase<EmitOndrixCEntryPointsPass> {
 public:
+  using ondrix::impl::EmitOndrixCEntryPointsBase<
+      EmitOndrixCEntryPointsPass>::EmitOndrixCEntryPointsBase;
+
   void runOnOperation() override {
     ModuleOp module = getOperation();
     SmallVector<LLVM::LLVMFuncOp> kernels;
@@ -375,7 +428,7 @@ public:
       kernels.push_back(function);
     }
     for (LLVM::LLVMFuncOp kernel : kernels)
-      if (failed(emitEntry(module, kernel)))
+      if (failed(emitEntry(module, kernel, checked)))
         return signalPassFailure();
   }
 };
@@ -407,11 +460,18 @@ std::unique_ptr<Pass> ondrix::createEmitOndrixCEntryPointsPass() {
   return std::make_unique<EmitOndrixCEntryPointsPass>();
 }
 
+std::unique_ptr<Pass>
+ondrix::createEmitOndrixCEntryPointsPass(const EmitOndrixCEntryPointsOptions &options) {
+  return std::make_unique<EmitOndrixCEntryPointsPass>(options);
+}
+
 LogicalResult ondrix::printOndrixCEntryHeader(ModuleOp module, raw_ostream &os) {
-  os << "// Plain-pointer entry points generated by Ondrix. An input buffer is read\n"
-        "// only; an output buffer receives the whole result and must not overlap any\n"
-        "// other argument. A length counts elements and must not exceed the signed\n"
-        "// range of its type, or the call aborts before touching memory.\n"
+  os << "// Plain-pointer entry points generated by Ondrix. Buffers are contiguous,\n"
+        "// row-major, element-aligned and valid for the call, and no two may overlap;\n"
+        "// an input is read only, an output receives the whole result. A length counts\n"
+        "// elements and must fit the signed index range in bytes, or the call prints a\n"
+        "// message and aborts before touching memory. Built with --checked-entries, a\n"
+        "// null buffer with elements or an overlap is refused the same way.\n"
         "#include <stdint.h>\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n";
   for (auto entry : module.getOps<LLVM::LLVMFuncOp>()) {
     if (!entry->hasAttr(kCEntryAttr) || !entry.getName().startswith(kCEntryPrefix))

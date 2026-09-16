@@ -1,8 +1,10 @@
 // RUN: ondrix-opt %s --emit-ondrix-c-entry-points --split-input-file | FileCheck %s
+// RUN: ondrix-opt %s --emit-ondrix-c-entry-points=checked=true --split-input-file | FileCheck %s --check-prefix=CHECKED
 
-// One length after both pointers of the declared group; each descriptor is
-// the pointer twice, offset zero, the length and stride one; the record moves
-// to the wrapper and leaves the descriptor wrapper's copy.
+// One length after both pointers of the declared group, bounded so the i16
+// buffer fits the signed range in bytes; each descriptor is the pointer
+// twice, offset zero, the length and stride one; the record moves to the
+// wrapper and leaves the descriptor wrapper's copy.
 // CHECK-LABEL: llvm.func @dot(
 // CHECK-NOT: ondrix.
 // CHECK-LABEL: llvm.func @_mlir_ciface_dot(
@@ -10,10 +12,11 @@
 // CHECK-LABEL: llvm.func @ondrix_dot(
 // CHECK-SAME: %[[A:.*]]: !llvm.ptr, %[[B:.*]]: !llvm.ptr, %[[N:.*]]: i64) -> i16
 // CHECK-SAME: ondrix.c_entry = {groups = array<i64: 0, 0>, names = ["lhs", "rhs"], signature = (memref<?xi16>, memref<?xi16>) -> i16}
-// CHECK: %[[MAX:.*]] = llvm.mlir.constant(9223372036854775807 : i64)
+// CHECK: %[[MAX:.*]] = llvm.mlir.constant(4611686018427387903 : i64)
 // CHECK: %[[OK:.*]] = llvm.icmp "ule" %[[N]], %[[MAX]]
 // CHECK: llvm.cond_br %[[OK]], ^[[CALL:.*]], ^[[REFUSE:.*]]
 // CHECK: ^[[CALL]]:
+// CHECK-NOT: llvm.ptrtoint
 // CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0 : i64)
 // CHECK: %[[ONE:.*]] = llvm.mlir.constant(1 : i64)
 // CHECK: %[[R:.*]] = llvm.call @dot(%[[A]], %[[A]], %[[ZERO]], %[[N]], %[[ONE]], %[[B]], %[[B]], %[[ZERO]], %[[N]], %[[ONE]])
@@ -22,6 +25,30 @@
 // CHECK: llvm.call @puts
 // CHECK: llvm.call @abort
 // CHECK: llvm.unreachable
+// Checked: after the length bound, a buffer with elements must not be null
+// and the two half-open byte ranges must not intersect, each with its own
+// message; the call is reached only past all three.
+// CHECKED-DAG: llvm.mlir.global private constant @{{.*}}("ondrix_dot: a length exceeds the addressable range\00")
+// CHECKED-DAG: llvm.mlir.global private constant @{{.*}}("ondrix_dot: a null buffer has elements\00")
+// CHECKED-DAG: llvm.mlir.global private constant @{{.*}}("ondrix_dot: two buffers overlap\00")
+// CHECKED-LABEL: llvm.func @ondrix_dot(
+// CHECKED-SAME: %[[A:.*]]: !llvm.ptr, %[[B:.*]]: !llvm.ptr, %[[N:.*]]: i64) -> i16
+// CHECKED: llvm.cond_br %{{.*}}, ^[[RANGE_OK:.*]], ^{{.*}}
+// CHECKED: ^[[RANGE_OK]]:
+// CHECKED: %[[PA:.*]] = llvm.ptrtoint %[[A]]
+// CHECKED: %[[TWO:.*]] = llvm.mlir.constant(2 : i64)
+// CHECKED: %[[BYTES_A:.*]] = llvm.mul %[[N]], %[[TWO]]
+// CHECKED: %[[END_A:.*]] = llvm.add %[[PA]], %[[BYTES_A]]
+// CHECKED: %[[PB:.*]] = llvm.ptrtoint %[[B]]
+// CHECKED: %[[END_B:.*]] = llvm.add %[[PB]], %{{.*}}
+// CHECKED: %[[START:.*]] = llvm.intr.umax(%[[PA]], %[[PB]])
+// CHECKED: %[[STOP:.*]] = llvm.intr.umin(%[[END_A]], %[[END_B]])
+// CHECKED: %[[DISJOINT:.*]] = llvm.icmp "uge" %[[START]], %[[STOP]]
+// CHECKED: llvm.cond_br %{{.*}}, ^[[NULL_OK:.*]], ^{{.*}}
+// CHECKED: ^[[NULL_OK]]:
+// CHECKED-NEXT: llvm.cond_br %[[DISJOINT]], ^[[CALL:.*]], ^{{.*}}
+// CHECKED: ^[[CALL]]:
+// CHECKED: llvm.call @dot(%[[A]], %[[A]], %{{.*}}, %[[N]], %{{.*}}, %[[B]], %[[B]], %{{.*}}, %[[N]], %{{.*}})
 llvm.func @abort()
 llvm.func @puts(!llvm.ptr)
 llvm.func @dot(%a0: !llvm.ptr, %a1: !llvm.ptr, %a2: i64, %a3: i64, %a4: i64,

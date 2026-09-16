@@ -133,6 +133,8 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
         "finalize-memref-to-llvm,convert-math-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,"
         "convert-func-to-llvm,apply-ondrix-llvm-argument-attributes,reconcile-unrealized-casts,"
         "emit-ondrix-c-entry-points";
+  if (options.checkedEntries)
+    os << "{checked=true}";
   return text;
 }
 

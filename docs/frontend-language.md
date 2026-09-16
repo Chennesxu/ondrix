@@ -649,12 +649,35 @@ length, and parameter names carry over from the source. The kernel writes a
 static result straight into the caller's array (`forward-ondrix-result-buffers`
 removes the local copy) and allocates nothing. The entry fills the descriptors
 itself (offset zero, row-major strides), carries the same storage
-preconditions as the descriptor entry, and refuses a length above the signed
-index range before touching memory, with the message-and-abort convention of
-the shape assertions. `ondrix-compile --emit=c-header`, or `ondrix-translate
---mlir-to-ondrix-c-header` on the `--emit=llvm` module, prints the
-prototypes. A kernel with a result of dynamic shape, such as `fir_filter` on
-`tensor[q15]`, keeps the descriptor convention and gets no plain entry.
+preconditions as the descriptor entry, and refuses a length whose buffer
+would not fit the signed index range in bytes before touching memory, with
+the message-and-abort convention of the shape assertions. `ondrix-compile
+--emit=c-header`, or `ondrix-translate --mlir-to-ondrix-c-header` on the
+`--emit=llvm` module, prints the prototypes. A kernel with a result of
+dynamic shape, such as `fir_filter` on `tensor[q15]`, keeps the descriptor
+convention and gets no plain entry.
+
+The memory contract of a call, in full. Storage: every buffer is contiguous,
+row-major for rank 2, aligned to its element, owned by the caller and valid
+for the duration of the call; the kernel keeps no reference and allocates
+nothing for a static result. Capacity: a static buffer holds at least its
+declared extent, a dynamic one holds `length` elements; a C pointer carries
+no size, so this cannot be checked. Disjointness: no two buffers of one call
+overlap, inputs included, which is the declared precondition above and the
+one `forward-ondrix-result-buffers` and the schedule transforms rely on; a
+read-only dot could tolerate aliasing inputs, but relaxing that is a separate
+ABI decision, not something the entry infers. Shape relations between
+buffers are either fixed by the types or established by the kernel's own
+runtime assertions before it reads (the FIR family asserts its window,
+coefficient and output lengths, `reduce_mac` its equal operand lengths, the
+SOS filters their section counts); the two windows an entry hands one length
+satisfy the equal-length assertion by construction. What the plain entry
+checks: always, that each length fits the index range in bytes; with
+`ondrix-compile --checked-entries`, also that no buffer with elements is null
+and that no two byte ranges intersect (empty ranges intersect nothing), each
+refusal printing `ondrix_<kernel>: <reason>` and aborting before the kernel
+runs. The checked mode is a debugging aid, a few compares per buffer pair,
+and off by default; the same header serves both builds.
 
 This is not a general Python parser. Imports, classes, heap objects, arbitrary
 expressions, and dynamic Python behavior are rejected. Scalar constants,

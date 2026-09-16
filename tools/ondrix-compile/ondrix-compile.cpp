@@ -68,6 +68,11 @@ cl::opt<int64_t> vectorBits("vector-bits",
                                      "sites ordered and scalar; fast reductions still carry "
                                      "scalar chains)"),
                             cl::init(0));
+cl::opt<bool> checkedEntries("checked-entries",
+                             cl::desc("Make the plain-pointer C entries refuse a null or "
+                                      "overlapping buffer before touching memory (message and "
+                                      "abort); off, the preconditions are the caller's"),
+                             cl::init(false));
 cl::opt<bool> fftLoops("fft-loops",
                        cl::desc("Schedule choice, not a target fact: lower static "
                                 "CFFT/RFFT/IRFFT as stage loops over in-memory twiddle tables "
@@ -210,6 +215,7 @@ int main(int argc, char **argv) {
     options.wideningMultiplyLowHalves = wideningMultiplyLowHalves.getValue();
     options.multiplyAddAdjacentPairs = multiplyAddAdjacentPairs.getValue();
     options.fftLoops = fftLoops.getValue();
+    options.checkedEntries = checkedEntries.getValue();
     ondrix::buildOndrixDefaultPipeline(passManager, options);
     if (failed(passManager.run(*module)))
       return 1;

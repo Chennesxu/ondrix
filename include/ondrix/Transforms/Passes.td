@@ -401,11 +401,21 @@ def EmitOndrixCEntryPoints
     in the index width the conversion chose; it builds the descriptors (both
     pointers the argument, offset zero, the static extents or the length as
     sizes, row-major strides) and calls the kernel, returning its scalar or
-    nothing. A length above the signed range of the index type is refused
-    before any memory is touched, with the message-then-abort convention the
-    shape assertions already use. The record moves to the wrapper, where the
-    header printer reads it.
+    nothing. A length whose buffer would not fit the signed range of the index
+    type is refused before any memory is touched, with the message-then-abort
+    convention the shape assertions already use; that check is one compare
+    per length and always on. With `checked` the entry also refuses a null
+    buffer that has elements and any two buffers whose byte ranges overlap,
+    which is the disjointness the descriptor convention declares and the
+    schedule transforms rely on; a valid call pays a handful of compares per
+    buffer pair, so the mode is off by default. The record moves to the
+    wrapper, where the header printer reads it.
   }];
+  let options = [
+    Option<"checked", "checked", "bool", /*default=*/"false",
+           "Refuse a null buffer with elements and overlapping buffers before "
+           "the kernel runs">,
+  ];
   let constructor = "ondrix::createEmitOndrixCEntryPointsPass()";
   let dependentDialects = ["mlir::LLVM::LLVMDialect"];
 }

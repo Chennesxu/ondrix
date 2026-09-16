@@ -40,6 +40,8 @@ std::unique_ptr<mlir::Pass> createApplyOndrixLlvmArgumentAttributesPass();
 constexpr llvm::StringLiteral kNoAliasPointerArgumentsAttr = "ondrix.noalias_pointer_args";
 std::unique_ptr<mlir::Pass> createDeclareOndrixCEntryPointsPass();
 std::unique_ptr<mlir::Pass> createEmitOndrixCEntryPointsPass();
+std::unique_ptr<mlir::Pass>
+createEmitOndrixCEntryPointsPass(const EmitOndrixCEntryPointsOptions &options);
 std::unique_ptr<mlir::Pass> createScalarizeOndspFixedReduceMacPass();
 std::unique_ptr<mlir::Pass> createUnrollOndspFixedMacLoopsPass();
 std::unique_ptr<mlir::Pass> createUnrollOndspFpOrderedReducePass();

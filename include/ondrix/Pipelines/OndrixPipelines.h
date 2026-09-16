@@ -100,6 +100,15 @@ struct OndrixDefaultPipelineOptions
                                        "loops over in-memory twiddle tables instead of unrolled "
                                        "butterflies (smaller object, slower at small extents)"),
                         llvm::cl::init(false)};
+  /// Whether the plain-pointer C entries verify their storage preconditions
+  /// (no null buffer with elements, no two buffers overlapping) before the
+  /// kernel runs. Neither a target fact nor a schedule choice: a debugging
+  /// aid for callers, off by default because a valid call pays it for nothing.
+  Option<bool> checkedEntries{
+      *this, "checked-entries",
+      llvm::cl::desc("Make the plain-pointer C entries refuse a null or overlapping buffer "
+                     "before touching memory (message and abort)"),
+      llvm::cl::init(false)};
 };
 
 /// Appends the canonical Ondrix flow to `pm`: design evaluation, contract
