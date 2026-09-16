@@ -2212,9 +2212,31 @@ def Ondrix_DivOp : Ondrix_ElementwiseOp<"div"> {
 }
 
 def Ondrix_QuantizeOp : Ondrix_Op<"quantize", [Pure]> {
-  let summary = "High-level numeric conversion intent";
-  let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$src,
-                   Ondsp_NumericAttr:$dst);
+  let summary = "Convert a value between the two uniform-Q widths, preserving its value";
+  let description = [{
+    ```text
+    q15 -> q31:  y = x * 2^16                    exact, no boundary
+    q31 -> q15:  y = narrow_i16(round(x / 2^16))  one tie rule, one overflow
+    ```
+
+    The value is preserved, not the raw integer: both formats have one
+    integer bit, so a widening is a left shift that cannot overflow and a
+    narrowing is a right shift by the width difference, where the top
+    `2^15` raw values round up onto the rail and the declared `overflow`
+    resolves them. The attributes follow the boundary rather than the
+    operation: a narrowing requires `rounding` and `overflow`, and a widening
+    refuses both, so a program that flips `src` and `dst` fails to verify
+    instead of keeping a policy that no longer names anything. This is the
+    only operation whose result element type differs from its operand's, and
+    the only way a source program changes width; no elementwise member
+    converts implicitly. A floating-point `src` or `dst` is a different
+    contract and fails closed here.
+  }];
+  let arguments = (ins AnyType:$input,
+                   Ondsp_NumericAttr:$src,
+                   Ondsp_NumericAttr:$dst,
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding,
+                   OptionalAttr<Ondsp_OverflowModeAttr>:$overflow);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

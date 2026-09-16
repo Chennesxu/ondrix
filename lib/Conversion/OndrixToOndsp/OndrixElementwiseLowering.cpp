@@ -28,15 +28,66 @@ using namespace ondrix::conversion;
 
 namespace {
 
+// One loop per operation: the operands' elements go through `body` and the
+// result lands in a fresh tensor. The elementwise family and the width
+// conversion share it.
+static Value emitElementwiseLoop(Location loc, RankedTensorType resultType, ValueRange sources,
+                                 llvm::function_ref<Value(ArrayRef<Value>, OpBuilder &)> body,
+                                 OpBuilder &rewriter) {
+  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, resultType.getDimSize(0));
+  Value empty =
+      rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+  auto loop = rewriter.create<scf::ForOp>(
+      loc, zero, extentValue, one, ValueRange{empty},
+      [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
+        SmallVector<Value> elements;
+        for (Value source : sources)
+          elements.push_back(builder.create<tensor::ExtractOp>(loc, source, position));
+        Value value = body(elements, builder);
+        Value inserted = builder.create<tensor::InsertOp>(loc, value, iterArgs.front(), position);
+        builder.create<scf::YieldOp>(loc, inserted);
+      });
+  return loop.getResult(0);
+}
+
+// The value-preserving width change: a widening is the exact left shift by
+// the width difference, a narrowing is the one requantization boundary the
+// operation declares, at the same shift.
+static Value emitQuantizeBody(ondrix::ir::QuantizeOp op, Value value, OpBuilder &builder) {
+  Location loc = op.getLoc();
+  auto source = cast<IntegerType>(cast<ondrix::ondsp::FixedAttr>(op.getSrc()).getStorage());
+  auto destination = cast<IntegerType>(cast<ondrix::ondsp::FixedAttr>(op.getDst()).getStorage());
+  if (destination.getWidth() > source.getWidth()) {
+    Value extended = builder.create<arith::ExtSIOp>(loc, destination, value);
+    Value shift = builder.create<arith::ConstantIntOp>(
+        loc, destination.getWidth() - source.getWidth(), destination);
+    return builder.create<arith::ShLIOp>(loc, extended, shift);
+  }
+  auto scale = ondrix::ondsp::ScaleAttr::get(builder.getContext(), /*preShiftLeft=*/0,
+                                             source.getWidth() - destination.getWidth(),
+                                             *op.getRounding(), *op.getOverflow(), destination);
+  return builder.create<ondrix::ondsp::RoundShiftOp>(loc, destination, value, scale);
+}
+
 class QuantizeOpLowering final : public OpConversionPattern<ondrix::ir::QuantizeOp> {
 public:
   using OpConversionPattern<ondrix::ir::QuantizeOp>::OpConversionPattern;
 
   LogicalResult matchAndRewrite(ondrix::ir::QuantizeOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    auto replacement = rewriter.create<ondrix::ondsp::ConvertOp>(
-        op.getLoc(), op.getResult().getType(), adaptor.getInput(), op.getSrc(), op.getDst());
-    rewriter.replaceOp(op, replacement);
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+    if (!resultType) {
+      rewriter.replaceOp(op, emitQuantizeBody(op, adaptor.getInput(), rewriter));
+      return success();
+    }
+    rewriter.replaceOp(op, emitElementwiseLoop(
+                               op.getLoc(), resultType, adaptor.getInput(),
+                               [&](ArrayRef<Value> elements, OpBuilder &builder) {
+                                 return emitQuantizeBody(op, elements.front(), builder);
+                               },
+                               rewriter));
     return success();
   }
 };
@@ -57,28 +108,19 @@ public:
     RankedTensorType resultType = op.getResult().getType();
     auto storage = cast<IntegerType>(resultType.getElementType());
     IntegerType wide = rewriter.getIntegerType(2 * storage.getWidth());
-    int64_t extent = resultType.getDimSize(0);
 
     SmallVector<Value> sources;
     for (Value operand : adaptor.getOperands())
       if (isa<RankedTensorType>(operand.getType()))
         sources.push_back(operand);
 
-    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-    Value extentValue = rewriter.create<arith::ConstantIndexOp>(loc, extent);
-    Value empty = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), storage);
-    auto loop = rewriter.create<scf::ForOp>(
-        loc, zero, extentValue, one, ValueRange{empty},
-        [&](OpBuilder &builder, Location loc, Value position, ValueRange iterArgs) {
-          SmallVector<Value> elements;
-          for (Value source : sources)
-            elements.push_back(builder.create<tensor::ExtractOp>(loc, source, position));
-          Value value = emitBody(op, elements, context, storage, wide, loc, builder);
-          Value inserted = builder.create<tensor::InsertOp>(loc, value, iterArgs.front(), position);
-          builder.create<scf::YieldOp>(loc, inserted);
-        });
-    rewriter.replaceOp(op, loop.getResult(0));
+    rewriter.replaceOp(op, emitElementwiseLoop(
+                               loc, resultType, sources,
+                               [&](ArrayRef<Value> elements, OpBuilder &builder) {
+                                 return emitBody(op, elements, context, storage, wide, loc,
+                                                 builder);
+                               },
+                               rewriter));
     return success();
   }
 

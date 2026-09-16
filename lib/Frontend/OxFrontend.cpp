@@ -254,6 +254,8 @@ enum class ReductionKind {
   Offset,
   Shift,
   Div,
+  Widen,
+  Narrow,
   Log2,
   Exp2
 };
@@ -270,6 +272,12 @@ static bool isElementwiseKind(ReductionKind kind) {
 
 static bool isBinaryElementwiseKind(ReductionKind kind) {
   return kind == ReductionKind::Add || kind == ReductionKind::Sub || kind == ReductionKind::Mult;
+}
+
+// The two spellings of the one width conversion: the name fixes the
+// direction, so a target on the wrong side is refused, never reinterpreted.
+static bool isConversionKind(ReductionKind kind) {
+  return kind == ReductionKind::Widen || kind == ReductionKind::Narrow;
 }
 
 // The compile-time coefficient designs. None has a runtime form, so each is
@@ -314,7 +322,7 @@ static bool isFftComposableKind(ReductionKind kind) {
 // carries an element type and extent from operand to result, so a member has
 // to have a statically derivable result shape.
 static bool isComposableKind(ReductionKind kind) {
-  return isFftComposableKind(kind) || isElementwiseKind(kind);
+  return isFftComposableKind(kind) || isElementwiseKind(kind) || isConversionKind(kind);
 }
 
 // A fixed gain is one requantization with a static shape, so it nests and
@@ -332,7 +340,7 @@ static bool isUnaryTensorKind(ReductionKind kind) {
 }
 
 static bool isUnaryKind(ReductionKind kind) {
-  return isFftComposableKind(kind) || isUnaryTensorKind(kind) ||
+  return isFftComposableKind(kind) || isUnaryTensorKind(kind) || isConversionKind(kind) ||
          (isElementwiseKind(kind) && !isBinaryElementwiseKind(kind));
 }
 
@@ -404,6 +412,7 @@ struct BuiltinCallAst {
   int64_t bias = 0;
   int64_t amount = 0;
   int64_t divisor = 0;
+  SourceType target = SourceType::Q15;
   bool literal = false;
   SourcePosition position;
 };
@@ -695,7 +704,8 @@ public:
         !isIdentifier("lowpass") && !isIdentifier("cic_decimate") && !isIdentifier("add") &&
         !isIdentifier("sub") && !isIdentifier("mult") && !isIdentifier("abs") &&
         !isIdentifier("negate") && !isIdentifier("offset") && !isIdentifier("shift") &&
-        !isIdentifier("div") && !isIdentifier("log2") && !isIdentifier("exp2")) {
+        !isIdentifier("div") && !isIdentifier("widen") && !isIdentifier("narrow") &&
+        !isIdentifier("log2") && !isIdentifier("exp2")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
@@ -705,7 +715,8 @@ public:
                         "moving_average(...), gain(...), rms(...), sine(...), cosine(...), "
                         "matmul(...), lms(...), cic_decimate(...), a lowpass/hamming/hann/"
                         "blackman/kaiser design, or an "
-                        "elementwise add/sub/mult/abs/negate/offset/shift/div builtin expression");
+                        "elementwise add/sub/mult/abs/negate/offset/shift/div builtin expression, "
+                        "or a widen(...)/narrow(...) conversion");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -778,6 +789,10 @@ public:
       call.kind = ReductionKind::Mult;
     else if (isIdentifier("div"))
       call.kind = ReductionKind::Div;
+    else if (isIdentifier("widen"))
+      call.kind = ReductionKind::Widen;
+    else if (isIdentifier("narrow"))
+      call.kind = ReductionKind::Narrow;
     else if (isIdentifier("abs"))
       call.kind = ReductionKind::Abs;
     else if (isIdentifier("negate"))
@@ -935,6 +950,32 @@ public:
         return std::nullopt;
       return call;
     }
+    if (isConversionKind(call.kind)) {
+      // The target is spelled although two widths leave one choice: the
+      // conversion is the only place a program changes width.
+      std::optional<ExpressionAst> input = parseExpression(std::nullopt);
+      if (!input)
+        return std::nullopt;
+      call.operands.push_back(std::move(*input));
+      if (!expect(TokenKind::Comma, "expected ',' before the conversion target") ||
+          !expectIdentifier("to", "expected 'to' naming the conversion target") ||
+          !expect(TokenKind::Equal, "expected '=' after to"))
+        return std::nullopt;
+      std::optional<SourceType> target =
+          parseSourceType("expected the target format 'q15' or 'q31'");
+      if (!target)
+        return std::nullopt;
+      call.target = *target;
+      if (call.kind == ReductionKind::Widen && current.kind == TokenKind::Comma) {
+        diagnostics.error(current.position,
+                          "widen is exact and takes no rounding or overflow policy");
+        return std::nullopt;
+      }
+      if (!parseBoundaryPolicies(call) ||
+          !expect(TokenKind::RightParen, "expected ')' after the conversion"))
+        return std::nullopt;
+      return call;
+    }
     if (isElementwiseKind(call.kind)) {
       std::optional<ExpressionAst> lhs = parseExpression(std::nullopt);
       if (!lhs)
@@ -954,29 +995,8 @@ public:
         return std::nullopt;
       if (call.kind == ReductionKind::Div && !parseNamedInteger("divisor", call.divisor))
         return std::nullopt;
-      // Both boundary choices are optional and both default to the rule the
-      // rest of the language uses: unbiased, non-wrapping.
-      if (current.kind == TokenKind::Comma && next.spelling == "rounding") {
-        if (!expect(TokenKind::Comma, "expected ',' before rounding policy") ||
-            !expectIdentifier("rounding", "expected rounding policy") ||
-            !expect(TokenKind::Equal, "expected '=' after rounding"))
-          return std::nullopt;
-        auto rounding = parseIdentifier("expected rounding mode");
-        if (!rounding)
-          return std::nullopt;
-        call.rounding = rounding->spelling.str();
-      }
-      if (current.kind == TokenKind::Comma) {
-        if (!expect(TokenKind::Comma, "expected ',' before overflow policy") ||
-            !expectIdentifier("overflow", "expected overflow policy") ||
-            !expect(TokenKind::Equal, "expected '=' after overflow"))
-          return std::nullopt;
-        auto overflow = parseIdentifier("expected overflow mode");
-        if (!overflow)
-          return std::nullopt;
-        call.destinationOverflow = overflow->spelling.str();
-      }
-      if (!expect(TokenKind::RightParen, "expected ')' after elementwise expression"))
+      if (!parseBoundaryPolicies(call) ||
+          !expect(TokenKind::RightParen, "expected ')' after elementwise expression"))
         return std::nullopt;
       return call;
     }
@@ -1587,7 +1607,7 @@ private:
                            isIdentifier("add") || isIdentifier("sub") || isIdentifier("mult") ||
                            isIdentifier("abs") || isIdentifier("negate") ||
                            isIdentifier("offset") || isIdentifier("shift") || isIdentifier("div") ||
-                           isIdentifier("gain");
+                           isIdentifier("gain") || isIdentifier("widen") || isIdentifier("narrow");
     if (isCall && (rootPolicy || isNestedBuiltin)) {
       std::optional<BuiltinCallAst> call = parseBuiltinCall(rootPolicy.value_or(SourceType::Q15));
       if (!call)
@@ -1878,6 +1898,32 @@ private:
       }
     }
     return instantiateCall(callee.result, substitution, name.position);
+  }
+
+  // The optional `rounding=` then `overflow=` pair of a one-boundary member;
+  // sema fills the language defaults where they are left out.
+  bool parseBoundaryPolicies(BuiltinCallAst &call) {
+    if (current.kind == TokenKind::Comma && next.spelling == "rounding") {
+      if (!expect(TokenKind::Comma, "expected ',' before rounding policy") ||
+          !expectIdentifier("rounding", "expected rounding policy") ||
+          !expect(TokenKind::Equal, "expected '=' after rounding"))
+        return false;
+      auto rounding = parseIdentifier("expected rounding mode");
+      if (!rounding)
+        return false;
+      call.rounding = rounding->spelling.str();
+    }
+    if (current.kind == TokenKind::Comma) {
+      if (!expect(TokenKind::Comma, "expected ',' before overflow policy") ||
+          !expectIdentifier("overflow", "expected overflow policy") ||
+          !expect(TokenKind::Equal, "expected '=' after overflow"))
+        return false;
+      auto overflow = parseIdentifier("expected overflow mode");
+      if (!overflow)
+        return false;
+      call.destinationOverflow = overflow->spelling.str();
+    }
+    return true;
   }
 
   bool parseNamedInteger(llvm::StringRef name, int64_t &slot) {
@@ -2826,6 +2872,24 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     // so one checker covers all seven and a new member cannot forget a rule.
     // The two attribute ranges follow the width because they are raw values
     // in the declared format, not abstract quantities.
+    // The language defaults for a declared boundary, then the mode names.
+    auto checkBoundaryPolicies = [&](BuiltinCallAst &call) -> bool {
+      if (call.rounding.empty())
+        call.rounding = "nearest_ties_positive";
+      if (call.destinationOverflow.empty())
+        call.destinationOverflow = "saturate";
+      if (!parseRounding(call.rounding)) {
+        diagnostics.error(call.position,
+                          llvm::Twine("unsupported rounding mode '") + call.rounding + "'");
+        return false;
+      }
+      if (!parseOverflow(call.destinationOverflow)) {
+        diagnostics.error(call.position, llvm::Twine("unsupported overflow mode '") +
+                                             call.destinationOverflow + "'");
+        return false;
+      }
+      return true;
+    };
     auto checkElementwise = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       std::optional<ComposedType> lhs = checkComposedExpression(call.operands.front());
       if (!lhs)
@@ -2873,21 +2937,37 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                                              llvm::Twine(biasBound - 1) + "]");
         return std::nullopt;
       }
-      if (call.rounding.empty())
-        call.rounding = "nearest_ties_positive";
-      if (call.destinationOverflow.empty())
-        call.destinationOverflow = "saturate";
-      if (!parseRounding(call.rounding)) {
-        diagnostics.error(call.position,
-                          llvm::Twine("unsupported rounding mode '") + call.rounding + "'");
+      if (!checkBoundaryPolicies(call))
         return std::nullopt;
-      }
-      if (!parseOverflow(call.destinationOverflow)) {
-        diagnostics.error(call.position, llvm::Twine("unsupported overflow mode '") +
-                                             call.destinationOverflow + "'");
-        return std::nullopt;
-      }
       return *lhs;
+    };
+    // The width conversion is the one member whose result type is not its
+    // operand's; the spelled direction and the spelled target must agree.
+    auto checkConversion = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
+      std::optional<ComposedType> input = checkComposedExpression(call.operands.front());
+      if (!input)
+        return std::nullopt;
+      bool widen = call.kind == ReductionKind::Widen;
+      if (input->elementType != SourceType::Q15 && input->elementType != SourceType::Q31) {
+        diagnostics.error(call.position, llvm::Twine(widen ? "widen" : "narrow") +
+                                             " converts between q15 and q31; an f32 conversion "
+                                             "is a separate contract");
+        return std::nullopt;
+      }
+      if (input->extent < 1 || input->extent > 4096) {
+        diagnostics.error(call.position, llvm::Twine(widen ? "widen" : "narrow") +
+                                             " currently requires an extent in [1, 4096]");
+        return std::nullopt;
+      }
+      if (input->elementType != (widen ? SourceType::Q15 : SourceType::Q31) ||
+          call.target != (widen ? SourceType::Q31 : SourceType::Q15)) {
+        diagnostics.error(call.position, widen ? "widen takes a q15 operand to q31"
+                                               : "narrow takes a q31 operand to q15");
+        return std::nullopt;
+      }
+      if (!widen && !checkBoundaryPolicies(call))
+        return std::nullopt;
+      return ComposedType{call.target, input->extent};
     };
     // The fixed gain: the same width in and out, the raw constant read at that
     // width, and the two tie rules its requantization admits.
@@ -2928,6 +3008,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return checkNestedFirFilter(call);
       if (isElementwiseKind(call.kind))
         return checkElementwise(call);
+      if (isConversionKind(call.kind))
+        return checkConversion(call);
       if (call.kind == ReductionKind::Gain)
         return checkComposedGain(call);
       if (!isFftComposableKind(call.kind) || call.operands.size() != 1) {
@@ -4005,6 +4087,18 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       Value input = operand.isParameterReference() ? arguments.lookup(operand.parameter)
                                                    : emitComposedCall(*operand.call);
       auto inputType = cast<RankedTensorType>(input.getType());
+      if (isConversionKind(call.kind)) {
+        bool widen = call.kind == ReductionKind::Widen;
+        auto resultType = RankedTensorType::get({inputType.getDimSize(0)}, widen ? i32 : i16);
+        return builder.create<ir::QuantizeOp>(
+            getLocation(context, sourceName, call.position), resultType, input,
+            Attribute(widen ? numeric : q31Numeric), Attribute(widen ? q31Numeric : numeric),
+            widen ? ondsp::RoundingModeAttr()
+                  : ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding)),
+            widen
+                ? ondsp::OverflowModeAttr()
+                : ondsp::OverflowModeAttr::get(&context, *parseOverflow(call.destinationOverflow)));
+      }
       if (call.kind == ReductionKind::Gain) {
         ondsp::FixedAttr gainNumeric =
             inputType.getElementType().isSignlessInteger(32) ? q31Numeric : numeric;

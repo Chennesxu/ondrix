@@ -573,8 +573,23 @@ a call argument is a diagnostic. The fixed `gain` is a composable member:
 it nests inside expressions and takes one, with its own `rounding=`.
 Operands are otherwise tensor names, locals, calls and parenthesized
 expressions; there is no unary minus on a tensor (spell `negate`) and no
-promotion between widths, which stays an explicit conversion whose contract
-(`ondrix.quantize`) is not yet frozen, so it has no source spelling.
+implicit promotion between widths: `x + y` with a `q15` and a `q31` operand
+is a diagnostic, and the width changes only where the program spells it.
+
+`widen(x, to=q31)` and `narrow(x, to=q15, rounding=..., overflow=...)` are
+that spelling (`ondrix.quantize`). Both preserve the value, not the raw
+integer: a `q15` value widens to the `q31` value with the same reading, the
+raw integer times `2^16`, exactly and with no boundary, which is why `widen`
+refuses a `rounding=` or `overflow=`. A `q31` value narrows by the same
+factor and loses its low sixteen raw bits at one declared boundary, so
+`narrow` takes both policies, defaulting to the language's; the top `2^15`
+raw values round up onto the rail, where `saturate` returns `32767` and
+`wrap` returns `-32768`. The direction is in the name, so `narrow(x,
+to=q15)` on a `q15` operand and `widen(x, to=q15)` are errors rather than
+identities, and the target is spelled although two widths leave one choice.
+Both are composable members: `narrow(widen(x, to=q31) * y, to=q15)`
+multiplies a `q15` signal by a `q31` one at the wider width and narrows the
+product once. An f32 conversion is a separate contract and is refused.
 
 Both boundary parameters are optional and both take the language default,
 `rounding=nearest_ties_positive` and `overflow=saturate`. `offset` names a raw Q1.15

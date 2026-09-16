@@ -39,7 +39,7 @@ func.func @butterfly_rejects_unranked_memref_result(
 func.func @quantize_rejects_memref_operand(
     %input: memref<1xi32>) -> i16 {
   // expected-error@+1 {{value-only operation does not accept memref operands}}
-  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (memref<1xi32>) -> i16
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 31>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (memref<1xi32>) -> i16
   return %0 : i16
 }
 
@@ -48,7 +48,7 @@ func.func @quantize_rejects_memref_operand(
 func.func @quantize_rejects_unranked_memref_operand(
     %input: memref<*xi32>) -> i16 {
   // expected-error@+1 {{value-only operation does not accept memref operands}}
-  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (memref<*xi32>) -> i16
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 31>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (memref<*xi32>) -> i16
   return %0 : i16
 }
 
@@ -57,7 +57,7 @@ func.func @quantize_rejects_unranked_memref_operand(
 func.func @quantize_rejects_memref_result(
     %input: i32) -> memref<1xi16> {
   // expected-error@+1 {{value-only operation does not produce memref results}}
-  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i32) -> memref<1xi16>
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 31>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (i32) -> memref<1xi16>
   return %0 : memref<1xi16>
 }
 
@@ -66,7 +66,7 @@ func.func @quantize_rejects_memref_result(
 func.func @quantize_rejects_unranked_memref_result(
     %input: i32) -> memref<*xi16> {
   // expected-error@+1 {{value-only operation does not produce memref results}}
-  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i32) -> memref<*xi16>
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 31>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (i32) -> memref<*xi16>
   return %0 : memref<*xi16>
 }
 
@@ -104,7 +104,7 @@ func.func @butterfly_rejects_scalable_vectors(
 func.func @quantize_rejects_nested_scalable_vector_operand(
     %input: tuple<vector<[2]xi32>>) -> i16 {
   // expected-error@+1 {{value-only operation does not accept scalable vector operands}}
-  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tuple<vector<[2]xi32>>) -> i16
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 31>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (tuple<vector<[2]xi32>>) -> i16
   return %0 : i16
 }
 
@@ -113,7 +113,7 @@ func.func @quantize_rejects_nested_scalable_vector_operand(
 func.func @quantize_rejects_nested_scalable_vector_result(
     %input: i32) -> tuple<vector<[2]xi16>> {
   // expected-error@+1 {{value-only operation does not produce scalable vector results}}
-  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i32) -> tuple<vector<[2]xi16>>
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 31>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (i32) -> tuple<vector<[2]xi16>>
   return %0 : tuple<vector<[2]xi16>>
 }
 
@@ -121,7 +121,7 @@ func.func @quantize_rejects_nested_scalable_vector_result(
 
 func.func @quantize_accepts_tensor_values(
     %input: tensor<2xi32>) -> tensor<2xi16> {
-  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tensor<2xi32>) -> tensor<2xi16>
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 31>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (tensor<2xi32>) -> tensor<2xi16>
   return %0 : tensor<2xi16>
 }
 
@@ -130,7 +130,7 @@ func.func @quantize_accepts_tensor_values(
 func.func @quantize_rejects_dynamic_tensor_operand(
     %input: tensor<?xi32>) -> tensor<2xi16> {
   // expected-error@+1 {{value-only operation does not accept dynamic or unranked shaped operands}}
-  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tensor<?xi32>) -> tensor<2xi16>
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 31>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (tensor<?xi32>) -> tensor<2xi16>
   return %0 : tensor<2xi16>
 }
 
@@ -139,7 +139,7 @@ func.func @quantize_rejects_dynamic_tensor_operand(
 func.func @quantize_rejects_nested_unranked_tensor_result(
     %input: i32) -> tuple<tensor<*xi16>> {
   // expected-error@+1 {{value-only operation does not produce dynamic or unranked shaped results}}
-  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i32) -> tuple<tensor<*xi16>>
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 31>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (i32) -> tuple<tensor<*xi16>>
   return %0 : tuple<tensor<*xi16>>
 }
 
@@ -148,7 +148,7 @@ func.func @quantize_rejects_nested_unranked_tensor_result(
 func.func @quantize_rejects_mismatched_static_shapes(
     %input: tensor<2xi32>) -> tensor<3xi16> {
   // expected-error@+1 {{input and result must use the same scalar or static shaped domain}}
-  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tensor<2xi32>) -> tensor<3xi16>
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 31>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (tensor<2xi32>) -> tensor<3xi16>
   return %0 : tensor<3xi16>
 }
 
@@ -156,7 +156,7 @@ func.func @quantize_rejects_mismatched_static_shapes(
 
 func.func @quantize_rejects_wrong_source_storage(%input: i16) -> i16 {
   // expected-error@+1 {{input element type must match source numeric storage type}}
-  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i16) -> i16
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 31>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (i16) -> i16
   return %0 : i16
 }
 
@@ -184,6 +184,6 @@ func.func @butterfly_rejects_signed_packed_container(
 func.func @quantize_rejects_tuple_as_scalar(
     %input: tuple<i32>) -> i16 {
   // expected-error@+1 {{input and result must use the same scalar or static shaped domain}}
-  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 30>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tuple<i32>) -> i16
+  %0 = ondrix.quantize %input {src = #ondsp.fixed<signed, storage = i32, frac = 31>, dst = #ondsp.fixed<signed, storage = i16, frac = 15>, rounding = #ondsp.rounding<nearest_even>, overflow = #ondsp.overflow<saturate>} : (tuple<i32>) -> i16
   return %0 : i16
 }

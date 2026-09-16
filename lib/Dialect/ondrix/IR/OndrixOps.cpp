@@ -346,12 +346,36 @@ static LogicalResult verifyDesignCoefficientTensor(Operation *op, RankedTensorTy
 }
 
 static LogicalResult verifyQuantizeDomain(QuantizeOp op) {
-  if (!ondrix::haveSameElementwiseShape(op.getInput().getType(), op.getResult().getType()))
+  std::optional<unsigned> sourceWidth = getUniformQStorageWidth(op.getSrc());
+  std::optional<unsigned> destinationWidth = getUniformQStorageWidth(op.getDst());
+  if (!sourceWidth || !destinationWidth)
+    return op.emitOpError("src and dst require #ondsp.fixed<signed, storage = i16, frac = 15> or "
+                          "#ondsp.fixed<signed, storage = i32, frac = 31>");
+  if (*sourceWidth == *destinationWidth)
+    return op.emitOpError("src and dst name the same format; a conversion changes the width");
+  Type inputType = op.getInput().getType();
+  Type resultType = op.getResult().getType();
+  if (!ondrix::haveSameElementwiseShape(inputType, resultType))
     return op.emitOpError("input and result must use the same scalar or static shaped domain");
-  if (ondrix::getElementTypeOrSelf(op.getInput().getType()) != getNumericStorage(op.getSrc()))
+  if (auto tensor = dyn_cast<RankedTensorType>(inputType)) {
+    if (failed(verifyUnencodedTensorTypes(op, {tensor, cast<RankedTensorType>(resultType)})))
+      return failure();
+    if (tensor.getRank() != 1 || tensor.getDimSize(0) < 1 || tensor.getDimSize(0) > 4096)
+      return op.emitOpError("executable conversions require a scalar or a static rank-1 tensor "
+                            "with N in [1, 4096]");
+  }
+  if (ondrix::getElementTypeOrSelf(inputType) != getNumericStorage(op.getSrc()))
     return op.emitOpError("input element type must match source numeric storage type");
-  if (ondrix::getElementTypeOrSelf(op.getResult().getType()) != getNumericStorage(op.getDst()))
+  if (ondrix::getElementTypeOrSelf(resultType) != getNumericStorage(op.getDst()))
     return op.emitOpError("result element type must match destination numeric storage type");
+  // The attributes belong to the boundary: only a narrowing has one.
+  bool narrowing = *destinationWidth < *sourceWidth;
+  if (narrowing != op.getRounding().has_value() || narrowing != op.getOverflow().has_value())
+    return op.emitOpError(narrowing ? "a narrowing conversion requires rounding and overflow"
+                                    : "a widening conversion is exact and declares no rounding "
+                                      "or overflow");
+  if (narrowing)
+    return verifyDeclaredRounding(op.getOperation(), *op.getRounding(), "quantize");
   return success();
 }
 
