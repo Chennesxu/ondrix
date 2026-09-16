@@ -23,7 +23,7 @@
 // TIES-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
 
 // CONSTANT: invalid_gain_constant.ox:2:10: error: gain constant must be a raw signed Q1.15 value in [-32768, 32767]
-// SHAPE: invalid_gain_shape.ox:2:10: error: gain result extent must equal the input extent
+// SHAPE: invalid_gain_shape.ox:2:10: error: declared result type does not match the builtin expression
 // ROUNDING: invalid_gain_rounding.ox:2:10: error: gain rounding must be nearest_even or nearest_ties_positive
 
 // FP-LABEL: func.func @f32_gain(

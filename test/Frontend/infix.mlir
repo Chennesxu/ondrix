@@ -5,7 +5,6 @@
 // RUN: ondrix-compile %S/Inputs/q15_infix_grouping.ox | FileCheck %s --check-prefix=GROUPING
 // RUN: ondrix-compile %S/Inputs/q31_infix.ox | FileCheck %s --check-prefix=WIDE
 // RUN: not ondrix-compile %S/Inputs/invalid_infix_unary_minus.ox 2>&1 | FileCheck %s --check-prefix=MINUS
-// RUN: not ondrix-compile %S/Inputs/invalid_infix_literal.ox 2>&1 | FileCheck %s --check-prefix=LITERAL
 // RUN: not ondrix-compile %S/Inputs/invalid_infix_division.ox 2>&1 | FileCheck %s --check-prefix=DIVISION
 // RUN: not ondrix-compile %S/Inputs/invalid_infix_f32.ox 2>&1 | FileCheck %s --check-prefix=FLOAT
 // RUN: not ondrix-compile %S/Inputs/invalid_infix_extent.ox 2>&1 | FileCheck %s --check-prefix=EXTENT
@@ -44,7 +43,6 @@
 // WIDE: ondrix.add
 
 // MINUS: error: unary minus is not an operator; spell negate(...)
-// LITERAL: error: expected an operand name, a nested expression, or a parenthesized expression
 // DIVISION: error: '/' takes a positive integer constant divisor
 // FLOAT: error: elementwise builtins require q15 or q31 operand elements
 // EXTENT: error: binary elementwise builtins require operands of the same element type and extent

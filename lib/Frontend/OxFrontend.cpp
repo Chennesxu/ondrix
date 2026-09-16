@@ -317,6 +317,12 @@ static bool isComposableKind(ReductionKind kind) {
   return isFftComposableKind(kind) || isElementwiseKind(kind);
 }
 
+// A fixed gain is one requantization with a static shape, so it nests and
+// leads a kernel like the elementwise family; the f32 gain keeps its own path.
+static bool isComposableKernel(ReductionKind kind, SourceType resultType) {
+  return isComposableKind(kind) || (kind == ReductionKind::Gain && resultType != SourceType::F32);
+}
+
 static bool isUnaryTensorKind(ReductionKind kind) {
   return kind == ReductionKind::Dct || kind == ReductionKind::MovingAverage ||
          kind == ReductionKind::Gain || kind == ReductionKind::Rms || kind == ReductionKind::Sine ||
@@ -398,6 +404,7 @@ struct BuiltinCallAst {
   int64_t bias = 0;
   int64_t amount = 0;
   int64_t divisor = 0;
+  bool literal = false;
   SourcePosition position;
 };
 
@@ -973,10 +980,18 @@ public:
         return std::nullopt;
       return call;
     }
-    auto lhs = parseIdentifier("expected builtin operand");
-    if (!lhs)
-      return std::nullopt;
-    call.operands.push_back(resolveOperand(*lhs));
+    if (call.kind == ReductionKind::Gain) {
+      // The fixed gain nests, so its operand is any composable expression.
+      std::optional<ExpressionAst> input = parseExpression(std::nullopt);
+      if (!input)
+        return std::nullopt;
+      call.operands.push_back(std::move(*input));
+    } else {
+      auto lhs = parseIdentifier("expected builtin operand");
+      if (!lhs)
+        return std::nullopt;
+      call.operands.push_back(resolveOperand(*lhs));
+    }
     if (call.kind == ReductionKind::SosDf2Fixed) {
       if (!expect(TokenKind::Comma, "expected ',' after sos_df2_fixed input operand"))
         return std::nullopt;
@@ -1409,51 +1424,72 @@ private:
   // A statement is a builtin call or an infix expression over them; a bare
   // parameter name would be an alias, which the language does not have.
   std::optional<BuiltinCallAst> parseStatementExpression(SourceType policyType) {
-    std::optional<ExpressionAst> expression = parseExpression(policyType);
-    if (!expression)
+    std::optional<Operand> operand = parseSum(policyType);
+    if (!operand)
       return std::nullopt;
-    if (expression->isParameterReference()) {
-      diagnostics.error(expression->position,
-                        "expected a builtin call or an infix expression, not a bare name");
+    if (!operand->expression || operand->expression->isParameterReference()) {
+      diagnostics.error(operand->position, "expected a builtin call or an infix expression, not "
+                                           "a bare name or literal");
       return std::nullopt;
     }
-    return std::move(*expression->call);
+    return std::move(*operand->expression->call);
   }
 
-  // Infix `+`, `-` and `*` are `add`, `sub` and `mult` under the language
-  // defaults: `*` binds tighter, all three associate to the left, parentheses
-  // group, and every operator is its own quantization boundary.
+  // An operand of a composable builtin: a whole infix expression, never a
+  // literal on its own, which only an operator with a tensor beside it reads.
   std::optional<ExpressionAst> parseExpression(std::optional<SourceType> rootPolicy) {
-    std::optional<ExpressionAst> lhs = parseTerm(rootPolicy);
+    std::optional<Operand> operand = parseSum(rootPolicy);
+    if (!operand)
+      return std::nullopt;
+    if (!operand->expression) {
+      diagnostics.error(operand->position, "a literal needs a tensor operand beside it");
+      return std::nullopt;
+    }
+    return std::move(operand->expression);
+  }
+
+  // An operand as parsed: an expression, or a raw integer literal in the
+  // declared format that the operator beside it turns into offset or gain.
+  struct Operand {
+    std::optional<ExpressionAst> expression;
+    int64_t literal = 0;
+    SourcePosition position;
+  };
+
+  // Infix `+`, `-`, `*` and `/` are `add`, `sub`, `mult` and `div` under the
+  // language defaults: `*` and `/` bind tighter, all associate to the left,
+  // parentheses group, and every operator is its own quantization boundary.
+  std::optional<Operand> parseSum(std::optional<SourceType> rootPolicy) {
+    std::optional<Operand> lhs = parseTerm(rootPolicy);
     while (lhs && (current.kind == TokenKind::Plus || current.kind == TokenKind::Minus)) {
       ReductionKind kind =
           current.kind == TokenKind::Plus ? ReductionKind::Add : ReductionKind::Sub;
       SourcePosition position = current.position;
       advance();
-      std::optional<ExpressionAst> rhs = parseTerm(std::nullopt);
+      std::optional<Operand> rhs = parseTerm(std::nullopt);
       if (!rhs)
         return std::nullopt;
-      lhs = makeInfix(kind, std::move(*lhs), std::move(*rhs), position);
+      lhs = combine(kind, std::move(*lhs), std::move(*rhs), position);
     }
     return lhs;
   }
 
-  // `/` is `div` and admits one positive integer constant: a runtime divisor
-  // is a different operation that must declare its zero policy.
-  std::optional<ExpressionAst> parseTerm(std::optional<SourceType> rootPolicy) {
-    std::optional<ExpressionAst> lhs = parsePrimary(rootPolicy);
+  // `/` admits one positive integer constant: a runtime divisor is a different
+  // operation that must declare its zero policy.
+  std::optional<Operand> parseTerm(std::optional<SourceType> rootPolicy) {
+    std::optional<Operand> lhs = parsePrimary(rootPolicy);
     while (lhs && (current.kind == TokenKind::Star || current.kind == TokenKind::Slash)) {
       bool multiply = current.kind == TokenKind::Star;
       SourcePosition position = current.position;
       advance();
       if (multiply) {
-        std::optional<ExpressionAst> rhs = parsePrimary(std::nullopt);
+        std::optional<Operand> rhs = parsePrimary(std::nullopt);
         if (!rhs)
           return std::nullopt;
-        lhs = makeInfix(ReductionKind::Mult, std::move(*lhs), std::move(*rhs), position);
+        lhs = combine(ReductionKind::Mult, std::move(*lhs), std::move(*rhs), position);
         continue;
       }
-      if (current.kind != TokenKind::Integer) {
+      if (current.kind != TokenKind::Integer || !lhs->expression) {
         diagnostics.error(current.position,
                           "'/' takes a positive integer constant divisor; a runtime divisor is a "
                           "separate operation that must declare its zero policy");
@@ -1462,39 +1498,79 @@ private:
       std::optional<Token> divisor = parseInteger("expected a divisor constant");
       BuiltinCallAst call;
       call.kind = ReductionKind::Div;
-      call.operands.push_back(std::move(*lhs));
+      call.operands.push_back(std::move(*lhs->expression));
       call.position = position;
       if (divisor->spelling.getAsInteger(10, call.divisor))
         call.divisor = 0;
-      lhs = ExpressionAst(std::move(call));
+      lhs = Operand{ExpressionAst(std::move(call)), 0, position};
     }
     return lhs;
   }
 
-  static ExpressionAst makeInfix(ReductionKind kind, ExpressionAst lhs, ExpressionAst rhs,
+  // A literal beside a tensor is the constant form of the operation: `+` and
+  // `-` are offset, `*` is gain, each reading the literal as a raw value in
+  // the declared format. `c - x` would be two boundaries, so it is spelled.
+  std::optional<Operand> combine(ReductionKind kind, Operand lhs, Operand rhs,
                                  SourcePosition position) {
+    if (lhs.expression && rhs.expression) {
+      BuiltinCallAst call;
+      call.kind = kind;
+      call.operands.push_back(std::move(*lhs.expression));
+      call.operands.push_back(std::move(*rhs.expression));
+      call.position = position;
+      return Operand{ExpressionAst(std::move(call)), 0, position};
+    }
+    if (!lhs.expression && !rhs.expression) {
+      diagnostics.error(position, "an operator needs a tensor operand on at least one side");
+      return std::nullopt;
+    }
+    bool literalOnLeft = !lhs.expression;
+    Operand &tensor = literalOnLeft ? rhs : lhs;
+    int64_t literal = literalOnLeft ? lhs.literal : rhs.literal;
+    if (kind == ReductionKind::Sub) {
+      if (literalOnLeft) {
+        diagnostics.error(position, "a constant minus a tensor is negate then offset, two "
+                                    "boundaries; spell offset(negate(x), bias=c)");
+        return std::nullopt;
+      }
+      if (literal == std::numeric_limits<int64_t>::min()) {
+        diagnostics.error(position, "integer literal is out of range");
+        return std::nullopt;
+      }
+      literal = -literal;
+    }
     BuiltinCallAst call;
-    call.kind = kind;
-    call.operands.push_back(std::move(lhs));
-    call.operands.push_back(std::move(rhs));
+    call.kind = kind == ReductionKind::Mult ? ReductionKind::Gain : ReductionKind::Offset;
+    call.operands.push_back(std::move(*tensor.expression));
     call.position = position;
-    return ExpressionAst(std::move(call));
+    (kind == ReductionKind::Mult ? call.gain : call.bias) = literal;
+    call.literal = true;
+    return Operand{ExpressionAst(std::move(call)), 0, position};
   }
 
   // A primary is a parenthesized expression, a callee instantiation, a builtin
-  // call or an operand name. A statement (`rootPolicy` set) may start with any
-  // builtin; inside an expression only the composable family nests.
-  std::optional<ExpressionAst> parsePrimary(std::optional<SourceType> rootPolicy) {
+  // call, an operand name or an integer literal. A statement (`rootPolicy`
+  // set) may start with any builtin; inside an expression only the composable
+  // family nests.
+  std::optional<Operand> parsePrimary(std::optional<SourceType> rootPolicy) {
+    SourcePosition position = current.position;
     if (current.kind == TokenKind::LeftParen) {
       advance();
-      std::optional<ExpressionAst> inner = parseExpression(std::nullopt);
+      std::optional<Operand> inner = parseSum(std::nullopt);
       if (!inner ||
           !expect(TokenKind::RightParen, "expected ')' to close the parenthesized expression"))
         return std::nullopt;
       return inner;
     }
+    if (current.kind == TokenKind::Integer ||
+        (current.kind == TokenKind::Minus && next.kind == TokenKind::Integer)) {
+      std::optional<int64_t> literal = parseSignedInteger("expected an integer literal");
+      if (!literal)
+        return std::nullopt;
+      return Operand{std::nullopt, *literal, position};
+    }
     if (current.kind == TokenKind::Minus) {
-      diagnostics.error(current.position, "unary minus is not an operator; spell negate(...)");
+      diagnostics.error(position, "unary minus is not an operator; spell negate(...)");
       return std::nullopt;
     }
     bool isCall = current.kind == TokenKind::Identifier && next.kind == TokenKind::LeftParen;
@@ -1504,24 +1580,25 @@ private:
       std::optional<BuiltinCallAst> instantiated = parseCalleeInstantiation(rootPolicy);
       if (!instantiated)
         return std::nullopt;
-      return ExpressionAst(std::move(*instantiated));
+      return Operand{ExpressionAst(std::move(*instantiated)), 0, position};
     }
     bool isNestedBuiltin = isIdentifier("cfft") || isIdentifier("icfft") || isIdentifier("rfft") ||
                            isIdentifier("irfft") || isIdentifier("magnitude") ||
                            isIdentifier("add") || isIdentifier("sub") || isIdentifier("mult") ||
                            isIdentifier("abs") || isIdentifier("negate") ||
-                           isIdentifier("offset") || isIdentifier("shift") || isIdentifier("div");
+                           isIdentifier("offset") || isIdentifier("shift") || isIdentifier("div") ||
+                           isIdentifier("gain");
     if (isCall && (rootPolicy || isNestedBuiltin)) {
       std::optional<BuiltinCallAst> call = parseBuiltinCall(rootPolicy.value_or(SourceType::Q15));
       if (!call)
         return std::nullopt;
-      return ExpressionAst(std::move(*call));
+      return Operand{ExpressionAst(std::move(*call)), 0, position};
     }
     auto parameter = parseIdentifier(
         "expected an operand name, a nested expression, or a parenthesized expression");
     if (!parameter)
       return std::nullopt;
-    return resolveOperand(*parameter);
+    return Operand{resolveOperand(*parameter), 0, position};
   }
 
   bool isIdentifier(llvm::StringRef spelling) const {
@@ -2033,7 +2110,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     diagnostics.error(ast.result.position, "builtin operand count does not match its contract");
     return std::nullopt;
   }
-  if (!isComposableKind(ast.result.kind) &&
+  if (!isComposableKernel(ast.result.kind, ast.primaryResult().type) &&
       llvm::any_of(ast.result.operands,
                    [](const ExpressionAst &operand) { return !operand.isParameterReference(); })) {
     diagnostics.error(ast.result.position,
@@ -2047,7 +2124,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                                                                : 2;
   // FFT-composable kernels take however many parameters their expression
   // tree consumes; the exactly-once accounting below replaces the count.
-  if (!isComposableKind(ast.result.kind) && ast.parameters.size() != expectedParameterCount) {
+  if (!isComposableKernel(ast.result.kind, ast.primaryResult().type) &&
+      ast.parameters.size() != expectedParameterCount) {
     diagnostics.error(ast.position,
                       isUnaryKind(ast.result.kind)
                           ? "unary DSP kernels require exactly one parameter"
@@ -2088,7 +2166,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         llvm::Twine("duplicate parameter '") + parameter.name + "'");
       return std::nullopt;
     }
-    if (!isComposableKind(ast.result.kind) && parameter.type != ast.primaryResult().type) {
+    if (!isComposableKernel(ast.result.kind, ast.primaryResult().type) &&
+        parameter.type != ast.primaryResult().type) {
       diagnostics.error(parameter.position,
                         "parameter element types must match the kernel result type");
       return std::nullopt;
@@ -2105,12 +2184,14 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     if (fourthName && parameter.name == *fourthName)
       fourthParameter = &parameter;
   }
-  if (!isComposableKind(ast.result.kind) && (!lhsName || !parameterNames.contains(*lhsName))) {
+  if (!isComposableKernel(ast.result.kind, ast.primaryResult().type) &&
+      (!lhsName || !parameterNames.contains(*lhsName))) {
     diagnostics.error(ast.result.position, llvm::Twine("unknown builtin operand '") +
                                                (lhsName ? *lhsName : "<nested call>") + "'");
     return std::nullopt;
   }
-  if (!isUnaryKind(ast.result.kind) && !isComposableKind(ast.result.kind) &&
+  if (!isUnaryKind(ast.result.kind) &&
+      !isComposableKernel(ast.result.kind, ast.primaryResult().type) &&
       (!rhsName || !parameterNames.contains(*rhsName))) {
     diagnostics.error(ast.result.position, llvm::Twine("unknown reduction operand '") +
                                                (rhsName ? *rhsName : "<nested call>") + "'");
@@ -2566,7 +2647,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                       "DSP builtins");
     return std::nullopt;
   }
-  if (isComposableKind(ast.result.kind)) {
+  if (isComposableKernel(ast.result.kind, ast.primaryResult().type)) {
     struct ComposedType {
       SourceType elementType;
       int64_t extent;
@@ -2808,11 +2889,47 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       return *lhs;
     };
+    // The fixed gain: the same width in and out, the raw constant read at that
+    // width, and the two tie rules its requantization admits.
+    auto checkComposedGain = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
+      std::optional<ComposedType> input = checkComposedExpression(call.operands.front());
+      if (!input)
+        return std::nullopt;
+      if (input->elementType != SourceType::Q15 && input->elementType != SourceType::Q31) {
+        diagnostics.error(call.position, "gain requires q15 or q31 operand elements");
+        return std::nullopt;
+      }
+      if (input->extent > 4096) {
+        diagnostics.error(call.position, "gain currently requires an input extent in [1, 4096]");
+        return std::nullopt;
+      }
+      unsigned width = input->elementType == SourceType::Q31 ? 32u : 16u;
+      int64_t top = (int64_t(1) << (width - 1)) - 1;
+      int64_t bottom = -(int64_t(1) << (width - 1));
+      if (call.gain < bottom || call.gain > top) {
+        diagnostics.error(call.position, llvm::Twine("gain constant must be a raw signed Q1.") +
+                                             Twine(width - 1) + " value in [" + Twine(bottom) +
+                                             ", " + Twine(top) + "]");
+        return std::nullopt;
+      }
+      if (call.rounding.empty())
+        call.rounding = "nearest_ties_positive";
+      std::optional<ondsp::RoundingMode> parsed = parseRounding(call.rounding);
+      if (!parsed || (*parsed != ondsp::RoundingMode::NearestEven &&
+                      *parsed != ondsp::RoundingMode::NearestTiesPositive)) {
+        diagnostics.error(call.position,
+                          "gain rounding must be nearest_even or nearest_ties_positive");
+        return std::nullopt;
+      }
+      return *input;
+    };
     checkComposedCall = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       if (call.kind == ReductionKind::FirFilter)
         return checkNestedFirFilter(call);
       if (isElementwiseKind(call.kind))
         return checkElementwise(call);
+      if (call.kind == ReductionKind::Gain)
+        return checkComposedGain(call);
       if (!isFftComposableKind(call.kind) || call.operands.size() != 1) {
         diagnostics.error(call.position,
                           "nested calls are currently supported only by unary FFT-family builtins "
@@ -3377,6 +3494,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
     } else if (ast.result.kind == ReductionKind::Gain) {
       if (isFloat) {
+        if (ast.result.literal) {
+          diagnostics.error(ast.result.position,
+                            "an integer literal is a raw fixed-point value; "
+                            "scale f32 with gain(x, gain=[n, d], contract=...)");
+          return std::nullopt;
+        }
         auto [constant, refusal] = roundRationalToF32(ast.result.gain, ast.result.fpConstantDen);
         if (refusal != RationalRefusal::None) {
           diagnostics.error(ast.result.position,
@@ -3794,7 +3917,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
 
   Location expressionLocation = getLocation(context, sourceName, kernel.ast.result.position);
-  if (isComposableKind(kernel.ast.result.kind)) {
+  if (isComposableKernel(kernel.ast.result.kind, kernel.ast.primaryResult().type)) {
     auto layout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI16ImagHiRealLo);
     auto i16 = builder.getI16Type();
     auto numeric = ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, i16, 15);
@@ -3882,6 +4005,14 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       Value input = operand.isParameterReference() ? arguments.lookup(operand.parameter)
                                                    : emitComposedCall(*operand.call);
       auto inputType = cast<RankedTensorType>(input.getType());
+      if (call.kind == ReductionKind::Gain) {
+        ondsp::FixedAttr gainNumeric =
+            inputType.getElementType().isSignlessInteger(32) ? q31Numeric : numeric;
+        return builder.create<ir::GainOp>(
+            getLocation(context, sourceName, call.position), inputType, input,
+            builder.getI64IntegerAttr(call.gain), FloatAttr(), Attribute(gainNumeric),
+            ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding)));
+      }
       if (isElementwiseKind(call.kind)) {
         Location callLocation = getLocation(context, sourceName, call.position);
         auto rounding = ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding));

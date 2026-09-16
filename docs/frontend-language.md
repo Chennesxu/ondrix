@@ -557,11 +557,24 @@ has no reachable tie, so both nearest modes agree there; an even one is where
 `rounding=nearest_even` and the default differ, and `x / 4` equals
 `shift(x, amount=-2)` under the same policy. A runtime divisor is a different
 operation that must declare its zero policy and does not exist yet; a
-rational scale such as `[3, 8]` is a gain, not a division. Operands are
-tensor names, locals, calls and parenthesized expressions; there is no unary
-minus (spell `negate`), no literal or scalar operand, and no promotion
-between widths, each of which is a separate contract decision rather than
-syntax.
+rational scale such as `[3, 8]` is a gain, not a division.
+
+An integer literal beside a tensor is the constant form of the operator, and
+it is read as a raw value in the declared format, exactly as `offset`'s
+`bias` and `gain`'s `gain` are: `x + 1024` and `1024 + x` are
+`offset(x, bias=1024)`, `x - 1024` is `offset(x, bias=-1024)`, and `x * 3`
+and `3 * x` are `gain(x, gain=3)`, which at Q15 scales by `3 / 2^15`; the
+literal that halves is `x * 16384`. The literal's range is the width's raw
+range, so the same digits name a different real number at `q15` and `q31`,
+and an f32 tensor takes no literal at all (its gain is the rational
+`gain=[n, d]`). `1024 - x` is negate then offset, two boundaries, so it is
+spelled out; a literal with no tensor beside it, alone as a statement, or as
+a call argument is a diagnostic. The fixed `gain` is a composable member:
+it nests inside expressions and takes one, with its own `rounding=`.
+Operands are otherwise tensor names, locals, calls and parenthesized
+expressions; there is no unary minus on a tensor (spell `negate`) and no
+promotion between widths, which stays an explicit conversion whose contract
+(`ondrix.quantize`) is not yet frozen, so it has no source spelling.
 
 Both boundary parameters are optional and both take the language default,
 `rounding=nearest_ties_positive` and `overflow=saturate`. `offset` names a raw Q1.15
