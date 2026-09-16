@@ -92,11 +92,15 @@ func.func @export_same_width_saturate(
 // CHECK-SAME: %[[ACC:.*]]: i64) -> i16
 // CHECK: %[[SHIFT:.*]] = arith.constant 15 : i64
 // CHECK: %[[ROUNDED:.*]] = arith.shrsi %[[ACC]], %[[SHIFT]] : i64
-// CHECK: %[[MIN:.*]] = arith.constant -32768 : i64
-// CHECK: %[[MAX:.*]] = arith.constant 32767 : i64
-// CHECK: %[[LOWER:.*]] = arith.maxsi %[[ROUNDED]], %[[MIN]] : i64
-// CHECK: %[[CLAMPED:.*]] = arith.minsi %[[LOWER]], %[[MAX]] : i64
-// CHECK: %[[RESULT:.*]] = arith.trunci %[[CLAMPED]] : i64 to i16
+// CHECK: %[[NARROWED:.*]] = arith.trunci %[[ROUNDED]] : i64 to i16
+// CHECK: %[[WIDENED:.*]] = arith.extsi %[[NARROWED]] : i16 to i64
+// CHECK: %[[FITS:.*]] = arith.cmpi eq, %[[WIDENED]], %[[ROUNDED]] : i64
+// CHECK: %[[SIGN_SHIFT:.*]] = arith.constant 63 : i64
+// CHECK: %[[SIGN:.*]] = arith.shrui %[[ROUNDED]], %[[SIGN_SHIFT]] : i64
+// CHECK: %[[SIGN_BIT:.*]] = arith.trunci %[[SIGN]] : i64 to i16
+// CHECK: %[[MAX:.*]] = arith.constant 32767 : i16
+// CHECK: %[[RAIL:.*]] = arith.addi %[[SIGN_BIT]], %[[MAX]] : i16
+// CHECK: %[[RESULT:.*]] = arith.select %[[FITS]], %[[NARROWED]], %[[RAIL]] : i16
 // CHECK: return %[[RESULT]] : i16
 
 // CHECK-LABEL: func.func @export_zero_wrap(
@@ -160,9 +164,10 @@ func.func @export_same_width_saturate(
 // CHECK: %[[SHIFT:.*]] = arith.constant 15 : i64
 // CHECK: %[[ROUNDED:.*]] = arith.shrsi %[[BIASED]], %[[SHIFT]] : i64
 // CHECK-NOT: arith.cmpi
-// CHECK: %[[LOWER:.*]] = arith.maxsi %[[ROUNDED]], %{{.*}} : i64
-// CHECK: %[[CLAMPED:.*]] = arith.minsi %[[LOWER]], %{{.*}} : i64
-// CHECK: %[[RESULT:.*]] = arith.trunci %[[CLAMPED]] : i64 to i16
+// CHECK: %[[NARROWED:.*]] = arith.trunci %[[ROUNDED]] : i64 to i16
+// CHECK: %[[WIDENED:.*]] = arith.extsi %[[NARROWED]] : i16 to i64
+// CHECK: %[[FITS:.*]] = arith.cmpi eq, %[[WIDENED]], %[[ROUNDED]] : i64
+// CHECK: %[[RESULT:.*]] = arith.select %[[FITS]], %[[NARROWED]], %{{.*}} : i16
 // CHECK: return %[[RESULT]] : i16
 
 // A storage as wide as its carrier has no headroom: the remainder form stays.

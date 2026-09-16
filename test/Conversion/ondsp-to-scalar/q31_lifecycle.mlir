@@ -63,8 +63,10 @@ func.func @export_q30(
 // CHECK: %[[BELOW_HALF:.*]] = arith.constant 1073741823 : i64
 // CHECK: %[[BIASED:.*]] = arith.addi %[[SUM]], %[[BELOW_HALF]] : i64
 // CHECK: %[[CARRY:.*]] = arith.shrui %[[BIASED]], {{.*}} : i64
-// CHECK: arith.addi %[[QUOTIENT]], %[[CARRY]] : i64
-// CHECK: %[[RESULT:.*]] = arith.trunci {{.*}} : i64 to i32
+// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[CARRY]] : i64
+// CHECK: %[[NARROWED:.*]] = arith.trunci %[[ROUNDED]] : i64 to i32
+// CHECK: %[[FITS:.*]] = arith.cmpi eq, %{{.*}}, %[[ROUNDED]] : i64
+// CHECK: %[[RESULT:.*]] = arith.select %[[FITS]], %[[NARROWED]], %{{.*}} : i32
 // CHECK: return %[[RESULT]] : i32
 
 // CHECK-LABEL: func.func @export_q30(

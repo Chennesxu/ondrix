@@ -45,11 +45,12 @@ func.func @export_mean_floor_saturate(
 // CHECK: %[[CARRY:.*]] = arith.shrui %[[BIASED]], %{{.*}} : i64
 // CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[CARRY]] : i64
 // CHECK-NOT: arith.select
-// CHECK: %[[MIN:.*]] = arith.constant -2147483648 : i64
-// CHECK: %[[MAX:.*]] = arith.constant 2147483647 : i64
-// CHECK: %[[LOWER:.*]] = arith.maxsi %[[ROUNDED]], %[[MIN]] : i64
-// CHECK: %[[CLAMPED:.*]] = arith.minsi %[[LOWER]], %[[MAX]] : i64
-// CHECK: %[[RESULT:.*]] = arith.trunci %[[CLAMPED]] : i64 to i32
+// CHECK: %[[NARROWED:.*]] = arith.trunci %[[ROUNDED]] : i64 to i32
+// CHECK: %[[WIDENED:.*]] = arith.extsi %[[NARROWED]] : i32 to i64
+// CHECK: %[[FITS:.*]] = arith.cmpi eq, %[[WIDENED]], %[[ROUNDED]] : i64
+// CHECK: %[[MAX:.*]] = arith.constant 2147483647 : i32
+// CHECK: %[[RAIL:.*]] = arith.addi %{{.*}}, %[[MAX]] : i32
+// CHECK: %[[RESULT:.*]] = arith.select %[[FITS]], %[[NARROWED]], %[[RAIL]] : i32
 // CHECK: return %[[RESULT]] : i32
 
 // Floor rounding at frac 29 is one arithmetic shift by 2^(30 - 29).
@@ -57,9 +58,9 @@ func.func @export_mean_floor_saturate(
 // CHECK-SAME: %[[FLOOR_ACC:.*]]: i64) -> i32
 // CHECK: %[[FLOOR_SHIFT:.*]] = arith.constant 1 : i64
 // CHECK: %[[FLOOR_ROUNDED:.*]] = arith.shrsi %[[FLOOR_ACC]], %[[FLOOR_SHIFT]] : i64
-// CHECK: arith.maxsi
-// CHECK: %[[FLOOR_CLAMPED:.*]] = arith.minsi
-// CHECK: %[[FLOOR_RESULT:.*]] = arith.trunci %[[FLOOR_CLAMPED]] : i64 to i32
+// CHECK: %[[FLOOR_NARROWED:.*]] = arith.trunci %[[FLOOR_ROUNDED]] : i64 to i32
+// CHECK: %[[FLOOR_FITS:.*]] = arith.cmpi eq, %{{.*}}, %[[FLOOR_ROUNDED]] : i64
+// CHECK: %[[FLOOR_RESULT:.*]] = arith.select %[[FLOOR_FITS]], %[[FLOOR_NARROWED]], %{{.*}} : i32
 // CHECK: return %[[FLOOR_RESULT]] : i32
 // CHECK-NOT: ondsp.
 

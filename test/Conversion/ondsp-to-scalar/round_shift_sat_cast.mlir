@@ -52,11 +52,10 @@ func.func @round_shift_nearest_ties_positive_saturating_narrow(%input: i32) -> i
 }
 
 // CHECK-LABEL: func.func @sat_cast_clamps_to_narrow_storage
-// CHECK-DAG: arith.constant -32768 : i32
-// CHECK-DAG: arith.constant 32767 : i32
-// CHECK: arith.maxsi
-// CHECK: arith.minsi
-// CHECK: arith.trunci %{{.*}} : i32 to i16
+// CHECK: %[[NARROWED:.*]] = arith.trunci %{{.*}} : i32 to i16
+// CHECK: %[[FITS:.*]] = arith.cmpi eq, %{{.*}} : i32
+// CHECK: arith.constant 32767 : i16
+// CHECK: arith.select %[[FITS]], %[[NARROWED]], %{{.*}} : i16
 func.func @sat_cast_clamps_to_narrow_storage(%input: i32) -> i16 {
   %0 = ondsp.sat_cast %input {numeric = #ondsp.fixed<signed, storage = i16, frac = 12>} : (i32) -> i16
   return %0 : i16

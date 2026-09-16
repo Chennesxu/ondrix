@@ -378,6 +378,23 @@ static Value narrowSignedValue(Location loc, Value input, Type destinationType,
   case ondrix::ondsp::OverflowMode::Saturate: {
     IntegerType inputElementType = getIntegerElementType(inputType);
     IntegerType destinationElementType = getIntegerElementType(destinationType);
+    if (!isa<VectorType>(inputType)) {
+      // A scalar keeps the value when it survives the round trip through the
+      // destination width, else the rail its sign selects: one compare, where
+      // two constant clamps branch over every word of a wider-than-word carrier.
+      Value narrowed = rewriter.create<arith::TruncIOp>(loc, destinationType, input);
+      Value widened = rewriter.create<arith::ExtSIOp>(loc, inputType, narrowed);
+      Value fits = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, widened, input);
+      Value signShift =
+          createIntegerConstant(loc, inputType, inputElementType.getWidth() - 1, rewriter);
+      Value signBit = rewriter.create<arith::ShRUIOp>(loc, input, signShift);
+      Value narrowSignBit = rewriter.create<arith::TruncIOp>(loc, destinationType, signBit);
+      Value maximumValue = createIntegerConstant(
+          loc, destinationType, llvm::APInt::getSignedMaxValue(destinationElementType.getWidth()),
+          rewriter);
+      Value rail = rewriter.create<arith::AddIOp>(loc, narrowSignBit, maximumValue);
+      return rewriter.create<arith::SelectOp>(loc, fits, narrowed, rail);
+    }
     llvm::APInt minimum = llvm::APInt::getSignedMinValue(destinationElementType.getWidth())
                               .sext(inputElementType.getWidth());
     llvm::APInt maximum = llvm::APInt::getSignedMaxValue(destinationElementType.getWidth())
