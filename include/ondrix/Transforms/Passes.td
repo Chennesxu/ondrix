@@ -426,7 +426,11 @@ def ScalarizeOndspFixedReduceMac
     multiplies a per-reduction bound by that replication and buys instruction
     count with instruction cache. Past the budget every reduction in that
     function keeps the loop form, so the shape stays uniform. Zero disables
-    the budget, which is what a target selecting the capability wants.
+    the budget, which is what a target selecting the capability wants. The
+    canonical pipeline's budget of 128 terms is a host-class measurement: at
+    32 terms a filter tap chain runs 1.9x faster for 2.7x its bytes, while
+    the DCT's per-row replication reaches 4096 terms and 15x its bytes to run
+    slower.
   }];
   let options = [
     Option<"maxUnrolledTerms", "max-unrolled-terms", "int64_t", /*default=*/"0",

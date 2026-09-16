@@ -88,12 +88,9 @@ static bool isSupportedExport(ondrix::ondsp::AccType accumulator,
             destination.getFrac() == accumulator.getFrac());
   if (!isSupportedAccumulator(accumulator) || accumulator.getFrac() != 30)
     return false;
-  // Every export is a value-preserving format conversion: the destination
-  // frac is the reading of the result, never a shift selector, so any i32
-  // destination the verifier admits (`dst.frac <= acc.frac`) lowers through
-  // the width-generic body. A boundary that changes the value belongs to
-  // `round_shift`; the i64 frac-30 destination is the identity
-  // materialization feeding exactly those. Every other destination is refused.
+  // The destination frac is the reading of the result, never a shift
+  // selector, so any i32 destination the verifier admits lowers here; the
+  // i64 frac-30 destination is the identity feeding `round_shift`.
   return ondrix::ondsp::isSignedQ15(destination) || isSignedFixedStorage(destination, 32) ||
          (isSignedFixedStorage(destination, 64) && destination.getFrac() == 30);
 }
@@ -307,8 +304,6 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
     break;
   }
 
-  // An exhaustive switch, so a newly declared mode is a compile-time
-  // -Wswitch finding here instead of borrowing a neighbour's semantics.
   switch (overflowMode) {
   case ondrix::ondsp::OverflowMode::Wrap:
     return narrowToCarrier(updated);
@@ -357,13 +352,6 @@ static Value lowerAccumulatorUpdate(Location loc, Value accumulator, Value produ
   }
   }
   llvm_unreachable("unhandled declared overflow mode");
-}
-
-static Value roundSignedRightShift(Location loc, Value input, unsigned shift,
-                                   ondrix::ondsp::RoundingMode roundingMode,
-                                   ConversionPatternRewriter &rewriter, unsigned valueBits = 0) {
-  return ondrix::conversion::createRoundedSignedRightShift(loc, input, shift, roundingMode,
-                                                           rewriter, valueBits);
 }
 
 static Value narrowSignedValue(Location loc, Value input, Type destinationType,
@@ -417,8 +405,8 @@ static Value requantizeSignedValue(Location loc, Value input, ondrix::ondsp::Sca
     Value amount = createIntegerConstant(loc, inputType, scale.getPreShiftLeft(), rewriter);
     shifted = rewriter.create<arith::ShLIOp>(loc, input, amount);
   }
-  Value rounded =
-      roundSignedRightShift(loc, shifted, scale.getPostShiftRight(), scale.getRounding(), rewriter);
+  Value rounded = ondrix::conversion::createRoundedSignedRightShift(
+      loc, shifted, scale.getPostShiftRight(), scale.getRounding(), rewriter);
   unsigned destinationWidth = cast<IntegerType>(scale.getSaturateTo()).getWidth();
   return narrowSignedValue(loc, rounded, getIntegerTypeLike(inputType, destinationWidth, rewriter),
                            scale.getOverflow(), rewriter);
@@ -478,6 +466,10 @@ static Value saturatingNegatePackedQ15(Location loc, Value input,
   return rewriter.create<arith::SelectOp>(loc, isMinimum, maximum, negated);
 }
 
+constexpr const char *kSupportedFixedMacDomains =
+    "fixed scalar lowering supports Q15/full with a signed frac30 accumulator of at least 32 "
+    "bits, Q31/full with i64/frac62, or Q31/high_raw with i40/frac30 accumulation";
+
 /// `productWidth` widens the multiplication itself past the exact product
 /// width; the value is unchanged, but lanes that feed a wider carrier then
 /// multiply in that carrier and skip a second widening after the product.
@@ -518,19 +510,11 @@ public:
   LogicalResult matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getAcc().getType());
-    // `mac` is the only multi-lane accumulator update. Every other MAC-like
-    // operation fails closed here as well as in its verifier, so a pass that
-    // builds one without going through the parser cannot slip past.
-    if (!std::is_same_v<OpTy, ondrix::ondsp::MacOp> &&
-        !ondrix::ondsp::isSingleLaneAccumulator(accumulator))
-      return op.emitOpError("fixed scalar lowering supports multi-lane accumulators only for mac");
     FailureOr<ondrix::conversion::SupportedFixedMacDomain> domain =
         ondrix::conversion::getSupportedFixedScalarMacDomain(op, accumulator, op.getNumeric(),
                                                              op.getProduct());
     if (failed(domain))
-      return op.emitOpError(
-          "fixed scalar lowering supports Q15/full with a signed frac30 accumulator of at least "
-          "32 bits, Q31/full with i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
+      return op.emitOpError(kSupportedFixedMacDomains);
 
     Location loc = op.getLoc();
     Value value = adaptor.getLhs();
@@ -549,11 +533,9 @@ public:
       if (!valueType || valueType.isScalable() || valueType.getRank() != 1 ||
           valueType.getNumElements() != static_cast<int64_t>(accumulator.getLanes()))
         return op.emitOpError("fixed scalar lowering requires one value lane per accumulator lane");
-      // The declared broadcast of the scalar coefficient across the lanes. A
-      // runtime coefficient against runtime lanes in one 128-bit register is
-      // widened before the splat, to the carrier only where the declared
-      // widening multiply reads low halves (otherwise the sign extension must
-      // stay visible on the lanes for the backend to select it).
+      // A runtime coefficient against runtime lanes in one 128-bit register
+      // is widened before the splat, to the carrier only where the declared
+      // widening multiply reads low halves (else the sign extension stays visible).
       Type splatElement = coefficient.getType();
       if (!matchPattern(coefficient, m_Constant()) && !matchPattern(value, m_Constant()) &&
           valueType.getNumElements() * exactProductWidth <= 128) {
@@ -607,10 +589,9 @@ public:
     Value twiddledReal;
     Value twiddledImaginary;
     bool specialized = false;
-    // Canonical-twiddle specialization is proven only for packed Q15: its
-    // identities are stated over i16 components and its exhaustive ground
-    // truth covers that domain alone. The Q31 profile keeps the general
-    // product path rather than reusing an unproven identity.
+    // Canonical-twiddle specialization is proven only for packed Q15 (its
+    // identities and exhaustive ground truth are over i16 components); Q31
+    // keeps the general product path.
     ondrix::ondsp::CxButterflyVariant variant =
         op.getVariant().value_or(ondrix::ondsp::CxButterflyVariant::Plain);
     bool cross = variant == ondrix::ondsp::CxButterflyVariant::Cross ||
@@ -757,21 +738,12 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = dyn_cast<ondrix::ondsp::AccType>(op.getInitial().getType());
     auto numeric = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
-    if (!accumulator || !numeric || !op.getProduct())
-      return op.emitOpError(
-          "fixed scalar reduction supports Q15/full with a signed frac30 accumulator of at least "
-          "32 bits, Q31/full with i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
-    if (!ondrix::ondsp::isSingleLaneAccumulator(accumulator))
-      return op.emitOpError("fixed scalar reduction requires a single-lane accumulator; a "
-                            "reduction spends its lanes on the reduction axis");
-
-    FailureOr<ondrix::conversion::SupportedFixedMacDomain> domain =
-        ondrix::conversion::getSupportedFixedScalarMacDomain(op, accumulator, numeric,
-                                                             *op.getProduct());
+    FailureOr<ondrix::conversion::SupportedFixedMacDomain> domain = failure();
+    if (accumulator && numeric && op.getProduct())
+      domain = ondrix::conversion::getSupportedFixedScalarMacDomain(op, accumulator, numeric,
+                                                                    *op.getProduct());
     if (failed(domain))
-      return op.emitOpError(
-          "fixed scalar reduction supports Q15/full with a signed frac30 accumulator of at least "
-          "32 bits, Q31/full with i64/frac62, or Q31/high_raw with i40/frac30 accumulation");
+      return op.emitOpError(kSupportedFixedMacDomains);
 
     FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
         ondrix::conversion::createRankOneMemRefReductionBounds(
@@ -815,21 +787,13 @@ public:
           "signed Q15, signed i32, or identity signed i64/frac30 destination, and i64/frac62 to "
           "Q31 export");
 
-    // The op verifier already rejects destinations whose frac exceeds the
-    // accumulator frac, but this lowering must not turn an unverified
-    // pass-created op into an undefined shift; keep the same self-guard the
-    // round_shift lowering carries.
-    if (op.getDst().getFrac() > accumulator.getFrac())
-      return op.emitOpError(
-          "fixed scalar lowering requires the destination frac not to exceed the accumulator "
-          "frac");
-
     unsigned shift = accumulator.getFrac() - op.getDst().getFrac();
     Value canonical = canonicalizeAccumulator(op.getLoc(), adaptor.getAcc(), accumulator, rewriter);
     // The canonical accumulator lies in its storage's signed range inside the
     // carrier, which is the headroom the ties-positive add-half needs.
-    Value rounded = roundSignedRightShift(op.getLoc(), canonical, shift, op.getRounding(), rewriter,
-                                          cast<IntegerType>(accumulator.getStorage()).getWidth());
+    Value rounded = ondrix::conversion::createRoundedSignedRightShift(
+        op.getLoc(), canonical, shift, op.getRounding(), rewriter,
+        cast<IntegerType>(accumulator.getStorage()).getWidth());
     // A multi-lane accumulator exports one destination element per lane; the
     // rounding, narrowing, and clamping sequence below is exactly the
     // single-lane one applied elementwise.
@@ -983,13 +947,9 @@ public:
     Value divisor = createIntegerConstant(loc, carrierType, op.getDivisor(), rewriter);
     Value zero = createIntegerConstant(loc, carrierType, 0, rewriter);
     Value one = createIntegerConstant(loc, carrierType, 1, rewriter);
-    // arith division truncates toward zero; the contract's Euclidean pair is
-    // recovered from it on demand. For a positive divisor the truncated
-    // remainder is negative exactly when the floor correction applies, so
-    // that one sign test replaces the scaled < 0 && r != 0 form. Each mode
-    // builds only the values it reads: toward_zero IS the truncated
-    // quotient, toward_negative needs the corrected quotient alone, and only
-    // the nearest modes need the non-negative remainder.
+    // arith division truncates toward zero; for a positive divisor the
+    // truncated remainder is negative exactly when the floor correction
+    // applies, and each mode builds only the Euclidean values it reads.
     Value truncated = rewriter.create<arith::DivSIOp>(loc, scaled, divisor);
     Value truncatedRemainder;
     Value needsCorrection;
@@ -1102,19 +1062,15 @@ public:
       return op.emitOpError("fixed scalar lowering supports scalar i16 or i32 sqrt_fixed results");
     unsigned resultWidth = resultType.getWidth();
     // Every candidate square stays inside i64: the ceiling caps the estimate
-    // at 2^31 and the exact search starts at bit 30, so no candidate reaches
-    // 2^32 and no square reaches 2^63. A root at or above the ceiling
-    // saturates to the destination maximum under either definition.
+    // at 2^31 and the exact search starts at bit 30; a root at or above the
+    // ceiling saturates to the destination maximum either way.
     int64_t rootCeiling = int64_t(1) << std::min<unsigned>(resultWidth, 31);
     int topCandidateBit = static_cast<int>(std::min<unsigned>(resultWidth - 1, 30));
     int64_t rootMaximum = (int64_t(1) << (resultWidth - 1)) - 1;
 
-    // The value domain is non-negative, but that producer obligation is not
-    // decidable for arbitrary SSA input. The lowering therefore rejects an
-    // input that is provably negative, and clamps the runtime value to zero
-    // from below so that every out-of-domain execution deterministically
-    // yields 0 — without the clamp the estimate branch would take the square
-    // root of a negative value (NaN, then poison at the integer conversion).
+    // A provably negative input is rejected; a runtime one is clamped to zero
+    // so an out-of-domain value yields 0 instead of the estimate branch's
+    // NaN-then-poison.
     APInt constantInput;
     if (matchPattern(adaptor.getInput(), m_ConstantInt(&constantInput)) &&
         constantInput.isNegative())
@@ -1125,11 +1081,9 @@ public:
     Value input = rewriter.create<arith::MaxSIOp>(loc, adaptor.getInput(), zero);
     Value root;
     if (sqrtEstimate) {
-      // The binary64 conversion is exact below 2^53 and carries relative
-      // error at most 2^-53 above it. A square root halves that, and the
-      // root is at most 2^31, so the estimate lands within one of the exact
-      // floor root over the whole i64 domain and the two corrections below
-      // cover it. The ceiling keeps every correction square inside i64.
+      // binary64 carries relative error at most 2^-53, halved by the root,
+      // so the estimate is within one of the exact floor root over all i64;
+      // the two corrections each way cover it.
       Value one = rewriter.create<arith::ConstantIntOp>(loc, 1, 64);
       Value asFloat = rewriter.create<arith::SIToFPOp>(loc, rewriter.getF64Type(), input);
       Value estimate = rewriter.create<math::SqrtOp>(loc, asFloat);

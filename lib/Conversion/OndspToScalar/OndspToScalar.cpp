@@ -47,18 +47,13 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::ReduceMacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto numeric = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
-    if (!numeric || !numeric.getFormat().isF32()) {
-      op.emitOpError("scalar lowering requires numeric = #ondsp.fp<format = f32, ...>");
-      return failure();
-    }
-    if (op.getProduct()) {
-      op.emitOpError("scalar floating-point reduce_mac lowering requires no product attribute");
-      return failure();
-    }
-    if (!op.getInitial().getType().isF32() || !op.getResult().getType().isF32()) {
-      op.emitOpError("scalar lowering requires an f32 initial value and result");
-      return failure();
-    }
+    if (!numeric || !numeric.getFormat().isF32())
+      return op.emitOpError("scalar lowering requires numeric = #ondsp.fp<format = f32, ...>");
+    if (op.getProduct())
+      return op.emitOpError(
+          "scalar floating-point reduce_mac lowering requires no product attribute");
+    if (!op.getInitial().getType().isF32() || !op.getResult().getType().isF32())
+      return op.emitOpError("scalar lowering requires an f32 initial value and result");
 
     FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
         ondrix::conversion::createRankOneMemRefReductionBounds(
@@ -68,9 +63,8 @@ public:
       return failure();
 
     Location loc = op.getLoc();
-    // A declared-off contract states that the multiply and the add are separate
-    // events. Each lane rounds once exactly as its scalar multiply would and
-    // distinct indices do not depend on one another, so a block of products is
+    // Under a declared-off contract each product rounds once, as its scalar
+    // multiply would, and indices are independent, so a block of products is
     // a rescheduling; only the folds must stay in index order.
     Value seed = adaptor.getInitial();
     Value scalarStart = bounds->lowerBound;
