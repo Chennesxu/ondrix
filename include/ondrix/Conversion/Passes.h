@@ -17,7 +17,7 @@ std::unique_ptr<mlir::Pass> createConvertOndspToOrtumCorePass();
 std::unique_ptr<mlir::Pass> createConvertOndspLanePairsToOrtumCorePass();
 std::unique_ptr<mlir::Pass> createConvertOndspCxButterflyToOrtumCorePass();
 std::unique_ptr<mlir::Pass> createLowerOndspF32ReduceToScalarPass();
-std::unique_ptr<mlir::Pass> createLowerRankOneMemRefCopyToSCFPass();
+std::unique_ptr<mlir::Pass> createLowerMemRefCopyToSCFPass();
 std::unique_ptr<mlir::Pass> createNormalizeOndspFixedVectorReducePass();
 std::unique_ptr<mlir::Pass> createParallelizeOndspFixedWrapVectorReducePass();
 std::unique_ptr<mlir::Pass> createForwardOndspPackedReductionOperandsPass();

@@ -12,7 +12,7 @@
 // RUN: not --crash %t.mismatch next
 // RUN: ondrix-opt %s --decompose-ondrix-fir-stream --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" --cse --canonicalize --vectorize-ondsp-fixed-memref-reduce="vector-width=2" --normalize-ondsp-fixed-vector-reduce --lower-ondsp-f32-reduce-to-scalar --canonicalize > %t.vector.mlir
 // RUN: FileCheck %s --check-prefix=STREAM-VECTOR < %t.vector.mlir
-// RUN: ondrix-opt %t.vector.mlir --lower-rank-one-memref-copy-to-scf --convert-ondsp-fixed-to-scalar --buffer-deallocation --expand-strided-metadata --lower-affine --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.vector.llvm.mlir
+// RUN: ondrix-opt %t.vector.mlir --lower-memref-copy-to-scf --convert-ondsp-fixed-to-scalar --buffer-deallocation --expand-strided-metadata --lower-affine --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-math-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.vector.llvm.mlir
 // RUN: FileCheck %s --check-prefix=VECTOR-DEALLOC < %t.vector.llvm.mlir
 // RUN: ondrix-translate %t.vector.llvm.mlir --mlir-to-llvmir > %t.vector.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.vector.ll -o %t.vector.o

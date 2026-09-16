@@ -313,20 +313,24 @@ def LowerOndspF32ReduceToScalar
   ];
 }
 
-def LowerRankOneMemRefCopyToSCF
-    : Pass<"lower-rank-one-memref-copy-to-scf", "::mlir::ModuleOp"> {
-  let summary = "Lower rank-one memref copies to explicit SCF loops";
+def LowerMemRefCopyToSCF
+    : Pass<"lower-memref-copy-to-scf", "::mlir::ModuleOp"> {
+  let summary = "Lower rank-one and statically shaped memref copies to explicit SCF loops";
   let description = [{
-    Replace ranked one-dimensional memref.copy operations with two increasing-
-    index scf.for loops and a temporary buffer. The first loop snapshots the
-    logical source elements and the second writes the target, preserving
+    Replace a rank-one or a statically shaped memref.copy with increasing-
+    index scf.for loops through a temporary buffer: the first nest snapshots
+    the logical source elements and the second writes the target, preserving
     overlapping-copy semantics and arbitrary source and destination layouts.
-    This avoids the external memrefCopy runtime required by MLIR 17 for dynamic
-    strided descriptors. Copies of other ranks remain unchanged.
+    A static shape takes its snapshot on the stack at the function entry; a
+    dynamic rank-one copy allocates it. No copy the canonical pipeline emits
+    then reaches a runtime: neither MLIR 17's memrefCopy for dynamic strided
+    descriptors nor a `memcpy` libcall, which a bare-metal target has no
+    library for. A dynamically shaped copy of higher rank stays unchanged.
   }];
-  let constructor = "ondrix::createLowerRankOneMemRefCopyToSCFPass()";
+  let constructor = "ondrix::createLowerMemRefCopyToSCFPass()";
   let dependentDialects = [
     "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
     "mlir::memref::MemRefDialect",
     "mlir::scf::SCFDialect",
   ];

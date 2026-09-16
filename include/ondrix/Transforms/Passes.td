@@ -293,6 +293,26 @@ def ConvertOndrixStaticResultsToOutParams
   let dependentDialects = ["mlir::memref::MemRefDialect"];
 }
 
+def DeclareOndrixArgumentsReadOnly
+    : Pass<"declare-ondrix-arguments-read-only", "::mlir::ModuleOp"> {
+  let summary = "Declare every tensor argument read-only for bufferization";
+  let description = [{
+    Marks each tensor argument of each function `bufferization.writable =
+    false`. One-shot bufferization treats every function argument as
+    writable, so a kernel that updates its state in place, the recursive
+    filters and the adaptive ones, would write its next state into the
+    caller's input buffer and then copy it to the result. A source tensor
+    argument is a value and the C entry declares its pointer `const`, so the
+    kernel must never write an input: with the argument declared read-only,
+    bufferization copies it into a buffer of the kernel's own before the
+    first write, and the result forwarding then makes that buffer the
+    caller's output. Runs before `one-shot-bufferize` in the canonical
+    pipeline.
+  }];
+  let constructor = "ondrix::createDeclareOndrixArgumentsReadOnlyPass()";
+  let dependentDialects = ["mlir::bufferization::BufferizationDialect"];
+}
+
 def ForwardOndrixResultBuffers
     : Pass<"forward-ondrix-result-buffers", "::mlir::ModuleOp"> {
   let summary = "Write a function's result directly into its out-parameter";

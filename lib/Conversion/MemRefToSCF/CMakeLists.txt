@@ -6,6 +6,7 @@ add_ondrix_library(OndrixMemRefToSCF
 
   LINK_LIBS PUBLIC
   MLIRArithDialect
+  MLIRFuncDialect
   MLIRIR
   MLIRMemRefDialect
   MLIRPass

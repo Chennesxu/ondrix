@@ -28,7 +28,9 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // Forwarding must precede bufferization so a forwarded intermediate is
   // never materialized as a buffer.
   os << "canonicalize,cse,forward-ondrix-insert-extract,canonicalize,cse,";
-  os << "empty-tensor-to-alloc-tensor,";
+  // A tensor argument is a value: a kernel that updates state in place copies
+  // it first and never writes the caller's input.
+  os << "declare-ondrix-arguments-read-only,empty-tensor-to-alloc-tensor,";
   // Only a dynamically shaped result still leaves as a fresh buffer under the
   // descriptor ABI; static results become caller buffers below.
   os << "one-shot-bufferize{bufferize-function-boundaries=true allow-return-allocs=true "
@@ -122,7 +124,7 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // declares an output disjoint from every other argument (distinct-out-params).
   os << "convert-ondrix-static-results-to-out-params,"
         "forward-ondrix-result-buffers{distinct-out-params=true},"
-        "lower-rank-one-memref-copy-to-scf,";
+        "lower-memref-copy-to-scf,";
   os << llvm::formatv("convert-ondsp-fixed-to-scalar{{widening-multiply-low-halves={0}},",
                       options.wideningMultiplyLowHalves ? "true" : "false");
   // Small kernel-local temporaries live on the stack; the C baselines never pay

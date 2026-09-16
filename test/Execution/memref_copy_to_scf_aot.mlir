@@ -1,4 +1,4 @@
-// RUN: ondrix-opt %s --lower-rank-one-memref-copy-to-scf --expand-strided-metadata --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
+// RUN: ondrix-opt %s --lower-memref-copy-to-scf --expand-strided-metadata --convert-scf-to-cf --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.mlir
 // RUN: FileCheck %s < %t.mlir
 // RUN: ondrix-translate %t.mlir --mlir-to-llvmir > %t.ll
 // RUN: llc -relocation-model=pic -filetype=obj %t.ll -o %t.o
@@ -6,6 +6,7 @@
 // RUN: %t
 
 // CHECK-NOT: @memrefCopy
+// CHECK-NOT: memcpy
 
 func.func @copy_right(%storage: memref<?xi32>) {
   %source = memref.subview %storage[0] [4] [1] :
@@ -15,6 +16,13 @@ func.func @copy_right(%storage: memref<?xi32>) {
   memref.copy %source, %target :
       memref<4xi32, strided<[1]>> to
       memref<4xi32, strided<[1], offset: 1>>
+  return
+}
+
+// A static rank-two copy between two buffers takes the same two loop nests
+// through a stack snapshot, and no libcall.
+func.func @copy_matrix(%source: memref<2x3xi32>, %target: memref<2x3xi32>) {
+  memref.copy %source, %target : memref<2x3xi32> to memref<2x3xi32>
   return
 }
 

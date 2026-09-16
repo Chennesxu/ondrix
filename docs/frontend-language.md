@@ -733,7 +733,13 @@ two operands of `dot` and `fir`), one `uintN_t length` in the target's index
 width, placed after the group's last pointer; a static extent needs no
 length, and parameter names carry over from the source. The kernel writes a
 static result straight into the caller's array (`forward-ondrix-result-buffers`
-removes the local copy) and allocates nothing. The entry fills the descriptors
+removes the local copy) and allocates nothing. An input is `const` in fact as
+well as in the header: every tensor argument is declared read-only before
+bufferization, so a kernel that carries state, the recursive and adaptive
+filters, never writes an input but copies the state into a buffer of its own,
+which the forwarding makes the caller's output buffer; the copies the pipeline
+leaves lower to loops for any static shape rather than to a `memcpy` a bare
+target may not have. The entry fills the descriptors
 itself (offset zero, row-major strides), carries the same storage
 preconditions as the descriptor entry, and refuses a length whose buffer
 would not fit the signed index range in bytes before touching memory, with
@@ -742,6 +748,10 @@ the message-and-abort convention of the shape assertions. `ondrix-compile
 `--emit=llvm` module, prints the prototypes. A kernel with a result of
 dynamic shape, such as `fir_filter` on `tensor[q15]`, keeps the descriptor
 convention and gets no plain entry.
+An input is never written. A tensor argument is a value, so a kernel that
+updates state in place, the recursive and adaptive filters, copies that state
+into the caller's output buffer before its first write; the `const` on every
+input pointer holds, and the copy is a loop, not a library call.
 
 The memory contract of a call, in full. Storage: every buffer is contiguous,
 row-major for rank 2, aligned to its element, owned by the caller and valid

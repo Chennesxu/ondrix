@@ -6,6 +6,8 @@
 
 extern void copy_right(int32_t *, int32_t *, int64_t, int64_t, int64_t);
 extern void copy_left(int32_t *, int32_t *, int64_t, int64_t, int64_t);
+extern void copy_matrix(int32_t *, int32_t *, int64_t, int64_t, int64_t, int64_t, int64_t,
+                        int32_t *, int32_t *, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 static int check(const char *name, const int32_t *actual, const int32_t *expected) {
   if (memcmp(actual, expected, 5 * sizeof(int32_t)) == 0)
@@ -23,5 +25,10 @@ int main(void) {
   const int32_t expected_left[] = {2, 3, 4, 5, 5};
   copy_left(MEMREF_ARGS(left, 5));
 
-  return check("right", right, expected_right) | check("left", left, expected_left);
+  int32_t source[6] = {1, 2, 3, 4, 5, 6}, target[6] = {0, 0, 0, 0, 0, 0};
+  copy_matrix(source, source, 0, 2, 3, 3, 1, target, target, 0, 2, 3, 3, 1);
+  int matrix = memcmp(source, target, sizeof(source)) != 0;
+  if (matrix)
+    fprintf(stderr, "matrix: copy differs\n");
+  return check("right", right, expected_right) | check("left", left, expected_left) | matrix;
 }
