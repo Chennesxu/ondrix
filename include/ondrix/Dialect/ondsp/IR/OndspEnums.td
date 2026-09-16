@@ -97,6 +97,16 @@ def Ondsp_OverflowMode : I32EnumAttr<"OverflowMode", "overflow mode",
   let genSpecializedAttr = 0;
 }
 
+// What a runtime division does when its divisor is not positive: stop
+// before producing a value, or return the dividend's signed rail.
+def Ondsp_NonpositiveDivisorTrap : I32EnumAttrCase<"Trap", 0, "trap">;
+def Ondsp_NonpositiveDivisorSaturate : I32EnumAttrCase<"Saturate", 1, "saturate">;
+def Ondsp_NonpositiveDivisor : I32EnumAttr<"NonpositiveDivisor", "non-positive divisor policy",
+    [Ondsp_NonpositiveDivisorTrap, Ondsp_NonpositiveDivisorSaturate]> {
+  let cppNamespace = "::ondrix::ondsp";
+  let genSpecializedAttr = 0;
+}
+
 // The declared floating-point evaluation policies. Each mode fixes which
 // dynamic FP event graphs a lowering may produce for one call site, and
 // therefore which correctness relation the evidence must establish:

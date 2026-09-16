@@ -104,14 +104,52 @@ def Ondsp_RoundDivOp : Ondsp_Op<"round_div", [Pure]> {
     construction. The parity test uses the Euclidean (floor) quotient.
 
     The divisor is a static attribute and must be positive: a zero or
-    negative divisor has no declared semantics and is rejected, and a
-    RUNTIME divisor is a different operation that must carry an explicit
-    zero policy, failing closed here by not existing. A power-of-two
+    negative divisor has no declared semantics and is rejected. A RUNTIME
+    divisor is `ondsp.round_quotient`, which carries the same sequence and
+    an explicit policy for a divisor that is not positive. A power-of-two
     divisor is admitted and agrees bit-exactly with `ondsp.round_shift` of
     the same policy, which the execution gates cross-check.
   }];
   let arguments = (ins AnyType:$input, I64Attr:$divisor, I64Attr:$pre_shift_left,
                    Ondsp_RoundingModeAttr:$rounding, Ondsp_OverflowModeAttr:$overflow);
+  let results = (outs AnyType:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def Ondsp_RoundQuotientOp
+    : Ondsp_Op<"round_quotient", [NoMemoryEffect,
+                                  DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
+  let summary = "Explicit rounded division by a runtime divisor with a declared non-positive policy";
+  let description = [{
+    `ondsp.round_div` with the divisor as an operand. For a divisor `d >= 1`
+    the sequence is that operation's, word for word, with `d` read as a
+    signed integer in place of the constant: exact pre-scale into the
+    `input width + pre_shift_left` carrier, Euclidean quotient and
+    remainder, the declared tie rule over `(q, r)` with the half test stated
+    against `d - r`, then the declared narrowing.
+
+    A divisor that is not positive has no quotient, and the operation does
+    not invent one silently: the required `nonpositive` attribute names what
+    happens. `trap` stops the program with a message before any value is
+    produced; `saturate` returns the dividend's signed rail in the result
+    storage, zero for a zero dividend — the reading `x / 0` has as a
+    saturated infinity. A producer that has proven `d >= 1` picks either,
+    since both are then unreachable; the choice is spelled so that a reader
+    of the program never has to know whether the proof exists. A trapping
+    quotient is not speculatable, and, like any pure value, one whose result
+    is unused is not computed.
+
+    Only scalars: the elementwise loop above it supplies the shape. With the
+    pre-scale `W - 1` that a value-preserving ratio of two `Q1.(W-1)` values
+    uses and a divisor of at most `W` bits, the tie `r == d - r` is
+    unreachable (`x * 2^W = (2q + 1) * d` would need `2^W | d`), so the two
+    nearest modes agree there by construction, as they do for an odd
+    constant divisor.
+  }];
+  let arguments = (ins AnyType:$input, AnyType:$divisor, I64Attr:$pre_shift_left,
+                   Ondsp_RoundingModeAttr:$rounding, Ondsp_OverflowModeAttr:$overflow,
+                   Ondsp_NonpositiveDivisorAttr:$nonpositive);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

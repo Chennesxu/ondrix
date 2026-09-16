@@ -1008,6 +1008,67 @@ public:
   }
 };
 
+// The declared tie rule over the Euclidean pair of `scaled` and a positive
+// `divisor` in one carrier type: arith division truncates toward zero, so
+// the floor correction applies exactly when the truncated remainder is
+// negative, and each mode builds only the Euclidean values it reads.
+static Value roundEuclideanQuotient(Location loc, Value scaled, Value divisor,
+                                    ondrix::ondsp::RoundingMode rounding,
+                                    ConversionPatternRewriter &rewriter) {
+  Type carrierType = scaled.getType();
+  Value zero = createIntegerConstant(loc, carrierType, 0, rewriter);
+  Value one = createIntegerConstant(loc, carrierType, 1, rewriter);
+  Value truncated = rewriter.create<arith::DivSIOp>(loc, scaled, divisor);
+  Value truncatedRemainder;
+  Value needsCorrection;
+  auto flooredQuotient = [&]() {
+    truncatedRemainder = rewriter.create<arith::RemSIOp>(loc, scaled, divisor);
+    needsCorrection =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, truncatedRemainder, zero);
+    Value stepped = rewriter.create<arith::SubIOp>(loc, truncated, one);
+    return rewriter.create<arith::SelectOp>(loc, needsCorrection, stepped, truncated).getResult();
+  };
+  auto euclideanRemainder = [&]() {
+    Value lifted = rewriter.create<arith::AddIOp>(loc, truncatedRemainder, divisor);
+    return rewriter.create<arith::SelectOp>(loc, needsCorrection, lifted, truncatedRemainder)
+        .getResult();
+  };
+  switch (rounding) {
+  case ondrix::ondsp::RoundingMode::TowardNegative:
+    return flooredQuotient();
+  case ondrix::ondsp::RoundingMode::TowardZero:
+    // q + [scaled < 0 and r != 0] is the truncated quotient by construction.
+    return truncated;
+  case ondrix::ondsp::RoundingMode::NearestTiesPositive: {
+    // r >= divisor - r, stated without ever forming 2r.
+    Value quotient = flooredQuotient();
+    Value remainder = euclideanRemainder();
+    Value complement = rewriter.create<arith::SubIOp>(loc, divisor, remainder);
+    Value atLeastHalf =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, remainder, complement);
+    Value increment = rewriter.create<arith::SelectOp>(loc, atLeastHalf, one, zero);
+    return rewriter.create<arith::AddIOp>(loc, quotient, increment);
+  }
+  case ondrix::ondsp::RoundingMode::NearestEven: {
+    Value quotient = flooredQuotient();
+    Value remainder = euclideanRemainder();
+    Value complement = rewriter.create<arith::SubIOp>(loc, divisor, remainder);
+    Value aboveHalf =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, remainder, complement);
+    Value exactlyHalf =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, remainder, complement);
+    Value quotientLowBit = rewriter.create<arith::AndIOp>(loc, quotient, one);
+    Value quotientIsOdd =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, quotientLowBit, zero);
+    Value halfAndOdd = rewriter.create<arith::AndIOp>(loc, exactlyHalf, quotientIsOdd);
+    Value condition = rewriter.create<arith::OrIOp>(loc, aboveHalf, halfAndOdd);
+    Value increment = rewriter.create<arith::SelectOp>(loc, condition, one, zero);
+    return rewriter.create<arith::AddIOp>(loc, quotient, increment);
+  }
+  }
+  llvm_unreachable("unhandled declared rounding mode");
+}
+
 class RoundDivOpLowering final : public OpConversionPattern<ondrix::ondsp::RoundDivOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::RoundDivOp>::OpConversionPattern;
@@ -1031,71 +1092,66 @@ public:
     }
 
     Value divisor = createIntegerConstant(loc, carrierType, op.getDivisor(), rewriter);
-    Value zero = createIntegerConstant(loc, carrierType, 0, rewriter);
-    Value one = createIntegerConstant(loc, carrierType, 1, rewriter);
-    // arith division truncates toward zero; for a positive divisor the
-    // truncated remainder is negative exactly when the floor correction
-    // applies, and each mode builds only the Euclidean values it reads.
-    Value truncated = rewriter.create<arith::DivSIOp>(loc, scaled, divisor);
-    Value truncatedRemainder;
-    Value needsCorrection;
-    auto flooredQuotient = [&]() {
-      truncatedRemainder = rewriter.create<arith::RemSIOp>(loc, scaled, divisor);
-      needsCorrection =
-          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, truncatedRemainder, zero);
-      Value stepped = rewriter.create<arith::SubIOp>(loc, truncated, one);
-      return rewriter.create<arith::SelectOp>(loc, needsCorrection, stepped, truncated).getResult();
-    };
-    auto euclideanRemainder = [&]() {
-      Value lifted = rewriter.create<arith::AddIOp>(loc, truncatedRemainder, divisor);
-      return rewriter.create<arith::SelectOp>(loc, needsCorrection, lifted, truncatedRemainder)
-          .getResult();
-    };
-
-    Value rounded;
-    switch (op.getRounding()) {
-    case ondrix::ondsp::RoundingMode::TowardNegative:
-      rounded = flooredQuotient();
-      break;
-    case ondrix::ondsp::RoundingMode::TowardZero:
-      // q + [scaled < 0 and r != 0] is the truncated quotient by construction.
-      rounded = truncated;
-      break;
-    case ondrix::ondsp::RoundingMode::NearestTiesPositive: {
-      // r >= divisor - r, stated without ever forming 2r.
-      Value quotient = flooredQuotient();
-      Value remainder = euclideanRemainder();
-      Value complement = rewriter.create<arith::SubIOp>(loc, divisor, remainder);
-      Value atLeastHalf =
-          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, remainder, complement);
-      Value increment = rewriter.create<arith::SelectOp>(loc, atLeastHalf, one, zero);
-      rounded = rewriter.create<arith::AddIOp>(loc, quotient, increment);
-      break;
-    }
-    case ondrix::ondsp::RoundingMode::NearestEven: {
-      Value quotient = flooredQuotient();
-      Value remainder = euclideanRemainder();
-      Value complement = rewriter.create<arith::SubIOp>(loc, divisor, remainder);
-      Value aboveHalf =
-          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, remainder, complement);
-      Value exactlyHalf =
-          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, remainder, complement);
-      Value quotientLowBit = rewriter.create<arith::AndIOp>(loc, quotient, one);
-      Value quotientIsOdd =
-          rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, quotientLowBit, zero);
-      Value halfAndOdd = rewriter.create<arith::AndIOp>(loc, exactlyHalf, quotientIsOdd);
-      Value condition = rewriter.create<arith::OrIOp>(loc, aboveHalf, halfAndOdd);
-      Value increment = rewriter.create<arith::SelectOp>(loc, condition, one, zero);
-      rounded = rewriter.create<arith::AddIOp>(loc, quotient, increment);
-      break;
-    }
-    }
-
+    Value rounded = roundEuclideanQuotient(loc, scaled, divisor, op.getRounding(), rewriter);
     unsigned destinationWidth = getIntegerElementType(op.getResult().getType()).getWidth();
     rewriter.replaceOp(
         op,
         narrowSignedValue(loc, rounded, getIntegerTypeLike(carrierType, destinationWidth, rewriter),
                           op.getOverflow(), rewriter));
+    return success();
+  }
+};
+
+// The runtime-divisor form: the same sequence over a divisor operand, with
+// the declared policy deciding a divisor that is not positive before any
+// division runs on it.
+class RoundQuotientOpLowering final : public OpConversionPattern<ondrix::ondsp::RoundQuotientOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::RoundQuotientOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::RoundQuotientOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto inputElement = cast<IntegerType>(adaptor.getInput().getType());
+    unsigned carrierWidth = inputElement.getWidth() + unsigned(op.getPreShiftLeft());
+    IntegerType carrierType = rewriter.getIntegerType(carrierWidth);
+    Value scaled = adaptor.getInput();
+    if (scaled.getType() != carrierType)
+      scaled = rewriter.create<arith::ExtSIOp>(loc, carrierType, scaled);
+    if (op.getPreShiftLeft() != 0) {
+      Value amount = createIntegerConstant(loc, carrierType, op.getPreShiftLeft(), rewriter);
+      scaled = rewriter.create<arith::ShLIOp>(loc, scaled, amount);
+    }
+    Value divisor = adaptor.getDivisor();
+    if (divisor.getType() != carrierType)
+      divisor = rewriter.create<arith::ExtSIOp>(loc, carrierType, divisor);
+    Value zero = createIntegerConstant(loc, carrierType, 0, rewriter);
+    Value one = createIntegerConstant(loc, carrierType, 1, rewriter);
+    Value positive = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, divisor, one);
+    bool trap = op.getNonpositive() == ondrix::ondsp::NonpositiveDivisor::Trap;
+    if (trap)
+      rewriter.create<cf::AssertOp>(
+          loc, positive,
+          rewriter.getStringAttr("ondsp.round_quotient: the divisor is not positive"));
+    // The division itself never sees a non-positive divisor: the policy
+    // selects around it, so no target-defined division by zero exists.
+    Value safeDivisor = rewriter.create<arith::SelectOp>(loc, positive, divisor, one);
+    Value rounded = roundEuclideanQuotient(loc, scaled, safeDivisor, op.getRounding(), rewriter);
+    IntegerType destination = cast<IntegerType>(op.getResult().getType());
+    Value result = narrowSignedValue(loc, rounded, destination, op.getOverflow(), rewriter);
+    if (!trap) {
+      Value negative = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, scaled, zero);
+      Value isZero = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, scaled, zero);
+      Value maximum = createIntegerConstant(
+          loc, destination, llvm::APInt::getSignedMaxValue(destination.getWidth()), rewriter);
+      Value minimum = createIntegerConstant(
+          loc, destination, llvm::APInt::getSignedMinValue(destination.getWidth()), rewriter);
+      Value rail = rewriter.create<arith::SelectOp>(loc, negative, minimum, maximum);
+      rail = rewriter.create<arith::SelectOp>(
+          loc, isZero, createIntegerConstant(loc, destination, 0, rewriter), rail);
+      result = rewriter.create<arith::SelectOp>(loc, positive, result, rail);
+    }
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
@@ -1295,8 +1351,8 @@ public:
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
                  AddShiftOpLowering, BitrevAddOpLowering, ConvertOpLowering, ReduceMacOpLowering,
-                 RoundDivOpLowering, RoundShiftOpLowering, SatCastOpLowering, SubShiftOpLowering>(
-        typeConverter, &getContext());
+                 RoundDivOpLowering, RoundQuotientOpLowering, RoundShiftOpLowering,
+                 SatCastOpLowering, SubShiftOpLowering>(typeConverter, &getContext());
     patterns.add<MacOpLowering, MacSubOpLowering>(typeConverter, &getContext(),
                                                   wideningMultiplyLowHalves);
     patterns.add<SqrtFixedOpLowering>(typeConverter, &getContext(), sqrtEstimate);

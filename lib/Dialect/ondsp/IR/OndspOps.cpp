@@ -294,6 +294,36 @@ LogicalResult RoundDivOp::verify() {
   return success();
 }
 
+LogicalResult RoundQuotientOp::verify() {
+  if (failed(verifyValueOnlyTypes(*this)))
+    return failure();
+  auto inputElement = dyn_cast<IntegerType>(getInput().getType());
+  auto divisorElement = dyn_cast<IntegerType>(getDivisor().getType());
+  auto resultElement = dyn_cast<IntegerType>(getResult().getType());
+  if (!inputElement || !divisorElement || !resultElement || !inputElement.isSignless() ||
+      !divisorElement.isSignless() || !resultElement.isSignless())
+    return emitOpError("round_quotient takes a scalar signless integer input, divisor and "
+                       "result; the elementwise loop above it supplies the shape");
+  int64_t preShift = int64_t(getPreShiftLeft());
+  if (preShift < 0 || preShift > 63)
+    return emitOpError("pre_shift_left must lie in [0, 63]");
+  uint64_t carrierWidth = uint64_t{inputElement.getWidth()} + uint64_t(preShift);
+  if (carrierWidth > 128)
+    return emitOpError("the exact scaled carrier (input width + pre_shift_left) must not "
+                       "exceed 128 bits");
+  if (divisorElement.getWidth() > carrierWidth)
+    return emitOpError("the divisor storage must not exceed the exact scaled carrier");
+  if (resultElement.getWidth() > carrierWidth)
+    return emitOpError("round_quotient does not widen: the result storage must not exceed the "
+                       "exact scaled carrier");
+  return success();
+}
+
+Speculation::Speculatability RoundQuotientOp::getSpeculatability() {
+  return getNonpositive() == NonpositiveDivisor::Trap ? Speculation::NotSpeculatable
+                                                      : Speculation::Speculatable;
+}
+
 LogicalResult SatCastOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();

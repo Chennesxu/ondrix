@@ -18,6 +18,10 @@ def Ondsp_OverflowModeAttr
     : EnumAttr<Ondsp_Dialect, Ondsp_OverflowMode, "overflow"> {
   let assemblyFormat = "`<` $value `>`";
 }
+def Ondsp_NonpositiveDivisorAttr
+    : EnumAttr<Ondsp_Dialect, Ondsp_NonpositiveDivisor, "nonpositive_divisor"> {
+  let assemblyFormat = "`<` $value `>`";
+}
 def Ondsp_CxButterflyVariantAttr
     : EnumAttr<Ondsp_Dialect, Ondsp_CxButterflyVariant, "cx_butterfly_variant"> {
   let assemblyFormat = "`<` $value `>`";
