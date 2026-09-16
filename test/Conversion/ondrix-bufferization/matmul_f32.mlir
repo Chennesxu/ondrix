@@ -32,9 +32,12 @@
 // BATCHED: vector.load %{{.*}} : memref<8x6xf32>, vector<4xf32>
 // BATCHED: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<4xf32>
 // BATCHED: vector.store {{.*}} : memref<4x6xf32>, vector<4xf32>
-// 6 columns at width 4 leave two ordered columns behind the one full block.
-// BATCHED: scf.for %{{.*}} = %c4
-// BATCHED: math.fma {{.*}} : f32
+// 6 columns at width 4 leave two columns behind the one full block; they take
+// one padded two-lane block of their own, so no ordered column remains.
+// BATCHED: vector.load {{.*}} : memref<8x6xf32>, vector<2xf32>
+// BATCHED: math.fma {{.*}} : vector<2xf32>
+// BATCHED: vector.store {{.*}} : memref<4x6xf32>, vector<2xf32>
+// BATCHED-NOT: math.fma {{.*}} : f32
 // The declared fast contract admits the rebuilt inner axis: the +0.0 seed
 // stays the first leaf of chain zero, chains one to three are seeded by their
 // own real products, and the pairwise merge tops out in one R-recording fold.

@@ -1148,7 +1148,13 @@ def VectorizeOndspFpFilterOutputs
     real product, merged pairwise into one R-recording top fold — under the
     contract its `ondsp.reduce_mac` still declares in place; below four
     taps every tree the round-robin can build is the declared left fold,
-    so the ordered form stays. Adjacent full blocks of one matmul output
+    so the ordered form stays. Columns a matmul row's full blocks leave over,
+    two or more of them, take one padded block of the next power-of-two
+    width: its surplus lanes read the following row of the contiguous right
+    operand for every term but the last, whose lanes are assembled, and only
+    the real columns are stored, so no ordered column remains (a 4x16x3
+    product runs one four-lane block per row where it ran a two-lane block
+    and an ordered column). Adjacent full blocks of one matmul output
     row may group into a single pass (`column-group`, default one): the row
     splats are shared, one term's group loads are contiguous in the right
     operand, and each block keeps its own accumulator, so every lane's

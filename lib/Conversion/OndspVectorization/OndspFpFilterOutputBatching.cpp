@@ -661,7 +661,22 @@ struct FpColumnTileLoopShape {
   /// This is the authority for the tree rebuild; absence reads as exact, so a
   /// dropped attribute only ever costs the schedule, never correctness.
   ondrix::ondsp::FpContractMode contract = ondrix::ondsp::FpContractMode::Off;
+  /// Lane count of the padded block that covers the columns the full blocks
+  /// leave over, zero when they stay on the ordered loop. Its surplus lanes
+  /// read the following row of the contiguous right operand and are never
+  /// stored, the rule the fixed-point column batcher applies.
+  int64_t paddedWidth = 0;
 };
+
+/// Row-major and contiguous: the flat offset of `[k][N]` is that of
+/// `[k + 1][0]`, which is what lets a padded block read past a row's end.
+bool isContiguousRowMajor(Value value) {
+  auto type = cast<MemRefType>(value.getType());
+  SmallVector<int64_t> strides;
+  int64_t offset = 0;
+  return succeeded(getStridesAndOffset(type, strides, offset)) && strides.size() == 2 &&
+         strides[1] == 1 && strides[0] == type.getDimSize(1);
+}
 
 /// Whether `value` is available where the loop is, rather than produced inside
 /// it.
@@ -803,12 +818,18 @@ FailureOr<FpColumnTileLoopShape> matchFpColumnTileLoop(scf::ForOp loop, int64_t 
     return failure();
 
   int64_t fullBlocks = shape.columnCount / vectorWidth;
-  if (fullBlocks < 1)
+  // Two or more leftover columns take one padded block of the next power of
+  // two, whose surplus lanes read the following row while it exists; the
+  // last term assembles its lanes instead, so no access leaves the operand.
+  int64_t leftover = shape.columnCount - fullBlocks * vectorWidth;
+  if (leftover >= 2 && shape.innerCount <= kMaxUnrolledTerms && isContiguousRowMajor(shape.rhs))
+    shape.paddedWidth = std::min<int64_t>(vectorWidth, llvm::PowerOf2Ceil(leftover));
+  if (fullBlocks < 1 && shape.paddedWidth == 0)
     return failure();
 
   // Pin the actual extent of the last batched access rather than inferring it
   // from the loop bound.
-  int64_t lastColumn = fullBlocks * vectorWidth - 1;
+  int64_t lastColumn = fullBlocks * vectorWidth + (shape.paddedWidth ? leftover : 0) - 1;
   if (lastColumn >= cast<MemRefType>(shape.rhs.getType()).getDimSize(1) ||
       lastColumn >= cast<MemRefType>(shape.output.getType()).getDimSize(1) ||
       shape.innerCount > cast<MemRefType>(shape.lhs.getType()).getDimSize(1) ||
@@ -930,7 +951,8 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
   // each block keeps its own accumulator, so every lane's event graph is the
   // single-block one verbatim and the grouping spends nothing. The width is
   // a measured per-target policy (a serializing in-order load pipe regresses).
-  int64_t grouping = unrolled ? std::min<int64_t>(columnGroup, fullBlocks) : 1;
+  int64_t grouping =
+      unrolled ? std::max<int64_t>(1, std::min<int64_t>(columnGroup, fullBlocks)) : 1;
   int64_t groupChains = chains;
   if (grouping > 1)
     groupChains = std::max<int64_t>(1, std::min<int64_t>(chains, 8 / grouping));
@@ -1012,9 +1034,71 @@ void batchFpColumnTiles(const FpColumnTileLoopShape &shape, int64_t vectorWidth,
 
   int64_t groupedColumns = (fullBlocks / grouping) * grouping * vectorWidth;
   Value groupedEnd = builder.create<arith::ConstantIndexOp>(loc, groupedColumns);
-  emitBatchedLoop(zeroIndex, groupedEnd, grouping, groupChains);
+  if (fullBlocks > 0)
+    emitBatchedLoop(zeroIndex, groupedEnd, grouping, groupChains);
   if (groupedColumns < batchedColumns)
     emitBatchedLoop(groupedEnd, batchedEnd, 1, chains);
+
+  // The padded block: one straight-line pass over the leftover columns at the
+  // next power-of-two width. Every term but the last reads its lanes in one
+  // contiguous load, the surplus lanes landing on the following row; the last
+  // term's lanes are assembled, since no following row exists there; only the
+  // real columns are stored. Each lane still runs its own ordered chain.
+  if (shape.paddedWidth > 0) {
+    int64_t leftover = shape.columnCount - batchedColumns;
+    auto paddedType = VectorType::get({shape.paddedWidth}, builder.getF32Type());
+    Value paddedZero = builder.create<arith::ConstantOp>(
+        loc, paddedType, DenseElementsAttr::get(paddedType, builder.getF32FloatAttr(0.0f)));
+    auto loadPadded = [&](int64_t term) -> Value {
+      Value index = builder.create<arith::ConstantIndexOp>(loc, term);
+      if (term + 1 < shape.innerCount || shape.paddedWidth == leftover)
+        return builder.create<vector::LoadOp>(loc, paddedType, shape.rhs,
+                                              ValueRange{index, batchedEnd});
+      Value lanes = paddedZero;
+      for (int64_t column = 0; column < leftover; ++column) {
+        Value position = builder.create<arith::ConstantIndexOp>(loc, batchedColumns + column);
+        Value element = builder.create<memref::LoadOp>(loc, shape.rhs, ValueRange{index, position});
+        lanes = builder.create<vector::InsertOp>(loc, element, lanes, column);
+      }
+      return lanes;
+    };
+    // The same declared permission buys the same chain rebuild the full
+    // blocks take; an exact contract keeps the single ordered chain.
+    SmallVector<Value> splats;
+    for (int64_t term = 0; term < shape.innerCount; ++term)
+      splats.push_back(builder.create<vector::SplatOp>(loc, paddedType, rowElements[term]));
+    SmallVector<Value> folds;
+    folds.push_back(updateLanes(builder, loc, splats[0], loadPadded(0), paddedZero));
+    for (int64_t chain = 1; chain < chains; ++chain)
+      folds.push_back(builder.create<arith::MulFOp>(loc, splats[chain], loadPadded(chain)));
+    for (int64_t term = chains; term < shape.innerCount; ++term)
+      folds[term % chains] =
+          updateLanes(builder, loc, splats[term], loadPadded(term), folds[term % chains]);
+    while (folds.size() > 1) {
+      SmallVector<Value> merged;
+      for (size_t i = 0; i + 1 < folds.size(); i += 2)
+        merged.push_back(builder.create<arith::AddFOp>(loc, folds[i], folds[i + 1]));
+      if (folds.size() % 2 != 0)
+        merged.push_back(folds.back());
+      folds = std::move(merged);
+    }
+    Value lanes = folds.front();
+    if (Operation *top = lanes.getDefiningOp(); chains > 1 && isa<arith::AddFOp>(top))
+      lanes = ondrix::ondsp::consumeFastPermission(
+          top, ondrix::ondsp::FastPermission::RebuildReductionTree);
+    if (shape.paddedWidth == leftover) {
+      builder.create<vector::StoreOp>(loc, lanes, shape.output,
+                                      ValueRange{shape.rowIndex, batchedEnd});
+    } else {
+      for (int64_t column = 0; column < leftover; ++column) {
+        Value element = builder.create<vector::ExtractOp>(loc, lanes, column);
+        Value position = builder.create<arith::ConstantIndexOp>(loc, batchedColumns + column);
+        builder.create<memref::StoreOp>(loc, element, shape.output,
+                                        ValueRange{shape.rowIndex, position});
+      }
+    }
+    batchedColumns = shape.columnCount;
+  }
 
   // A fully covered ordered loop is erased rather than left dead: its body
   // would still record a spend the audit can never observe.

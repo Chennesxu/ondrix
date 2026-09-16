@@ -168,16 +168,18 @@ func.func @fast_filter_short(%input: tensor<40xf32>, %coeffs: tensor<3xf32>,
 }
 
 // The matmul column axis: W columns of one output row ride one vector, the
-// broadcast row element is scalar-loaded, and the residual columns keep the
-// ordered schedule. Grouping stays off at the default column-group of one.
+// broadcast row element is scalar-loaded, and the four residual columns take
+// one padded block of their own width, so no ordered column remains.
+// Grouping stays off at the default column-group of one.
 // CHECK-LABEL: func.func @matmul_columns_off
 // CHECK: %[[ROW:.*]] = memref.load %{{.*}} : memref<2x4xf32>
 // CHECK: vector.splat %[[ROW]] : vector<8xf32>
 // CHECK: scf.for %{{.*}} = %c0{{.*}} to %c16{{.*}} step %c8
 // CHECK-COUNT-4: vector.load %{{.*}} : memref<4x20xf32>, vector<8xf32>
 // CHECK: vector.store {{.*}} : memref<2x20xf32>, vector<8xf32>
-// CHECK: scf.for %{{.*}} = %c16{{.*}} to %c20
-// CHECK: arith.mulf {{.*}} : f32
+// CHECK-COUNT-4: vector.load %{{.*}} : memref<4x20xf32>, vector<4xf32>
+// CHECK: vector.store {{.*}} : memref<2x20xf32>, vector<4xf32>
+// CHECK-NOT: arith.mulf {{.*}} : f32
 func.func @matmul_columns_off(%a: tensor<2x4xf32>, %b: tensor<4x20xf32>) -> tensor<2x20xf32> {
   %r = ondrix.matmul %a, %b {
     numeric = #ondsp.fp<format = f32, contract = off>
@@ -202,11 +204,14 @@ func.func @matmul_columns_fast(%a: tensor<2x4xf32>, %b: tensor<4x20xf32>) -> ten
   return %r : tensor<2x20xf32>
 }
 
-// Fewer columns than lanes: the width steps down to four, batching columns
-// zero through three and leaving the remaining two on the ordered nest.
+// Fewer columns than lanes: one padded eight-lane block covers all six, its
+// two surplus lanes reading the following row for every term but the last,
+// whose lanes are assembled; only the six real columns are stored.
 // CHECK-LABEL: func.func @matmul_narrow
-// CHECK: vector.store {{.*}} : memref<2x6xf32>, vector<4xf32>
-// CHECK: arith.mulf {{.*}} : f32
+// CHECK-COUNT-3: vector.load %{{.*}} : memref<4x6xf32>, vector<8xf32>
+// CHECK-COUNT-6: vector.insert
+// CHECK-COUNT-6: memref.store {{.*}} : memref<2x6xf32>
+// CHECK-NOT: arith.mulf {{.*}} : f32
 func.func @matmul_narrow(%a: tensor<2x4xf32>, %b: tensor<4x6xf32>) -> tensor<2x6xf32> {
   %r = ondrix.matmul %a, %b {
     numeric = #ondsp.fp<format = f32, contract = off>
@@ -214,11 +219,12 @@ func.func @matmul_narrow(%a: tensor<2x4xf32>, %b: tensor<4x6xf32>) -> tensor<2x6
   return %r : tensor<2x6xf32>
 }
 
-// Three columns at eight lanes: the step-down halves twice, so a single
-// halving would leave this nest ordered.
+// Three columns at eight lanes: one padded four-lane block, three stores, no
+// ordered column left.
 // CHECK-LABEL: func.func @matmul_three_columns
-// CHECK: vector.store {{.*}} : memref<4x3xf32>, vector<2xf32>
-// CHECK: arith.mulf {{.*}} : f32
+// CHECK-COUNT-15: vector.load %{{.*}} : memref<16x3xf32>, vector<4xf32>
+// CHECK-COUNT-3: memref.store {{.*}} : memref<4x3xf32>
+// CHECK-NOT: arith.mulf {{.*}} : f32
 func.func @matmul_three_columns(%a: tensor<4x16xf32>, %b: tensor<16x3xf32>) -> tensor<4x3xf32> {
   %r = ondrix.matmul %a, %b {
     numeric = #ondsp.fp<format = f32, contract = off>
@@ -226,12 +232,11 @@ func.func @matmul_three_columns(%a: tensor<4x16xf32>, %b: tensor<16x3xf32>) -> t
   return %r : tensor<4x3xf32>
 }
 
-// The columns a narrow output count leaves over take the same declared chain
-// rebuild at one lane, so the remainder is not the row's serial critical path.
+// The padded block takes the same declared chain rebuild the full blocks do,
+// at its own width.
 // CHAINED-LABEL: func.func @matmul_three_columns_fast
-// CHAINED: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : vector<2xf32>
-// CHAINED: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
-// CHAINED: memref.store
+// CHAINED: arith.addf {{.*}} {ondsp.fast_used = ["rebuild_reduction_tree"]} : vector<4xf32>
+// CHAINED-COUNT-3: memref.store
 func.func @matmul_three_columns_fast(%a: tensor<4x16xf32>, %b: tensor<16x3xf32>) -> tensor<4x3xf32> {
   %r = ondrix.matmul %a, %b {
     numeric = #ondsp.fp<format = f32, contract = fast>
