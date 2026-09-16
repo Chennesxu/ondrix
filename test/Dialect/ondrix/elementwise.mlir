@@ -106,3 +106,19 @@ func.func @div_declares_its_boundaries(%a: tensor<8xi16>) -> tensor<8xi16> {
   } : (tensor<8xi16>) -> tensor<8xi16>
   return %0 : tensor<8xi16>
 }
+
+// The runtime quotient carries the fourth attribute: what a divisor that is
+// not positive does.
+// CHECK-LABEL: func.func @ratio_declares_its_divisor_policy
+// CHECK: ondrix.ratio
+// CHECK-SAME: nonpositive = #ondsp.nonpositive_divisor<saturate>
+// CHECK-SAME: rounding = #ondsp.rounding<toward_zero>
+func.func @ratio_declares_its_divisor_policy(%a: tensor<8xi32>, %b: tensor<8xi32>) -> tensor<8xi32> {
+  %0 = ondrix.ratio %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    rounding = #ondsp.rounding<toward_zero>,
+    overflow = #ondsp.overflow<saturate>,
+    nonpositive = #ondsp.nonpositive_divisor<saturate>
+  } : (tensor<8xi32>, tensor<8xi32>) -> tensor<8xi32>
+  return %0 : tensor<8xi32>
+}

@@ -158,3 +158,28 @@ func.func @div_divisor_outside_the_carrier(%a: tensor<8xi16>) -> tensor<8xi16> {
   } : (tensor<8xi16>) -> tensor<8xi16>
   return %0 : tensor<8xi16>
 }
+
+// -----
+
+func.func @ratio_without_divisor_policy(%a: tensor<8xi16>, %b: tensor<8xi16>) -> tensor<8xi16> {
+  // expected-error @below {{requires attribute 'nonpositive'}}
+  %0 = ondrix.ratio %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<8xi16>, tensor<8xi16>) -> tensor<8xi16>
+  return %0 : tensor<8xi16>
+}
+
+// -----
+
+func.func @ratio_mismatched_divisor(%a: tensor<8xi16>, %b: tensor<8xi32>) -> tensor<8xi16> {
+  // expected-error @below {{executable elementwise operations require matching static tensor<Nxi16> operands and result}}
+  %0 = ondrix.ratio %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>,
+    nonpositive = #ondsp.nonpositive_divisor<trap>
+  } : (tensor<8xi16>, tensor<8xi32>) -> tensor<8xi16>
+  return %0 : tensor<8xi16>
+}

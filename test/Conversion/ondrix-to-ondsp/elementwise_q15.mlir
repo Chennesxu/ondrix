@@ -95,3 +95,21 @@ func.func @div_by_three(%a: tensor<8xi16>) -> tensor<8xi16> {
   } : (tensor<8xi16>) -> tensor<8xi16>
   return %0 : tensor<8xi16>
 }
+
+// -----
+
+// The runtime quotient's pre-scale is the operation's own, so the body is
+// one round_quotient on the two storage values and nothing widens outside it.
+// CHECK-LABEL: func.func @ratio
+// CHECK-NOT: arith.extsi
+// CHECK: ondsp.round_quotient %{{.*}}, %{{.*}} {{.*}}nonpositive = #ondsp.nonpositive_divisor<trap>{{.*}}pre_shift_left = 15{{.*}}rounding = #ondsp.rounding<nearest_ties_positive>
+// CHECK-SAME: (i16, i16) -> i16
+func.func @ratio(%a: tensor<8xi16>, %b: tensor<8xi16>) -> tensor<8xi16> {
+  %0 = ondrix.ratio %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>,
+    overflow = #ondsp.overflow<saturate>,
+    nonpositive = #ondsp.nonpositive_divisor<trap>
+  } : (tensor<8xi16>, tensor<8xi16>) -> tensor<8xi16>
+  return %0 : tensor<8xi16>
+}

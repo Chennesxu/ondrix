@@ -188,6 +188,19 @@ Value ElementwiseOpLowering<ondrix::ir::MultOp>::emitBody(ondrix::ir::MultOp op,
 }
 
 template <>
+Value ElementwiseOpLowering<ondrix::ir::RatioOp>::emitBody(ondrix::ir::RatioOp op,
+                                                           ArrayRef<Value> elements,
+                                                           MLIRContext *context,
+                                                           IntegerType storage, IntegerType wide,
+                                                           Location loc, OpBuilder &builder) {
+  // The quotient's own pre-scale widens inside the operation, so the body
+  // is the one boundary on the storage values.
+  return builder.create<ondrix::ondsp::RoundQuotientOp>(
+      loc, storage, elements[0], elements[1], builder.getI64IntegerAttr(storage.getWidth() - 1),
+      op.getRoundingAttr(), op.getOverflowAttr(), op.getNonpositiveAttr());
+}
+
+template <>
 Value ElementwiseOpLowering<ondrix::ir::AbsOp>::emitBody(ondrix::ir::AbsOp op,
                                                          ArrayRef<Value> elements,
                                                          MLIRContext *context, IntegerType storage,
@@ -1202,5 +1215,6 @@ void ondrix::conversion::populateOndrixElementwiseLoweringPatterns(RewritePatter
            ElementwiseOpLowering<ondrix::ir::SubOp>, ElementwiseOpLowering<ondrix::ir::MultOp>,
            ElementwiseOpLowering<ondrix::ir::AbsOp>, ElementwiseOpLowering<ondrix::ir::NegateOp>,
            ElementwiseOpLowering<ondrix::ir::OffsetOp>, ElementwiseOpLowering<ondrix::ir::ShiftOp>,
-           ElementwiseOpLowering<ondrix::ir::DivOp>>(patterns.getContext());
+           ElementwiseOpLowering<ondrix::ir::DivOp>, ElementwiseOpLowering<ondrix::ir::RatioOp>>(
+          patterns.getContext());
 }

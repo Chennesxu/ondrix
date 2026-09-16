@@ -43,7 +43,7 @@
 // WIDE: ondrix.add
 
 // MINUS: error: unary minus is not an operator; spell negate(...)
-// DIVISION: error: '/' takes a positive integer constant divisor
+// DIVISION: error: the divisor is not provably positive
 // FLOAT: error: elementwise builtins require q15 or q31 operand elements
 // EXTENT: error: binary elementwise builtins require operands of the same element type and extent
 // BARE: error: expected a builtin call or an infix expression, not a bare name

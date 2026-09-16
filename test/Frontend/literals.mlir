@@ -44,5 +44,5 @@
 // BIAS: error: offset bias must be a raw signed Q1.15 value in [-32768, 32767]
 // GAIN: error: gain constant must be a raw signed Q1.15 value in [-32768, 32767]
 // OPERAND: error: a literal needs a tensor operand beside it
-// NUMERATOR: error: '/' takes a positive integer constant divisor
+// NUMERATOR: error: a constant dividend is not an operation
 // FLOAT: error: an integer literal is a raw fixed-point value; scale f32 with gain(x, gain=[n, d], contract=...)

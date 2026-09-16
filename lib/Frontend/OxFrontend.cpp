@@ -254,6 +254,7 @@ enum class ReductionKind {
   Offset,
   Shift,
   Div,
+  Ratio,
   Widen,
   Narrow,
   Quantize,
@@ -269,11 +270,12 @@ static bool isElementwiseKind(ReductionKind kind) {
   return kind == ReductionKind::Add || kind == ReductionKind::Sub || kind == ReductionKind::Mult ||
          kind == ReductionKind::Abs || kind == ReductionKind::Negate ||
          kind == ReductionKind::Offset || kind == ReductionKind::Shift ||
-         kind == ReductionKind::Div;
+         kind == ReductionKind::Div || kind == ReductionKind::Ratio;
 }
 
 static bool isBinaryElementwiseKind(ReductionKind kind) {
-  return kind == ReductionKind::Add || kind == ReductionKind::Sub || kind == ReductionKind::Mult;
+  return kind == ReductionKind::Add || kind == ReductionKind::Sub || kind == ReductionKind::Mult ||
+         kind == ReductionKind::Ratio;
 }
 
 // The four spellings of the one conversion operation: the name fixes the
@@ -420,10 +422,64 @@ struct BuiltinCallAst {
   int64_t bias = 0;
   int64_t amount = 0;
   int64_t divisor = 0;
+  std::string nonpositive;
   SourceType target = SourceType::Q15;
   bool literal = false;
   SourcePosition position;
 };
+
+enum class SignFact { Unknown, NonNegative, Positive };
+
+// What the structure of a composed expression proves about its sign: a
+// magnitude or a square of one operand is non-negative, a positive constant
+// added under saturation makes it positive, and no operand of unknown sign
+// becomes known. This is what admits an unspelled divisor policy.
+static SignFact signFact(const ExpressionAst &expression) {
+  if (expression.isParameterReference())
+    return SignFact::Unknown;
+  const BuiltinCallAst &call = *expression.call;
+  bool saturating = call.destinationOverflow != "wrap";
+  auto known = [](SignFact fact) { return fact != SignFact::Unknown; };
+  switch (call.kind) {
+  case ReductionKind::Abs:
+    return saturating ? SignFact::NonNegative : SignFact::Unknown;
+  case ReductionKind::Mult: {
+    const ExpressionAst &lhs = call.operands[0], &rhs = call.operands[1];
+    bool square =
+        lhs.isParameterReference() && rhs.isParameterReference() && lhs.parameter == rhs.parameter;
+    return saturating && square ? SignFact::NonNegative : SignFact::Unknown;
+  }
+  case ReductionKind::Offset: {
+    SignFact input = signFact(call.operands[0]);
+    if (!saturating || !known(input) || call.bias < 0)
+      return SignFact::Unknown;
+    return call.bias > 0 ? SignFact::Positive : input;
+  }
+  case ReductionKind::Add: {
+    SignFact lhs = signFact(call.operands[0]), rhs = signFact(call.operands[1]);
+    if (!saturating || !known(lhs) || !known(rhs))
+      return SignFact::Unknown;
+    return lhs == SignFact::Positive || rhs == SignFact::Positive ? SignFact::Positive
+                                                                  : SignFact::NonNegative;
+  }
+  case ReductionKind::Shift: {
+    SignFact input = signFact(call.operands[0]);
+    if (!saturating || !known(input))
+      return SignFact::Unknown;
+    return call.amount >= 0 ? input : SignFact::NonNegative;
+  }
+  case ReductionKind::Widen:
+    return signFact(call.operands[0]);
+  case ReductionKind::Div:
+  case ReductionKind::Narrow:
+    return known(signFact(call.operands[0])) ? SignFact::NonNegative : SignFact::Unknown;
+  case ReductionKind::Gain:
+    return known(signFact(call.operands[0])) && call.gain >= 0 ? SignFact::NonNegative
+                                                               : SignFact::Unknown;
+  default:
+    return SignFact::Unknown;
+  }
+}
 
 // Both operands bounded at 2^24 are exact in binary32, so dividing there
 // gives the one correctly rounded quotient and no double-rounding argument is
@@ -712,9 +768,9 @@ public:
         !isIdentifier("lowpass") && !isIdentifier("cic_decimate") && !isIdentifier("add") &&
         !isIdentifier("sub") && !isIdentifier("mult") && !isIdentifier("abs") &&
         !isIdentifier("negate") && !isIdentifier("offset") && !isIdentifier("shift") &&
-        !isIdentifier("div") && !isIdentifier("widen") && !isIdentifier("narrow") &&
-        !isIdentifier("quantize") && !isIdentifier("dequantize") && !isIdentifier("log2") &&
-        !isIdentifier("exp2")) {
+        !isIdentifier("div") && !isIdentifier("ratio") && !isIdentifier("widen") &&
+        !isIdentifier("narrow") && !isIdentifier("quantize") && !isIdentifier("dequantize") &&
+        !isIdentifier("log2") && !isIdentifier("exp2")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
@@ -724,8 +780,8 @@ public:
                         "moving_average(...), gain(...), rms(...), sine(...), cosine(...), "
                         "matmul(...), lms(...), cic_decimate(...), a lowpass/hamming/hann/"
                         "blackman/kaiser design, or an "
-                        "elementwise add/sub/mult/abs/negate/offset/shift/div builtin expression, "
-                        "or a widen/narrow/quantize/dequantize conversion");
+                        "elementwise add/sub/mult/abs/negate/offset/shift/div/ratio builtin "
+                        "expression, or a widen/narrow/quantize/dequantize conversion");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -798,6 +854,8 @@ public:
       call.kind = ReductionKind::Mult;
     else if (isIdentifier("div"))
       call.kind = ReductionKind::Div;
+    else if (isIdentifier("ratio"))
+      call.kind = ReductionKind::Ratio;
     else if (isIdentifier("widen"))
       call.kind = ReductionKind::Widen;
     else if (isIdentifier("narrow"))
@@ -1011,8 +1069,19 @@ public:
         return std::nullopt;
       if (call.kind == ReductionKind::Div && !parseNamedInteger("divisor", call.divisor))
         return std::nullopt;
-      if (!parseBoundaryPolicies(call) ||
-          !expect(TokenKind::RightParen, "expected ')' after elementwise expression"))
+      if (!parseBoundaryPolicies(call))
+        return std::nullopt;
+      if (call.kind == ReductionKind::Ratio && current.kind == TokenKind::Comma) {
+        if (!expect(TokenKind::Comma, "expected ',' before the nonpositive divisor policy") ||
+            !expectIdentifier("nonpositive", "expected the nonpositive divisor policy") ||
+            !expect(TokenKind::Equal, "expected '=' after nonpositive"))
+          return std::nullopt;
+        auto policy = parseIdentifier("expected trap or saturate");
+        if (!policy)
+          return std::nullopt;
+        call.nonpositive = policy->spelling.str();
+      }
+      if (!expect(TokenKind::RightParen, "expected ')' after elementwise expression"))
         return std::nullopt;
       return call;
     }
@@ -1510,8 +1579,8 @@ private:
     return lhs;
   }
 
-  // `/` admits one positive integer constant: a runtime divisor is a different
-  // operation that must declare its zero policy.
+  // `/` by a literal is `div`, by a tensor `ratio`; a constant dividend has
+  // no operation, since no constant is a tensor.
   std::optional<Operand> parseTerm(std::optional<SourceType> rootPolicy) {
     std::optional<Operand> lhs = parsePrimary(rootPolicy);
     while (lhs && (current.kind == TokenKind::Star || current.kind == TokenKind::Slash)) {
@@ -1525,19 +1594,23 @@ private:
         lhs = combine(ReductionKind::Mult, std::move(*lhs), std::move(*rhs), position);
         continue;
       }
-      if (current.kind != TokenKind::Integer || !lhs->expression) {
-        diagnostics.error(current.position,
-                          "'/' takes a positive integer constant divisor; a runtime divisor is a "
-                          "separate operation that must declare its zero policy");
+      std::optional<Operand> rhs = parsePrimary(std::nullopt);
+      if (!rhs)
+        return std::nullopt;
+      if (!lhs->expression) {
+        diagnostics.error(position, "a constant dividend is not an operation; a tensor divides "
+                                    "by a constant or by a tensor");
         return std::nullopt;
       }
-      std::optional<Token> divisor = parseInteger("expected a divisor constant");
+      if (rhs->expression) {
+        lhs = combine(ReductionKind::Ratio, std::move(*lhs), std::move(*rhs), position);
+        continue;
+      }
       BuiltinCallAst call;
       call.kind = ReductionKind::Div;
       call.operands.push_back(std::move(*lhs->expression));
       call.position = position;
-      if (divisor->spelling.getAsInteger(10, call.divisor))
-        call.divisor = 0;
+      call.divisor = rhs->literal;
       lhs = Operand{ExpressionAst(std::move(call)), 0, position};
     }
     return lhs;
@@ -1618,13 +1691,14 @@ private:
         return std::nullopt;
       return Operand{ExpressionAst(std::move(*instantiated)), 0, position};
     }
-    bool isNestedBuiltin =
-        isIdentifier("cfft") || isIdentifier("icfft") || isIdentifier("rfft") ||
-        isIdentifier("irfft") || isIdentifier("magnitude") || isIdentifier("add") ||
-        isIdentifier("sub") || isIdentifier("mult") || isIdentifier("abs") ||
-        isIdentifier("negate") || isIdentifier("offset") || isIdentifier("shift") ||
-        isIdentifier("div") || isIdentifier("gain") || isIdentifier("widen") ||
-        isIdentifier("narrow") || isIdentifier("quantize") || isIdentifier("dequantize");
+    bool isNestedBuiltin = isIdentifier("cfft") || isIdentifier("icfft") || isIdentifier("rfft") ||
+                           isIdentifier("irfft") || isIdentifier("magnitude") ||
+                           isIdentifier("add") || isIdentifier("sub") || isIdentifier("mult") ||
+                           isIdentifier("abs") || isIdentifier("negate") ||
+                           isIdentifier("offset") || isIdentifier("shift") || isIdentifier("div") ||
+                           isIdentifier("ratio") || isIdentifier("gain") || isIdentifier("widen") ||
+                           isIdentifier("narrow") || isIdentifier("quantize") ||
+                           isIdentifier("dequantize");
     if (isCall && (rootPolicy || isNestedBuiltin)) {
       std::optional<BuiltinCallAst> call = parseBuiltinCall(rootPolicy.value_or(SourceType::Q15));
       if (!call)
@@ -1930,7 +2004,7 @@ private:
         return false;
       call.rounding = rounding->spelling.str();
     }
-    if (current.kind == TokenKind::Comma) {
+    if (current.kind == TokenKind::Comma && next.spelling == "overflow") {
       if (!expect(TokenKind::Comma, "expected ',' before overflow policy") ||
           !expectIdentifier("overflow", "expected overflow policy") ||
           !expect(TokenKind::Equal, "expected '=' after overflow"))
@@ -2956,6 +3030,24 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       if (!checkBoundaryPolicies(call))
         return std::nullopt;
+      if (call.kind == ReductionKind::Ratio) {
+        // An unspelled policy is admitted only where the divisor's structure
+        // proves it positive; otherwise the author names what a non-positive
+        // divisor does, and no policy is ever chosen for them.
+        if (call.nonpositive.empty()) {
+          if (signFact(call.operands[1]) != SignFact::Positive) {
+            diagnostics.error(call.position,
+                              "the divisor is not provably positive (a magnitude or a square of "
+                              "one operand plus a positive constant, under saturation); spell "
+                              "ratio(x, y, nonpositive=trap) or nonpositive=saturate");
+            return std::nullopt;
+          }
+        } else if (call.nonpositive != "trap" && call.nonpositive != "saturate") {
+          diagnostics.error(call.position, llvm::Twine("unsupported nonpositive divisor policy '") +
+                                               call.nonpositive + "'");
+          return std::nullopt;
+        }
+      }
       return *lhs;
     };
     // The conversion is the one member whose result type is not its
@@ -4163,6 +4255,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
           const ExpressionAst &second = call.operands[1];
           Value rhs = second.isParameterReference() ? arguments.lookup(second.parameter)
                                                     : emitComposedCall(*second.call);
+          if (call.kind == ReductionKind::Ratio) {
+            auto policy = call.nonpositive == "saturate" ? ondsp::NonpositiveDivisor::Saturate
+                                                         : ondsp::NonpositiveDivisor::Trap;
+            return builder.create<ir::RatioOp>(
+                callLocation, inputType, input, rhs, elementwise, rounding, overflow,
+                ondsp::NonpositiveDivisorAttr::get(&context, policy));
+          }
           if (call.kind == ReductionKind::Add)
             return builder.create<ir::AddOp>(callLocation, inputType, input, rhs, elementwise,
                                              overflow);

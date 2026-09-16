@@ -2114,6 +2114,33 @@ def Ondrix_MultOp : Ondrix_ElementwiseOp<"mult"> {
                    Ondsp_OverflowModeAttr:$overflow);
 }
 
+def Ondrix_RatioOp : Ondrix_ElementwiseOp<"ratio"> {
+  let summary = "Elementwise uniform-Q quotient of two tensors with a declared non-positive divisor policy";
+  let description = [{
+    ```text
+    z[i] >= 1:  y[i] = narrow_iW(round(x[i] * 2^(W-1) / z[i]))
+    z[i] <= 0:  y[i] = per `nonpositive`
+    ```
+
+    The value-preserving quotient: the reading of `x` over the reading of
+    `z` is again `Q1.(W-1)` while the divisor is at least the dividend in
+    magnitude, and saturates otherwise, the reachable overflow `div` never
+    has. The exact scaled dividend needs `2W - 1` bits, and the operation is
+    `ondsp.round_quotient` at that pre-scale, where the tie is unreachable,
+    so the two nearest rules agree and floor and toward-zero still differ.
+    A divisor that is not positive is decided by the declared `nonpositive`
+    policy, `trap` or `saturate`, as that operation defines them. The
+    source language leaves the policy unspelled only for a divisor it has
+    proven positive from its structure, and then declares `trap`.
+  }];
+  let arguments = (ins AnyRankedTensor:$lhs,
+                   AnyRankedTensor:$rhs,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_RoundingModeAttr:$rounding,
+                   Ondsp_OverflowModeAttr:$overflow,
+                   Ondsp_NonpositiveDivisorAttr:$nonpositive);
+}
+
 class Ondrix_ExactUnaryOp<string mnemonic, string noun, string formula>
     : Ondrix_ElementwiseOp<mnemonic> {
   let summary = "Elementwise uniform-Q " # noun # " with one declared overflow";

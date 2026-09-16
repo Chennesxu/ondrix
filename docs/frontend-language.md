@@ -555,9 +555,28 @@ freely: `(x + y) * z - mult(y, z, overflow=wrap)`. `x / n` is
 with no pre-scale, so `divisor` lies in `[1, 2^(W-1) - 1]`. An odd divisor
 has no reachable tie, so both nearest modes agree there; an even one is where
 `rounding=nearest_even` and the default differ, and `x / 4` equals
-`shift(x, amount=-2)` under the same policy. A runtime divisor is a different
-operation that must declare its zero policy and does not exist yet; a
-rational scale such as `[3, 8]` is a gain, not a division.
+`shift(x, amount=-2)` under the same policy. A rational scale such as
+`[3, 8]` is a gain, not a division.
+
+`x / y` with a tensor divisor is `ratio(x, y, rounding=..., overflow=...,
+nonpositive=...)`, the value-preserving quotient of the two readings: the
+exact dividend scaled by `2^(W-1)` over the divisor, so a result whose
+divisor is smaller than the dividend in magnitude saturates, the reachable
+overflow `div` never has. At that pre-scale the rounding tie is unreachable
+(`x * 2^W = (2q + 1) * y` would need `2^W | y`), so the two nearest rules
+agree on a ratio and only floor and toward-zero differ from them. A divisor
+that is not positive has no quotient, and the language never chooses for
+the author what happens then: `nonpositive=trap` stops the program before
+any value is produced, `nonpositive=saturate` returns the dividend's signed
+rail (zero for a zero dividend), and the policy may be left unspelled only
+where the divisor's structure proves it positive — a magnitude (`abs`) or a
+square (`y * y`, one operand name twice) plus a positive constant, under
+saturation, through `widen`, a left `shift`, or a sum of such terms — in
+which case the operation declares `trap`, unreachable by that proof. So
+`x / (y * y + 1)` compiles and `x / y` is a diagnostic naming the two
+spellings; `x / offset(abs(y), bias=1, overflow=wrap)` is refused because
+the wrapped rail of `abs(-32768)` is negative. A constant dividend, `3 / x`,
+has no operation, since no constant is a tensor.
 
 An integer literal beside a tensor is the constant form of the operator, and
 it is read as a raw value in the declared format, exactly as `offset`'s

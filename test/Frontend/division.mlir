@@ -5,8 +5,7 @@
 // RUN: ondrix-compile %S/Inputs/q31_division.ox | FileCheck %s --check-prefix=WIDE
 // RUN: not ondrix-compile %S/Inputs/invalid_division_zero.ox 2>&1 | FileCheck %s --check-prefix=ZERO
 // RUN: not ondrix-compile %S/Inputs/invalid_division_range.ox 2>&1 | FileCheck %s --check-prefix=RANGE
-// RUN: not ondrix-compile %S/Inputs/invalid_division_negative.ox 2>&1 | FileCheck %s --check-prefix=CONSTANT
-// RUN: not ondrix-compile %S/Inputs/invalid_infix_division.ox 2>&1 | FileCheck %s --check-prefix=CONSTANT
+// RUN: not ondrix-compile %S/Inputs/invalid_division_negative.ox 2>&1 | FileCheck %s --check-prefix=RANGE
 
 // `/` is `div` by a positive integer constant under the language defaults,
 // at the precedence of `*` and left-associative with it; the call spelling
@@ -38,4 +37,3 @@
 
 // ZERO: error: div divisor must be a positive integer in [1, 32767]
 // RANGE: error: div divisor must be a positive integer in [1, 32767]
-// CONSTANT: error: '/' takes a positive integer constant divisor; a runtime divisor is a separate operation that must declare its zero policy

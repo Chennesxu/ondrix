@@ -1009,6 +1009,14 @@ LogicalResult MultOp::verify() {
       {getLhs().getType(), getRhs().getType(), getResult().getType()});
 }
 
+LogicalResult RatioOp::verify() {
+  if (failed(verifyDeclaredRounding(getOperation(), getRounding(), "ratio")))
+    return failure();
+  return verifyElementwiseDomainOnly(
+      getOperation(), getNumeric(),
+      {getLhs().getType(), getRhs().getType(), getResult().getType()});
+}
+
 LogicalResult AbsOp::verify() {
   return verifyElementwiseDomainOnly(getOperation(), getNumeric(),
                                      {getInput().getType(), getResult().getType()});
