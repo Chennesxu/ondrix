@@ -523,6 +523,7 @@ public:
     ondrix::ondsp::ScaleAttr unitScale;
     ondrix::ondsp::ScaleAttr outputScale;
     ondrix::ondsp::ScaleAttr productScale;
+    ondrix::ondsp::ScaleAttr energyScale;
     Value mu;
     if (fp) {
       mu = rewriter.create<arith::ConstantOp>(loc, op.getFpStepSizeAttr());
@@ -536,6 +537,7 @@ public:
                                              ondrix::ondsp::OverflowMode::Saturate, destination);
       };
       unitScale = saturating(width - 1, ondrix::ondsp::RoundingMode::NearestEven, storage);
+      energyScale = saturating(width - 1, ondrix::ondsp::RoundingMode::NearestEven, i32);
       outputScale =
           saturating(width - 1 - productShift, ondrix::ondsp::RoundingMode::NearestEven, storage);
       if (productShift > 0)
@@ -674,10 +676,40 @@ public:
       Value error = builder.create<ondrix::ondsp::SatCastOp>(loc, storage, difference, numeric);
       Value nextErrors = builder.create<tensor::InsertOp>(loc, error, errors, sample);
 
-      Value errorWide = builder.create<arith::ExtSIOp>(loc, i64, error);
-      Value stepProduct = builder.create<arith::MulIOp>(loc, mu, errorWide);
-      Value step =
-          builder.create<ondrix::ondsp::RoundShiftOp>(loc, storage, stepProduct, unitScale);
+      Value step;
+      if (op.getEpsilon()) {
+        // Normalized: the window energy exact in i64, requantized once to the
+        // storage position, plus epsilon, divides mu * e; epsilon >= 1 keeps
+        // the divisor positive, so the declared trap never fires.
+        auto energyLoop = builder.create<scf::ForOp>(
+            loc, zero, tapCount, one, ValueRange{zero64},
+            [&](OpBuilder &builder, Location loc, Value tap, ValueRange energyArgs) {
+              Value term = fetch(builder, loc, sample, tap);
+              Value termWide = builder.create<arith::ExtSIOp>(loc, i64, term);
+              Value square = builder.create<arith::MulIOp>(loc, termWide, termWide);
+              builder.create<scf::YieldOp>(
+                  loc, builder.create<arith::AddIOp>(loc, energyArgs.front(), square).getResult());
+            });
+        Value energy = builder.create<ondrix::ondsp::RoundShiftOp>(
+            loc, i32, energyLoop.getResult(0), energyScale);
+        Value epsilon = builder.create<arith::ConstantIntOp>(loc, op.getEpsilonAttr().getInt(), 32);
+        Value divisor = builder.create<arith::AddIOp>(loc, epsilon, energy);
+        Value muNarrow =
+            builder.create<arith::ConstantIntOp>(loc, op.getStepSizeAttr().getInt(), 32);
+        Value errorNarrow = builder.create<arith::ExtSIOp>(loc, i32, error);
+        Value dividend = builder.create<arith::MulIOp>(loc, muNarrow, errorNarrow);
+        MLIRContext *context = builder.getContext();
+        step = builder.create<ondrix::ondsp::RoundQuotientOp>(
+            loc, storage, dividend, divisor, builder.getI64IntegerAttr(0),
+            ondrix::ondsp::RoundingModeAttr::get(context, ondrix::ondsp::RoundingMode::NearestEven),
+            ondrix::ondsp::OverflowModeAttr::get(context, ondrix::ondsp::OverflowMode::Saturate),
+            ondrix::ondsp::NonpositiveDivisorAttr::get(context,
+                                                       ondrix::ondsp::NonpositiveDivisor::Trap));
+      } else {
+        Value errorWide = builder.create<arith::ExtSIOp>(loc, i64, error);
+        Value stepProduct = builder.create<arith::MulIOp>(loc, mu, errorWide);
+        step = builder.create<ondrix::ondsp::RoundShiftOp>(loc, storage, stepProduct, unitScale);
+      }
       Value stepWide = builder.create<arith::ExtSIOp>(loc, i64, step);
 
       auto updateLoop = builder.create<scf::ForOp>(

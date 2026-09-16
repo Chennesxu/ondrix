@@ -79,3 +79,27 @@ func.func @lms8_short_q15(%x: tensor<4xi16>, %d: tensor<4xi16>, %w: tensor<8xi16
   } : (tensor<4xi16>, tensor<4xi16>, tensor<8xi16>) -> (tensor<4xi16>, tensor<8xi16>)
   return %e, %wf : tensor<4xi16>, tensor<8xi16>
 }
+
+// -----
+
+// The normalized step: the window energy is one exact i64 loop of squares,
+// requantized once to the storage position, and mu * e divides by epsilon
+// plus that energy through round_quotient; epsilon >= 1 makes the declared
+// trap unreachable.
+// CHECK-LABEL: func.func @nlms4_q15
+// CHECK: scf.for
+// CHECK: %[[TERM:.*]] = arith.extsi %{{.*}} : i16 to i64
+// CHECK: arith.muli %[[TERM]], %[[TERM]] : i64
+// CHECK: ondsp.round_shift {{.*}}post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i32
+// CHECK: %[[DIVISOR:.*]] = arith.addi %c16_i32, %{{.*}} : i32
+// CHECK: ondsp.round_quotient %{{.*}}, %[[DIVISOR]] {nonpositive = #ondsp.nonpositive_divisor<trap>, overflow = #ondsp.overflow<saturate>, pre_shift_left = 0 : i64, rounding = #ondsp.rounding<nearest_even>} : (i32, i32) -> i16
+func.func @nlms4_q15(%x: tensor<16xi16>, %d: tensor<16xi16>, %w: tensor<4xi16>)
+    -> (tensor<16xi16>, tensor<4xi16>) {
+  %e, %wf = ondrix.lms %x, %d, %w {
+    step_size = 8192 : i64,
+    epsilon = 16 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<16xi16>, tensor<16xi16>, tensor<4xi16>) -> (tensor<16xi16>, tensor<4xi16>)
+  return %e, %wf : tensor<16xi16>, tensor<4xi16>
+}

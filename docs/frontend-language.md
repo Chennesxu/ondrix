@@ -327,6 +327,17 @@ admits `nearest_ties_positive`, and `lms` does not. Omission keeps the
 `butterfly` is Q15-only; `log2` and `exp2` take `q31`, and `phase` takes
 `complex_q15` or `complex_q31` operands and either turn width (see below).
 
+`nlms(x, d, w, step_size=mu, epsilon=eps)` is the normalized recursion at
+`q15`: per sample the tap window's exact energy `sum x[n-k]^2` is requantized
+once to Q15 under nearest-even, `epsilon` (a raw Q1.15 value in `[1, 32767]`)
+is added, and the step is the nearest-even rounded quotient `mu * e / p`
+instead of the rounded product `mu * e`. Everything else, the output, the
+error, the per-tap updates and the quantized state, is the `lms` recursion,
+so a sample takes `3 + K` boundaries. The divisor is positive by
+construction, which is what admits the division without a spelled policy;
+`lms` refuses `epsilon=` and `nlms` requires it, and the normalized profile
+has no `q31` or `f32` form yet.
+
 As a bounded expression-composition slice, the unary FFT-family builtins may
 be nested when every intermediate type and extent satisfies the next
 builtin's contract. Each nested call emits a separate Ondrix operation, so the

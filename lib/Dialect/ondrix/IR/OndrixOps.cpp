@@ -1801,6 +1801,8 @@ LogicalResult LmsOp::verify() {
       return emitOpError("floating-point lms step size must not be negative");
     if (getProductRounding())
       return emitOpError("floating-point lms has no product boundary to round");
+    if (getEpsilon())
+      return emitOpError("floating-point lms has no normalized profile yet");
   } else {
     storageWidth = getUniformQStorageWidth(getNumeric());
     if (!storageWidth)
@@ -1818,6 +1820,13 @@ LogicalResult LmsOp::verify() {
         getStepSizeAttr().getInt() > stepCeiling)
       return emitOpError() << "lms step size must be a raw signed Q1." << (*storageWidth - 1)
                            << " value in [0, " << stepCeiling << "]";
+    if (getEpsilon()) {
+      if (*storageWidth != 16)
+        return emitOpError("the normalized lms profile is Q15 for now");
+      int64_t epsilon = getEpsilonAttr().getInt();
+      if (epsilon < 1 || epsilon > 32767)
+        return emitOpError("lms epsilon must be a raw Q1.15 value in [1, 32767]");
+    }
   }
   RankedTensorType inputType = getInput().getType();
   RankedTensorType desiredType = getDesired().getType();

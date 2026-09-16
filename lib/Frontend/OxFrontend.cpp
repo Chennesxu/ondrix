@@ -424,6 +424,8 @@ struct BuiltinCallAst {
   int64_t divisor = 0;
   std::string nonpositive;
   std::string product;
+  bool normalized = false;
+  int64_t epsilon = 0;
   SourceType target = SourceType::Q15;
   bool literal = false;
   SourcePosition position;
@@ -766,23 +768,24 @@ public:
         !isIdentifier("phase") && !isIdentifier("dct") && !isIdentifier("moving_average") &&
         !isIdentifier("gain") && !isIdentifier("rms") && !isIdentifier("sine") &&
         !isIdentifier("cosine") && !isIdentifier("matmul") && !isIdentifier("lms") &&
-        !isIdentifier("lowpass") && !isIdentifier("cic_decimate") && !isIdentifier("add") &&
-        !isIdentifier("sub") && !isIdentifier("mult") && !isIdentifier("abs") &&
-        !isIdentifier("negate") && !isIdentifier("offset") && !isIdentifier("shift") &&
-        !isIdentifier("div") && !isIdentifier("ratio") && !isIdentifier("widen") &&
-        !isIdentifier("narrow") && !isIdentifier("quantize") && !isIdentifier("dequantize") &&
-        !isIdentifier("log2") && !isIdentifier("exp2")) {
-      diagnostics.error(current.position,
-                        "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
-                        "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
-                        "sos_tdf2(...), goertzel(...), "
-                        "convolution(...), correlation(...), butterfly(...), cfft(...), or "
-                        "icfft(...), rfft(...), irfft(...), magnitude(...), phase(...), dct(...), "
-                        "moving_average(...), gain(...), rms(...), sine(...), cosine(...), "
-                        "matmul(...), lms(...), cic_decimate(...), a lowpass/hamming/hann/"
-                        "blackman/kaiser design, or an "
-                        "elementwise add/sub/mult/abs/negate/offset/shift/div/ratio builtin "
-                        "expression, or a widen/narrow/quantize/dequantize conversion");
+        !isIdentifier("nlms") && !isIdentifier("lowpass") && !isIdentifier("cic_decimate") &&
+        !isIdentifier("add") && !isIdentifier("sub") && !isIdentifier("mult") &&
+        !isIdentifier("abs") && !isIdentifier("negate") && !isIdentifier("offset") &&
+        !isIdentifier("shift") && !isIdentifier("div") && !isIdentifier("ratio") &&
+        !isIdentifier("widen") && !isIdentifier("narrow") && !isIdentifier("quantize") &&
+        !isIdentifier("dequantize") && !isIdentifier("log2") && !isIdentifier("exp2")) {
+      diagnostics.error(
+          current.position,
+          "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
+          "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
+          "sos_tdf2(...), goertzel(...), "
+          "convolution(...), correlation(...), butterfly(...), cfft(...), or "
+          "icfft(...), rfft(...), irfft(...), magnitude(...), phase(...), dct(...), "
+          "moving_average(...), gain(...), rms(...), sine(...), cosine(...), "
+          "matmul(...), lms(...), nlms(...), cic_decimate(...), a lowpass/hamming/hann/"
+          "blackman/kaiser design, or an "
+          "elementwise add/sub/mult/abs/negate/offset/shift/div/ratio builtin "
+          "expression, or a widen/narrow/quantize/dequantize conversion");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -845,7 +848,10 @@ public:
       call.kind = ReductionKind::Matmul;
     else if (isIdentifier("lms"))
       call.kind = ReductionKind::Lms;
-    else if (isIdentifier("cic_decimate"))
+    else if (isIdentifier("nlms")) {
+      call.kind = ReductionKind::Lms;
+      call.normalized = true;
+    } else if (isIdentifier("cic_decimate"))
       call.kind = ReductionKind::CicDecimate;
     else if (isIdentifier("add"))
       call.kind = ReductionKind::Add;
@@ -1186,6 +1192,17 @@ public:
         if (!stepSize)
           return std::nullopt;
         call.stepSize = *stepSize;
+        // The normalized recursion divides the step by the window energy plus
+        // epsilon; the constant is the profile's, so lms refuses it and nlms
+        // requires it.
+        if (call.normalized) {
+          if (!parseNamedInteger("epsilon", call.epsilon))
+            return std::nullopt;
+        } else if (current.kind == TokenKind::Comma && next.spelling == "epsilon") {
+          diagnostics.error(next.position,
+                            "epsilon is the normalized profile's constant; spell nlms(...)");
+          return std::nullopt;
+        }
         // The Q31 tap sum carries a per-product boundary; its rounding is
         // declared here, beside the step size, and refused where the sum
         // already fits. Bindings must expose every choice their contract
@@ -2719,6 +2736,15 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     if (*adaptedExtent != *weightExtent) {
       diagnostics.error(ast.result.position,
                         "lms adapted weights must have the initial weight extent");
+      return std::nullopt;
+    }
+    if (ast.result.normalized && (isFloat || isQ31)) {
+      diagnostics.error(ast.result.position, "nlms is the Q15 profile for now");
+      return std::nullopt;
+    }
+    if (ast.result.normalized && (ast.result.epsilon < 1 || ast.result.epsilon > 32767)) {
+      diagnostics.error(ast.result.position,
+                        "nlms epsilon must be a raw Q1.15 value in [1, 32767]");
       return std::nullopt;
     }
     if (isFloat) {
@@ -4669,7 +4695,9 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         expressionLocation, resultTypes[0], resultTypes[1], lhs, rhs, weights,
         kernel.fpContract ? IntegerAttr() : builder.getI64IntegerAttr(kernel.ast.result.stepSize),
         kernel.fpContract ? builder.getF32FloatAttr(kernel.ast.result.fpConstant) : FloatAttr(),
-        productRounding, numeric, rounding);
+        productRounding, numeric, rounding,
+        kernel.ast.result.normalized ? builder.getI64IntegerAttr(kernel.ast.result.epsilon)
+                                     : IntegerAttr());
     builder.create<func::ReturnOp>(expressionLocation,
                                    ValueRange{lms.getError(), lms.getAdapted()});
     module->push_back(function);

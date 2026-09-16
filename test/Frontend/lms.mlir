@@ -6,6 +6,10 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_lms_desired.ox 2>&1 | FileCheck %s --check-prefix=DESIRED
 // RUN: not ondrix-compile %S/Inputs/invalid_lms_taps.ox 2>&1 | FileCheck %s --check-prefix=TAPS
 // RUN: ondrix-compile %S/Inputs/f32_lms.ox | FileCheck %s --check-prefix=FP
+// RUN: ondrix-compile %S/Inputs/q15_nlms.ox | FileCheck %s --check-prefix=NLMS
+// RUN: not ondrix-compile %S/Inputs/invalid_nlms_q31.ox 2>&1 | FileCheck %s --check-prefix=NLMSQ31
+// RUN: not ondrix-compile %S/Inputs/invalid_nlms_epsilon.ox 2>&1 | FileCheck %s --check-prefix=EPSILON
+// RUN: not ondrix-compile %S/Inputs/invalid_lms_epsilon.ox 2>&1 | FileCheck %s --check-prefix=LMSEPSILON
 
 // CHECK-LABEL: func.func @q15_lms(
 // CHECK-SAME: tensor<64xi16>
@@ -41,3 +45,13 @@
 // Q31FLOOR-SAME: product_rounding = #ondsp.rounding<toward_negative>
 
 // TAPBOUND: lms at this width and tap count has no product boundary to round
+
+// nlms is lms with epsilon: the same operation, the normalized step.
+// NLMS-LABEL: func.func @q15_nlms(
+// NLMS: ondrix.lms
+// NLMS-SAME: epsilon = 16
+// NLMS-SAME: step_size = 8192
+
+// NLMSQ31: error: nlms is the Q15 profile for now
+// EPSILON: error: nlms epsilon must be a raw Q1.15 value in [1, 32767]
+// LMSEPSILON: error: epsilon is the normalized profile's constant; spell nlms(...)

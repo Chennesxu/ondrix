@@ -72,3 +72,20 @@ func.func @lms_k1_q31(%x: tensor<16xi32>, %d: tensor<16xi32>, %w: tensor<1xi32>)
   } : (tensor<16xi32>, tensor<16xi32>, tensor<1xi32>) -> (tensor<16xi32>, tensor<1xi32>)
   return %e, %a : tensor<16xi32>, tensor<1xi32>
 }
+
+// The normalized profile: epsilon makes the step a rounded quotient by the
+// window energy; the recursion is otherwise the Q15 one.
+// CHECK-LABEL: func.func @nlms8_q15
+// CHECK: ondrix.lms
+// CHECK-SAME: epsilon = 64
+// CHECK-SAME: step_size = 16384
+func.func @nlms8_q15(%x: tensor<256xi16>, %d: tensor<256xi16>, %w: tensor<8xi16>)
+    -> (tensor<256xi16>, tensor<8xi16>) {
+  %e, %wf = ondrix.lms %x, %d, %w {
+    step_size = 16384 : i64,
+    epsilon = 64 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<256xi16>, tensor<256xi16>, tensor<8xi16>) -> (tensor<256xi16>, tensor<8xi16>)
+  return %e, %wf : tensor<256xi16>, tensor<8xi16>
+}

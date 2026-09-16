@@ -166,3 +166,45 @@ func.func @q31_lms_step_size_out_of_range(%x: tensor<8xi32>, %d: tensor<8xi32>, 
   } : (tensor<8xi32>, tensor<8xi32>, tensor<4xi32>) -> (tensor<8xi32>, tensor<4xi32>)
   return %e, %a : tensor<8xi32>, tensor<4xi32>
 }
+
+// -----
+
+func.func @nlms_zero_epsilon(%x: tensor<8xi16>, %d: tensor<8xi16>, %w: tensor<4xi16>)
+    -> (tensor<8xi16>, tensor<4xi16>) {
+  // expected-error @below {{lms epsilon must be a raw Q1.15 value in [1, 32767]}}
+  %e, %wf = ondrix.lms %x, %d, %w {
+    step_size = 4096 : i64,
+    epsilon = 0 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi16>, tensor<8xi16>, tensor<4xi16>) -> (tensor<8xi16>, tensor<4xi16>)
+  return %e, %wf : tensor<8xi16>, tensor<4xi16>
+}
+
+// -----
+
+func.func @nlms_q31(%x: tensor<8xi32>, %d: tensor<8xi32>, %w: tensor<4xi32>)
+    -> (tensor<8xi32>, tensor<4xi32>) {
+  // expected-error @below {{the normalized lms profile is Q15 for now}}
+  %e, %wf = ondrix.lms %x, %d, %w {
+    step_size = 4096 : i64,
+    epsilon = 16 : i64,
+    product_rounding = #ondsp.rounding<nearest_even>,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<8xi32>, tensor<8xi32>, tensor<4xi32>) -> (tensor<8xi32>, tensor<4xi32>)
+  return %e, %wf : tensor<8xi32>, tensor<4xi32>
+}
+
+// -----
+
+func.func @nlms_f32(%x: tensor<8xf32>, %d: tensor<8xf32>, %w: tensor<4xf32>)
+    -> (tensor<8xf32>, tensor<4xf32>) {
+  // expected-error @below {{floating-point lms has no normalized profile yet}}
+  %e, %wf = ondrix.lms %x, %d, %w {
+    fp_step_size = 0.5 : f32,
+    epsilon = 16 : i64,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<8xf32>, tensor<8xf32>, tensor<4xf32>) -> (tensor<8xf32>, tensor<4xf32>)
+  return %e, %wf : tensor<8xf32>, tensor<4xf32>
+}

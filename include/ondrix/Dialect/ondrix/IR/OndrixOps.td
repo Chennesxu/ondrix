@@ -1721,6 +1721,22 @@ def Ondrix_LmsOp : Ondrix_Op<"lms", [Pure]> {
     reduction and the weight updates select fused events and spend F. Unlike
     interpolation's inserted zeros, the zero prehistory samples `x[m < 0]`
     are evaluated rather than skipped, matching the fixed profile's shape.
+
+    With `epsilon` the recursion is the normalized LMS: the step divides by
+    the energy of the tap window instead of scaling by a constant alone.
+
+    ```text
+    energy = sum_{k<K} x[n-k]^2                         exact i64
+    p      = epsilon + sat_i32(round_half_even(energy / 2^15))
+    step   = sat_i16(round_half_even(mu * e[n] / p))    ondsp.round_quotient
+    ```
+
+    `epsilon` is a raw Q1.15 value in `[1, 32767]`, so `p >= 1` by
+    construction and the quotient's non-positive policy, declared `trap`, is
+    unreachable. The energy requantization is one more boundary per sample
+    and the step is a rounded quotient in place of a rounded product, so a
+    sample takes `3 + K` boundaries; everything else is the Q15 recursion
+    above, quantized state included. The normalized profile is Q15 only.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    AnyRankedTensor:$desired,
@@ -1729,7 +1745,8 @@ def Ondrix_LmsOp : Ondrix_Op<"lms", [Pure]> {
                    OptionalAttr<F32Attr>:$fp_step_size,
                    OptionalAttr<Ondsp_RoundingModeAttr>:$product_rounding,
                    Ondsp_NumericAttr:$numeric,
-                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding,
+                   OptionalAttr<I64Attr>:$epsilon);
   let results = (outs AnyRankedTensor:$error, AnyRankedTensor:$adapted);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
