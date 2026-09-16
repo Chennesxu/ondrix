@@ -916,8 +916,10 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
     // exact N-sum already fits the accumulator, and the shift the verifier
     // pairs with product_rounding at Q31.
     unsigned productShift = ondrix::ir::getReductionProductShift(storageWidth, extent);
+    bool rawHigh = op.getProduct() && ondrix::ondsp::isRawHighProduct(*op.getProduct());
     auto product =
-        productShift > 0
+        rawHigh ? *op.getProduct()
+        : productShift > 0
             ? ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full,
                                               productShift, *op.getProductRounding())
             : ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
@@ -928,10 +930,12 @@ struct DctOpInterface : public BufferizableOpInterface::ExternalModel<DctOpInter
     // Q31: the product shift caps the N-term sum at 2^62, so the accumulator is
     // exact-modulo and takes the wrap form matmul's Q31 route takes; wrap alone
     // is what authorizes the reassociation the schedule stage needs.
+    // Raw-high Q31: at most 64 frac-30 floors sum below 2^36, the Q15 bound
+    // again, so the exact-modulo wrap class takes it in the shared i40 state.
     ondrix::ondsp::AccType accumulatorType =
-        storageWidth == 16
-            ? getSaturatingAccumulator(context, /*width=*/40)
-            : getExactWrapAccumulator(context, /*width=*/64, /*frac=*/62 - productShift);
+        storageWidth == 16 ? getSaturatingAccumulator(context, /*width=*/40)
+        : rawHigh          ? getExactWrapAccumulator(context, /*width=*/40)
+                  : getExactWrapAccumulator(context, /*width=*/64, /*frac=*/62 - productShift);
     // Identity materialization of the raw frac-30 accumulator. This is a
     // WIDENING export (i40 -> i64 at the same frac), the exact
     // sign-extension leg of `acc_export`, and this is its first in-tree

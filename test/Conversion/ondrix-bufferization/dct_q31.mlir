@@ -62,3 +62,19 @@ func.func @dct16_q31(%input: tensor<16xi32>) -> tensor<16xi32> {
 // LANES: ondsp.mac {{.*}} product = #ondsp.product<full, shift = 3, rounding = nearest_even>} : (!ondsp.acc<storage = i64, frac = 59, signed, update_overflow = wrap, lanes = 8>
 // LANES: ondsp.acc_export {{.*}} -> vector<8xi32>
 // LANES-NOT: ondsp.reduce_mac
+
+// The raw-high profile: the row reduce_mac carries the high_raw product into
+// the shared i40/frac30 wrapping state (at most 64 floors, the 2^36 bound),
+// and the same acc_export reads it down by m onto the declared frac.
+// CHECK-LABEL: func.func @dct8_q31_raw_high(
+// CHECK: ondsp.acc_zero : <storage = i40, frac = 30, signed, update_overflow = wrap>
+// CHECK: ondsp.reduce_mac {{.*}}product = #ondsp.product<high_raw>
+// CHECK: ondsp.acc_export {{.*}}dst = #ondsp.fixed<signed, storage = i32, frac = 27>{{.*}} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>) -> i32
+func.func @dct8_q31_raw_high(%input: tensor<8xi32>) -> tensor<8xi32> {
+  %result = ondrix.dct %input {
+    input_numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    output_numeric = #ondsp.fixed<signed, storage = i32, frac = 27>,
+    product = #ondsp.product<high_raw>
+  } : (tensor<8xi32>) -> tensor<8xi32>
+  return %result : tensor<8xi32>
+}

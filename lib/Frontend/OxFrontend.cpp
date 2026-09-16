@@ -1281,16 +1281,20 @@ public:
           if (!name)
             return std::nullopt;
           bool isExport = name->spelling == "rounding";
-          if (!isExport && name->spelling != "product_rounding") {
-            diagnostics.error(name->position, "dct accepts rounding and product_rounding");
+          bool isProduct = name->spelling == "product";
+          if (!isExport && !isProduct && name->spelling != "product_rounding") {
+            diagnostics.error(name->position, "dct accepts product, rounding and product_rounding");
             return std::nullopt;
           }
-          if (!expect(TokenKind::Equal, "expected '=' after a rounding policy name"))
+          if (!expect(TokenKind::Equal, "expected '=' after a dct policy name"))
             return std::nullopt;
-          auto rounding = parseIdentifier("expected rounding mode");
-          if (!rounding)
+          auto value = parseIdentifier(isProduct ? "expected product selection 'full' or 'raw_high'"
+                                                 : "expected rounding mode");
+          if (!value)
             return std::nullopt;
-          (isExport ? call.rounding : call.inputRounding) = rounding->spelling.str();
+          (isProduct  ? call.product
+           : isExport ? call.rounding
+                      : call.inputRounding) = value->spelling.str();
         }
       }
       if (call.kind == ReductionKind::Rms && policyType == SourceType::F32) {
@@ -3928,8 +3932,26 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     std::optional<ondsp::RoundingMode> productRounding;
     // dct rounds a PRODUCT where rms rounds an INPUT, so the shared source
     // slot resolves to different checked fields and different admitted modes.
-    bool hasProductShift =
-        isDct && !isFloat && ir::getReductionProductShift(isQ31 ? 32 : 16, *inputExtent) > 0;
+    bool rawHigh = isDct && ast.result.product == "raw_high";
+    if (isDct && !ast.result.product.empty() && ast.result.product != "full" && !rawHigh) {
+      diagnostics.error(ast.result.position, llvm::Twine("unsupported product selection '") +
+                                                 ast.result.product + "'; use full or raw_high");
+      return std::nullopt;
+    }
+    if (rawHigh && !isQ31) {
+      diagnostics.error(ast.result.position,
+                        "product=raw_high is the Q31 dct profile: each term is the raw high half "
+                        "of the product, accumulated at frac 30");
+      return std::nullopt;
+    }
+    if (rawHigh && !ast.result.inputRounding.empty()) {
+      diagnostics.error(ast.result.position,
+                        "a raw-high dct has no product rounding to declare: the high half is a "
+                        "floor");
+      return std::nullopt;
+    }
+    bool hasProductShift = isDct && !isFloat && !rawHigh &&
+                           ir::getReductionProductShift(isQ31 ? 32 : 16, *inputExtent) > 0;
     bool hasPreShift = ast.result.kind == ReductionKind::Rms && !isFloat &&
                        ir::getRmsInputPreShift(isQ31 ? 32 : 16, *inputExtent) > 0;
     if (!ast.result.inputRounding.empty()) {
@@ -4512,7 +4534,8 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       if (kernel.fpContract) {
         auto fp = ondsp::FpAttr::get(&context, elementType, *kernel.fpContract);
         result = builder.create<ir::DctOp>(expressionLocation, outputType, lhs, fp, fp,
-                                           ondsp::RoundingModeAttr(), ondsp::RoundingModeAttr());
+                                           ondsp::RoundingModeAttr(), ondsp::RoundingModeAttr(),
+                                           ondsp::ProductAttr());
       } else {
         unsigned storageWidth = cast<IntegerType>(elementType).getWidth();
         unsigned stageCount = llvm::Log2_64(outputType.getDimSize(0));
@@ -4525,13 +4548,17 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                             : ondsp::RoundingModeAttr();
         // Required exactly where the row sum would leave i64, which is every
         // Q31 extent and no Q15 one.
+        bool rawHigh = kernel.ast.result.product == "raw_high";
         auto product =
-            ir::getReductionProductShift(storageWidth, outputType.getDimSize(0)) > 0
+            !rawHigh && ir::getReductionProductShift(storageWidth, outputType.getDimSize(0)) > 0
                 ? ondsp::RoundingModeAttr::get(
                       &context, kernel.productRounding.value_or(ondsp::RoundingMode::NearestEven))
                 : ondsp::RoundingModeAttr();
+        auto selection = rawHigh
+                             ? ondsp::ProductAttr::get(&context, ondsp::ProductSelection::HighRaw)
+                             : ondsp::ProductAttr();
         result = builder.create<ir::DctOp>(expressionLocation, outputType, lhs, numeric,
-                                           outputNumeric, product, declared);
+                                           outputNumeric, product, declared, selection);
       }
     } else if (kernel.ast.result.kind == ReductionKind::MovingAverage) {
       result = builder.create<ir::MovingAverageOp>(

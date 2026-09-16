@@ -1390,6 +1390,14 @@ LogicalResult DctOp::verify() {
     if (getProductRounding() && !isMatmulRounding(*getProductRounding()))
       return emitOpError("DCT product_rounding must be nearest_even, toward_negative, or "
                          "nearest_ties_positive");
+    if (getProduct()) {
+      if (*storageWidth != 32 || !ondrix::ondsp::isRawHighProduct(*getProduct()))
+        return emitOpError("DCT product admits only #ondsp.product<high_raw>, at Q31; the full "
+                           "product is the default");
+      if (getProductRounding())
+        return emitOpError("a raw-high DCT has no product rounding to declare: the high half "
+                           "is a floor");
+    }
   }
   RankedTensorType inputType = getInput().getType();
   RankedTensorType resultType = getResult().getType();
@@ -1415,6 +1423,8 @@ LogicalResult DctOp::verify() {
     return failure();
   // The product boundary exists exactly when an exact N-sum of the row would
   // not fit i64. Q15 never needs one; Q31 needs one at every admitted extent.
+  if (getProduct())
+    return success();
   unsigned shift = ondrix::ir::getReductionProductShift(*storageWidth, extent);
   if (shift > 0 && !getProductRounding())
     return emitOpError() << "a row sum of " << extent << " Q" << (*storageWidth - 1)

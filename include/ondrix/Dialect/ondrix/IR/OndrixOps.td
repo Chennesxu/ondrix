@@ -1036,12 +1036,22 @@ def Ondrix_DctOp : Ondrix_Op<"dct", [Pure]> {
     `c[k][n]` is the binary32 narrowing of a binary64 cosine, which makes
     the build's libm part of the declared constant rather than a detail:
     the coefficient bits are pinned, not derived.
+
+    A Q31 DCT may instead declare `product = #ondsp.product<high_raw>`, the
+    selection the target's Q31 multiply-accumulate makes: each term is the
+    upper 32 bits of the exact product, a floor at frac 30, the N-term row
+    sum of at most 64 such terms is exact in the shared i40 state, and the
+    export shifts by `m` from frac 30 to the same `30 - m` reading the
+    requantized profile lands on, under the declared `rounding`. The floor
+    is the product boundary, so `product_rounding` is refused beside it; the
+    two are different contracts with one output reading.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_NumericAttr:$input_numeric,
                    Ondsp_NumericAttr:$output_numeric,
                    OptionalAttr<Ondsp_RoundingModeAttr>:$product_rounding,
-                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding,
+                   OptionalAttr<Ondsp_ProductAttr>:$product);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

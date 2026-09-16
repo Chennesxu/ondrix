@@ -54,3 +54,19 @@ func.func @dct8_q15(%input: tensor<8xi16>) -> tensor<8xi16> {
   } : (tensor<8xi16>) -> tensor<8xi16>
   return %result : tensor<8xi16>
 }
+
+// The raw-high profile floors each product by the storage width (a
+// toward-negative shift by 32 in the i64 carrier) and the export shifts the
+// frac-30 row sum by m = 3 onto the same frac-27 reading.
+// CHECK-LABEL: func.func @dct8_q31_raw_high
+// CHECK: ondsp.round_shift {{.*}}post_shift_right = 32, rounding = toward_negative, overflow = saturate, saturate_to = i64
+// CHECK: ondsp.round_shift {{.*}}post_shift_right = 3, rounding = nearest_even, overflow = saturate, saturate_to = i32
+// CHECK-NOT: ondrix.dct
+func.func @dct8_q31_raw_high(%input: tensor<8xi32>) -> tensor<8xi32> {
+  %result = ondrix.dct %input {
+    input_numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    output_numeric = #ondsp.fixed<signed, storage = i32, frac = 27>,
+    product = #ondsp.product<high_raw>
+  } : (tensor<8xi32>) -> tensor<8xi32>
+  return %result : tensor<8xi32>
+}

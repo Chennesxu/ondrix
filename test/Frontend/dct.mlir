@@ -33,6 +33,9 @@
 
 // RUN: ondrix-compile %S/Inputs/q31_dct8.ox | FileCheck %s --check-prefix=Q31
 // RUN: ondrix-compile %S/Inputs/q31_dct8_floor.ox | FileCheck %s --check-prefix=Q31FLOOR
+// RUN: ondrix-compile %S/Inputs/q31_dct8_raw_high.ox | FileCheck %s --check-prefix=RAW
+// RUN: not ondrix-compile %S/Inputs/invalid_dct_raw_high_q15.ox 2>&1 | FileCheck %s --check-prefix=RAWQ15
+// RUN: not ondrix-compile %S/Inputs/invalid_dct_raw_high_rounding.ox 2>&1 | FileCheck %s --check-prefix=RAWROUNDING
 
 // The Q31 reading is frac = 30 - log2(N) = 27, and the row sum of 8 Q31
 // products needs the derived per-product boundary the Q15 form refuses.
@@ -46,3 +49,13 @@
 // Q31FLOOR: ondrix.dct
 // Q31FLOOR-SAME: product_rounding = #ondsp.rounding<toward_negative>
 // Q31FLOOR-SAME: rounding = #ondsp.rounding<toward_negative>
+
+// product=raw_high at q31: one floor per term, no product_rounding, the same
+// frac-27 reading reached by an export shift of m.
+// RAW-LABEL: func.func @q31_dct8_raw_high(
+// RAW: ondrix.dct
+// RAW-SAME: output_numeric = #ondsp.fixed<signed, storage = i32, frac = 27>
+// RAW-SAME: product = #ondsp.product<high_raw>
+// RAW-NOT: product_rounding
+// RAWQ15: error: product=raw_high is the Q31 dct profile
+// RAWROUNDING: error: a raw-high dct has no product rounding to declare

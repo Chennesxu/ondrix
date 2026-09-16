@@ -1664,6 +1664,11 @@ public:
     IntegerType i64 = rewriter.getIntegerType(64);
     unsigned stageCount = llvm::Log2_64(extent);
     unsigned productShift = ondrix::ir::getReductionProductShift(storageWidth, extent);
+    // The raw high half floors each product by the storage width; the same
+    // export formula then shifts the frac-30 sum by m onto the reading.
+    bool rawHigh = op.getProduct() && ondrix::ondsp::isRawHighProduct(*op.getProduct());
+    if (rawHigh)
+      productShift = storageWidth;
     // The declared boundary rounding rides the same single round_shift;
     // absence reads as the nearest_even default.
     ondrix::ondsp::RoundingMode boundaryRounding =
@@ -1676,9 +1681,10 @@ public:
         ondrix::ondsp::OverflowMode::Saturate, storage);
     ondrix::ondsp::ScaleAttr productScale;
     if (productShift > 0)
-      productScale = ondrix::ondsp::ScaleAttr::get(rewriter.getContext(), /*preShiftLeft=*/0,
-                                                   productShift, *op.getProductRounding(),
-                                                   ondrix::ondsp::OverflowMode::Saturate, i64);
+      productScale = ondrix::ondsp::ScaleAttr::get(
+          rewriter.getContext(), /*preShiftLeft=*/0, productShift,
+          rawHigh ? ondrix::ondsp::RoundingMode::TowardNegative : *op.getProductRounding(),
+          ondrix::ondsp::OverflowMode::Saturate, i64);
 
     SmallVector<Value> inputs;
     inputs.reserve(extent);

@@ -101,7 +101,7 @@ two profiles are different contracts, not two implementations of one: sixteen
 products of small values sum to `-16` floors under `raw_high` where the full
 product rounds to zero. `product=full` (the default) keeps the exact i64/frac62
 accumulator; the selection is refused at Q15 and, so far, on every builtin
-but `dot`, `fir` and `matmul`.
+but `dot`, `fir`, `matmul` and `dct`.
 
 `matmul(a, b, product=raw_high)` at `q31` is the same selection per term:
 one floor at frac 30 per product, the K-sum of at most 64 such terms exact
@@ -109,6 +109,11 @@ in the shared 40-bit state, and the same doubling readout. It is a
 different contract from the requantized profile below, which rounds each
 term by the derived shift under `product_rounding`; the two cannot be
 combined, so `product_rounding=` is refused beside `product=raw_high`.
+`dct(x, product=raw_high)` at `q31` floors each coefficient product the
+same way and reaches the same `frac = 30 - m` reading the requantized
+profile lands on, through an export shift of `m` under its `rounding=`, so
+here the selection changes the per-term boundary and nothing about the
+result's reading.
 
 ```python
 def q31_dot_raw_high(lhs: buffer[q31], rhs: buffer[q31]) -> q31:
