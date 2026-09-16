@@ -33,6 +33,45 @@ static int16_t reference(const int16_t *lhs, const int16_t *rhs, int64_t count,
                                    policy);
 }
 
+// The descriptor entries the tensor-result plain entries are held against.
+typedef struct {
+  int16_t *allocated, *aligned;
+  int64_t offset, sizes[1], strides[1];
+} MemRefI16;
+typedef struct {
+  int16_t *allocated, *aligned;
+  int64_t offset, sizes[2], strides[2];
+} MemRefI16x2;
+extern void _mlir_ciface_q15_multi_use_binding(MemRefI16 *, MemRefI16 *, MemRefI16 *);
+extern void _mlir_ciface_q15_matmul_floor(MemRefI16x2 *, MemRefI16x2 *, MemRefI16x2 *);
+
+static int16_t saturate16(int32_t value) {
+  return (int16_t)(value > 32767 ? 32767 : (value < -32768 ? -32768 : value));
+}
+
+static int16_t roundShiftHalfEven(int32_t value, int shift) {
+  int32_t quotient = value >> shift;
+  int32_t remainder = value - (quotient << shift);
+  int32_t half = (int32_t)1 << (shift - 1);
+  if (remainder > half || (remainder == half && (quotient & 1)))
+    ++quotient;
+  return saturate16(quotient);
+}
+
+// t = mult(x, y); add(shift(mult(t, t), -1), t), each step nearest-even and saturating.
+static int16_t chainReference(int16_t x, int16_t y) {
+  int16_t t = roundShiftHalfEven((int32_t)x * y, 15);
+  int16_t square = roundShiftHalfEven((int32_t)t * t, 15);
+  return saturate16((int32_t)roundShiftHalfEven(square, 1) + t);
+}
+
+static int16_t nextSample(uint32_t *state) {
+  *state ^= *state << 13;
+  *state ^= *state >> 17;
+  *state ^= *state << 5;
+  return (int16_t)((int32_t)(*state % 65536u) - 32768);
+}
+
 // A refused length must abort before any element is read: the buffers are null.
 static int refuses(uint64_t length) {
   pid_t child = fork();
@@ -80,6 +119,52 @@ int main(void) {
       return 1;
     }
   }
+
+  // A tensor result lands in the caller's array: entry, descriptor call and
+  // reference agree, with the product that leaves Q1.15 in the corpus.
+  int16_t x[32], y[32], chain[32], chainDirect[32];
+  uint32_t state = 0x2F6E19A3u;
+  for (int i = 0; i < 32; ++i) {
+    x[i] = nextSample(&state);
+    y[i] = nextSample(&state);
+  }
+  x[0] = -32768;
+  y[0] = -32768;
+  ondrix_q15_multi_use_binding(x, y, chain);
+  MemRefI16 xRef = {x, x, 0, {32}, {1}};
+  MemRefI16 yRef = {y, y, 0, {32}, {1}};
+  MemRefI16 chainRef = {chainDirect, chainDirect, 0, {32}, {1}};
+  _mlir_ciface_q15_multi_use_binding(&xRef, &yRef, &chainRef);
+  for (int i = 0; i < 32; ++i) {
+    int16_t expected = chainReference(x[i], y[i]);
+    if (chain[i] != expected || chainDirect[i] != expected) {
+      fprintf(stderr, "q15 chain[%d]: entry %d, descriptor %d, expected %d\n", i, chain[i],
+              chainDirect[i], expected);
+      return 1;
+    }
+  }
+
+  // Rank 2 through the entry: only the pointer order is observable at run
+  // time, the static sizes and strides are pinned by FileCheck.
+  int16_t a[4][8], b[8][3], product[4][3], productDirect[4][3];
+  for (int i = 0; i < 4; ++i)
+    for (int k = 0; k < 8; ++k)
+      a[i][k] = nextSample(&state);
+  for (int k = 0; k < 8; ++k)
+    for (int j = 0; j < 3; ++j)
+      b[k][j] = nextSample(&state);
+  ondrix_q15_matmul_floor(&a[0][0], &b[0][0], &product[0][0]);
+  MemRefI16x2 aRef = {&a[0][0], &a[0][0], 0, {4, 8}, {8, 1}};
+  MemRefI16x2 bRef = {&b[0][0], &b[0][0], 0, {8, 3}, {3, 1}};
+  MemRefI16x2 productRef = {&productDirect[0][0], &productDirect[0][0], 0, {4, 3}, {3, 1}};
+  _mlir_ciface_q15_matmul_floor(&aRef, &bRef, &productRef);
+  for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < 3; ++j)
+      if (product[i][j] != productDirect[i][j]) {
+        fprintf(stderr, "q15 matmul[%d][%d]: entry %d, descriptor %d\n", i, j, product[i][j],
+                productDirect[i][j]);
+        return 1;
+      }
 
   if (!refuses(UINT64_MAX) || !refuses((uint64_t)1 << 63)) {
     fprintf(stderr, "a length past the signed index range was not refused\n");

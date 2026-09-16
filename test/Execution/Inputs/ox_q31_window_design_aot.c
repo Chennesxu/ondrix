@@ -5,7 +5,6 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 typedef struct {
   int32_t *allocated;
@@ -101,18 +100,18 @@ int main(void) {
         input[i] = INT32_MIN;
 
     MemRefI32 inputRef = {input, input, 0, {kInput}, {1}};
-    MemRefI32 got;
-    _mlir_ciface_q31_window_spectrum(&got, &inputRef);
+    int32_t output[kOutput];
+    MemRefI32 got = {output, output, 0, {kOutput}, {1}};
+    _mlir_ciface_q31_window_spectrum(&inputRef, &got);
     for (int64_t i = 0; i < kOutput; ++i) {
       int32_t expected = reference(input, taps, i, &clampedUpdates, &exportRails, &negatives);
-      int32_t actual = got.aligned[got.offset + i];
+      int32_t actual = output[i];
       if (actual != expected) {
         fprintf(stderr, "trial %d output %lld: got %d, expected %d\n", trial, (long long)i, actual,
                 expected);
         failed = 1;
       }
     }
-    free(got.allocated);
   }
   if (clampedUpdates == 0 || exportRails == 0 || negatives == 0) {
     fprintf(stderr, "corpus is vacuous: %lld clamped updates, %lld export rails, %lld negatives\n",

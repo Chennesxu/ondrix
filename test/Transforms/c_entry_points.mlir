@@ -26,8 +26,28 @@ func.func @separate(%a: memref<?xi16>, %b: memref<5xi16>, %c: memref<?xi16>) -> 
 
 // -----
 
-// A tensor result, a rank-2 buffer, a strided view and an unexported function
-// get no record.
+// Static results are trailing buffers named `output`, kept apart from a
+// parameter of that name; a static rank-2 buffer is one pointer.
+// CHECK-LABEL: func.func @matrix(
+// CHECK-SAME: ondrix.c_entry = {groups = array<i64: -1, -1, -1>, names = ["a", "b", "output"], signature = (memref<4x8xi16>, memref<8x3xi16>) -> memref<4x3xi16>}
+// CHECK-LABEL: func.func @pair(
+// CHECK-SAME: ondrix.c_entry = {groups = array<i64: 0, -1, -1>, names = ["output0", "output0_", "output1"], signature = (memref<?xi32>) -> (memref<8xi32>, memref<4xi32>)}
+func.func @matrix(%a: memref<4x8xi16> loc("a"), %b: memref<8x3xi16> loc("b")) -> memref<4x3xi16>
+    attributes {llvm.emit_c_interface} {
+  %alloc = memref.alloc() : memref<4x3xi16>
+  return %alloc : memref<4x3xi16>
+}
+func.func @pair(%x: memref<?xi32> loc("output0")) -> (memref<8xi32>, memref<4xi32>)
+    attributes {llvm.emit_c_interface} {
+  %a = memref.alloc() : memref<8xi32>
+  %b = memref.alloc() : memref<4xi32>
+  return %a, %b : memref<8xi32>, memref<4xi32>
+}
+
+// -----
+
+// A dynamic result, a dynamic extent above rank 1, a strided view and an
+// unexported function get no record.
 // CHECK-LABEL: func.func @full(
 // CHECK-NOT: ondrix.c_entry
 // CHECK-LABEL: func.func @matrix(
@@ -39,7 +59,7 @@ func.func @separate(%a: memref<?xi16>, %b: memref<5xi16>, %c: memref<?xi16>) -> 
 func.func @full(%a: memref<?xi16>) -> memref<?xi16> attributes {llvm.emit_c_interface} {
   return %a : memref<?xi16>
 }
-func.func @matrix(%a: memref<4x16xi16>) -> i16 attributes {llvm.emit_c_interface} {
+func.func @matrix(%a: memref<?x16xi16>) -> i16 attributes {llvm.emit_c_interface} {
   %zero = arith.constant 0 : i16
   return %zero : i16
 }

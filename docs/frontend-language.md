@@ -620,9 +620,12 @@ future work.
 
 No target capability or physical register information enters source IR.
 `llvm.emit_c_interface` marks the generated function for the existing AOT
-pipeline, but the resulting C ABI is not stable. In particular, tensor results
-currently use MLIR's bufferized ranked-memref descriptor convention in the test
-wrapper. That convention is not part of `.ox` source semantics. Tensor
+pipeline, but the resulting C ABI is not stable. In particular, the descriptor
+entry points use MLIR's bufferized ranked-memref convention; a tensor result of
+static shape is a trailing out-parameter the caller supplies
+(`convert-ondrix-static-results-to-out-params`), and only a result of dynamic
+shape is still allocated by the kernel and returned. That convention is not
+part of `.ox` source semantics. Tensor
 parameters are values, so aliasing is not observable in the source language at
 all; the storage question only appears at the emitted ABI, and there it is a
 DECLARED precondition rather than an inference: a caller of the bufferized
@@ -634,20 +637,24 @@ on exactly this contract for function entry arguments — everything else they
 prove or refuse statically — so the precondition is part of the language and
 ABI surface, never a hidden assumption of one pass.
 
-A kernel whose parameters are all rank-1 buffers and whose result is one
-scalar also gets a plain C entry point, `ondrix_<kernel>`, built by the
-canonical pipeline once the descriptors have expanded: one `const T *` per
-buffer and, for each group of parameters whose windows a reduction pairs at
-equal length (the two operands of `dot` and `fir`), one `uintN_t length` in
-the target's index width, placed after the group's last pointer; a static
-extent needs no length, and parameter names carry over from the source. The entry fills the descriptors itself (offset zero,
-stride one), carries the same storage preconditions as the descriptor entry,
-and refuses a length above the signed index range before touching memory,
-with the message-and-abort convention of the shape assertions.
-`ondrix-compile --emit=c-header`, or `ondrix-translate
+A kernel whose parameters are buffers of any extent or tensors of static
+shape, and whose results are one scalar or tensors of static shape, also gets
+a plain C entry point, `ondrix_<kernel>`, built by the canonical pipeline once
+the descriptors have expanded: one `const T *` per parameter, one `T *` per
+tensor result (`output`, or `output0`, `output1`, ... for several), and, for
+each group of parameters whose windows a reduction pairs at equal length (the
+two operands of `dot` and `fir`), one `uintN_t length` in the target's index
+width, placed after the group's last pointer; a static extent needs no
+length, and parameter names carry over from the source. The kernel writes a
+static result straight into the caller's array (`forward-ondrix-result-buffers`
+removes the local copy) and allocates nothing. The entry fills the descriptors
+itself (offset zero, row-major strides), carries the same storage
+preconditions as the descriptor entry, and refuses a length above the signed
+index range before touching memory, with the message-and-abort convention of
+the shape assertions. `ondrix-compile --emit=c-header`, or `ondrix-translate
 --mlir-to-ondrix-c-header` on the `--emit=llvm` module, prints the
-prototypes. Tensor results keep the descriptor convention until a
-destination-passing entry exists for them.
+prototypes. A kernel with a result of dynamic shape, such as `fir_filter` on
+`tensor[q15]`, keeps the descriptor convention and gets no plain entry.
 
 This is not a general Python parser. Imports, classes, heap objects, arbitrary
 expressions, and dynamic Python behavior are rejected. Scalar constants,

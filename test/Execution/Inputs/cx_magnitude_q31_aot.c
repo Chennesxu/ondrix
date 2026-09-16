@@ -9,7 +9,6 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 typedef struct {
   int64_t *allocated;
@@ -27,8 +26,8 @@ typedef struct {
   int64_t strides[1];
 } MemRefI32;
 
-extern void _mlir_ciface_magnitude_q31_even(MemRefI32 *, MemRefI64 *);
-extern void _mlir_ciface_magnitude_q31_floor(MemRefI32 *, MemRefI64 *);
+extern void _mlir_ciface_magnitude_q31_even(MemRefI64 *, MemRefI32 *);
+extern void _mlir_ciface_magnitude_q31_floor(MemRefI64 *, MemRefI32 *);
 
 enum { kEven = 0, kFloor = 1, kExtent = 32 };
 
@@ -98,21 +97,19 @@ static int64_t pack(int32_t real, int32_t imaginary) {
   return (int64_t)(((uint64_t)(uint32_t)imaginary << 32) | (uint32_t)real);
 }
 
-static void check(const char *name, void (*kernel)(MemRefI32 *, MemRefI64 *), int64_t *packed,
+static void check(const char *name, void (*kernel)(MemRefI64 *, MemRefI32 *), int64_t *packed,
                   int inputMode, int rootMode, int32_t *observedOut) {
   MemRefI64 in = {packed, packed, 0, {kExtent}, {1}};
-  MemRefI32 out;
-  kernel(&out, &in);
+  MemRefI32 out = {observedOut, observedOut, 0, {kExtent}, {1}};
+  kernel(&in, &out);
   for (int64_t i = 0; i < kExtent; ++i) {
-    int32_t observed = out.aligned[out.offset + i * out.strides[0]];
+    int32_t observed = observedOut[i];
     int32_t expected = reference(packed[i], inputMode, rootMode);
-    observedOut[i] = observed;
     if (observed != expected) {
       printf("%s[%lld]: observed %d expected %d\n", name, (long long)i, observed, expected);
       ++failures;
     }
   }
-  free(out.allocated);
 }
 
 int main(void) {

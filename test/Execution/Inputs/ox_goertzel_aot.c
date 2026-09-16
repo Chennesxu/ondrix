@@ -2,7 +2,6 @@
 
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 typedef struct {
@@ -39,18 +38,18 @@ static int check(const float *input, const char *label, int64_t *split) {
   float copy[kLength];
   memcpy(copy, input, sizeof(copy));
   MemRefF32Rank1 inputRef = {copy, copy, 0, {kLength}, {1}};
-  MemRefF32Rank1 off, fma;
-  _mlir_ciface_f32_goertzel_off(&off, &inputRef);
-  _mlir_ciface_f32_goertzel_fma(&fma, &inputRef);
+  float offBuffer[1], fmaBuffer[1];
+  MemRefF32Rank1 off = {offBuffer, offBuffer, 0, {1}, {1}};
+  MemRefF32Rank1 fma = {fmaBuffer, fmaBuffer, 0, {1}, {1}};
+  _mlir_ciface_f32_goertzel_off(&inputRef, &off);
+  _mlir_ciface_f32_goertzel_fma(&inputRef, &fma);
 
-  const float offValue = off.aligned[off.offset];
-  const float fmaValue = fma.aligned[fma.offset];
+  const float offValue = offBuffer[0];
+  const float fmaValue = fmaBuffer[0];
   int failed = compare(label, "goertzel off", offValue, goertzelReference(input, kLength, kBin, 0));
   failed |= compare(label, "goertzel fma", fmaValue, goertzelReference(input, kLength, kBin, 1));
   if (floatBits(offValue) != floatBits(fmaValue))
     ++*split;
-  free(off.allocated);
-  free(fma.allocated);
   return failed;
 }
 

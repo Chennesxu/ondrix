@@ -1,6 +1,5 @@
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* Source-to-object gate for the Q31 magnitude component boundary. The two
@@ -24,8 +23,8 @@ typedef struct {
   int64_t strides[1];
 } MemRefI32;
 
-extern void _mlir_ciface_q31_magnitude_component_even(MemRefI32 *, MemRefI64 *);
-extern void _mlir_ciface_q31_magnitude_component_floor(MemRefI32 *, MemRefI64 *);
+extern void _mlir_ciface_q31_magnitude_component_even(MemRefI64 *, MemRefI32 *);
+extern void _mlir_ciface_q31_magnitude_component_floor(MemRefI64 *, MemRefI32 *);
 
 enum { kExtent = 8 };
 
@@ -33,15 +32,12 @@ static int64_t pack(int32_t real, int32_t imaginary) {
   return (int64_t)(((uint64_t)(uint32_t)imaginary << 32) | (uint32_t)real);
 }
 
-static void run(void (*kernel)(MemRefI32 *, MemRefI64 *), const int64_t *bins, int32_t *out) {
+static void run(void (*kernel)(MemRefI64 *, MemRefI32 *), const int64_t *bins, int32_t *out) {
   int64_t input[kExtent];
   memcpy(input, bins, sizeof(input));
   MemRefI64 in = {input, input, 0, {kExtent}, {1}};
-  MemRefI32 result;
-  kernel(&result, &in);
-  for (int i = 0; i < kExtent; ++i)
-    out[i] = result.aligned[result.offset + i * result.strides[0]];
-  free(result.allocated);
+  MemRefI32 result = {out, out, 0, {kExtent}, {1}};
+  kernel(&in, &result);
 }
 
 int main(void) {

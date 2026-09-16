@@ -1,7 +1,6 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* Object gate for the interleaved f32 transform profile. The profile has no
@@ -92,8 +91,6 @@ static int report(const char *label, int index, float expected, float actual) {
   return 1;
 }
 
-/* The kernels return a tensor, so the callee writes the result descriptor and
- * owns the buffer; reading a caller-supplied array would read nothing. */
 static float resultAt(const MemRefF32 *result, int index) {
   return result->aligned[result->offset + (int64_t)index * result->strides[0]];
 }
@@ -108,8 +105,9 @@ static int checkCfft(void (*kernel)(MemRefF32 *, MemRefF32 *), const char *label
     inIm[i] = input[2 * i + 1];
   }
   MemRefF32 inputRef = {input, input, 0, {2 * n}, {1}};
-  MemRefF32 result;
-  kernel(&result, &inputRef);
+  float output[2 * kMaxExtent];
+  MemRefF32 result = {output, output, 0, {2 * n}, {1}};
+  kernel(&inputRef, &result);
 
   referenceCfft(inRe, inIm, outRe, outIm, n, forward, fused);
   const float scale = forward ? 1.0f : 1.0f / (float)n;
@@ -118,7 +116,6 @@ static int checkCfft(void (*kernel)(MemRefF32 *, MemRefF32 *), const char *label
     failures += report(label, 2 * i, outRe[i] * scale, resultAt(&result, 2 * i));
     failures += report(label, 2 * i + 1, outIm[i] * scale, resultAt(&result, 2 * i + 1));
   }
-  free(result.allocated);
   return failures;
 }
 
@@ -131,8 +128,9 @@ static int checkRfft(const float *signal, int n) {
     inIm[i] = 0.0f;
   }
   MemRefF32 inputRef = {input, input, 0, {n}, {1}};
-  MemRefF32 result;
-  _mlir_ciface_rfft16_off(&result, &inputRef);
+  float output[kMaxExtent + 2];
+  MemRefF32 result = {output, output, 0, {n + 2}, {1}};
+  _mlir_ciface_rfft16_off(&inputRef, &result);
 
   referenceCfft(inRe, inIm, outRe, outIm, n, /*forward=*/1, /*fused=*/0);
   outIm[0] = 0.0f;
@@ -142,7 +140,6 @@ static int checkRfft(const float *signal, int n) {
     failures += report("rfft", 2 * i, outRe[i], resultAt(&result, 2 * i));
     failures += report("rfft", 2 * i + 1, outIm[i], resultAt(&result, 2 * i + 1));
   }
-  free(result.allocated);
   return failures;
 }
 
@@ -161,14 +158,14 @@ static int checkIrfft(const float *bins, int n) {
     inIm[n - k] = -input[2 * k + 1];
   }
   MemRefF32 inputRef = {input, input, 0, {n + 2}, {1}};
-  MemRefF32 result;
-  _mlir_ciface_irfft16_off(&result, &inputRef);
+  float output[kMaxExtent];
+  MemRefF32 result = {output, output, 0, {n}, {1}};
+  _mlir_ciface_irfft16_off(&inputRef, &result);
 
   referenceCfft(inRe, inIm, outRe, outIm, n, /*forward=*/0, /*fused=*/0);
   int failures = 0;
   for (int i = 0; i < n; ++i)
     failures += report("irfft", i, outRe[i] * (1.0f / (float)n), resultAt(&result, i));
-  free(result.allocated);
   return failures;
 }
 
@@ -180,15 +177,15 @@ static int checkContractsDiffer(const float *interleaved) {
   memcpy(inputFma, interleaved, sizeof(inputFma));
   MemRefF32 offIn = {inputOff, inputOff, 0, {128}, {1}};
   MemRefF32 fmaIn = {inputFma, inputFma, 0, {128}, {1}};
-  MemRefF32 off, fma;
-  _mlir_ciface_cfft64_off(&off, &offIn);
-  _mlir_ciface_cfft64_fma(&fma, &fmaIn);
+  float offOut[128], fmaOut[128];
+  MemRefF32 off = {offOut, offOut, 0, {128}, {1}};
+  MemRefF32 fma = {fmaOut, fmaOut, 0, {128}, {1}};
+  _mlir_ciface_cfft64_off(&offIn, &off);
+  _mlir_ciface_cfft64_fma(&fmaIn, &fma);
   int differs = 0;
   for (int i = 0; i < 128; ++i)
     if (floatBits(resultAt(&off, i)) != floatBits(resultAt(&fma, i)))
       differs = 1;
-  free(off.allocated);
-  free(fma.allocated);
   if (differs)
     return 0;
   fprintf(stderr, "off and fma agreed on every lane: the contract axis is not observable\n");
@@ -208,8 +205,9 @@ static int checkSourceRoundTrip(const float *interleaved) {
     inIm[i] = input[2 * i + 1];
   }
   MemRefF32 inputRef = {input, input, 0, {2 * kPoints}, {1}};
-  MemRefF32 result;
-  _mlir_ciface_f32_cfft_round_trip(&result, &inputRef);
+  float output[2 * kPoints];
+  MemRefF32 result = {output, output, 0, {2 * kPoints}, {1}};
+  _mlir_ciface_f32_cfft_round_trip(&inputRef, &result);
 
   referenceCfft(inRe, inIm, forwardRe, forwardIm, kPoints, /*forward=*/1, /*fused=*/0);
   referenceCfft(forwardRe, forwardIm, inverseRe, inverseIm, kPoints, /*forward=*/0, /*fused=*/0);
@@ -219,7 +217,6 @@ static int checkSourceRoundTrip(const float *interleaved) {
     failures += report("ox", 2 * i, inverseRe[i] * scale, resultAt(&result, 2 * i));
     failures += report("ox", 2 * i + 1, inverseIm[i] * scale, resultAt(&result, 2 * i + 1));
   }
-  free(result.allocated);
   return failures;
 }
 
@@ -234,14 +231,14 @@ static int checkSourceShapesAgree(const float *interleaved) {
   memcpy(loopedIn, interleaved, sizeof(loopedIn));
   MemRefF32 unrolledRef = {unrolledIn, unrolledIn, 0, {2 * kPoints}, {1}};
   MemRefF32 loopedRef = {loopedIn, loopedIn, 0, {2 * kPoints}, {1}};
-  MemRefF32 unrolled, looped;
-  _mlir_ciface_f32_cfft_round_trip(&unrolled, &unrolledRef);
-  _mlir_ciface_f32_cfft_round_trip_loops(&looped, &loopedRef);
+  float unrolledOut[2 * kPoints], loopedOut[2 * kPoints];
+  MemRefF32 unrolled = {unrolledOut, unrolledOut, 0, {2 * kPoints}, {1}};
+  MemRefF32 looped = {loopedOut, loopedOut, 0, {2 * kPoints}, {1}};
+  _mlir_ciface_f32_cfft_round_trip(&unrolledRef, &unrolled);
+  _mlir_ciface_f32_cfft_round_trip_loops(&loopedRef, &looped);
   int failures = 0;
   for (int i = 0; i < 2 * kPoints; ++i)
     failures += report("ox_loops", i, resultAt(&unrolled, i), resultAt(&looped, i));
-  free(unrolled.allocated);
-  free(looped.allocated);
   return failures;
 }
 

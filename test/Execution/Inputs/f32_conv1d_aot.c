@@ -1,7 +1,6 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* Object gate for the f32 conv1d contracts. off and fma are exact, so every
@@ -76,11 +75,15 @@ static int check(const float *input, const float *kernel, const char *label) {
 
   MemRefF32 inputRef = {inputCopy, inputCopy, 0, {kLength}, {1}};
   MemRefF32 kernelRef = {kernelCopy, kernelCopy, 0, {kTaps}, {1}};
-  MemRefF32 convOff, convFma, corrOff, corrFma;
-  _mlir_ciface_f32_conv1d_conv_off(&convOff, &inputRef, &kernelRef);
-  _mlir_ciface_f32_conv1d_conv_fma(&convFma, &inputRef, &kernelRef);
-  _mlir_ciface_f32_conv1d_corr_off(&corrOff, &inputRef, &kernelRef);
-  _mlir_ciface_f32_conv1d_corr_fma(&corrFma, &inputRef, &kernelRef);
+  float convOffOut[kOutputs], convFmaOut[kOutputs], corrOffOut[kOutputs], corrFmaOut[kOutputs];
+  MemRefF32 convOff = {convOffOut, convOffOut, 0, {kOutputs}, {1}};
+  MemRefF32 convFma = {convFmaOut, convFmaOut, 0, {kOutputs}, {1}};
+  MemRefF32 corrOff = {corrOffOut, corrOffOut, 0, {kOutputs}, {1}};
+  MemRefF32 corrFma = {corrFmaOut, corrFmaOut, 0, {kOutputs}, {1}};
+  _mlir_ciface_f32_conv1d_conv_off(&inputRef, &kernelRef, &convOff);
+  _mlir_ciface_f32_conv1d_conv_fma(&inputRef, &kernelRef, &convFma);
+  _mlir_ciface_f32_conv1d_corr_off(&inputRef, &kernelRef, &corrOff);
+  _mlir_ciface_f32_conv1d_corr_fma(&inputRef, &kernelRef, &corrFma);
 
   int failed = 0;
   for (int64_t n = 0; n < kOutputs; ++n) {
@@ -93,10 +96,6 @@ static int check(const float *input, const float *kernel, const char *label) {
     failed |= compare(label, "corr fma", n, corrFma.aligned[corrFma.offset + n],
                       reference(input, kernel, n, 0, 1));
   }
-  free(convOff.allocated);
-  free(convFma.allocated);
-  free(corrOff.allocated);
-  free(corrFma.allocated);
   return failed;
 }
 
@@ -142,11 +141,15 @@ static int checkContractSplit(void) {
   MemRefF32 inputRef = {input, input, 0, {kLength}, {1}};
   MemRefF32 corrKernelRef = {correlationKernel, correlationKernel, 0, {kTaps}, {1}};
   MemRefF32 convKernelRef = {convolutionKernel, convolutionKernel, 0, {kTaps}, {1}};
-  MemRefF32 corrOff, corrFma, convOff, convFma;
-  _mlir_ciface_f32_conv1d_corr_off(&corrOff, &inputRef, &corrKernelRef);
-  _mlir_ciface_f32_conv1d_corr_fma(&corrFma, &inputRef, &corrKernelRef);
-  _mlir_ciface_f32_conv1d_conv_off(&convOff, &inputRef, &convKernelRef);
-  _mlir_ciface_f32_conv1d_conv_fma(&convFma, &inputRef, &convKernelRef);
+  float corrOffOut[kOutputs], corrFmaOut[kOutputs], convOffOut[kOutputs], convFmaOut[kOutputs];
+  MemRefF32 corrOff = {corrOffOut, corrOffOut, 0, {kOutputs}, {1}};
+  MemRefF32 corrFma = {corrFmaOut, corrFmaOut, 0, {kOutputs}, {1}};
+  MemRefF32 convOff = {convOffOut, convOffOut, 0, {kOutputs}, {1}};
+  MemRefF32 convFma = {convFmaOut, convFmaOut, 0, {kOutputs}, {1}};
+  _mlir_ciface_f32_conv1d_corr_off(&inputRef, &corrKernelRef, &corrOff);
+  _mlir_ciface_f32_conv1d_corr_fma(&inputRef, &corrKernelRef, &corrFma);
+  _mlir_ciface_f32_conv1d_conv_off(&inputRef, &convKernelRef, &convOff);
+  _mlir_ciface_f32_conv1d_conv_fma(&inputRef, &convKernelRef, &convFma);
   if (floatBits(corrOff.aligned[corrOff.offset]) == floatBits(corrFma.aligned[corrFma.offset])) {
     fprintf(stderr, "correlation split corpus is vacuous: off and fma agree\n");
     failed = 1;
@@ -155,10 +158,6 @@ static int checkContractSplit(void) {
     fprintf(stderr, "convolution split corpus is vacuous: off and fma agree\n");
     failed = 1;
   }
-  free(corrOff.allocated);
-  free(corrFma.allocated);
-  free(convOff.allocated);
-  free(convFma.allocated);
   return failed;
 }
 
@@ -181,10 +180,13 @@ static int checkWideModes(void) {
 
   MemRefF32 inputRef = {input, input, 0, {kWideLength}, {1}};
   MemRefF32 kernelRef = {kernel, kernel, 0, {kWideTaps}, {1}};
-  MemRefF32 batched, ordered, reversed;
-  _mlir_ciface_f32_conv1d_corr_fast(&batched, &inputRef, &kernelRef);
-  _mlir_ciface_f32_conv1d_corr_ordered(&ordered, &inputRef, &kernelRef);
-  _mlir_ciface_f32_conv1d_conv_fast(&reversed, &inputRef, &kernelRef);
+  float batchedOut[kWideOutputs], orderedOut[kWideOutputs], reversedOut[kWideOutputs];
+  MemRefF32 batched = {batchedOut, batchedOut, 0, {kWideOutputs}, {1}};
+  MemRefF32 ordered = {orderedOut, orderedOut, 0, {kWideOutputs}, {1}};
+  MemRefF32 reversed = {reversedOut, reversedOut, 0, {kWideOutputs}, {1}};
+  _mlir_ciface_f32_conv1d_corr_fast(&inputRef, &kernelRef, &batched);
+  _mlir_ciface_f32_conv1d_corr_ordered(&inputRef, &kernelRef, &ordered);
+  _mlir_ciface_f32_conv1d_conv_fast(&inputRef, &kernelRef, &reversed);
 
   int failed = 0;
   for (int64_t n = 0; n < kWideOutputs; ++n) {
@@ -199,9 +201,6 @@ static int checkWideModes(void) {
     failed |= compare("integer lattice", "conv fast", n, reversed.aligned[reversed.offset + n],
                       referenceTaps(input, kernel, kWideTaps, n, 1, 1));
   }
-  free(batched.allocated);
-  free(ordered.allocated);
-  free(reversed.allocated);
   return failed;
 }
 
@@ -220,15 +219,15 @@ int main(void) {
 
   MemRefF32 inputRef = {input, input, 0, {kLength}, {1}};
   MemRefF32 kernelRef = {kernel, kernel, 0, {kTaps}, {1}};
-  MemRefF32 conv, corr;
-  _mlir_ciface_f32_conv1d_conv_off(&conv, &inputRef, &kernelRef);
-  _mlir_ciface_f32_conv1d_corr_off(&corr, &inputRef, &kernelRef);
+  float convOut[kOutputs], corrOut[kOutputs];
+  MemRefF32 conv = {convOut, convOut, 0, {kOutputs}, {1}};
+  MemRefF32 corr = {corrOut, corrOut, 0, {kOutputs}, {1}};
+  _mlir_ciface_f32_conv1d_conv_off(&inputRef, &kernelRef, &conv);
+  _mlir_ciface_f32_conv1d_corr_off(&inputRef, &kernelRef, &corr);
   if (floatBits(conv.aligned[conv.offset]) == floatBits(corr.aligned[corr.offset])) {
     fprintf(stderr, "the two modes agree on an asymmetric kernel, so neither is pinned\n");
     failed = 1;
   }
-  free(conv.allocated);
-  free(corr.allocated);
 
   failed |= checkContractSplit();
 

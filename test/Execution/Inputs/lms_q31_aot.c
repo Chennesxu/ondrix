@@ -9,7 +9,6 @@
 
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 typedef struct {
   int32_t *allocated;
@@ -19,17 +18,14 @@ typedef struct {
   int64_t strides[1];
 } MemRefI32;
 
-/* Two results arrive as one aggregate, not as two output pointers. */
-typedef struct {
-  MemRefI32 error;
-  MemRefI32 adapted;
-} LmsResult;
+typedef void (*LmsFn)(MemRefI32 *, MemRefI32 *, MemRefI32 *, MemRefI32 *, MemRefI32 *);
 
-typedef void (*LmsFn)(LmsResult *, MemRefI32 *, MemRefI32 *, MemRefI32 *);
-
-extern void _mlir_ciface_lms_k16_q31(LmsResult *, MemRefI32 *, MemRefI32 *, MemRefI32 *);
-extern void _mlir_ciface_lms_k5_q31_floor(LmsResult *, MemRefI32 *, MemRefI32 *, MemRefI32 *);
-extern void _mlir_ciface_lms_k1_q31(LmsResult *, MemRefI32 *, MemRefI32 *, MemRefI32 *);
+extern void _mlir_ciface_lms_k16_q31(MemRefI32 *, MemRefI32 *, MemRefI32 *, MemRefI32 *,
+                                     MemRefI32 *);
+extern void _mlir_ciface_lms_k5_q31_floor(MemRefI32 *, MemRefI32 *, MemRefI32 *, MemRefI32 *,
+                                          MemRefI32 *);
+extern void _mlir_ciface_lms_k1_q31(MemRefI32 *, MemRefI32 *, MemRefI32 *, MemRefI32 *,
+                                    MemRefI32 *);
 
 enum { kEven = 0, kFloor = 1, kSamples = 48 };
 
@@ -108,12 +104,14 @@ static void check(const char *name, LmsFn kernel, const int32_t *x, const int32_
   MemRefI32 xin = {(int32_t *)x, (int32_t *)x, 0, {kSamples}, {1}};
   MemRefI32 din = {(int32_t *)d, (int32_t *)d, 0, {kSamples}, {1}};
   MemRefI32 win = {(int32_t *)w0, (int32_t *)w0, 0, {taps}, {1}};
-  LmsResult out;
-  kernel(&out, &xin, &din, &win);
+  static int32_t observedError[kSamples], observedWeights[64];
+  MemRefI32 errorOut = {observedError, observedError, 0, {kSamples}, {1}};
+  MemRefI32 adaptedOut = {observedWeights, observedWeights, 0, {taps}, {1}};
+  kernel(&xin, &din, &win, &errorOut, &adaptedOut);
   static int32_t expectedError[kSamples], expectedWeights[64];
   reference(x, d, w0, taps, 134217728, productMode, expectedError, expectedWeights);
   for (int64_t n = 0; n < kSamples; ++n) {
-    int32_t observed = out.error.aligned[out.error.offset + n * out.error.strides[0]];
+    int32_t observed = observedError[n];
     if (observed != expectedError[n]) {
       printf("%s error[%lld]: observed %d expected %d\n", name, (long long)n, observed,
              expectedError[n]);
@@ -121,15 +119,13 @@ static void check(const char *name, LmsFn kernel, const int32_t *x, const int32_
     }
   }
   for (int64_t k = 0; k < taps; ++k) {
-    int32_t observed = out.adapted.aligned[out.adapted.offset + k * out.adapted.strides[0]];
+    int32_t observed = observedWeights[k];
     if (observed != expectedWeights[k]) {
       printf("%s weight[%lld]: observed %d expected %d\n", name, (long long)k, observed,
              expectedWeights[k]);
       ++failures;
     }
   }
-  free(out.error.allocated);
-  free(out.adapted.allocated);
 }
 
 int main(void) {

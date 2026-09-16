@@ -1,7 +1,6 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* Object gate for the f32 decimation and interpolation contracts. Both are
@@ -86,10 +85,13 @@ static int checkDecimate(const float *input, const float *coeffs, const char *la
 
   MemRefF32Rank1 inputRef = {inputCopy, inputCopy, 0, {kDecimateInput}, {1}};
   MemRefF32Rank1 coeffRef = {coeffCopy, coeffCopy, 0, {kDecimateTaps}, {1}};
-  MemRefF32Rank1 off, fma, source;
-  _mlir_ciface_f32_decimate_off(&off, &inputRef, &coeffRef);
-  _mlir_ciface_f32_decimate_fma(&fma, &inputRef, &coeffRef);
-  _mlir_ciface_f32_fir_decimate(&source, &inputRef, &coeffRef);
+  float offOut[kDecimateOutput], fmaOut[kDecimateOutput], sourceOut[kDecimateOutput];
+  MemRefF32Rank1 off = {offOut, offOut, 0, {kDecimateOutput}, {1}};
+  MemRefF32Rank1 fma = {fmaOut, fmaOut, 0, {kDecimateOutput}, {1}};
+  MemRefF32Rank1 source = {sourceOut, sourceOut, 0, {kDecimateOutput}, {1}};
+  _mlir_ciface_f32_decimate_off(&inputRef, &coeffRef, &off);
+  _mlir_ciface_f32_decimate_fma(&inputRef, &coeffRef, &fma);
+  _mlir_ciface_f32_fir_decimate(&inputRef, &coeffRef, &source);
 
   int failed = 0;
   for (int64_t m = 0; m < kDecimateOutput; ++m) {
@@ -103,9 +105,6 @@ static int checkDecimate(const float *input, const float *coeffs, const char *la
     failed |= compare(label, "decimate .ox", m,
                       source.aligned[source.offset + m * source.strides[0]], expectedFma);
   }
-  free(off.allocated);
-  free(fma.allocated);
-  free(source.allocated);
   return failed;
 }
 
@@ -117,11 +116,16 @@ static int checkInterpolate(const float *input, const float *coeffs, const char 
 
   MemRefF32Rank1 inputRef = {inputCopy, inputCopy, 0, {kInterpolateInput}, {1}};
   MemRefF32Rank1 coeffRef = {coeffCopy, coeffCopy, 0, {kInterpolateTaps}, {1}};
-  MemRefF32Rank1 off, fma, fast, source;
-  _mlir_ciface_f32_interpolate_off(&off, &inputRef, &coeffRef);
-  _mlir_ciface_f32_interpolate_fma(&fma, &inputRef, &coeffRef);
-  _mlir_ciface_f32_interpolate_fast(&fast, &inputRef, &coeffRef);
-  _mlir_ciface_f32_fir_interpolate(&source, &inputRef, &coeffRef);
+  float offOut[kInterpolateOutput], fmaOut[kInterpolateOutput];
+  float fastOut[kInterpolateOutput], sourceOut[kInterpolateOutput];
+  MemRefF32Rank1 off = {offOut, offOut, 0, {kInterpolateOutput}, {1}};
+  MemRefF32Rank1 fma = {fmaOut, fmaOut, 0, {kInterpolateOutput}, {1}};
+  MemRefF32Rank1 fast = {fastOut, fastOut, 0, {kInterpolateOutput}, {1}};
+  MemRefF32Rank1 source = {sourceOut, sourceOut, 0, {kInterpolateOutput}, {1}};
+  _mlir_ciface_f32_interpolate_off(&inputRef, &coeffRef, &off);
+  _mlir_ciface_f32_interpolate_fma(&inputRef, &coeffRef, &fma);
+  _mlir_ciface_f32_interpolate_fast(&inputRef, &coeffRef, &fast);
+  _mlir_ciface_f32_fir_interpolate(&inputRef, &coeffRef, &source);
 
   int failed = 0;
   for (int64_t m = 0; m < kInterpolateOutput; ++m) {
@@ -138,10 +142,6 @@ static int checkInterpolate(const float *input, const float *coeffs, const char 
     failed |= compare(label, "interpolate .ox", m,
                       source.aligned[source.offset + m * source.strides[0]], expectedOff);
   }
-  free(off.allocated);
-  free(fma.allocated);
-  free(fast.allocated);
-  free(source.allocated);
   return failed;
 }
 
@@ -155,8 +155,9 @@ static int checkNonFiniteTapZero(const char *label, float tap0) {
 
   MemRefF32Rank1 inputRef = {input, input, 0, {kInterpolateInput}, {1}};
   MemRefF32Rank1 coeffRef = {coeffs, coeffs, 0, {kInterpolateTaps}, {1}};
-  MemRefF32Rank1 off;
-  _mlir_ciface_f32_interpolate_off(&off, &inputRef, &coeffRef);
+  float offOut[kInterpolateOutput];
+  MemRefF32Rank1 off = {offOut, offOut, 0, {kInterpolateOutput}, {1}};
+  _mlir_ciface_f32_interpolate_off(&inputRef, &coeffRef, &off);
 
   int failed = 0;
   const float skipped = off.aligned[off.offset + off.strides[0]];
@@ -167,7 +168,6 @@ static int checkNonFiniteTapZero(const char *label, float tap0) {
   }
   failed |=
       compare(label, "interpolate off", 1, skipped, referenceInterpolate(input, coeffs, 1, 0));
-  free(off.allocated);
   return failed;
 }
 
@@ -181,8 +181,9 @@ static int checkFiniteSignedZeroSkip(void) {
 
   MemRefF32Rank1 inputRef = {input, input, 0, {kInterpolateInput}, {1}};
   MemRefF32Rank1 coeffRef = {coeffs, coeffs, 0, {kInterpolateTaps}, {1}};
-  MemRefF32Rank1 fused;
-  _mlir_ciface_f32_interpolate_fma(&fused, &inputRef, &coeffRef);
+  float fusedOut[kInterpolateOutput];
+  MemRefF32Rank1 fused = {fusedOut, fusedOut, 0, {kInterpolateOutput}, {1}};
+  _mlir_ciface_f32_interpolate_fma(&inputRef, &coeffRef, &fused);
 
   int failed = 0;
   const float skipped = fused.aligned[fused.offset + fused.strides[0]];
@@ -193,7 +194,6 @@ static int checkFiniteSignedZeroSkip(void) {
   }
   failed |= compare("finite inserted-zero skip", "interpolate fma", 1, skipped,
                     referenceInterpolate(input, coeffs, 1, 1));
-  free(fused.allocated);
   return failed;
 }
 

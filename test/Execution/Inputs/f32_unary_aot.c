@@ -1,7 +1,6 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* Object gate for the f32 moving average and DCT. Both are exact contracts,
@@ -65,13 +64,20 @@ static int check(const float *x, const char *label) {
   float input[kLength];
   memcpy(input, x, sizeof(input));
   MemRefF32 inputRef = {input, input, 0, {kLength}, {1}};
-  MemRefF32 average, averageFma, averageFast, dctOff, dctFma, dctFast;
-  _mlir_ciface_f32_moving_average_off(&average, &inputRef);
-  _mlir_ciface_f32_moving_average_fma(&averageFma, &inputRef);
-  _mlir_ciface_f32_moving_average_fast(&averageFast, &inputRef);
-  _mlir_ciface_f32_dct_off(&dctOff, &inputRef);
-  _mlir_ciface_f32_dct_fma(&dctFma, &inputRef);
-  _mlir_ciface_f32_dct_fast(&dctFast, &inputRef);
+  float averageOut[kAverages], averageFmaOut[kAverages], averageFastOut[kAverages];
+  float dctOffOut[kLength], dctFmaOut[kLength], dctFastOut[kLength];
+  MemRefF32 average = {averageOut, averageOut, 0, {kAverages}, {1}};
+  MemRefF32 averageFma = {averageFmaOut, averageFmaOut, 0, {kAverages}, {1}};
+  MemRefF32 averageFast = {averageFastOut, averageFastOut, 0, {kAverages}, {1}};
+  MemRefF32 dctOff = {dctOffOut, dctOffOut, 0, {kLength}, {1}};
+  MemRefF32 dctFma = {dctFmaOut, dctFmaOut, 0, {kLength}, {1}};
+  MemRefF32 dctFast = {dctFastOut, dctFastOut, 0, {kLength}, {1}};
+  _mlir_ciface_f32_moving_average_off(&inputRef, &average);
+  _mlir_ciface_f32_moving_average_fma(&inputRef, &averageFma);
+  _mlir_ciface_f32_moving_average_fast(&inputRef, &averageFast);
+  _mlir_ciface_f32_dct_off(&inputRef, &dctOff);
+  _mlir_ciface_f32_dct_fma(&inputRef, &dctFma);
+  _mlir_ciface_f32_dct_fast(&inputRef, &dctFast);
 
   int failed = 0;
   /* One window sum in declared order and one division. The window sum IS a
@@ -100,12 +106,6 @@ static int check(const float *x, const char *label) {
     failed |= compare(label, "dct fast", k,
                       dctFast.aligned[dctFast.offset + k * dctFast.strides[0]], expectedFma);
   }
-  free(average.allocated);
-  free(averageFma.allocated);
-  free(averageFast.allocated);
-  free(dctOff.allocated);
-  free(dctFma.allocated);
-  free(dctFast.allocated);
   return failed;
 }
 

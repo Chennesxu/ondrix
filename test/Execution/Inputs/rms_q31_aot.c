@@ -83,18 +83,16 @@ static int failures = 0;
 static void check(const char *name, void (*kernel)(MemRefI32 *, MemRefI32 *), const int32_t *input,
                   int64_t extent, int nearestInput, int nearestRoot, const char *caseName) {
   MemRefI32 in = {(int32_t *)input, (int32_t *)input, 0, {extent}, {1}};
-  MemRefI32 out;
-  kernel(&out, &in);
-  int32_t observed = out.aligned[out.offset];
+  int32_t result[1];
+  MemRefI32 out = {result, result, 0, {1}, {1}};
+  kernel(&in, &out);
+  int32_t observed = result[0];
   int32_t expected = referenceRms(input, extent, nearestInput, nearestRoot);
   if (observed != expected) {
     printf("%s/%s: observed %d expected %d\n", name, caseName, observed, expected);
     ++failures;
   }
-  free(out.allocated);
 }
-
-extern void free(void *);
 
 int main(void) {
   static int32_t buffer[64];

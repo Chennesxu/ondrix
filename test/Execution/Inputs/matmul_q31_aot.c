@@ -9,7 +9,6 @@
 
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 typedef struct {
   int32_t *allocated;
@@ -100,8 +99,9 @@ static void checkQ31(const char *name, void (*kernel)(MemRefI32x2 *, MemRefI32x2
   enum { kRows = 3, kColumns = 3 };
   MemRefI32x2 lhs = {a, a, 0, {kRows, inner}, {inner, 1}};
   MemRefI32x2 rhs = {b, b, 0, {inner, kColumns}, {kColumns, 1}};
-  MemRefI32x2 out;
-  kernel(&out, &lhs, &rhs);
+  int32_t results[kRows * kColumns];
+  MemRefI32x2 out = {results, results, 0, {kRows, kColumns}, {kColumns, 1}};
+  kernel(&lhs, &rhs, &out);
   int64_t wa[3 * 64], wb[64 * 3];
   for (int64_t i = 0; i < kRows * inner; ++i)
     wa[i] = a[i];
@@ -117,7 +117,6 @@ static void checkQ31(const char *name, void (*kernel)(MemRefI32x2 *, MemRefI32x2
         ++failures;
       }
     }
-  free(out.allocated);
 }
 
 static void checkQ15(const char *name, void (*kernel)(MemRefI16x2 *, MemRefI16x2 *, MemRefI16x2 *),
@@ -125,8 +124,8 @@ static void checkQ15(const char *name, void (*kernel)(MemRefI16x2 *, MemRefI16x2
   enum { kRows = 3, kInner = 8, kColumns = 3 };
   MemRefI16x2 lhs = {a, a, 0, {kRows, kInner}, {kInner, 1}};
   MemRefI16x2 rhs = {b, b, 0, {kInner, kColumns}, {kColumns, 1}};
-  MemRefI16x2 out;
-  kernel(&out, &lhs, &rhs);
+  MemRefI16x2 out = {observedOut, observedOut, 0, {kRows, kColumns}, {kColumns, 1}};
+  kernel(&lhs, &rhs, &out);
   int64_t wa[kRows * kInner], wb[kInner * kColumns];
   for (int64_t i = 0; i < kRows * kInner; ++i)
     wa[i] = a[i];
@@ -134,16 +133,14 @@ static void checkQ15(const char *name, void (*kernel)(MemRefI16x2 *, MemRefI16x2
     wb[i] = b[i];
   for (int64_t i = 0; i < kRows; ++i)
     for (int64_t j = 0; j < kColumns; ++j) {
-      int16_t observed = out.aligned[out.offset + i * out.strides[0] + j * out.strides[1]];
+      int16_t observed = observedOut[i * kColumns + j];
       int64_t expected = reference(wa, wb, kInner, kColumns, i, j, 16, kEven, exportMode);
-      observedOut[i * kColumns + j] = observed;
       if (observed != expected) {
         printf("%s[%lld][%lld]: observed %d expected %lld\n", name, (long long)i, (long long)j,
                observed, (long long)expected);
         ++failures;
       }
     }
-  free(out.allocated);
 }
 
 int main(void) {

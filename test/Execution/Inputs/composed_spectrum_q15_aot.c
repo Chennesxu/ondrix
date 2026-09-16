@@ -1,7 +1,6 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 typedef struct {
   int16_t *allocated;
@@ -25,7 +24,7 @@ extern void _mlir_ciface_q15_filtered_spectrum(MemRefI16 *, MemRefI16 *);
  * modulus unchanged - so the packed bins are observed directly. This is a
  * stage-isolated compilation of the shared prefix, not an observation of the
  * intermediate the forwarded object deletes. */
-extern void _mlir_ciface_q15_filtered_spectrum_stage(MemRefI32 *, MemRefI16 *);
+extern void _mlir_ciface_q15_filtered_spectrum_stage(MemRefI16 *, MemRefI32 *);
 
 enum { kSignalLength = 72, kTapCount = 9, kExtent = 64, kBinCount = 33, kRandomTrialCount = 64 };
 
@@ -203,51 +202,43 @@ static int16_t toSigned16(uint32_t bits) {
 
 static int checkBins(const int16_t *signal, const char *label) {
   MemRefI16 inputRef = {(int16_t *)signal, (int16_t *)signal, 0, {kSignalLength}, {1}};
-  MemRefI32 output;
-  _mlir_ciface_q15_filtered_spectrum_stage(&output, &inputRef);
+  int32_t bins[kBinCount];
+  MemRefI32 output = {bins, bins, 0, {kBinCount}, {1}};
+  _mlir_ciface_q15_filtered_spectrum_stage(&inputRef, &output);
 
   int32_t expected[kBinCount];
   referenceBins(signal, expected);
 
-  int failed = output.sizes[0] != kBinCount;
-  if (failed)
-    fprintf(stderr, "%s: spectrum length %lld\n", label, (long long)output.sizes[0]);
-  int64_t count = output.sizes[0] < kBinCount ? output.sizes[0] : kBinCount;
-  for (int64_t i = 0; i < count; ++i) {
-    int32_t actual = output.aligned[output.offset + i * output.strides[0]];
+  int failed = 0;
+  for (int64_t i = 0; i < kBinCount; ++i) {
+    int32_t actual = bins[i];
     if (actual != expected[i]) {
       fprintf(stderr, "%s packed bin %lld: got %d, expected %d\n", label, (long long)i, actual,
               expected[i]);
       failed = 1;
     }
   }
-  free(output.allocated);
   return failed;
 }
 
 static int check(const int16_t *signal, const char *label) {
   MemRefI16 inputRef = {(int16_t *)signal, (int16_t *)signal, 0, {kSignalLength}, {1}};
-  MemRefI16 output;
-  _mlir_ciface_q15_filtered_spectrum(&output, &inputRef);
+  int16_t magnitudes[kBinCount];
+  MemRefI16 output = {magnitudes, magnitudes, 0, {kBinCount}, {1}};
+  _mlir_ciface_q15_filtered_spectrum(&inputRef, &output);
 
   int16_t expected[kBinCount];
   referenceSpectrum(signal, expected);
 
   int failed = checkBins(signal, label);
-  if (output.sizes[0] != kBinCount) {
-    fprintf(stderr, "%s: output length %lld\n", label, (long long)output.sizes[0]);
-    failed = 1;
-  }
-  int64_t count = output.sizes[0] < kBinCount ? output.sizes[0] : kBinCount;
-  for (int64_t i = 0; i < count; ++i) {
-    int16_t actual = output.aligned[output.offset + i * output.strides[0]];
+  for (int64_t i = 0; i < kBinCount; ++i) {
+    int16_t actual = magnitudes[i];
     if (actual != expected[i]) {
       fprintf(stderr, "%s bin %lld: got %d, expected %d\n", label, (long long)i, actual,
               expected[i]);
       failed = 1;
     }
   }
-  free(output.allocated);
   return failed;
 }
 

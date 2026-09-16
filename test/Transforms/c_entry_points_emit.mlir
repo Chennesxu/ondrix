@@ -62,3 +62,23 @@ llvm.func @filter(%a0: !llvm.ptr, %a1: !llvm.ptr, %a2: i32, %a3: i32, %a4: i32,
   %zero = llvm.mlir.constant(0 : i16) : i16
   llvm.return %zero : i16
 }
+
+// -----
+
+// A rank-2 buffer expands to two sizes and two row-major strides, a result
+// out-parameter is one more pointer, and the entry returns nothing.
+// CHECK-LABEL: llvm.func @ondrix_matrix(
+// CHECK-SAME: %[[A:.*]]: !llvm.ptr, %[[OUT:.*]]: !llvm.ptr) attributes
+// CHECK-DAG: %[[ZERO:.*]] = llvm.mlir.constant(0 : i64)
+// CHECK-DAG: %[[ONE:.*]] = llvm.mlir.constant(1 : i64)
+// CHECK-DAG: %[[THREE:.*]] = llvm.mlir.constant(3 : i64)
+// CHECK-DAG: %[[FOUR:.*]] = llvm.mlir.constant(4 : i64)
+// CHECK-DAG: %[[EIGHT:.*]] = llvm.mlir.constant(8 : i64)
+// CHECK: llvm.call @matrix(%[[A]], %[[A]], %[[ZERO]], %[[FOUR]], %[[EIGHT]], %[[EIGHT]], %[[ONE]], %[[OUT]], %[[OUT]], %[[ZERO]], %[[THREE]], %[[ONE]])
+// CHECK-NEXT: llvm.return
+llvm.func @matrix(%a0: !llvm.ptr, %a1: !llvm.ptr, %a2: i64, %a3: i64, %a4: i64, %a5: i64, %a6: i64,
+                  %o0: !llvm.ptr, %o1: !llvm.ptr, %o2: i64, %o3: i64, %o4: i64)
+    attributes {ondrix.c_entry = {groups = array<i64: -1, -1>, names = ["a", "output"],
+                signature = (memref<4x8xi16>) -> memref<3xi16>}} {
+  llvm.return
+}

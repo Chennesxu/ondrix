@@ -1,7 +1,6 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 typedef struct {
   int16_t *allocated;
@@ -88,18 +87,18 @@ int main(void) {
         input[i] = (int16_t)(i % 2 == 0 ? INT16_MIN : INT16_MAX);
 
     MemRefI16 inputRef = {input, input, 0, {kInput}, {1}};
-    MemRefI16 got;
-    _mlir_ciface_q15_window_spectrum(&got, &inputRef);
+    int16_t output[kOutput];
+    MemRefI16 got = {output, output, 0, {kOutput}, {1}};
+    _mlir_ciface_q15_window_spectrum(&inputRef, &got);
     for (int64_t i = 0; i < kOutput; ++i) {
       int16_t expected = reference(input, taps, i, &exportRails, &negatives);
-      int16_t actual = got.aligned[got.offset + i];
+      int16_t actual = output[i];
       if (actual != expected) {
         fprintf(stderr, "trial %d output %lld: got %d, expected %d\n", trial, (long long)i, actual,
                 expected);
         failed = 1;
       }
     }
-    free(got.allocated);
   }
   if (exportRails == 0 || negatives == 0) {
     fprintf(stderr, "corpus is vacuous: %lld export rails, %lld negative windows\n",

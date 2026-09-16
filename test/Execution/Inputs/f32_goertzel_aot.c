@@ -2,7 +2,6 @@
 
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* Object gate for the f32 Goertzel contract. off and fma are exact, so those
@@ -44,15 +43,19 @@ static int check(const float *input, const char *label) {
   float copy[kLength];
   memcpy(copy, input, sizeof(copy));
   MemRefF32Rank1 inputRef = {copy, copy, 0, {kLength}, {1}};
-  MemRefF32Rank1 off, fma, fast, quarter;
-  _mlir_ciface_f32_goertzel_off(&off, &inputRef);
-  _mlir_ciface_f32_goertzel_fma(&fma, &inputRef);
-  _mlir_ciface_f32_goertzel_fast(&fast, &inputRef);
-  _mlir_ciface_f32_goertzel_quarter_turn(&quarter, &inputRef);
+  float offBuffer[1], fmaBuffer[1], fastBuffer[1], quarterBuffer[1];
+  MemRefF32Rank1 off = {offBuffer, offBuffer, 0, {1}, {1}};
+  MemRefF32Rank1 fma = {fmaBuffer, fmaBuffer, 0, {1}, {1}};
+  MemRefF32Rank1 fast = {fastBuffer, fastBuffer, 0, {1}, {1}};
+  MemRefF32Rank1 quarter = {quarterBuffer, quarterBuffer, 0, {1}, {1}};
+  _mlir_ciface_f32_goertzel_off(&inputRef, &off);
+  _mlir_ciface_f32_goertzel_fma(&inputRef, &fma);
+  _mlir_ciface_f32_goertzel_fast(&inputRef, &fast);
+  _mlir_ciface_f32_goertzel_quarter_turn(&inputRef, &quarter);
 
-  const float offValue = off.aligned[off.offset];
-  const float fmaValue = fma.aligned[fma.offset];
-  const float fastValue = fast.aligned[fast.offset];
+  const float offValue = offBuffer[0];
+  const float fmaValue = fmaBuffer[0];
+  const float fastValue = fastBuffer[0];
   int failed = 0;
   failed |= compare(label, "goertzel off", offValue, goertzelReference(input, kLength, kBin, 0));
   failed |= compare(label, "goertzel fma", fmaValue, goertzelReference(input, kLength, kBin, 1));
@@ -62,12 +65,8 @@ static int check(const float *input, const char *label) {
    * the backend de-fuses a reassoc-flagged fma and the object drops to the
    * off value. */
   failed |= compare(label, "goertzel fast", fastValue, fmaValue);
-  failed |= compare(label, "goertzel quarter turn", quarter.aligned[quarter.offset],
+  failed |= compare(label, "goertzel quarter turn", quarterBuffer[0],
                     goertzelReference(input, kLength, kQuarterTurnBin, 0));
-  free(off.allocated);
-  free(fma.allocated);
-  free(fast.allocated);
-  free(quarter.allocated);
   return failed;
 }
 

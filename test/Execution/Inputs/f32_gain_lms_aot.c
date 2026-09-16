@@ -1,7 +1,6 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* Object gate for the f32 gain and lms contracts. Both are exact, so every
@@ -16,21 +15,17 @@ typedef struct {
   int64_t strides[1];
 } MemRefF32Rank1;
 
-typedef struct {
-  MemRefF32Rank1 error;
-  MemRefF32Rank1 adapted;
-} LmsResult;
-
 extern void _mlir_ciface_f32_gain_off(MemRefF32Rank1 *, MemRefF32Rank1 *);
 extern void _mlir_ciface_f32_gain_fma(MemRefF32Rank1 *, MemRefF32Rank1 *);
 extern void _mlir_ciface_f32_gain_fast(MemRefF32Rank1 *, MemRefF32Rank1 *);
-extern void _mlir_ciface_f32_lms_off(LmsResult *, MemRefF32Rank1 *, MemRefF32Rank1 *,
-                                     MemRefF32Rank1 *);
-extern void _mlir_ciface_f32_lms_fma(LmsResult *, MemRefF32Rank1 *, MemRefF32Rank1 *,
-                                     MemRefF32Rank1 *);
-extern void _mlir_ciface_f32_lms_fast(LmsResult *, MemRefF32Rank1 *, MemRefF32Rank1 *,
-                                      MemRefF32Rank1 *);
-extern void _mlir_ciface_f32_lms(LmsResult *, MemRefF32Rank1 *, MemRefF32Rank1 *, MemRefF32Rank1 *);
+extern void _mlir_ciface_f32_lms_off(MemRefF32Rank1 *, MemRefF32Rank1 *, MemRefF32Rank1 *,
+                                     MemRefF32Rank1 *, MemRefF32Rank1 *);
+extern void _mlir_ciface_f32_lms_fma(MemRefF32Rank1 *, MemRefF32Rank1 *, MemRefF32Rank1 *,
+                                     MemRefF32Rank1 *, MemRefF32Rank1 *);
+extern void _mlir_ciface_f32_lms_fast(MemRefF32Rank1 *, MemRefF32Rank1 *, MemRefF32Rank1 *,
+                                      MemRefF32Rank1 *, MemRefF32Rank1 *);
+extern void _mlir_ciface_f32_lms(MemRefF32Rank1 *, MemRefF32Rank1 *, MemRefF32Rank1 *,
+                                 MemRefF32Rank1 *, MemRefF32Rank1 *);
 
 enum { kGainLength = 16, kSamples = 32, kTaps = 4, kTrialCount = 24 };
 
@@ -56,10 +51,13 @@ static int checkGain(const float *input, const char *label) {
   float copy[kGainLength];
   memcpy(copy, input, sizeof(copy));
   MemRefF32Rank1 inputRef = {copy, copy, 0, {kGainLength}, {1}};
-  MemRefF32Rank1 off, fma, fast;
-  _mlir_ciface_f32_gain_off(&off, &inputRef);
-  _mlir_ciface_f32_gain_fma(&fma, &inputRef);
-  _mlir_ciface_f32_gain_fast(&fast, &inputRef);
+  float offOut[kGainLength], fmaOut[kGainLength], fastOut[kGainLength];
+  MemRefF32Rank1 off = {offOut, offOut, 0, {kGainLength}, {1}};
+  MemRefF32Rank1 fma = {fmaOut, fmaOut, 0, {kGainLength}, {1}};
+  MemRefF32Rank1 fast = {fastOut, fastOut, 0, {kGainLength}, {1}};
+  _mlir_ciface_f32_gain_off(&inputRef, &off);
+  _mlir_ciface_f32_gain_fma(&inputRef, &fma);
+  _mlir_ciface_f32_gain_fast(&inputRef, &fast);
 
   int failed = 0;
   for (int64_t i = 0; i < kGainLength; ++i) {
@@ -70,9 +68,6 @@ static int checkGain(const float *input, const char *label) {
     failed |=
         compare(label, "gain fast", i, fast.aligned[fast.offset + i * fast.strides[0]], expected);
   }
-  free(off.allocated);
-  free(fma.allocated);
-  free(fast.allocated);
   return failed;
 }
 
@@ -99,18 +94,16 @@ static void referenceLms(const float *input, const float *desired, const float *
   memcpy(adapted, state, sizeof(state));
 }
 
-static int checkLmsResult(const LmsResult *result, const float *expectedError,
-                          const float *expectedAdapted, const char *label, const char *mode) {
+static int checkLmsResult(const MemRefF32Rank1 *error, const MemRefF32Rank1 *adapted,
+                          const float *expectedError, const float *expectedAdapted,
+                          const char *label, const char *mode) {
   int failed = 0;
   for (int64_t n = 0; n < kSamples; ++n)
-    failed |= compare(label, mode, n,
-                      result->error.aligned[result->error.offset + n * result->error.strides[0]],
+    failed |= compare(label, mode, n, error->aligned[error->offset + n * error->strides[0]],
                       expectedError[n]);
   for (int64_t k = 0; k < kTaps; ++k)
-    failed |=
-        compare(label, mode, k,
-                result->adapted.aligned[result->adapted.offset + k * result->adapted.strides[0]],
-                expectedAdapted[k]);
+    failed |= compare(label, mode, k, adapted->aligned[adapted->offset + k * adapted->strides[0]],
+                      expectedAdapted[k]);
   return failed;
 }
 
@@ -126,23 +119,36 @@ static int checkLms(const float *input, const float *desired, const float *weigh
   MemRefF32Rank1 inputRef = {inputCopy, inputCopy, 0, {kSamples}, {1}};
   MemRefF32Rank1 desiredRef = {desiredCopy, desiredCopy, 0, {kSamples}, {1}};
   MemRefF32Rank1 weightRef = {weightCopy, weightCopy, 0, {kTaps}, {1}};
-  LmsResult off, fma, fast, source;
-  _mlir_ciface_f32_lms_off(&off, &inputRef, &desiredRef, &weightRef);
-  _mlir_ciface_f32_lms_fma(&fma, &inputRef, &desiredRef, &weightRef);
-  _mlir_ciface_f32_lms_fast(&fast, &inputRef, &desiredRef, &weightRef);
-  _mlir_ciface_f32_lms(&source, &inputRef, &desiredRef, &weightRef);
+  float offError[kSamples], fmaError[kSamples], fastError[kSamples], sourceError[kSamples];
+  float offAdapted[kTaps], fmaAdapted[kTaps], fastAdapted[kTaps], sourceAdapted[kTaps];
+  MemRefF32Rank1 offErrorRef = {offError, offError, 0, {kSamples}, {1}};
+  MemRefF32Rank1 fmaErrorRef = {fmaError, fmaError, 0, {kSamples}, {1}};
+  MemRefF32Rank1 fastErrorRef = {fastError, fastError, 0, {kSamples}, {1}};
+  MemRefF32Rank1 sourceErrorRef = {sourceError, sourceError, 0, {kSamples}, {1}};
+  MemRefF32Rank1 offAdaptedRef = {offAdapted, offAdapted, 0, {kTaps}, {1}};
+  MemRefF32Rank1 fmaAdaptedRef = {fmaAdapted, fmaAdapted, 0, {kTaps}, {1}};
+  MemRefF32Rank1 fastAdaptedRef = {fastAdapted, fastAdapted, 0, {kTaps}, {1}};
+  MemRefF32Rank1 sourceAdaptedRef = {sourceAdapted, sourceAdapted, 0, {kTaps}, {1}};
+  _mlir_ciface_f32_lms_off(&inputRef, &desiredRef, &weightRef, &offErrorRef, &offAdaptedRef);
+  _mlir_ciface_f32_lms_fma(&inputRef, &desiredRef, &weightRef, &fmaErrorRef, &fmaAdaptedRef);
+  _mlir_ciface_f32_lms_fast(&inputRef, &desiredRef, &weightRef, &fastErrorRef, &fastAdaptedRef);
+  _mlir_ciface_f32_lms(&inputRef, &desiredRef, &weightRef, &sourceErrorRef, &sourceAdaptedRef);
 
   float expectedError[kSamples];
   float expectedAdapted[kTaps];
   int failed = 0;
   referenceLms(input, desired, weights, 0, expectedError, expectedAdapted);
-  failed |= checkLmsResult(&off, expectedError, expectedAdapted, label, "lms off");
+  failed |= checkLmsResult(&offErrorRef, &offAdaptedRef, expectedError, expectedAdapted, label,
+                           "lms off");
   referenceLms(input, desired, weights, 1, expectedError, expectedAdapted);
-  failed |= checkLmsResult(&fma, expectedError, expectedAdapted, label, "lms fma");
+  failed |= checkLmsResult(&fmaErrorRef, &fmaAdaptedRef, expectedError, expectedAdapted, label,
+                           "lms fma");
   /* fast spends F here: the fused chain over a rounded product and an add. */
-  failed |= checkLmsResult(&fast, expectedError, expectedAdapted, label, "lms fast");
+  failed |= checkLmsResult(&fastErrorRef, &fastAdaptedRef, expectedError, expectedAdapted, label,
+                           "lms fast");
   /* The .ox binding declares fma. */
-  failed |= checkLmsResult(&source, expectedError, expectedAdapted, label, "lms .ox");
+  failed |= checkLmsResult(&sourceErrorRef, &sourceAdaptedRef, expectedError, expectedAdapted,
+                           label, "lms .ox");
 
   /* The initial weights are the caller's, and the recursion must not adapt
    * them in place. */
@@ -150,14 +156,6 @@ static int checkLms(const float *input, const float *desired, const float *weigh
     fprintf(stderr, "%s: lms adapted the caller's initial weights in place\n", label);
     failed = 1;
   }
-  free(off.error.allocated);
-  free(off.adapted.allocated);
-  free(fast.error.allocated);
-  free(fast.adapted.allocated);
-  free(fma.error.allocated);
-  free(fma.adapted.allocated);
-  free(source.error.allocated);
-  free(source.adapted.allocated);
   return failed;
 }
 

@@ -34,21 +34,43 @@ bool isCScalar(Type type) {
   return type.isF32() || type.isF64();
 }
 
+/// A buffer the entry can pass as one pointer: a window of any extent, or a
+/// static shape of any rank (its sizes and strides are constants).
 bool isEntryBuffer(Type type) {
   auto memref = dyn_cast<MemRefType>(type);
-  return memref && memref.getRank() == 1 && memref.getLayout().isIdentity() &&
-         !memref.getMemorySpace() && isCScalar(memref.getElementType());
+  return memref && memref.getRank() >= 1 && memref.getLayout().isIdentity() &&
+         !memref.getMemorySpace() && isCScalar(memref.getElementType()) &&
+         (memref.getRank() == 1 || memref.hasStaticShape());
 }
 
+bool hasScalarResult(FunctionType type) {
+  return type.getNumResults() == 1 && isCScalar(type.getResult(0));
+}
+
+/// Static memref results become trailing out-parameters before the entry is built.
 bool isSupportedEntrySignature(FunctionType type) {
-  return type.getNumResults() == 1 && isCScalar(type.getResult(0)) &&
-         llvm::all_of(type.getInputs(), isEntryBuffer);
+  return llvm::all_of(type.getInputs(), isEntryBuffer) &&
+         (hasScalarResult(type) || llvm::all_of(type.getResults(), [](Type result) {
+            return isEntryBuffer(result) && cast<MemRefType>(result).hasStaticShape();
+          }));
+}
+
+/// The buffers in the expanded kernel's parameter order: the inputs, then the
+/// results that became out-parameters.
+SmallVector<MemRefType> getEntryBuffers(FunctionType type) {
+  SmallVector<MemRefType> buffers;
+  for (Type input : type.getInputs())
+    buffers.push_back(cast<MemRefType>(input));
+  if (!hasScalarResult(type))
+    for (Type result : type.getResults())
+      buffers.push_back(cast<MemRefType>(result));
+  return buffers;
 }
 
 std::string getCEntryName(StringRef kernel) { return (ondrix::kCEntryPrefix + kernel).str(); }
 
-/// What the record carries: the bufferized signature, one name per parameter,
-/// and per parameter the extent group it shares one length with (-1 static).
+/// What the record carries: the bufferized signature, one name per buffer, and
+/// per buffer the extent group it shares one length with (-1 static).
 struct EntryRecord {
   FunctionType signature;
   SmallVector<std::string> names;
@@ -58,9 +80,8 @@ struct EntryRecord {
 /// Groups are the compact ids 0..k-1, exactly on the dynamic extents.
 bool hasWellFormedGroups(const EntryRecord &record) {
   int64_t next = 0;
-  for (auto [index, group] : llvm::enumerate(record.groups)) {
-    bool dynamic = cast<MemRefType>(record.signature.getInput(index)).isDynamicDim(0);
-    if (dynamic != (group >= 0) || group > next)
+  for (auto [buffer, group] : llvm::zip_equal(getEntryBuffers(record.signature), record.groups)) {
+    if (buffer.hasStaticShape() != (group < 0) || group > next)
       return false;
     if (group == next)
       ++next;
@@ -76,16 +97,19 @@ FailureOr<EntryRecord> readRecord(Operation *op) {
   auto groups = dictionary ? dyn_cast_or_null<DenseI64ArrayAttr>(dictionary.get("groups"))
                            : DenseI64ArrayAttr();
   auto type = signature ? dyn_cast<FunctionType>(signature.getValue()) : FunctionType();
-  if (!type || !isSupportedEntrySignature(type) || !names || !groups ||
-      names.size() != type.getNumInputs() || groups.size() != type.getNumInputs() ||
+  auto malformed = [&] { return op->emitOpError("carries a malformed C entry record"); };
+  if (!type || !isSupportedEntrySignature(type) || !names || !groups)
+    return malformed();
+  size_t numBuffers = getEntryBuffers(type).size();
+  if (names.size() != numBuffers || groups.size() != numBuffers ||
       !llvm::all_of(names, [](Attribute name) { return isa<StringAttr>(name); }))
-    return op->emitOpError("carries a malformed C entry record");
+    return malformed();
   EntryRecord record{type, {}, {}};
   for (Attribute name : names)
     record.names.push_back(cast<StringAttr>(name).str());
   record.groups.assign(groups.asArrayRef().begin(), groups.asArrayRef().end());
   if (!hasWellFormedGroups(record))
-    return op->emitOpError("carries a malformed C entry record");
+    return malformed();
   return record;
 }
 
@@ -113,8 +137,8 @@ BlockArgument getWindowArgument(func::FuncOp function, Value operand) {
 
 /// Extent groups: `ondsp.reduce_mac` reads two equal-length windows, so two
 /// dynamic parameters it pairs share one length; every other dynamic extent
-/// is its own group, numbered by first parameter.
-SmallVector<int64_t> deriveExtentGroups(func::FuncOp function) {
+/// is its own group, numbered by first parameter. Results are static.
+SmallVector<int64_t> deriveExtentGroups(func::FuncOp function, unsigned numBuffers) {
   unsigned numInputs = function.getNumArguments();
   SmallVector<int64_t> parent(numInputs);
   for (unsigned index = 0; index < numInputs; ++index)
@@ -131,10 +155,10 @@ SmallVector<int64_t> deriveExtentGroups(func::FuncOp function) {
       parent[std::max(find(lhs.getArgNumber()), find(rhs.getArgNumber()))] =
           std::min(find(lhs.getArgNumber()), find(rhs.getArgNumber()));
   });
-  SmallVector<int64_t> groups(numInputs, -1);
+  SmallVector<int64_t> groups(numBuffers, -1);
   int64_t next = 0;
   for (unsigned index = 0; index < numInputs; ++index) {
-    if (!cast<MemRefType>(function.getArgument(index).getType()).isDynamicDim(0))
+    if (cast<MemRefType>(function.getArgument(index).getType()).hasStaticShape())
       continue;
     int64_t root = find(index);
     groups[index] = groups[root] >= 0 ? groups[root] : next++;
@@ -188,7 +212,15 @@ public:
         record.names.push_back(name ? name.getName().str()
                                     : llvm::formatv("a{0}", argument.getArgNumber()).str());
       }
-      record.groups = deriveExtentGroups(function);
+      unsigned numBuffers = getEntryBuffers(record.signature).size();
+      unsigned numOutputs = numBuffers - function.getNumArguments();
+      for (unsigned index = 0; index < numOutputs; ++index) {
+        std::string name = numOutputs == 1 ? "output" : llvm::formatv("output{0}", index).str();
+        while (llvm::is_contained(record.names, name))
+          name += '_';
+        record.names.push_back(name);
+      }
+      record.groups = deriveExtentGroups(function, numBuffers);
       std::string entry = getCEntryName(function.getName());
       if (symbols.lookup(entry)) {
         function.emitOpError() << "C entry point '" << entry
@@ -226,27 +258,34 @@ LogicalResult emitEntry(ModuleOp module, LLVM::LLVMFuncOp kernel) {
     return failure();
   FunctionType signature = record->signature;
   ArrayRef<int64_t> groups = record->groups;
+  SmallVector<MemRefType> buffers = getEntryBuffers(signature);
 
-  // Each buffer expanded to (allocated, aligned, offset, size, stride); the
-  // index width is whatever the conversion chose.
+  // Each buffer expanded to (allocated, aligned, offset, sizes..., strides...);
+  // the index width is whatever the conversion chose.
   LLVM::LLVMFunctionType kernelType = kernel.getFunctionType();
-  unsigned numInputs = signature.getNumInputs();
   auto mismatch = [&] {
     return kernel.emitOpError("recorded C entry signature does not match the expanded function");
   };
-  if (kernelType.getNumParams() != 5 * numInputs ||
-      kernelType.getReturnType() != signature.getResult(0))
+  Type returnType = hasScalarResult(signature) ? signature.getResult(0)
+                                               : LLVM::LLVMVoidType::get(module.getContext());
+  unsigned numFields = 0;
+  for (MemRefType buffer : buffers)
+    numFields += 3 + 2 * buffer.getRank();
+  if (kernelType.getNumParams() != numFields || kernelType.getReturnType() != returnType)
     return mismatch();
   IntegerType indexType;
-  for (unsigned index = 0; index < numInputs; ++index) {
-    auto pointer = kernelType.getParamType(5 * index);
-    auto offset = dyn_cast<IntegerType>(kernelType.getParamType(5 * index + 2));
-    if (!isa<LLVM::LLVMPointerType>(pointer) || pointer != kernelType.getParamType(5 * index + 1) ||
-        !offset || (indexType && indexType != offset) ||
-        offset != kernelType.getParamType(5 * index + 3) ||
-        offset != kernelType.getParamType(5 * index + 4))
+  unsigned field = 0;
+  for (MemRefType buffer : buffers) {
+    Type pointer = kernelType.getParamType(field);
+    auto offset = dyn_cast<IntegerType>(kernelType.getParamType(field + 2));
+    if (!isa<LLVM::LLVMPointerType>(pointer) || pointer != kernelType.getParamType(field + 1) ||
+        !offset || (indexType && indexType != offset))
       return mismatch();
+    for (unsigned extent = 3; extent < 3 + 2 * buffer.getRank(); ++extent)
+      if (kernelType.getParamType(field + extent) != offset)
+        return mismatch();
     indexType = offset;
+    field += 3 + 2 * buffer.getRank();
   }
 
   EntryLayout layout = getEntryLayout(groups);
@@ -259,9 +298,8 @@ LogicalResult emitEntry(ModuleOp module, LLVM::LLVMFuncOp kernel) {
 
   Location loc = kernel.getLoc();
   OpBuilder builder = OpBuilder::atBlockEnd(module.getBody());
-  auto entry = builder.create<LLVM::LLVMFuncOp>(
-      loc, getCEntryName(kernel.getName()),
-      LLVM::LLVMFunctionType::get(kernelType.getReturnType(), params));
+  auto entry = builder.create<LLVM::LLVMFuncOp>(loc, getCEntryName(kernel.getName()),
+                                                LLVM::LLVMFunctionType::get(returnType, params));
   Block *body = entry.addEntryBlock();
   builder.setInsertionPointToStart(body);
 
@@ -286,22 +324,33 @@ LogicalResult emitEntry(ModuleOp module, LLVM::LLVMFuncOp kernel) {
     builder.setInsertionPointToStart(call);
   }
 
+  DenseMap<int64_t, Value> constants;
+  auto constant = [&](int64_t value) {
+    Value &cached = constants[value];
+    if (!cached)
+      cached = builder.create<LLVM::ConstantOp>(loc, indexType, value);
+    return cached;
+  };
   SmallVector<Value> operands;
-  if (numInputs != 0) {
-    Value zero = builder.create<LLVM::ConstantOp>(loc, indexType, 0);
-    Value one = builder.create<LLVM::ConstantOp>(loc, indexType, 1);
-    for (unsigned index = 0; index < numInputs; ++index) {
-      auto buffer = cast<MemRefType>(signature.getInput(index));
-      Value pointer = body->getArgument(layout.pointerPosition[index]);
-      Value size =
-          buffer.isDynamicDim(0)
-              ? body->getArgument(layout.lengthPosition[groups[index]])
-              : builder.create<LLVM::ConstantOp>(loc, indexType, buffer.getDimSize(0)).getResult();
-      operands.append({pointer, pointer, zero, size, one});
+  for (auto [index, buffer] : llvm::enumerate(buffers)) {
+    Value pointer = body->getArgument(layout.pointerPosition[index]);
+    operands.append({pointer, pointer, constant(0)});
+    if (!buffer.hasStaticShape()) {
+      operands.append({body->getArgument(layout.lengthPosition[groups[index]]), constant(1)});
+      continue;
     }
+    for (int64_t size : buffer.getShape())
+      operands.push_back(constant(size));
+    int64_t stride = 1;
+    SmallVector<Value> strides(buffer.getRank());
+    for (int64_t dim = buffer.getRank() - 1; dim >= 0; --dim) {
+      strides[dim] = constant(stride);
+      stride *= buffer.getDimSize(dim);
+    }
+    operands.append(strides);
   }
   auto result = builder.create<LLVM::CallOp>(loc, kernel, operands);
-  builder.create<LLVM::ReturnOp>(loc, result.getResult());
+  builder.create<LLVM::ReturnOp>(loc, result.getResults());
 
   entry->setAttr(ondrix::kCEntryAttr, kernel->getAttr(ondrix::kCEntryAttr));
   kernel->removeAttr(ondrix::kCEntryAttr);
@@ -359,9 +408,10 @@ std::unique_ptr<Pass> ondrix::createEmitOndrixCEntryPointsPass() {
 }
 
 LogicalResult ondrix::printOndrixCEntryHeader(ModuleOp module, raw_ostream &os) {
-  os << "// Plain-pointer entry points generated by Ondrix. Every buffer is read\n"
-        "// only; a length counts elements and must not exceed the signed range of\n"
-        "// its type, or the call aborts before touching memory.\n"
+  os << "// Plain-pointer entry points generated by Ondrix. An input buffer is read\n"
+        "// only; an output buffer receives the whole result and must not overlap any\n"
+        "// other argument. A length counts elements and must not exceed the signed\n"
+        "// range of its type, or the call aborts before touching memory.\n"
         "#include <stdint.h>\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n";
   for (auto entry : module.getOps<LLVM::LLVMFuncOp>()) {
     if (!entry->hasAttr(kCEntryAttr) || !entry.getName().startswith(kCEntryPrefix))
@@ -376,10 +426,11 @@ LogicalResult ondrix::printOndrixCEntryHeader(ModuleOp module, raw_ostream &os) 
       continue;
     int64_t numGroups = getGroupCount(groups);
     SmallVector<std::string> fields(layout.numParams);
-    for (unsigned index = 0; index < record->signature.getNumInputs(); ++index) {
-      auto buffer = cast<MemRefType>(record->signature.getInput(index));
-      fields[layout.pointerPosition[index]] = llvm::formatv(
-          "const {0} *{1}", getCTypeName(buffer.getElementType()), record->names[index]);
+    for (auto [index, buffer] : llvm::enumerate(getEntryBuffers(record->signature))) {
+      bool input = index < record->signature.getNumInputs();
+      fields[layout.pointerPosition[index]] =
+          llvm::formatv("{0}{1} *{2}", input ? "const " : "", getCTypeName(buffer.getElementType()),
+                        record->names[index]);
       int64_t group = groups[index];
       if (group < 0 || !fields[layout.lengthPosition[group]].empty())
         continue;
@@ -389,7 +440,9 @@ LogicalResult ondrix::printOndrixCEntryHeader(ModuleOp module, raw_ostream &os) 
           llvm::formatv("uint{0}_t {1}", width,
                         numGroups == 1 ? std::string("length") : record->names[index] + "_length");
     }
-    os << getCTypeName(record->signature.getResult(0)) << ' ' << entry.getName() << '('
+    os << (hasScalarResult(record->signature) ? getCTypeName(record->signature.getResult(0))
+                                              : StringRef("void"))
+       << ' ' << entry.getName() << '('
        << (fields.empty() ? std::string("void") : llvm::join(fields, ", ")) << ");\n";
   }
   os << "\n#ifdef __cplusplus\n}\n#endif\n";

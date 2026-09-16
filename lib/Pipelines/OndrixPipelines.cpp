@@ -29,9 +29,8 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // never materialized as a buffer.
   os << "canonicalize,cse,forward-ondrix-insert-extract,canonicalize,cse,";
   os << "empty-tensor-to-alloc-tensor,";
-  // Entry points may return fresh result buffers: ownership passes to the
-  // caller under the documented (unstable) descriptor ABI; the deallocation
-  // pass below frees only what does not escape.
+  // Only a dynamically shaped result still leaves as a fresh buffer under the
+  // descriptor ABI; static results become caller buffers below.
   os << "one-shot-bufferize{bufferize-function-boundaries=true allow-return-allocs=true "
         "function-boundary-type-conversion=identity-layout-map create-deallocs=false},";
   os << "cse,canonicalize,";
@@ -119,7 +118,11 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
                         options.vectorBits / 32);
   else
     os << "lower-ondsp-f32-reduce-to-scalar,";
-  os << "lower-rank-one-memref-copy-to-scf,";
+  // Static results are written into caller buffers, no copy: the C convention
+  // declares an output disjoint from every other argument (distinct-out-params).
+  os << "convert-ondrix-static-results-to-out-params,"
+        "forward-ondrix-result-buffers{distinct-out-params=true},"
+        "lower-rank-one-memref-copy-to-scf,";
   os << llvm::formatv("convert-ondsp-fixed-to-scalar{{widening-multiply-low-halves={0}},",
                       options.wideningMultiplyLowHalves ? "true" : "false");
   // Small kernel-local temporaries live on the stack; the C baselines never pay

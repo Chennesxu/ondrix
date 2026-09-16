@@ -10,18 +10,18 @@
 // assume nothing by default, so the plain invocations are ordered.
 
 // CHECK: llvm.func @f32_fir_filter_valid
-// CHECK-NOT: ondrix.
+// CHECK-NOT: {{^ *(%[^ ]+ = )?ondrix\.}}
 // CHECK-NOT: ondsp.
 
 // Q15: llvm.func @q15_moving_average
-// Q15-NOT: ondrix.
+// Q15-NOT: {{^ *(%[^ ]+ = )?ondrix\.}}
 
 // The composed four-stage program (design, filter, spectrum, magnitude)
 // rides the same single invocation: the design constants are evaluated, the
 // staged spectrum is forwarded, and the filter is scheduled, all inside the
 // canonical pipeline.
 // SPECTRUM: llvm.func @q15_filtered_spectrum
-// SPECTRUM-NOT: ondrix.
+// SPECTRUM-NOT: {{^ *(%[^ ]+ = )?ondrix\.}}
 // SPECTRUM-NOT: ondsp.
 
 // The driver's own target flags: an undeclared width is the ordered program,

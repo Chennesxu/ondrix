@@ -12,7 +12,6 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 typedef struct {
   int32_t *allocated;
@@ -120,20 +119,20 @@ static int failures = 0;
 static void checkQ31(const char *name, void (*entry)(MemRefI32 *, MemRefI32 *), int64_t extent,
                      const int32_t *values, int productMode, int exportMode) {
   MemRefI32 in = {(int32_t *)values, (int32_t *)values, 0, {extent}, {1}};
-  MemRefI32 out = {NULL, NULL, 0, {0}, {0}};
-  entry(&out, &in);
+  int32_t results[64];
+  MemRefI32 out = {results, results, 0, {extent}, {1}};
+  entry(&in, &out);
   int64_t wide[64];
   for (int64_t n = 0; n < extent; ++n)
     wide[n] = values[n];
   for (int64_t k = 0; k < extent; ++k) {
     int64_t expected = reference(wide, extent, k, 32, productMode, exportMode);
-    int32_t got = out.aligned[out.offset + k];
+    int32_t got = results[k];
     if ((int64_t)got != expected) {
       printf("%s[%lld]: got %d expected %lld\n", name, (long long)k, got, (long long)expected);
       ++failures;
     }
   }
-  free(out.allocated);
 }
 
 int main(void) {
@@ -156,14 +155,14 @@ int main(void) {
    * witness below, whose reference is unreachable without it. */
   {
     MemRefI32 in = {random8, random8, 0, {8}, {1}};
-    MemRefI32 even = {NULL, NULL, 0, {0}, {0}}, floorArm = {NULL, NULL, 0, {0}, {0}};
-    _mlir_ciface_dct8_q31(&even, &in);
-    _mlir_ciface_dct8_q31_floor(&floorArm, &in);
+    int32_t evenValues[8], floorValues[8];
+    MemRefI32 even = {evenValues, evenValues, 0, {8}, {1}};
+    MemRefI32 floorArm = {floorValues, floorValues, 0, {8}, {1}};
+    _mlir_ciface_dct8_q31(&in, &even);
+    _mlir_ciface_dct8_q31_floor(&in, &floorArm);
     for (int k = 0; k < 8; ++k)
-      if (even.aligned[even.offset + k] != floorArm.aligned[floorArm.offset + k])
+      if (evenValues[k] != floorValues[k])
         printf("note: product rounding reached the output at k=%d\n", k);
-    free(even.allocated);
-    free(floorArm.allocated);
   }
 
   /* Named witness, and it is the ONLY arm that discriminates the derivation.
@@ -186,20 +185,20 @@ int main(void) {
     for (int i = 0; i < 8; ++i)
       values[i] = (int16_t)nextRandom();
     MemRefI16 in = {values, values, 0, {8}, {1}};
-    MemRefI16 out = {NULL, NULL, 0, {0}, {0}};
-    _mlir_ciface_dct8_q15(&out, &in);
+    int16_t results[8];
+    MemRefI16 out = {results, results, 0, {8}, {1}};
+    _mlir_ciface_dct8_q15(&in, &out);
     int64_t wide[8];
     for (int n = 0; n < 8; ++n)
       wide[n] = values[n];
     for (int64_t k = 0; k < 8; ++k) {
       int64_t expected = reference(wide, 8, k, 16, kEven, kEven);
-      if ((int64_t)out.aligned[out.offset + k] != expected) {
-        printf("dct8_q15[%lld]: got %d expected %lld\n", (long long)k, out.aligned[out.offset + k],
+      if ((int64_t)results[k] != expected) {
+        printf("dct8_q15[%lld]: got %d expected %lld\n", (long long)k, results[k],
                (long long)expected);
         ++failures;
       }
     }
-    free(out.allocated);
   }
 
   if (failures != 0) {

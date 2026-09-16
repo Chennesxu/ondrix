@@ -1,7 +1,6 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* Object gate for the f32 matmul and rms contracts. Both are exact, so every
@@ -68,10 +67,14 @@ static int checkMatmul(const float *a, const float *b, const char *label) {
 
   MemRefF32Rank2 lhsRef = {lhs, lhs, 0, {kRows, kInner}, {kInner, 1}};
   MemRefF32Rank2 rhsRef = {rhs, rhs, 0, {kInner, kColumns}, {kColumns, 1}};
-  MemRefF32Rank2 off, fma, source;
-  _mlir_ciface_f32_matmul_off(&off, &lhsRef, &rhsRef);
-  _mlir_ciface_f32_matmul_fma(&fma, &lhsRef, &rhsRef);
-  _mlir_ciface_f32_matmul(&source, &lhsRef, &rhsRef);
+  float offValues[kRows * kColumns], fmaValues[kRows * kColumns];
+  float sourceValues[kRows * kColumns];
+  MemRefF32Rank2 off = {offValues, offValues, 0, {kRows, kColumns}, {kColumns, 1}};
+  MemRefF32Rank2 fma = {fmaValues, fmaValues, 0, {kRows, kColumns}, {kColumns, 1}};
+  MemRefF32Rank2 source = {sourceValues, sourceValues, 0, {kRows, kColumns}, {kColumns, 1}};
+  _mlir_ciface_f32_matmul_off(&lhsRef, &rhsRef, &off);
+  _mlir_ciface_f32_matmul_fma(&lhsRef, &rhsRef, &fma);
+  _mlir_ciface_f32_matmul(&lhsRef, &rhsRef, &source);
 
   int failed = 0;
   for (int64_t row = 0; row < kRows; ++row) {
@@ -98,9 +101,6 @@ static int checkMatmul(const float *a, const float *b, const char *label) {
       }
     }
   }
-  free(off.allocated);
-  free(fma.allocated);
-  free(source.allocated);
   return failed;
 }
 
@@ -109,9 +109,11 @@ static int checkRms(const float *x, const char *label) {
   memcpy(input, x, sizeof(input));
 
   MemRefF32Rank1 inputRef = {input, input, 0, {kRmsLength}, {1}};
-  MemRefF32Rank1 off, fma;
-  _mlir_ciface_f32_rms_off(&off, &inputRef);
-  _mlir_ciface_f32_rms_fma(&fma, &inputRef);
+  float offValue[1], fmaValue[1];
+  MemRefF32Rank1 off = {offValue, offValue, 0, {1}, {1}};
+  MemRefF32Rank1 fma = {fmaValue, fmaValue, 0, {1}, {1}};
+  _mlir_ciface_f32_rms_off(&inputRef, &off);
+  _mlir_ciface_f32_rms_fma(&inputRef, &fma);
 
   int failed = 0;
   const float expectedOff = referenceRms(x, 0);
@@ -126,8 +128,6 @@ static int checkRms(const float *x, const char *label) {
             (double)expectedFma);
     failed = 1;
   }
-  free(off.allocated);
-  free(fma.allocated);
   return failed;
 }
 

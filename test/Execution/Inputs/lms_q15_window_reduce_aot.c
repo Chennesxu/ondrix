@@ -31,12 +31,8 @@ typedef struct {
   int64_t strides[1];
 } MemRefI16;
 
-typedef struct {
-  MemRefI16 error;
-  MemRefI16 adapted;
-} LmsResult;
-
-extern void _mlir_ciface_lms_q15_window(LmsResult *, MemRefI16 *, MemRefI16 *, MemRefI16 *);
+extern void _mlir_ciface_lms_q15_window(MemRefI16 *, MemRefI16 *, MemRefI16 *, MemRefI16 *,
+                                        MemRefI16 *);
 
 static const int64_t kStepSize = 4096;
 
@@ -154,11 +150,13 @@ int main(void) {
     MemRefI16 inputRef = {x, x, 0, {kSamples}, {1}};
     MemRefI16 desiredRef = {d, d, 0, {kSamples}, {1}};
     MemRefI16 weightRef = {w0, w0, 0, {kTaps}, {1}};
-    LmsResult result;
-    _mlir_ciface_lms_q15_window(&result, &inputRef, &desiredRef, &weightRef);
+    int16_t observedError[kSamples], observedWeights[kTaps];
+    MemRefI16 errorRef = {observedError, observedError, 0, {kSamples}, {1}};
+    MemRefI16 adaptedRef = {observedWeights, observedWeights, 0, {kTaps}, {1}};
+    _mlir_ciface_lms_q15_window(&inputRef, &desiredRef, &weightRef, &errorRef, &adaptedRef);
 
     for (int64_t n = 0; n < kSamples; ++n) {
-      int16_t got = result.error.aligned[result.error.offset + n * result.error.strides[0]];
+      int16_t got = observedError[n];
       if (got != expectedError[n]) {
         fprintf(stderr, "trial %d error[%lld]: got %d, expected %d\n", trial, (long long)n,
                 (int)got, (int)expectedError[n]);
@@ -166,7 +164,7 @@ int main(void) {
       }
     }
     for (int64_t k = 0; k < kTaps; ++k) {
-      int16_t got = result.adapted.aligned[result.adapted.offset + k * result.adapted.strides[0]];
+      int16_t got = observedWeights[k];
       if (got != expectedWeights[k]) {
         fprintf(stderr, "trial %d weight[%lld]: got %d, expected %d\n", trial, (long long)k,
                 (int)got, (int)expectedWeights[k]);

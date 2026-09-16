@@ -1,6 +1,5 @@
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 typedef struct {
   int16_t *allocated;
@@ -86,18 +85,18 @@ int main(void) {
 
     MemRefI16 xRef = {x, x, 0, {kLength}, {1}};
     MemRefI16 yRef = {y, y, 0, {kLength}, {1}};
-    MemRefI16 got;
-    _mlir_ciface_q15_multi_use_binding(&got, &xRef, &yRef);
+    int16_t output[kLength];
+    MemRefI16 got = {output, output, 0, {kLength}, {1}};
+    _mlir_ciface_q15_multi_use_binding(&xRef, &yRef, &got);
     for (int64_t i = 0; i < kLength; ++i) {
       int16_t expected = reference(x[i], y[i], &saturations, &ties);
-      int16_t actual = got.aligned[got.offset + i];
+      int16_t actual = output[i];
       if (actual != expected) {
         fprintf(stderr, "trial %d element %lld: got %d, expected %d\n", trial, (long long)i, actual,
                 expected);
         failed = 1;
       }
     }
-    free(got.allocated);
   }
   if (saturations == 0 || ties == 0) {
     fprintf(stderr, "corpus is vacuous: %lld product saturations, %lld shift ties\n",
