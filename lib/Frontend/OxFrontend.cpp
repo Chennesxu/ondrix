@@ -92,6 +92,8 @@ enum class TokenKind {
   Colon,
   Equal,
   Minus,
+  Plus,
+  Star,
   Arrow,
   Invalid,
 };
@@ -153,6 +155,15 @@ public:
       return {TokenKind::Colon, ":", start};
     case '=':
       return {TokenKind::Equal, "=", start};
+    case '+':
+      return {TokenKind::Plus, "+", start};
+    case '*':
+      return {TokenKind::Star, "*", start};
+    case '/':
+      diagnostics.error(start, "'/' is not an operator: division needs a contract decision "
+                               "(divisor zero, quotient overflow, rounding) before it can be "
+                               "spelled");
+      return {TokenKind::Invalid, source.slice(start.offset, offset), start};
     default:
       diagnostics.error(start,
                         llvm::Twine("unexpected character '") + llvm::StringRef(&current, 1) + "'");
@@ -620,7 +631,7 @@ public:
       }
       advance();
       advance();
-      std::optional<BuiltinCallAst> bound = parseBuiltinCall(policyType);
+      std::optional<BuiltinCallAst> bound = parseStatementExpression(policyType);
       if (!bound)
         return std::nullopt;
       bindingsByName[name.spelling] = bindings.size();
@@ -629,7 +640,7 @@ public:
     }
     if (!expectIdentifier("return", "expected a single return statement"))
       return std::nullopt;
-    std::optional<BuiltinCallAst> result = parseBuiltinCall(policyType);
+    std::optional<BuiltinCallAst> result = parseStatementExpression(policyType);
     if (!result)
       return std::nullopt;
     kernel.result = std::move(*result);
@@ -813,7 +824,7 @@ public:
       return call;
     }
     if (isFftKind(call.kind)) {
-      std::optional<ExpressionAst> operand = parseComposedOperand();
+      std::optional<ExpressionAst> operand = parseExpression(std::nullopt);
       if (!operand)
         return std::nullopt;
       call.operands.push_back(std::move(*operand));
@@ -861,7 +872,7 @@ public:
     if (call.kind == ReductionKind::Phase) {
       // The phase contract admits exactly one tie rule, so the only choice at
       // the call site is the turn width; omission keeps the Q0.16 turn.
-      std::optional<ExpressionAst> operand = parseComposedOperand();
+      std::optional<ExpressionAst> operand = parseExpression(std::nullopt);
       if (!operand)
         return std::nullopt;
       call.operands.push_back(std::move(*operand));
@@ -888,7 +899,7 @@ public:
       return call;
     }
     if (call.kind == ReductionKind::Magnitude) {
-      std::optional<ExpressionAst> operand = parseComposedOperand();
+      std::optional<ExpressionAst> operand = parseExpression(std::nullopt);
       if (!operand)
         return std::nullopt;
       call.operands.push_back(std::move(*operand));
@@ -915,14 +926,14 @@ public:
       return call;
     }
     if (isElementwiseKind(call.kind)) {
-      std::optional<ExpressionAst> lhs = parseComposedOperand();
+      std::optional<ExpressionAst> lhs = parseExpression(std::nullopt);
       if (!lhs)
         return std::nullopt;
       call.operands.push_back(std::move(*lhs));
       if (isBinaryElementwiseKind(call.kind)) {
         if (!expect(TokenKind::Comma, "expected ',' before the second elementwise operand"))
           return std::nullopt;
-        std::optional<ExpressionAst> rhs = parseComposedOperand();
+        std::optional<ExpressionAst> rhs = parseExpression(std::nullopt);
         if (!rhs)
           return std::nullopt;
         call.operands.push_back(std::move(*rhs));
@@ -1390,15 +1401,82 @@ public:
   }
 
 private:
-  // An operand of a composable builtin is a name or another composable
-  // expression; the whole family shares one operand grammar so that adding a
-  // member does not add a nesting rule.
-  std::optional<ExpressionAst> parseComposedOperand() {
-    if (current.kind == TokenKind::Identifier && next.kind == TokenKind::LeftParen &&
-        calleesByName.contains(current.spelling)) {
+  // A statement is a builtin call or an infix expression over them; a bare
+  // parameter name would be an alias, which the language does not have.
+  std::optional<BuiltinCallAst> parseStatementExpression(SourceType policyType) {
+    std::optional<ExpressionAst> expression = parseExpression(policyType);
+    if (!expression)
+      return std::nullopt;
+    if (expression->isParameterReference()) {
+      diagnostics.error(expression->position,
+                        "expected a builtin call or an infix expression, not a bare name");
+      return std::nullopt;
+    }
+    return std::move(*expression->call);
+  }
+
+  // Infix `+`, `-` and `*` are `add`, `sub` and `mult` under the language
+  // defaults: `*` binds tighter, all three associate to the left, parentheses
+  // group, and every operator is its own quantization boundary.
+  std::optional<ExpressionAst> parseExpression(std::optional<SourceType> rootPolicy) {
+    std::optional<ExpressionAst> lhs = parseTerm(rootPolicy);
+    while (lhs && (current.kind == TokenKind::Plus || current.kind == TokenKind::Minus)) {
+      ReductionKind kind =
+          current.kind == TokenKind::Plus ? ReductionKind::Add : ReductionKind::Sub;
+      SourcePosition position = current.position;
+      advance();
+      std::optional<ExpressionAst> rhs = parseTerm(std::nullopt);
+      if (!rhs)
+        return std::nullopt;
+      lhs = makeInfix(kind, std::move(*lhs), std::move(*rhs), position);
+    }
+    return lhs;
+  }
+
+  std::optional<ExpressionAst> parseTerm(std::optional<SourceType> rootPolicy) {
+    std::optional<ExpressionAst> lhs = parsePrimary(rootPolicy);
+    while (lhs && current.kind == TokenKind::Star) {
+      SourcePosition position = current.position;
+      advance();
+      std::optional<ExpressionAst> rhs = parsePrimary(std::nullopt);
+      if (!rhs)
+        return std::nullopt;
+      lhs = makeInfix(ReductionKind::Mult, std::move(*lhs), std::move(*rhs), position);
+    }
+    return lhs;
+  }
+
+  static ExpressionAst makeInfix(ReductionKind kind, ExpressionAst lhs, ExpressionAst rhs,
+                                 SourcePosition position) {
+    BuiltinCallAst call;
+    call.kind = kind;
+    call.operands.push_back(std::move(lhs));
+    call.operands.push_back(std::move(rhs));
+    call.position = position;
+    return ExpressionAst(std::move(call));
+  }
+
+  // A primary is a parenthesized expression, a callee instantiation, a builtin
+  // call or an operand name. A statement (`rootPolicy` set) may start with any
+  // builtin; inside an expression only the composable family nests.
+  std::optional<ExpressionAst> parsePrimary(std::optional<SourceType> rootPolicy) {
+    if (current.kind == TokenKind::LeftParen) {
+      advance();
+      std::optional<ExpressionAst> inner = parseExpression(std::nullopt);
+      if (!inner ||
+          !expect(TokenKind::RightParen, "expected ')' to close the parenthesized expression"))
+        return std::nullopt;
+      return inner;
+    }
+    if (current.kind == TokenKind::Minus) {
+      diagnostics.error(current.position, "unary minus is not an operator; spell negate(...)");
+      return std::nullopt;
+    }
+    bool isCall = current.kind == TokenKind::Identifier && next.kind == TokenKind::LeftParen;
+    if (isCall && calleesByName.contains(current.spelling)) {
       // Inside a chain the composition checker establishes element types, so
       // the call is not additionally tied to the function's result type.
-      std::optional<BuiltinCallAst> instantiated = parseCalleeInstantiation(std::nullopt);
+      std::optional<BuiltinCallAst> instantiated = parseCalleeInstantiation(rootPolicy);
       if (!instantiated)
         return std::nullopt;
       return ExpressionAst(std::move(*instantiated));
@@ -1408,16 +1486,17 @@ private:
                            isIdentifier("add") || isIdentifier("sub") || isIdentifier("mult") ||
                            isIdentifier("abs") || isIdentifier("negate") ||
                            isIdentifier("offset") || isIdentifier("shift");
-    if (!isNestedBuiltin || next.kind != TokenKind::LeftParen) {
-      auto parameter = parseIdentifier("expected an operand name or nested expression");
-      if (!parameter)
+    if (isCall && (rootPolicy || isNestedBuiltin)) {
+      std::optional<BuiltinCallAst> call = parseBuiltinCall(rootPolicy.value_or(SourceType::Q15));
+      if (!call)
         return std::nullopt;
-      return resolveOperand(*parameter);
+      return ExpressionAst(std::move(*call));
     }
-    std::optional<BuiltinCallAst> nested = parseBuiltinCall(SourceType::Q15);
-    if (!nested)
+    auto parameter = parseIdentifier(
+        "expected an operand name, a nested expression, or a parenthesized expression");
+    if (!parameter)
       return std::nullopt;
-    return ExpressionAst(std::move(*nested));
+    return resolveOperand(*parameter);
   }
 
   bool isIdentifier(llvm::StringRef spelling) const {

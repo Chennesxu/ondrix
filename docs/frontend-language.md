@@ -313,9 +313,10 @@ intermediate stage-scaling and requantization boundaries remain observable;
 in particular, `irfft(rfft(input))` is not folded to an identity.
 
 A kernel body may also name intermediate stages with local bindings before
-its single return statement. Each local binds one builtin call, and every
-later reference instantiates that call, so a local may be read any number of
-times; a local no statement reads is a compile error. Reading a local twice
+its single return statement. Each local binds one builtin call or infix
+expression, and every later reference instantiates it, so a local may be read
+any number of times; a local no statement reads is a compile error, and a
+bare parameter name is not a statement. Reading a local twice
 is not a second evaluation: the duplicated subtrees are `Pure` Ondrix
 operations and the canonical pipeline's `canonicalize`/`cse` collapses them,
 which is what lets an intermediate be reused, as in `add(mult(t, t), t)`.
@@ -539,6 +540,18 @@ Q15 tensors elementwise:
 def q15_envelope(x: tensor[q15,32], y: tensor[q15,32]) -> tensor[q15,32]:
   return add(mult(x, y), shift(abs(sub(x, y)), amount=-2), overflow=wrap)
 ```
+
+The three binary members also have an infix spelling: `x + y`, `x - y` and
+`x * y` are `add(x, y)`, `sub(x, y)` and `mult(x, y)` under the language
+defaults below, `*` binds before `+` and `-`, all three associate to the
+left, and parentheses group. Every operator is one operation with its own
+quantization boundary, so `x + y * z` is `add(x, mult(y, z))` and nothing is
+reassociated or folded while parsing; the two spellings produce the identical
+module. A per-operation policy keeps the call spelling, and the two mix
+freely: `(x + y) * z - mult(y, z, overflow=wrap)`. Operands are tensor names,
+locals, calls and parenthesized expressions; there is no unary minus (spell
+`negate`), no literal or scalar operand, no `/`, and no promotion between
+widths, each of which is a separate contract decision rather than syntax.
 
 Both boundary parameters are optional and both take the language default,
 `rounding=nearest_ties_positive` and `overflow=saturate`. `offset` names a raw Q1.15
