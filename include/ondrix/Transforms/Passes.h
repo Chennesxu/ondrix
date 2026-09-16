@@ -37,6 +37,8 @@ std::unique_ptr<mlir::Pass> createApplyOndrixLlvmArgumentAttributesPass();
 /// Function attribute naming the expanded LLVM argument positions that
 /// `apply-ondrix-llvm-argument-attributes` marks `llvm.noalias`.
 constexpr llvm::StringLiteral kNoAliasPointerArgumentsAttr = "ondrix.noalias_pointer_args";
+std::unique_ptr<mlir::Pass> createDeclareOndrixCEntryPointsPass();
+std::unique_ptr<mlir::Pass> createEmitOndrixCEntryPointsPass();
 std::unique_ptr<mlir::Pass> createScalarizeOndspFixedReduceMacPass();
 std::unique_ptr<mlir::Pass> createUnrollOndspFixedMacLoopsPass();
 std::unique_ptr<mlir::Pass> createUnrollOndspFpOrderedReducePass();

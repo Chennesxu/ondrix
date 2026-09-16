@@ -20,6 +20,7 @@ target_link_libraries(ondrix-compile PRIVATE
   MLIRPass
   MLIRSupport
   MLIRTargetLLVMIRExport
+  OndrixCEntryPoints
   OndrixFrontend
   OndrixPipelines
   OndrixSupport

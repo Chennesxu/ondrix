@@ -34,6 +34,7 @@ add_ondrix_library(OndrixSupport
   MLIRIR
   MLIRPass
   MLIRSupport
+  MLIRTranslateLib
   OndrixBufferizationInterfaces
   OndrixMemRefToSCF
   OndrixFixedPointSemantics
@@ -50,6 +51,7 @@ add_ondrix_library(OndrixSupport
   OndrixForwardInsertExtract
   OndrixForwardResultBuffers
   OndrixApplyLlvmArgumentAttributes
+  OndrixCEntryPoints
   OndrixScalarizeFixedReduceMac
   OndrixUnrollFixedMacLoops
   OndrixUnrollFpOrderedReduce

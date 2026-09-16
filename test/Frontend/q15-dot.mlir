@@ -8,7 +8,6 @@
 // TIES: ondsp.acc_export
 // TIES-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
 
-// MLIR: #loc = loc({{.*}}q15_dot.ox":1:1)
 // MLIR-LABEL: func.func @q15_dot
 // MLIR-SAME: %[[LHS:[^:]+]]: memref<?xi16>
 // MLIR-SAME: %[[RHS:[^:]+]]: memref<?xi16>
@@ -22,6 +21,7 @@
 // MLIR-SAME: overflow = #ondsp.overflow<saturate>
 // MLIR-SAME: rounding = #ondsp.rounding<nearest_even>
 // MLIR: return %[[RESULT]] : i16
+// MLIR: #loc{{[0-9]*}} = loc({{.*}}q15_dot.ox":1:1)
 // MLIR: loc({{.*}}q15_dot.ox":2:10)
 
 // SCALAR-LABEL: func.func @q15_dot

@@ -3647,7 +3647,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   unsigned argumentIndex = 0;
   for (const ParameterAst &parameter : kernel.ast.parameters) {
     if (!parameter.isConstexpr()) {
-      arguments.insert({parameter.name, entry->getArgument(argumentIndex++)});
+      // The source name travels as the argument's location, where the C entry
+      // point reads it and nothing downstream has to carry or drop it.
+      BlockArgument argument = entry->getArgument(argumentIndex++);
+      argument.setLoc(NameLoc::get(builder.getStringAttr(parameter.name),
+                                   getLocation(context, sourceName, parameter.position)));
+      arguments.insert({parameter.name, argument});
       continue;
     }
 

@@ -335,6 +335,55 @@ def ApplyOndrixLlvmArgumentAttributes
   let dependentDialects = ["mlir::LLVM::LLVMDialect"];
 }
 
+def DeclareOndrixCEntryPoints
+    : Pass<"declare-ondrix-c-entry-points", "::mlir::ModuleOp"> {
+  let summary = "Record which exported kernels receive a plain-pointer C entry point";
+  let description = [{
+    A kernel exported through `llvm.emit_c_interface` is reachable from C
+    only through MLIR's ranked-memref descriptor convention, whose field
+    layout and index width belong to no published ABI. This pass records, on
+    every exported function whose signature the plain entry can carry, the
+    bufferized signature that `emit-ondrix-c-entry-points` later turns into
+    an `ondrix_<kernel>` wrapper: every parameter a rank-1 identity-layout
+    memref of a fixed-width integer or binary floating-point element type,
+    and exactly one scalar result. Tensor results, higher ranks and strided
+    views get no entry until a destination-passing convention exists for
+    them; their descriptor entry points are untouched.
+
+    Parameter names are read from the arguments' `NameLoc` locations, which a
+    frontend sets and nothing has to drop later. Two dynamic parameters an
+    `ondsp.reduce_mac` pairs read equal-length windows by that operation's
+    contract, so they form one extent group and the entry takes one length
+    for it; the kernel's own equal-length assertion then holds by
+    construction. The pass therefore runs right after bufferization, while
+    the reductions are still `reduce_mac`. A kernel whose entry name is
+    already a symbol of the module is an error, never a silent rename.
+  }];
+  let constructor = "ondrix::createDeclareOndrixCEntryPointsPass()";
+  let dependentDialects = ["mlir::func::FuncDialect", "mlir::LLVM::LLVMDialect",
+                           "mlir::memref::MemRefDialect", "ondrix::ondsp::OndspDialect"];
+}
+
+def EmitOndrixCEntryPoints
+    : Pass<"emit-ondrix-c-entry-points", "::mlir::ModuleOp"> {
+  let summary = "Build the plain-pointer C entry points from their recorded signatures";
+  let description = [{
+    After `convert-func-to-llvm` a recorded kernel is an `llvm.func` whose
+    memref parameters have expanded into descriptor fields (allocated and
+    aligned pointers, offset, size, stride). For each record this pass adds
+    `llvm.func @ondrix_<kernel>` taking one pointer per buffer parameter and,
+    after the last parameter of each extent group, one length in the index
+    width the conversion chose; it builds the descriptors (both pointers the
+    argument, offset zero, stride one, size the length or the static extent)
+    and calls the kernel. A length above the signed range of the index type
+    is refused before any memory is touched, with the message-then-abort
+    convention the shape assertions already use. The record moves to the
+    wrapper, where the header printer reads it.
+  }];
+  let constructor = "ondrix::createEmitOndrixCEntryPointsPass()";
+  let dependentDialects = ["mlir::LLVM::LLVMDialect"];
+}
+
 def UnrollOndspFpOrderedReduce
     : Pass<"unroll-ondsp-fp-ordered-reduce", "::mlir::ModuleOp"> {
   let summary = "Straight-line the f32 reductions whose contract already fixed their fold order";

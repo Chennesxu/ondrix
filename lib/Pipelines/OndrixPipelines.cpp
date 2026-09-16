@@ -35,6 +35,9 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   os << "one-shot-bufferize{bufferize-function-boundaries=true allow-return-allocs=true "
         "function-boundary-type-conversion=identity-layout-map create-deallocs=false},";
   os << "cse,canonicalize,";
+  // The C entry is recorded here, while the reductions that pair equal-length
+  // windows are still `reduce_mac`; it is built once the descriptors expand.
+  os << "declare-ondrix-c-entry-points,";
 
   // The schedule stage; each transform is its own legality filter. Order is
   // the policy: vertical batchings first, then horizontal reductions,
@@ -125,7 +128,8 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   os << "convert-vector-to-scf,expand-strided-metadata,lower-affine,convert-scf-to-cf,"
         "convert-vector-to-llvm,"
         "finalize-memref-to-llvm,convert-math-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,"
-        "convert-func-to-llvm,apply-ondrix-llvm-argument-attributes,reconcile-unrealized-casts";
+        "convert-func-to-llvm,apply-ondrix-llvm-argument-attributes,reconcile-unrealized-casts,"
+        "emit-ondrix-c-entry-points";
   return text;
 }
 

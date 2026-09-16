@@ -634,6 +634,21 @@ on exactly this contract for function entry arguments — everything else they
 prove or refuse statically — so the precondition is part of the language and
 ABI surface, never a hidden assumption of one pass.
 
+A kernel whose parameters are all rank-1 buffers and whose result is one
+scalar also gets a plain C entry point, `ondrix_<kernel>`, built by the
+canonical pipeline once the descriptors have expanded: one `const T *` per
+buffer and, for each group of parameters whose windows a reduction pairs at
+equal length (the two operands of `dot` and `fir`), one `uintN_t length` in
+the target's index width, placed after the group's last pointer; a static
+extent needs no length, and parameter names carry over from the source. The entry fills the descriptors itself (offset zero,
+stride one), carries the same storage preconditions as the descriptor entry,
+and refuses a length above the signed index range before touching memory,
+with the message-and-abort convention of the shape assertions.
+`ondrix-compile --emit=c-header`, or `ondrix-translate
+--mlir-to-ondrix-c-header` on the `--emit=llvm` module, prints the
+prototypes. Tensor results keep the descriptor convention until a
+destination-passing entry exists for them.
+
 This is not a general Python parser. Imports, classes, heap objects, arbitrary
 expressions, and dynamic Python behavior are rejected. Scalar constants,
 indexing, loops, mutable output buffers, multiple exported kernels, and

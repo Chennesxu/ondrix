@@ -3,6 +3,7 @@
 #include "ondrix/InitAllDialects.h"
 #include "ondrix/InitAllPasses.h"
 #include "ondrix/Pipelines/OndrixPipelines.h"
+#include "ondrix/Transforms/CEntryPoints.h"
 
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/InitAllDialects.h"
@@ -31,7 +32,7 @@
 using namespace llvm;
 
 namespace {
-enum class EmitKind { Contracts, LLVMDialect, LLVMIR, Manifest };
+enum class EmitKind { Contracts, LLVMDialect, LLVMIR, Manifest, CHeader };
 
 cl::opt<std::string> inputFilename(cl::Positional, cl::desc("<input .ox file>"), cl::Required);
 cl::opt<std::string> outputFilename("o", cl::desc("Output MLIR file"), cl::value_desc("filename"),
@@ -51,7 +52,10 @@ cl::opt<EmitKind> emitKind(
                           "vectorizers off; the schedule stage owns every lane decision"),
                clEnumValN(EmitKind::Manifest, "manifest",
                           "JSON reproduction record of the compilation that "
-                          "--emit=llvm would perform")),
+                          "--emit=llvm would perform"),
+               clEnumValN(EmitKind::CHeader, "c-header",
+                          "C header declaring the plain-pointer entry points the "
+                          "--emit=llvm module defines")),
     cl::init(EmitKind::Contracts));
 cl::opt<unsigned> llvmOptLevel("llvm-opt-level",
                                cl::desc("LLVM middle-end level for --emit=llvmir (0-3)"),
@@ -211,6 +215,12 @@ int main(int argc, char **argv) {
       return 1;
     if (emitKind == EmitKind::Manifest) {
       emitManifest(*module, options, output.os());
+      output.keep();
+      return 0;
+    }
+    if (emitKind == EmitKind::CHeader) {
+      if (failed(ondrix::printOndrixCEntryHeader(*module, output.os())))
+        return 1;
       output.keep();
       return 0;
     }
