@@ -27,6 +27,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include <cmath>
 #include <optional>
 #include <utility>
 
@@ -855,6 +856,91 @@ public:
   }
 };
 
+// The domain change between a uniform-Q grid and binary32, scalar only.
+class ConvertOpLowering final : public OpConversionPattern<ondrix::ondsp::ConvertOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::ConvertOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::ConvertOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    if (!op.getInput().getType().isIntOrFloat())
+      return op.emitOpError("fixed scalar lowering supports scalar convert values");
+    Location loc = op.getLoc();
+    auto f32 = rewriter.getF32Type();
+    auto floatConstant = [&](double value) -> Value {
+      return rewriter.create<arith::ConstantOp>(loc, rewriter.getF32FloatAttr(value));
+    };
+    if (auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getSrc())) {
+      // Dequantize: the integer's one IEEE rounding, then an exact power-of-two scale.
+      Value real = rewriter.create<arith::SIToFPOp>(loc, f32, adaptor.getInput());
+      rewriter.replaceOp(op, rewriter.create<arith::MulFOp>(
+                                 loc, real, floatConstant(std::ldexp(1.0, -int(fixed.getFrac())))));
+      return success();
+    }
+    auto fixed = cast<ondrix::ondsp::FixedAttr>(op.getDst());
+    auto storage = cast<IntegerType>(fixed.getStorage());
+    auto i64 = rewriter.getI64Type();
+    double rail = std::ldexp(1.0, storage.getWidth() - 1);
+    // Exact scale, NaN to zero, both rails clamped in binary32 (both are
+    // representable), so the truncation to i64 below is exact.
+    Value scaled = rewriter.create<arith::MulFOp>(loc, adaptor.getInput(),
+                                                  floatConstant(std::ldexp(1.0, fixed.getFrac())));
+    Value zero = floatConstant(0.0);
+    Value isNan = rewriter.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UNO, scaled, scaled);
+    Value value = rewriter.create<arith::SelectOp>(loc, isNan, zero, scaled);
+    Value high = floatConstant(rail), low = floatConstant(-rail);
+    Value above = rewriter.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OGT, value, high);
+    value = rewriter.create<arith::SelectOp>(loc, above, high, value);
+    Value below = rewriter.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OLT, value, low);
+    value = rewriter.create<arith::SelectOp>(loc, below, low, value);
+    // The integer part by truncation and the exact fraction beside it, so
+    // the tie rule is decided by comparing that fraction with one half.
+    Value truncated = rewriter.create<arith::FPToSIOp>(loc, i64, value);
+    Value back = rewriter.create<arith::SIToFPOp>(loc, f32, truncated);
+    Value fraction = rewriter.create<arith::SubFOp>(loc, value, back);
+    Value half = floatConstant(0.5), negativeHalf = floatConstant(-0.5);
+    Value one = createIntegerConstant(loc, i64, 1, rewriter);
+    Value zeroInt = createIntegerConstant(loc, i64, 0, rewriter);
+    auto compare = [&](arith::CmpFPredicate predicate, Value rhs) -> Value {
+      return rewriter.create<arith::CmpFOp>(loc, predicate, fraction, rhs);
+    };
+    Value up, down;
+    switch (*op.getRounding()) {
+    case ondrix::ondsp::RoundingMode::TowardZero:
+      break;
+    case ondrix::ondsp::RoundingMode::TowardNegative:
+      down = compare(arith::CmpFPredicate::OLT, zero);
+      break;
+    case ondrix::ondsp::RoundingMode::NearestTiesPositive:
+      up = compare(arith::CmpFPredicate::OGE, half);
+      down = compare(arith::CmpFPredicate::OLT, negativeHalf);
+      break;
+    case ondrix::ondsp::RoundingMode::NearestEven: {
+      Value odd = rewriter.create<arith::TruncIOp>(
+          loc, rewriter.getI1Type(), rewriter.create<arith::AndIOp>(loc, truncated, one));
+      up = rewriter.create<arith::OrIOp>(
+          loc, compare(arith::CmpFPredicate::OGT, half),
+          rewriter.create<arith::AndIOp>(loc, compare(arith::CmpFPredicate::OEQ, half), odd));
+      down = rewriter.create<arith::OrIOp>(
+          loc, compare(arith::CmpFPredicate::OLT, negativeHalf),
+          rewriter.create<arith::AndIOp>(loc, compare(arith::CmpFPredicate::OEQ, negativeHalf),
+                                         odd));
+      break;
+    }
+    }
+    Value rounded = truncated;
+    if (up)
+      rounded = rewriter.create<arith::AddIOp>(
+          loc, rounded, rewriter.create<arith::SelectOp>(loc, up, one, zeroInt));
+    if (down)
+      rounded = rewriter.create<arith::SubIOp>(
+          loc, rounded, rewriter.create<arith::SelectOp>(loc, down, one, zeroInt));
+    rewriter.replaceOp(op, narrowSignedValue(loc, rounded, storage,
+                                             ondrix::ondsp::OverflowMode::Saturate, rewriter));
+    return success();
+  }
+};
+
 // The exact sum or difference of two W-bit values needs W+1 bits, so the
 // carrier is widened before the scale runs; nothing is lost before the
 // operation's single declared boundary.
@@ -1208,9 +1294,9 @@ public:
     OndspFixedToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
-                 AddShiftOpLowering, BitrevAddOpLowering, ReduceMacOpLowering, RoundDivOpLowering,
-                 RoundShiftOpLowering, SatCastOpLowering, SubShiftOpLowering>(typeConverter,
-                                                                              &getContext());
+                 AddShiftOpLowering, BitrevAddOpLowering, ConvertOpLowering, ReduceMacOpLowering,
+                 RoundDivOpLowering, RoundShiftOpLowering, SatCastOpLowering, SubShiftOpLowering>(
+        typeConverter, &getContext());
     patterns.add<MacOpLowering, MacSubOpLowering>(typeConverter, &getContext(),
                                                   wideningMultiplyLowHalves);
     patterns.add<SqrtFixedOpLowering>(typeConverter, &getContext(), sqrtEstimate);

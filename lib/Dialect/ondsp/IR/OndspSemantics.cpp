@@ -173,6 +173,56 @@ LogicalResult verifyInterleavedFpTransformPolicy(Operation *op, CxLayoutAttr lay
   return success();
 }
 
+std::optional<unsigned> getUniformQStorageWidth(Attribute numeric) {
+  auto fixed = dyn_cast_or_null<FixedAttr>(numeric);
+  if (!fixed || fixed.getSignedness() != Signedness::Signed)
+    return std::nullopt;
+  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
+  if (!storage || !storage.isSignless())
+    return std::nullopt;
+  unsigned width = storage.getWidth();
+  if ((width != 16 && width != 32) || fixed.getFrac() != width - 1)
+    return std::nullopt;
+  return width;
+}
+
+bool isConversionFloatFormat(Attribute numeric) {
+  auto fp = dyn_cast_or_null<FpAttr>(numeric);
+  return fp && fp.getFormat().isF32() && fp.getContract() == FpContractMode::Off;
+}
+
+LogicalResult verifyConversionPolicy(Operation *op, Attribute src, Attribute dst,
+                                     std::optional<RoundingMode> rounding,
+                                     std::optional<OverflowMode> overflow) {
+  std::optional<unsigned> sourceWidth = getUniformQStorageWidth(src);
+  std::optional<unsigned> destinationWidth = getUniformQStorageWidth(dst);
+  bool sourceFloat = isConversionFloatFormat(src);
+  bool destinationFloat = isConversionFloatFormat(dst);
+  if ((!sourceWidth && !sourceFloat) || (!destinationWidth && !destinationFloat))
+    return op->emitOpError(
+        "src and dst each require #ondsp.fixed<signed, storage = i16, frac = "
+        "15>, #ondsp.fixed<signed, storage = i32, frac = 31>, or #ondsp.fp<format "
+        "= f32, contract = off>");
+  if (sourceFloat && destinationFloat)
+    return op->emitOpError("a conversion between floating-point formats is not an operation here");
+  if (sourceWidth && destinationWidth && *sourceWidth == *destinationWidth)
+    return op->emitOpError("src and dst name the same format; a conversion changes the width");
+  bool boundary = sourceFloat || (destinationWidth && *destinationWidth < *sourceWidth);
+  bool declared = rounding.has_value() && overflow.has_value();
+  if (boundary && !declared)
+    return op->emitOpError(sourceFloat ? "a quantization requires rounding and overflow"
+                                       : "a narrowing conversion requires rounding and overflow");
+  if (!boundary && (rounding || overflow))
+    return op->emitOpError(destinationFloat ? "a dequantization is one IEEE rounding and declares "
+                                              "no rounding or overflow"
+                                            : "a widening conversion is exact and declares no "
+                                              "rounding or overflow");
+  if (sourceFloat && *overflow != OverflowMode::Saturate)
+    return op->emitOpError("a quantization saturates; wrapping an unbounded value is not a "
+                           "contract this operation offers");
+  return success();
+}
+
 LogicalResult verifyPackedButterflyPolicy(Operation *op, CxLayoutAttr layout, Attribute numeric,
                                           ProductAttr product, ScaleAttr productScale,
                                           ScaleAttr outputScale, bool targetInventory) {

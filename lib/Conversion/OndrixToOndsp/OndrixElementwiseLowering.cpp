@@ -57,8 +57,17 @@ static Value emitElementwiseLoop(Location loc, RankedTensorType resultType, Valu
 // operation declares, at the same shift.
 static Value emitQuantizeBody(ondrix::ir::QuantizeOp op, Value value, OpBuilder &builder) {
   Location loc = op.getLoc();
-  auto source = cast<IntegerType>(cast<ondrix::ondsp::FixedAttr>(op.getSrc()).getStorage());
-  auto destination = cast<IntegerType>(cast<ondrix::ondsp::FixedAttr>(op.getDst()).getStorage());
+  auto sourceFixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getSrc());
+  auto destinationFixed = dyn_cast<ondrix::ondsp::FixedAttr>(op.getDst());
+  if (!sourceFixed || !destinationFixed) {
+    // The domain change keeps its own boundary operation.
+    Type element = destinationFixed ? destinationFixed.getStorage()
+                                    : cast<ondrix::ondsp::FpAttr>(op.getDst()).getFormat();
+    return builder.create<ondrix::ondsp::ConvertOp>(loc, element, value, op.getSrc(), op.getDst(),
+                                                    op.getRoundingAttr(), op.getOverflowAttr());
+  }
+  auto source = cast<IntegerType>(sourceFixed.getStorage());
+  auto destination = cast<IntegerType>(destinationFixed.getStorage());
   if (destination.getWidth() > source.getWidth()) {
     Value extended = builder.create<arith::ExtSIOp>(loc, destination, value);
     Value shift = builder.create<arith::ConstantIntOp>(

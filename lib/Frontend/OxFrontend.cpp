@@ -256,6 +256,8 @@ enum class ReductionKind {
   Div,
   Widen,
   Narrow,
+  Quantize,
+  Dequantize,
   Log2,
   Exp2
 };
@@ -274,10 +276,16 @@ static bool isBinaryElementwiseKind(ReductionKind kind) {
   return kind == ReductionKind::Add || kind == ReductionKind::Sub || kind == ReductionKind::Mult;
 }
 
-// The two spellings of the one width conversion: the name fixes the
+// The four spellings of the one conversion operation: the name fixes the
 // direction, so a target on the wrong side is refused, never reinterpreted.
 static bool isConversionKind(ReductionKind kind) {
-  return kind == ReductionKind::Widen || kind == ReductionKind::Narrow;
+  return kind == ReductionKind::Widen || kind == ReductionKind::Narrow ||
+         kind == ReductionKind::Quantize || kind == ReductionKind::Dequantize;
+}
+
+// The two that carry a boundary and therefore take rounding and overflow.
+static bool isLossyConversionKind(ReductionKind kind) {
+  return kind == ReductionKind::Narrow || kind == ReductionKind::Quantize;
 }
 
 // The compile-time coefficient designs. None has a runtime form, so each is
@@ -705,7 +713,8 @@ public:
         !isIdentifier("sub") && !isIdentifier("mult") && !isIdentifier("abs") &&
         !isIdentifier("negate") && !isIdentifier("offset") && !isIdentifier("shift") &&
         !isIdentifier("div") && !isIdentifier("widen") && !isIdentifier("narrow") &&
-        !isIdentifier("log2") && !isIdentifier("exp2")) {
+        !isIdentifier("quantize") && !isIdentifier("dequantize") && !isIdentifier("log2") &&
+        !isIdentifier("exp2")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
@@ -716,7 +725,7 @@ public:
                         "matmul(...), lms(...), cic_decimate(...), a lowpass/hamming/hann/"
                         "blackman/kaiser design, or an "
                         "elementwise add/sub/mult/abs/negate/offset/shift/div builtin expression, "
-                        "or a widen(...)/narrow(...) conversion");
+                        "or a widen/narrow/quantize/dequantize conversion");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -793,6 +802,10 @@ public:
       call.kind = ReductionKind::Widen;
     else if (isIdentifier("narrow"))
       call.kind = ReductionKind::Narrow;
+    else if (isIdentifier("quantize"))
+      call.kind = ReductionKind::Quantize;
+    else if (isIdentifier("dequantize"))
+      call.kind = ReductionKind::Dequantize;
     else if (isIdentifier("abs"))
       call.kind = ReductionKind::Abs;
     else if (isIdentifier("negate"))
@@ -962,13 +975,16 @@ public:
           !expect(TokenKind::Equal, "expected '=' after to"))
         return std::nullopt;
       std::optional<SourceType> target =
-          parseSourceType("expected the target format 'q15' or 'q31'");
+          parseSourceType("expected the target format 'q15', 'q31', or 'f32'");
       if (!target)
         return std::nullopt;
       call.target = *target;
-      if (call.kind == ReductionKind::Widen && current.kind == TokenKind::Comma) {
+      if (!isLossyConversionKind(call.kind) && current.kind == TokenKind::Comma) {
         diagnostics.error(current.position,
-                          "widen is exact and takes no rounding or overflow policy");
+                          call.kind == ReductionKind::Widen
+                              ? "widen is exact and takes no rounding or overflow policy"
+                              : "dequantize is one IEEE rounding and takes no rounding or "
+                                "overflow policy");
         return std::nullopt;
       }
       if (!parseBoundaryPolicies(call) ||
@@ -1602,12 +1618,13 @@ private:
         return std::nullopt;
       return Operand{ExpressionAst(std::move(*instantiated)), 0, position};
     }
-    bool isNestedBuiltin = isIdentifier("cfft") || isIdentifier("icfft") || isIdentifier("rfft") ||
-                           isIdentifier("irfft") || isIdentifier("magnitude") ||
-                           isIdentifier("add") || isIdentifier("sub") || isIdentifier("mult") ||
-                           isIdentifier("abs") || isIdentifier("negate") ||
-                           isIdentifier("offset") || isIdentifier("shift") || isIdentifier("div") ||
-                           isIdentifier("gain") || isIdentifier("widen") || isIdentifier("narrow");
+    bool isNestedBuiltin =
+        isIdentifier("cfft") || isIdentifier("icfft") || isIdentifier("rfft") ||
+        isIdentifier("irfft") || isIdentifier("magnitude") || isIdentifier("add") ||
+        isIdentifier("sub") || isIdentifier("mult") || isIdentifier("abs") ||
+        isIdentifier("negate") || isIdentifier("offset") || isIdentifier("shift") ||
+        isIdentifier("div") || isIdentifier("gain") || isIdentifier("widen") ||
+        isIdentifier("narrow") || isIdentifier("quantize") || isIdentifier("dequantize");
     if (isCall && (rootPolicy || isNestedBuiltin)) {
       std::optional<BuiltinCallAst> call = parseBuiltinCall(rootPolicy.value_or(SourceType::Q15));
       if (!call)
@@ -2941,32 +2958,49 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       return *lhs;
     };
-    // The width conversion is the one member whose result type is not its
+    // The conversion is the one member whose result type is not its
     // operand's; the spelled direction and the spelled target must agree.
     auto checkConversion = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       std::optional<ComposedType> input = checkComposedExpression(call.operands.front());
       if (!input)
         return std::nullopt;
-      bool widen = call.kind == ReductionKind::Widen;
-      if (input->elementType != SourceType::Q15 && input->elementType != SourceType::Q31) {
-        diagnostics.error(call.position, llvm::Twine(widen ? "widen" : "narrow") +
-                                             " converts between q15 and q31; an f32 conversion "
-                                             "is a separate contract");
+      bool fixedInput =
+          input->elementType == SourceType::Q15 || input->elementType == SourceType::Q31;
+      bool fixedTarget = call.target == SourceType::Q15 || call.target == SourceType::Q31;
+      llvm::StringRef contract;
+      switch (call.kind) {
+      case ReductionKind::Widen:
+        if (input->elementType != SourceType::Q15 || call.target != SourceType::Q31)
+          contract = "widen takes a q15 operand to q31";
+        break;
+      case ReductionKind::Narrow:
+        if (input->elementType != SourceType::Q31 || call.target != SourceType::Q15)
+          contract = "narrow takes a q31 operand to q15";
+        break;
+      case ReductionKind::Quantize:
+        if (input->elementType != SourceType::F32 || !fixedTarget)
+          contract = "quantize takes an f32 operand to q15 or q31";
+        break;
+      default:
+        if (!fixedInput || call.target != SourceType::F32)
+          contract = "dequantize takes a q15 or q31 operand to f32";
+        break;
+      }
+      if (!contract.empty()) {
+        diagnostics.error(call.position, contract);
         return std::nullopt;
       }
       if (input->extent < 1 || input->extent > 4096) {
-        diagnostics.error(call.position, llvm::Twine(widen ? "widen" : "narrow") +
-                                             " currently requires an extent in [1, 4096]");
+        diagnostics.error(call.position, "conversions currently require an extent in [1, 4096]");
         return std::nullopt;
       }
-      if (input->elementType != (widen ? SourceType::Q15 : SourceType::Q31) ||
-          call.target != (widen ? SourceType::Q31 : SourceType::Q15)) {
-        diagnostics.error(call.position, widen ? "widen takes a q15 operand to q31"
-                                               : "narrow takes a q31 operand to q15");
+      if (isLossyConversionKind(call.kind) && !checkBoundaryPolicies(call))
+        return std::nullopt;
+      if (call.kind == ReductionKind::Quantize && call.destinationOverflow != "saturate") {
+        diagnostics.error(call.position, "quantize saturates; wrapping an unbounded value is not "
+                                         "a contract this operation offers");
         return std::nullopt;
       }
-      if (!widen && !checkBoundaryPolicies(call))
-        return std::nullopt;
       return ComposedType{call.target, input->extent};
     };
     // The fixed gain: the same width in and out, the raw constant read at that
@@ -4088,16 +4122,25 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                                                    : emitComposedCall(*operand.call);
       auto inputType = cast<RankedTensorType>(input.getType());
       if (isConversionKind(call.kind)) {
-        bool widen = call.kind == ReductionKind::Widen;
-        auto resultType = RankedTensorType::get({inputType.getDimSize(0)}, widen ? i32 : i16);
+        // Sema pinned the direction, so the operand's element type and the
+        // spelled target name the two formats.
+        auto formatOf = [&](Type element) -> Attribute {
+          if (element.isF32())
+            return ondsp::FpAttr::get(&context, element, ondsp::FpContractMode::Off);
+          return element.isSignlessInteger(32) ? q31Numeric : numeric;
+        };
+        Type target = call.target == SourceType::F32   ? Type(builder.getF32Type())
+                      : call.target == SourceType::Q31 ? Type(i32)
+                                                       : Type(i16);
+        bool lossy = isLossyConversionKind(call.kind);
+        auto resultType = RankedTensorType::get({inputType.getDimSize(0)}, target);
         return builder.create<ir::QuantizeOp>(
             getLocation(context, sourceName, call.position), resultType, input,
-            Attribute(widen ? numeric : q31Numeric), Attribute(widen ? q31Numeric : numeric),
-            widen ? ondsp::RoundingModeAttr()
-                  : ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding)),
-            widen
-                ? ondsp::OverflowModeAttr()
-                : ondsp::OverflowModeAttr::get(&context, *parseOverflow(call.destinationOverflow)));
+            formatOf(inputType.getElementType()), formatOf(target),
+            lossy ? ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding))
+                  : ondsp::RoundingModeAttr(),
+            lossy ? ondsp::OverflowModeAttr::get(&context, *parseOverflow(call.destinationOverflow))
+                  : ondsp::OverflowModeAttr());
       }
       if (call.kind == ReductionKind::Gain) {
         ondsp::FixedAttr gainNumeric =

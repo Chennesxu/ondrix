@@ -66,10 +66,10 @@ func.func @add_shift_rejects_nested_memref_operands(
 
 func.func @numeric_value_ops_accept_shaped_values(
     %tensor: tensor<2xi16>, %vector: vector<2xi16>)
-    -> (tensor<2xi16>, vector<2xi8>) {
+    -> (tensor<2xi16>, vector<2xf32>) {
   %0 = ondsp.assume_numeric %tensor {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (tensor<2xi16>) -> tensor<2xi16>
-  %1 = ondsp.convert %vector {src = #ondsp.fixed<signed, storage = i16, frac = 15>, dst = #ondsp.fixed<signed, storage = i8, frac = 7>} : (vector<2xi16>) -> vector<2xi8>
-  return %0, %1 : tensor<2xi16>, vector<2xi8>
+  %1 = ondsp.convert %vector {src = #ondsp.fixed<signed, storage = i16, frac = 15>, dst = #ondsp.fp<format = f32, contract = off>} : (vector<2xi16>) -> vector<2xf32>
+  return %0, %1 : tensor<2xi16>, vector<2xf32>
 }
 
 // -----

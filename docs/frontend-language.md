@@ -589,7 +589,21 @@ to=q15)` on a `q15` operand and `widen(x, to=q15)` are errors rather than
 identities, and the target is spelled although two widths leave one choice.
 Both are composable members: `narrow(widen(x, to=q31) * y, to=q15)`
 multiplies a `q15` signal by a `q31` one at the wider width and narrows the
-product once. An f32 conversion is a separate contract and is refused.
+product once.
+
+`quantize(x, to=q15|q31, rounding=..., overflow=saturate)` and
+`dequantize(x, to=f32)` are the same operation across the domain boundary.
+A quantization rounds the exact real `x * 2^(W-1)` under the declared tie
+rule (the scale is a power of two, so nothing is lost before the boundary)
+and saturates: the real value is unbounded, so `overflow` may be omitted or
+spelled `saturate` and `wrap` is refused, and a NaN reads as zero, stated
+because targets disagree on it (ARM and MATLAB give zero, RISC-V the
+maximum, x86 the minimum). A dequantization is exact at `q15`; at `q31` it
+is the single nearest-even rounding of the integer to binary32 that IEEE
+defines, so it takes no policy of its own. Both are composable members too,
+with fixed-point neighbours only, since the elementwise family is fixed
+point: `dequantize(quantize(x, to=q15) + y, to=f32)` adds an f32 signal to a
+`q15` one on the `q15` grid and returns to f32.
 
 Both boundary parameters are optional and both take the language default,
 `rounding=nearest_ties_positive` and `overflow=saturate`. `offset` names a raw Q1.15

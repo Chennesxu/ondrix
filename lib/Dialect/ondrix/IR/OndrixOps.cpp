@@ -246,18 +246,7 @@ static LogicalResult verifyFixedTransformAttributes(Operation *op, Attribute pro
 
 // The two admitted uniform-Q profiles. Both operations whose fixed contract
 // spans them read the width from here rather than pinning one.
-static std::optional<unsigned> getUniformQStorageWidth(Attribute numeric) {
-  auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric);
-  if (!fixed || fixed.getSignedness() != ondrix::ondsp::Signedness::Signed)
-    return std::nullopt;
-  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
-  if (!storage || !storage.isSignless())
-    return std::nullopt;
-  unsigned width = storage.getWidth();
-  if ((width != 16 && width != 32) || fixed.getFrac() != width - 1)
-    return std::nullopt;
-  return width;
-}
+using ondrix::ondsp::getUniformQStorageWidth;
 
 static LogicalResult verifySignedFixedFormat(Operation *op, Attribute numeric, unsigned width,
                                              unsigned frac, StringRef name) {
@@ -346,13 +335,9 @@ static LogicalResult verifyDesignCoefficientTensor(Operation *op, RankedTensorTy
 }
 
 static LogicalResult verifyQuantizeDomain(QuantizeOp op) {
-  std::optional<unsigned> sourceWidth = getUniformQStorageWidth(op.getSrc());
-  std::optional<unsigned> destinationWidth = getUniformQStorageWidth(op.getDst());
-  if (!sourceWidth || !destinationWidth)
-    return op.emitOpError("src and dst require #ondsp.fixed<signed, storage = i16, frac = 15> or "
-                          "#ondsp.fixed<signed, storage = i32, frac = 31>");
-  if (*sourceWidth == *destinationWidth)
-    return op.emitOpError("src and dst name the same format; a conversion changes the width");
+  if (failed(ondrix::ondsp::verifyConversionPolicy(op.getOperation(), op.getSrc(), op.getDst(),
+                                                   op.getRounding(), op.getOverflow())))
+    return failure();
   Type inputType = op.getInput().getType();
   Type resultType = op.getResult().getType();
   if (!ondrix::haveSameElementwiseShape(inputType, resultType))
@@ -368,13 +353,7 @@ static LogicalResult verifyQuantizeDomain(QuantizeOp op) {
     return op.emitOpError("input element type must match source numeric storage type");
   if (ondrix::getElementTypeOrSelf(resultType) != getNumericStorage(op.getDst()))
     return op.emitOpError("result element type must match destination numeric storage type");
-  // The attributes belong to the boundary: only a narrowing has one.
-  bool narrowing = *destinationWidth < *sourceWidth;
-  if (narrowing != op.getRounding().has_value() || narrowing != op.getOverflow().has_value())
-    return op.emitOpError(narrowing ? "a narrowing conversion requires rounding and overflow"
-                                    : "a widening conversion is exact and declares no rounding "
-                                      "or overflow");
-  if (narrowing)
+  if (op.getRounding())
     return verifyDeclaredRounding(op.getOperation(), *op.getRounding(), "quantize");
   return success();
 }

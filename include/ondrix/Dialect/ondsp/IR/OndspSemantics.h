@@ -177,6 +177,22 @@ mlir::LogicalResult verifyInterleavedFpTransformPolicy(mlir::Operation *op, CxLa
 /// nearest_ties_positive rounding, wrap narrowing, and output shift 0 (the
 /// packed target inventory). Fails closed on any layout without an
 /// executable profile.
+/// The storage width of a signed uniform-Q reading, Q1.15 in i16 or Q1.31 in
+/// i32, and nothing else.
+std::optional<unsigned> getUniformQStorageWidth(mlir::Attribute numeric);
+
+/// The one floating-point format a numeric conversion admits: binary32 with
+/// `contract = off`, the mode of a program that contains no multiply-add.
+bool isConversionFloatFormat(mlir::Attribute numeric);
+
+/// The boundary rule shared by `ondrix.quantize` and `ondsp.convert`: a
+/// narrowing or a quantization declares `rounding` and `overflow`, a widening
+/// or a dequantization declares neither, and a quantization saturates.
+mlir::LogicalResult verifyConversionPolicy(mlir::Operation *op, mlir::Attribute src,
+                                           mlir::Attribute dst,
+                                           std::optional<RoundingMode> rounding,
+                                           std::optional<OverflowMode> overflow);
+
 mlir::LogicalResult verifyPackedButterflyPolicy(mlir::Operation *op, CxLayoutAttr layout,
                                                 mlir::Attribute numeric, ProductAttr product,
                                                 ScaleAttr productScale, ScaleAttr outputScale,

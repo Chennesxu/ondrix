@@ -238,9 +238,16 @@ LogicalResult ConvertOp::verify() {
     return failure();
   if (failed(verifySameElementwiseShape(*this, {getInput().getType(), getResult().getType()})))
     return failure();
-  if (failed(verifyValueNumericType(*this, getInput().getType(), getSrc(), "input")))
+  if (failed(verifyValueNumericType(*this, getInput().getType(), getSrc(), "input")) ||
+      failed(verifyValueNumericType(*this, getResult().getType(), getDst(), "result")))
     return failure();
-  return verifyValueNumericType(*this, getResult().getType(), getDst(), "result");
+  if (failed(
+          verifyConversionPolicy(getOperation(), getSrc(), getDst(), getRounding(), getOverflow())))
+    return failure();
+  if (isa<FixedAttr>(getSrc()) && isa<FixedAttr>(getDst()))
+    return emitOpError("a conversion between fixed formats is round_shift; convert changes "
+                       "the domain");
+  return success();
 }
 
 LogicalResult RoundShiftOp::verify() {

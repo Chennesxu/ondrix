@@ -16,8 +16,30 @@ def Ondsp_AssumeNumericOp
 }
 
 def Ondsp_ConvertOp : Ondsp_Op<"convert", [Pure]> {
-  let summary = "Convert a value between explicit ondsp numeric policies";
-  let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$src, Ondsp_NumericAttr:$dst);
+  let summary = "Convert one value between a uniform-Q format and binary32";
+  let description = [{
+    ```text
+    quantize   f32 -> QW:  y = sat_iW(round(x * 2^(W-1)))    one tie rule; NaN -> 0
+    dequantize QW -> f32:  y = fl(x) * 2^-(W-1)               one IEEE rounding
+    ```
+
+    The domain change between the integer grid and binary32. A quantization
+    scales exactly (a power of two), rounds the exact real `x * 2^(W-1)`
+    under the declared tie rule, and saturates: the value is unbounded, so
+    `overflow` is required and must be `saturate` — a wrapping reading of an
+    infinity has nothing to name. A NaN quantizes to zero, the reading ARM's
+    and MATLAB's converters give, stated here because no target agrees on
+    it. A dequantization is exact at Q15 and, at Q31, the single
+    nearest-even rounding of the integer to binary32 that IEEE defines, so
+    it declares no rounding of its own and no overflow. A conversion between
+    two fixed formats is `round_shift`, not this operation. Scalar values
+    only; the elementwise loop above it supplies the shape.
+  }];
+  let arguments = (ins AnyType:$input,
+                   Ondsp_NumericAttr:$src,
+                   Ondsp_NumericAttr:$dst,
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding,
+                   OptionalAttr<Ondsp_OverflowModeAttr>:$overflow);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

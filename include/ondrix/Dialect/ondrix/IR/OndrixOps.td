@@ -2215,22 +2215,27 @@ def Ondrix_QuantizeOp : Ondrix_Op<"quantize", [Pure]> {
   let summary = "Convert a value between the two uniform-Q widths, preserving its value";
   let description = [{
     ```text
-    q15 -> q31:  y = x * 2^16                    exact, no boundary
-    q31 -> q15:  y = narrow_i16(round(x / 2^16))  one tie rule, one overflow
+    q15 -> q31:  y = x * 2^16                          exact, no boundary
+    q31 -> q15:  y = narrow_i16(round(x / 2^16))        one tie rule, one overflow
+    f32 -> QW:   y = sat_iW(round(x * 2^(W-1)))         one tie rule; saturates; NaN -> 0
+    QW  -> f32:  y = fl(x) * 2^-(W-1)                    one IEEE rounding, none declared
     ```
 
-    The value is preserved, not the raw integer: both formats have one
+    The value is preserved, not the raw integer: both fixed formats have one
     integer bit, so a widening is a left shift that cannot overflow and a
     narrowing is a right shift by the width difference, where the top
     `2^15` raw values round up onto the rail and the declared `overflow`
     resolves them. The attributes follow the boundary rather than the
-    operation: a narrowing requires `rounding` and `overflow`, and a widening
-    refuses both, so a program that flips `src` and `dst` fails to verify
-    instead of keeping a policy that no longer names anything. This is the
-    only operation whose result element type differs from its operand's, and
-    the only way a source program changes width; no elementwise member
-    converts implicitly. A floating-point `src` or `dst` is a different
-    contract and fails closed here.
+    operation: a narrowing and a quantization require `rounding` and
+    `overflow`, a widening and a dequantization refuse both, so a program
+    that flips `src` and `dst` fails to verify instead of keeping a policy
+    that no longer names anything. A quantization's `overflow` is
+    `saturate`: the real value is unbounded and a wrapping infinity names
+    nothing; its NaN reads as zero. This is the only operation whose result
+    element type differs from its operand's, and the only way a source
+    program changes width or domain; no elementwise member converts
+    implicitly. The floating-point format is binary32 with `contract = off`,
+    the mode of a program with no multiply-add.
   }];
   let arguments = (ins AnyType:$input,
                    Ondsp_NumericAttr:$src,
