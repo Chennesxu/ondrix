@@ -63,3 +63,17 @@ func.func @matmul_k1_q31(%a: tensor<4x1xi32>, %b: tensor<1x3xi32>) -> tensor<4x3
   } : (tensor<4x1xi32>, tensor<1x3xi32>) -> tensor<4x3xi32>
   return %result : tensor<4x3xi32>
 }
+
+// The raw-high Q31 profile: one floor per term at frac 30, no product rounding.
+// CHECK-LABEL: func.func @matmul_q31_raw_high
+// CHECK: ondrix.matmul
+// CHECK-SAME: product = #ondsp.product<high_raw>
+// CHECK-SAME: rounding = #ondsp.rounding<nearest_even>
+func.func @matmul_q31_raw_high(%a: tensor<4x16xi32>, %b: tensor<16x3xi32>) -> tensor<4x3xi32> {
+  %c = ondrix.matmul %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<4x16xi32>, tensor<16x3xi32>) -> tensor<4x3xi32>
+  return %c : tensor<4x3xi32>
+}

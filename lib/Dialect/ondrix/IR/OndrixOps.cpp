@@ -1630,6 +1630,14 @@ LogicalResult MatmulOp::verify() {
     if (getProductRounding() && !isMatmulRounding(*getProductRounding()))
       return emitOpError("matmul product_rounding must be nearest_even, toward_negative, or "
                          "nearest_ties_positive");
+    if (getProduct()) {
+      if (*storageWidth != 32 || !ondrix::ondsp::isRawHighProduct(*getProduct()))
+        return emitOpError("matmul product admits only #ondsp.product<high_raw>, at Q31; the "
+                           "full product is the default");
+      if (getProductRounding())
+        return emitOpError("a raw-high matmul has no product rounding to declare: the high "
+                           "half is a floor");
+    }
   }
   RankedTensorType lhsType = getLhs().getType();
   RankedTensorType rhsType = getRhs().getType();
@@ -1654,7 +1662,7 @@ LogicalResult MatmulOp::verify() {
   }
   // The product boundary exists exactly when an exact K-sum would not fit
   // i64, so its rounding is required there and refused where there is none.
-  if (storageWidth) {
+  if (storageWidth && !getProduct()) {
     unsigned shift = ondrix::ir::getReductionProductShift(*storageWidth, lhsType.getDimSize(1));
     if (shift > 0 && !getProductRounding())
       return emitOpError() << "a K-sum of " << lhsType.getDimSize(1) << " Q" << (*storageWidth - 1)

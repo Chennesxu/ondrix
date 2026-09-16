@@ -54,3 +54,23 @@ func.func @matmul1x1x1_q31(%a: tensor<1x1xi32>, %b: tensor<1x1xi32>) -> tensor<1
 // A K = 1 reduction has no full block to batch and keeps the ordered form.
 // LANES-LABEL: func.func @matmul1x1x1_q31
 // LANES: ondsp.reduce_mac
+
+// The raw-high profile takes the shared i40/frac30 accumulator the Q15 route
+// uses, with the raw-high product the target's MAC family selects natively,
+// and reads out through the identity export, one doubling and the declared
+// narrowing.
+// CHECK-LABEL: func.func @matmul_raw_high_q31(
+// CHECK: ondsp.reduce_mac
+// CHECK-SAME: product = #ondsp.product<high_raw>
+// CHECK-SAME: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
+// CHECK: ondsp.acc_export {{.*}}dst = #ondsp.fixed<signed, storage = i64, frac = 30>
+// CHECK: arith.shli
+// CHECK: ondsp.round_shift {{.*}}post_shift_right = 0, rounding = nearest_even, overflow = saturate, saturate_to = i32
+func.func @matmul_raw_high_q31(%a: tensor<4x16xi32>, %b: tensor<16x3xi32>) -> tensor<4x3xi32> {
+  %c = ondrix.matmul %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<4x16xi32>, tensor<16x3xi32>) -> tensor<4x3xi32>
+  return %c : tensor<4x3xi32>
+}

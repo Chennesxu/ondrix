@@ -719,18 +719,32 @@ public:
     ondrix::ondsp::ScaleAttr scale;
     ondrix::ondsp::ScaleAttr productScale;
     IntegerType storage;
+    bool rawHigh = op.getProduct() && ondrix::ondsp::isRawHighProduct(*op.getProduct());
     if (!fp) {
       auto fixed = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
       storage = cast<IntegerType>(fixed.getStorage());
       unsigned productShift =
           ondrix::ir::getReductionProductShift(storage.getWidth(), lhsType.getDimSize(1));
-      scale = ondrix::ondsp::ScaleAttr::get(
-          context, /*preShiftLeft=*/0, storage.getWidth() - 1 - productShift, *op.getRounding(),
-          ondrix::ondsp::OverflowMode::Saturate, storage);
-      if (productShift > 0)
+      if (rawHigh) {
+        // The raw high half is the product floored by the storage width; the
+        // frac-30 sum reads out through one exact doubling and the declared
+        // narrowing.
+        productShift = storage.getWidth();
         productScale = ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, productShift,
-                                                     *op.getProductRounding(),
+                                                     ondrix::ondsp::RoundingMode::TowardNegative,
                                                      ondrix::ondsp::OverflowMode::Saturate, i64);
+        scale = ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, /*postShiftRight=*/0,
+                                              *op.getRounding(),
+                                              ondrix::ondsp::OverflowMode::Saturate, storage);
+      } else {
+        scale = ondrix::ondsp::ScaleAttr::get(
+            context, /*preShiftLeft=*/0, storage.getWidth() - 1 - productShift, *op.getRounding(),
+            ondrix::ondsp::OverflowMode::Saturate, storage);
+        if (productShift > 0)
+          productScale = ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, productShift,
+                                                       *op.getProductRounding(),
+                                                       ondrix::ondsp::OverflowMode::Saturate, i64);
+      }
     }
     Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
@@ -774,6 +788,10 @@ public:
                       builder.create<scf::YieldOp>(loc, sum);
                     });
                 Value element = accLoop.getResult(0);
+                if (rawHigh) {
+                  Value one64 = builder.create<arith::ConstantIntOp>(loc, 1, 64);
+                  element = builder.create<arith::ShLIOp>(loc, element, one64);
+                }
                 if (!fp)
                   element =
                       builder.create<ondrix::ondsp::RoundShiftOp>(loc, storage, element, scale);

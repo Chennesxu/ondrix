@@ -133,3 +133,28 @@ func.func @f32_matmul_with_product_rounding(%a: tensor<2x8xf32>, %b: tensor<8x2x
   } : (tensor<2x8xf32>, tensor<8x2xf32>) -> tensor<2x2xf32>
   return %result : tensor<2x2xf32>
 }
+
+// -----
+
+func.func @matmul_raw_high_q15(%a: tensor<4x8xi16>, %b: tensor<8x3xi16>) -> tensor<4x3xi16> {
+  // expected-error @below {{matmul product admits only #ondsp.product<high_raw>, at Q31; the full product is the default}}
+  %c = ondrix.matmul %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    product = #ondsp.product<high_raw>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<4x8xi16>, tensor<8x3xi16>) -> tensor<4x3xi16>
+  return %c : tensor<4x3xi16>
+}
+
+// -----
+
+func.func @matmul_raw_high_rounds_products(%a: tensor<4x16xi32>, %b: tensor<16x3xi32>) -> tensor<4x3xi32> {
+  // expected-error @below {{a raw-high matmul has no product rounding to declare: the high half is a floor}}
+  %c = ondrix.matmul %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    product_rounding = #ondsp.rounding<nearest_even>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<4x16xi32>, tensor<16x3xi32>) -> tensor<4x3xi32>
+  return %c : tensor<4x3xi32>
+}

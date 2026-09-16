@@ -5,6 +5,10 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_matmul_rank.ox 2>&1 | FileCheck %s --check-prefix=RANK
 // RUN: not ondrix-compile %S/Inputs/invalid_matmul_inner.ox 2>&1 | FileCheck %s --check-prefix=INNER
 // RUN: not ondrix-compile %S/Inputs/invalid_matmul_extent.ox 2>&1 | FileCheck %s --check-prefix=EXTENT
+// RUN: ondrix-compile %S/Inputs/q31_matmul_raw_high.ox | FileCheck %s --check-prefix=RAW
+// RUN: not ondrix-compile %S/Inputs/invalid_matmul_raw_high_q15.ox 2>&1 | FileCheck %s --check-prefix=RAWQ15
+// RUN: not ondrix-compile %S/Inputs/invalid_matmul_raw_high_rounding.ox 2>&1 | FileCheck %s --check-prefix=RAWROUNDING
+// RUN: not ondrix-compile %S/Inputs/invalid_matmul_product.ox 2>&1 | FileCheck %s --check-prefix=SELECTION
 
 // CHECK-LABEL: func.func @q15_matmul(
 // CHECK-SAME: %[[LHS:.*]]: tensor<4x8xi16>, %[[RHS:.*]]: tensor<8x3xi16>) -> tensor<4x3xi16>
@@ -49,3 +53,13 @@
 // Q31FLOOR-SAME: rounding = #ondsp.rounding<nearest_ties_positive>
 
 // PRODBOUND: matmul at this width and inner extent has no product boundary to round
+
+// product=raw_high is the Q31 target's selection: one floor per term at frac
+// 30, no product_rounding, the export doubling once to the Q31 position.
+// RAW-LABEL: func.func @q31_matmul_raw_high(
+// RAW: ondrix.matmul
+// RAW-SAME: product = #ondsp.product<high_raw>
+// RAW-NOT: product_rounding
+// RAWQ15: error: product=raw_high is the Q31 matmul profile
+// RAWROUNDING: error: a raw-high matmul has no product rounding to declare
+// SELECTION: error: unsupported product selection 'low'; use full or raw_high

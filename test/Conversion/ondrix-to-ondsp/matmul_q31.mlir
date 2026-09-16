@@ -51,3 +51,22 @@ func.func @matmul_k1_q31(%a: tensor<2x1xi32>, %b: tensor<1x2xi32>) -> tensor<2x2
   } : (tensor<2x1xi32>, tensor<1x2xi32>) -> tensor<2x2xi32>
   return %result : tensor<2x2xi32>
 }
+
+// -----
+
+// The raw-high profile floors each product by the storage width (a
+// toward-negative shift by 32 in the i64 carrier, the high half exactly), sums
+// at frac 30, and reads out by one exact doubling and the declared narrowing.
+// CHECK-LABEL: func.func @matmul_raw_high_q31
+// CHECK: ondsp.round_shift {{.*}}post_shift_right = 32, rounding = toward_negative, overflow = saturate, saturate_to = i64
+// CHECK: arith.addi
+// CHECK: arith.shli %{{.*}}, %c1_i64 : i64
+// CHECK: ondsp.round_shift {{.*}}post_shift_right = 0, rounding = nearest_even, overflow = saturate, saturate_to = i32
+func.func @matmul_raw_high_q31(%a: tensor<4x16xi32>, %b: tensor<16x3xi32>) -> tensor<4x3xi32> {
+  %c = ondrix.matmul %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    product = #ondsp.product<high_raw>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<4x16xi32>, tensor<16x3xi32>) -> tensor<4x3xi32>
+  return %c : tensor<4x3xi32>
+}

@@ -100,7 +100,15 @@ but vacuous on this profile, the way a left shift declares a tie rule. The
 two profiles are different contracts, not two implementations of one: sixteen
 products of small values sum to `-16` floors under `raw_high` where the full
 product rounds to zero. `product=full` (the default) keeps the exact i64/frac62
-accumulator; the selection is refused at Q15 and on every other builtin.
+accumulator; the selection is refused at Q15 and, so far, on every builtin
+but `dot`, `fir` and `matmul`.
+
+`matmul(a, b, product=raw_high)` at `q31` is the same selection per term:
+one floor at frac 30 per product, the K-sum of at most 64 such terms exact
+in the shared 40-bit state, and the same doubling readout. It is a
+different contract from the requantized profile below, which rounds each
+term by the derived shift under `product_rounding`; the two cannot be
+combined, so `product_rounding=` is refused beside `product=raw_high`.
 
 ```python
 def q31_dot_raw_high(lhs: buffer[q31], rhs: buffer[q31]) -> q31:
@@ -317,7 +325,9 @@ refused where it does not:
   is refused rather than ignored.
 - `matmul` and `lms` take `product_rounding=` for the per-term boundary their
   Q31 tap/inner sums need. It is refused at Q15 and at `K = 1`, where the
-  derived shift is zero and there is no boundary to round.
+  derived shift is zero and there is no boundary to round, and on a
+  `matmul` that selects `product=raw_high`, whose per-term boundary is the
+  floor itself.
 - `rms` takes `input_rounding=` for the Q31 pre-shift, alongside the
   `root_rounding=` it already carried.
 

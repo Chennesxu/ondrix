@@ -493,16 +493,19 @@ struct MatmulOpInterface
     // the exact K-sum already fits, and the shift the verifier pairs with
     // product_rounding at Q31.
     unsigned productShift = ondrix::ir::getReductionProductShift(storageWidth, innerCount);
+    bool rawHigh = op.getProduct() && ondrix::ondsp::isRawHighProduct(*op.getProduct());
     auto product =
-        productShift > 0
+        rawHigh ? *op.getProduct()
+        : productShift > 0
             ? ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full,
                                               productShift, *op.getProductRounding())
             : ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
     // Wrap alone authorizes reassociation (exact-modulo); the range bounds
     // tying the wrapped accumulator to the contract's exact K-sum, at both
-    // widths, are derived in the Ondrix_MatmulOp description.
+    // widths, are derived in the Ondrix_MatmulOp description. The raw-high
+    // K-sum of at most 64 frac-30 terms is the Q15 bound again, in i40.
     ondrix::ondsp::AccType accumulatorType =
-        storageWidth == 16
+        storageWidth == 16 || rawHigh
             ? getExactWrapAccumulator(context, /*width=*/40)
             : getExactWrapAccumulator(context, /*width=*/64, /*frac=*/62 - productShift);
 
@@ -547,12 +550,32 @@ struct MatmulOpInterface
                     columnBuilder.create<ondrix::ondsp::AccZeroOp>(columnLoc, accumulatorType);
                 Value reduced = columnBuilder.create<ondrix::ondsp::ReduceMacOp>(
                     columnLoc, accumulatorType, initial, lhsRow, packedRow, numeric, product);
-                // Dividing the raw accumulator by 2^(acc.frac - (W - 1)) under the
-                // declared rounding and saturating to the storage width is
-                // exactly the `round_shift` boundary of the tensor-form lowering.
-                Value element = columnBuilder.create<ondrix::ondsp::AccExportOp>(
-                    columnLoc, elementType, reduced, fixed, *op.getRounding(),
-                    ondrix::ondsp::OverflowMode::Saturate);
+                Value element;
+                if (rawHigh) {
+                  // The frac-30 sum reads out as on the raw-high dot: identity
+                  // export into the i64 carrier, one exact doubling, the
+                  // declared narrowing.
+                  IntegerType i64 = columnBuilder.getI64Type();
+                  auto carrier = ondrix::ondsp::FixedAttr::get(
+                      context, ondrix::ondsp::Signedness::Signed, i64, /*frac=*/30);
+                  Value wide = columnBuilder.create<ondrix::ondsp::AccExportOp>(
+                      columnLoc, i64, reduced, carrier, *op.getRounding(),
+                      ondrix::ondsp::OverflowMode::Saturate);
+                  Value one64 = columnBuilder.create<arith::ConstantIntOp>(columnLoc, 1, 64);
+                  Value doubled = columnBuilder.create<arith::ShLIOp>(columnLoc, wide, one64);
+                  element = columnBuilder.create<ondrix::ondsp::RoundShiftOp>(
+                      columnLoc, elementType, doubled,
+                      ondrix::ondsp::ScaleAttr::get(context, 0, 0, *op.getRounding(),
+                                                    ondrix::ondsp::OverflowMode::Saturate,
+                                                    elementType));
+                } else {
+                  // Dividing the raw accumulator by 2^(acc.frac - (W - 1)) under
+                  // the declared rounding and saturating to the storage width is
+                  // exactly the `round_shift` boundary of the tensor-form lowering.
+                  element = columnBuilder.create<ondrix::ondsp::AccExportOp>(
+                      columnLoc, elementType, reduced, fixed, *op.getRounding(),
+                      ondrix::ondsp::OverflowMode::Saturate);
+                }
                 columnBuilder.create<memref::StoreOp>(columnLoc, element, *output,
                                                       ValueRange{row, column});
                 columnBuilder.create<scf::YieldOp>(columnLoc);

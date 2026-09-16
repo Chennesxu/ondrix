@@ -1498,12 +1498,31 @@ def Ondrix_MatmulOp : Ondrix_Op<"matmul", [Pure]> {
     increasing `k`, from `+0.0`. Under `off` that is one multiply and one
     add per term, under `fma` one fused event per term, and under `fast` any
     schedule derivable from the declared rewrites.
+
+    A Q31 matmul may instead declare `product = #ondsp.product<high_raw>`,
+    the selection a fixed-point DSP's Q31 multiply-accumulate makes natively:
+
+    ```text
+    t[k]    = floor(A[i][k] * B[k][j] / 2^32)          frac 30, exact i32
+    C[i][j] = sat_i32(2 * sum_k t[k])                  |sum| <= 64 * 2^30
+    ```
+
+    The K-sum of at most 64 such terms is exact in the shared i40 state and
+    in i64 alike, so no second requantization exists and `product_rounding`
+    is refused, the floor being the product boundary. The readout is the
+    identity export into the i64 carrier, one exact doubling to the Q31
+    position, and the declared saturating narrowing, so `rounding` is
+    declared and vacuous, as on the raw-high `dot`. This is a different
+    contract from the requantized full product above, not a faster
+    implementation of it: the author chooses one floor per term where the
+    other profile rounds each term by `p` under a mode of their choice.
   }];
   let arguments = (ins AnyRankedTensor:$lhs,
                    AnyRankedTensor:$rhs,
                    Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_RoundingModeAttr>:$product_rounding,
-                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding,
+                   OptionalAttr<Ondsp_ProductAttr>:$product);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

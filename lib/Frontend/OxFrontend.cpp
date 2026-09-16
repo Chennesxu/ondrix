@@ -1445,16 +1445,21 @@ public:
           if (!name)
             return std::nullopt;
           bool isExport = name->spelling == "rounding";
-          if (!isExport && name->spelling != "product_rounding") {
-            diagnostics.error(name->position, "matmul accepts rounding and product_rounding");
+          bool isProduct = name->spelling == "product";
+          if (!isExport && !isProduct && name->spelling != "product_rounding") {
+            diagnostics.error(name->position,
+                              "matmul accepts product, rounding and product_rounding");
             return std::nullopt;
           }
-          if (!expect(TokenKind::Equal, "expected '=' after a matmul rounding policy name"))
+          if (!expect(TokenKind::Equal, "expected '=' after a matmul policy name"))
             return std::nullopt;
-          auto rounding = parseIdentifier("expected rounding mode");
-          if (!rounding)
+          auto value = parseIdentifier(isProduct ? "expected product selection 'full' or 'raw_high'"
+                                                 : "expected rounding mode");
+          if (!value)
             return std::nullopt;
-          (isExport ? call.rounding : call.inputRounding) = rounding->spelling.str();
+          (isProduct  ? call.product
+           : isExport ? call.rounding
+                      : call.inputRounding) = value->spelling.str();
         }
       }
       if (!expect(TokenKind::RightParen, "expected ')' after matmul expression"))
@@ -2664,12 +2669,32 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       rounding = *parsed;
     }
+    // The raw high half is the Q31 target's product: one floor per term, no
+    // second rounding, the sum read out by a doubling.
+    bool rawHigh = ast.result.product == "raw_high";
+    if (!ast.result.product.empty() && ast.result.product != "full" && !rawHigh) {
+      diagnostics.error(ast.result.position, llvm::Twine("unsupported product selection '") +
+                                                 ast.result.product + "'; use full or raw_high");
+      return std::nullopt;
+    }
+    if (rawHigh && !isQ31) {
+      diagnostics.error(ast.result.position,
+                        "product=raw_high is the Q31 matmul profile: each term is the raw high "
+                        "half of the product, accumulated at frac 30");
+      return std::nullopt;
+    }
+    if (rawHigh && !ast.result.inputRounding.empty()) {
+      diagnostics.error(ast.result.position,
+                        "a raw-high matmul has no product rounding to declare: the high half is "
+                        "a floor");
+      return std::nullopt;
+    }
     // The product boundary exists only where an exact K-sum would not fit i64,
     // so the binding declares its rounding exactly there and refuses it
     // elsewhere. K is the inner extent, already validated as static above.
     std::optional<ondsp::RoundingMode> productRounding;
     bool hasProductBoundary =
-        ir::getReductionProductShift(isQ31 ? 32 : 16, *lhsParameter->shape[1]) > 0;
+        !rawHigh && ir::getReductionProductShift(isQ31 ? 32 : 16, *lhsParameter->shape[1]) > 0;
     if (!ast.result.inputRounding.empty()) {
       if (!hasProductBoundary) {
         diagnostics.error(ast.result.position,
@@ -4669,9 +4694,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     ondsp::RoundingModeAttr productRounding =
         kernel.productRounding ? ondsp::RoundingModeAttr::get(&context, *kernel.productRounding)
                                : ondsp::RoundingModeAttr();
+    ondsp::ProductAttr selection =
+        kernel.ast.result.product == "raw_high"
+            ? ondsp::ProductAttr::get(&context, ondsp::ProductSelection::HighRaw)
+            : ondsp::ProductAttr();
     auto product =
         builder.create<ir::MatmulOp>(expressionLocation, cast<RankedTensorType>(resultType), lhs,
-                                     rhs, numeric, productRounding, rounding);
+                                     rhs, numeric, productRounding, rounding, selection);
     builder.create<func::ReturnOp>(expressionLocation, product.getResult());
     module->push_back(function);
     if (failed(verify(*module)))
