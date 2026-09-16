@@ -552,6 +552,72 @@ def ScalarizeOndspFixedReduceMac
   ];
 }
 
+def ScalarizeOndspCertifiedConstantReduce
+    : Pass<"scalarize-ondsp-certified-constant-reduce", "::mlir::ModuleOp"> {
+  let summary = "Expand a constant-coefficient fixed reduce_mac into certified 32-bit term "
+                "groups on a wrapping accumulator";
+  let description = [{
+    Rewrites a zero-seeded rank-1 memref `ondsp.reduce_mac` whose coefficient
+    operand is a constant global (or a static reversed view of one) into
+    scalar arithmetic the prefix-range analysis has certified: every exact
+    product is formed in the 32-bit term width, consecutive products are
+    summed there in groups of the widest certified power-of-two width, and
+    each group sum enters a WRAPPING accumulator of the declared storage
+    through `ondsp.acc_add_term`. The definitional form the sibling
+    `scalarize-ondsp-fixed-reduce-mac` emits updates the accumulator once per
+    product under the declared overflow mode, which on a target without the
+    accumulator's width is a widened multiply and a rail check per term.
+
+    Two certificates authorize the rewrite, both rebuilt from the constants
+    and the complete signed input domain. A saturating accumulator is admitted
+    only when `proveOrderedZeroSeededConstantReduction` shows that no ordered
+    prefix can reach its rails: the saturating and the wrapping update
+    sequences then denote the same exact sum, so the accumulator is retyped
+    to wrap and the rail checks are gone. A wrapping accumulator needs no rail
+    certificate; its update is the exact-modulo class. The group width is
+    `largestCertifiedTermGroup` at 32 bits: the interval sum of each aligned
+    group of that width fits a signed 32-bit term, and since two's-complement
+    addition is associative a group whose total fits is exact in whatever
+    order its 32-bit adds run. Products past the last full group are added
+    singly, which is what the certificate covers for them. A group width the
+    analysis cannot certify leaves every product a single term, still exact
+    and still cheaper than the widened multiply.
+
+    Straight-line or loop form follows the sibling pass's rule and budgets: a
+    reduction of at most 64 terms unrolls with its coefficients as constants
+    unless the function's straight-line total exceeds `max-unrolled-terms`;
+    otherwise a loop steps over full groups of at most 16 terms, loading the
+    coefficients, and the remaining products follow straight-line. Runtime
+    coefficients, a product with a shift, a multi-lane or unsigned
+    accumulator, a result read by anything but `acc_export`, dynamic or
+    unequal extents, and coefficient tables longer than `max-elements` are
+    left byte-identical for the definitional expansion.
+
+    Measured on the canonical pipeline at width zero, RV32IM under gem5,
+    instructions per call: the definitional expansion ran the 64-term
+    constant dot in 593, the 16-tap filter in 6761, the DCT-8 in 676, the
+    DCT-32 in 28761 and the DCT-64 in 112797; the certified groups run them
+    in 468, 5242, 506, 6584 and 36798. The loop-form rows gain most, because
+    their saturating step was a clamp pair per product; the DCT-8 still trails
+    the tensor lowering's 447, whose straight-line i64 products the middle
+    end shares across rows.
+  }];
+  let options = [
+    Option<"maxUnrolledTerms", "max-unrolled-terms", "int64_t", /*default=*/"0",
+           "Per-function budget of straight-line reduction terms shared with "
+           "scalarize-ondsp-fixed-reduce-mac; 0 leaves the straight-line form unbounded">,
+    Option<"maxElements", "max-elements", "int64_t", /*default=*/"256",
+           "Longest constant coefficient table the certificates are built for">,
+  ];
+  let constructor = "ondrix::createScalarizeOndspCertifiedConstantReducePass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "ondrix::ondsp::OndspDialect",
+  ];
+}
+
 def UnrollOndspFixedMacLoops
     : Pass<"unroll-ondsp-fixed-mac-loops", "::mlir::ModuleOp"> {
   let summary = "Unroll short static accumulator-carried mac loops into straight-line chains";

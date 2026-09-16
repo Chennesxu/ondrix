@@ -124,6 +124,19 @@ lowering to the LLVM dialect.
   independent per-sample products is what an in-order backend can schedule
   without spilling, where 128 straight-lined samples could not.
 
+- **Certified scalar groups.** A constant-coefficient reduction the lane
+  stages left behind — every one of them at width zero — is not expanded into
+  the declared update sequence when the prefix-range analysis certifies more:
+  that no ordered prefix reaches the saturating rails, so the accumulator may
+  wrap, and how many consecutive products sum exactly in 32 bits, so those
+  products are added as one term. The rewrite is authorized per reduction by
+  the same interval analysis the horizontal routes replay in their proof
+  traces, and refused for runtime coefficients, shifted products, or a result
+  read by anything but its export. What it buys is the scalar target once
+  more: on RV32IM under gem5 the DCT-32 and DCT-64 rows run in a quarter and a
+  third of the definitional expansion's instructions, the constant dot and
+  filter in four fifths.
+
 - **Cost model.** The fixed priority order plus each pass's own
   profitability guards. A measured regret evaluation against the best legal
   candidate is planned for the frozen-revision evaluation. The individual

@@ -101,7 +101,10 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // description); under a declared repeat block counted reductions keep loops.
   os << "forward-ondsp-packed-reduction-operands,";
   int64_t straightLineTerms = options.hardwareRepeatBlock ? 1 : 128;
-  os << llvm::formatv("scalarize-ondsp-fixed-reduce-mac{{max-unrolled-terms={0}},"
+  // Constant-coefficient reductions the lane stages left take their certified
+  // 32-bit term groups first; the definitional expansion gets the rest.
+  os << llvm::formatv("scalarize-ondsp-certified-constant-reduce{{max-unrolled-terms={0}},"
+                      "scalarize-ondsp-fixed-reduce-mac{{max-unrolled-terms={0}},"
                       "unroll-ondsp-fixed-mac-loops{{max-unrolled-terms={0}},",
                       straightLineTerms);
   // The f32 sibling under the same budget; above one lane the lane-blocked

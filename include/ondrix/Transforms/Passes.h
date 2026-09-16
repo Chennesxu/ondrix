@@ -44,6 +44,7 @@ std::unique_ptr<mlir::Pass> createEmitOndrixCEntryPointsPass();
 std::unique_ptr<mlir::Pass>
 createEmitOndrixCEntryPointsPass(const EmitOndrixCEntryPointsOptions &options);
 std::unique_ptr<mlir::Pass> createScalarizeOndspFixedReduceMacPass();
+std::unique_ptr<mlir::Pass> createScalarizeOndspCertifiedConstantReducePass();
 std::unique_ptr<mlir::Pass> createUnrollOndspFixedMacLoopsPass();
 std::unique_ptr<mlir::Pass> createUnrollOndspFpOrderedReducePass();
 std::unique_ptr<mlir::Pass> createWidenOndspExactAccumulatorsPass();

@@ -15,6 +15,7 @@ add_ondrix_library(OndrixConversionUtils
   MLIRMemRefDialect
   MLIRSCFDialect
   MLIRTransformUtils
+  OndrixConstantSequenceAnalysis
   OndspIR
 )
 

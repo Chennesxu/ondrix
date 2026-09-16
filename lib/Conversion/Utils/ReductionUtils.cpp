@@ -1,5 +1,7 @@
 #include "ondrix/Conversion/Utils/ReductionUtils.h"
 
+#include "ondrix/Analysis/ConstantSequenceAnalysis.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -55,6 +57,39 @@ FailureOr<RankOneReductionBounds> createRankOneMemRefReductionBounds(Operation *
   }
 
   return RankOneReductionBounds{*lhsType, *rhsType, lowerBound, upperBound};
+}
+
+std::optional<SmallVector<llvm::APInt>>
+getConstantCoefficientsInReadOrder(Value coefficients, int64_t length, int64_t maxElements) {
+  auto type = dyn_cast<MemRefType>(coefficients.getType());
+  SmallVector<int64_t> strides;
+  int64_t offset = 0;
+  if (!type || failed(getStridesAndOffset(type, strides, offset)) || strides.size() != 1)
+    return std::nullopt;
+  Value source = coefficients;
+  if (strides[0] == -1) {
+    auto subview = coefficients.getDefiningOp<memref::SubViewOp>();
+    if (!subview || ShapedType::isDynamic(offset))
+      return std::nullopt;
+    source = subview.getSource();
+  }
+  FailureOr<ondrix::ConstantIntegerMemRefFacts> constant =
+      ondrix::analyzeConstantIntegerMemRef(source, maxElements);
+  if (failed(constant))
+    return std::nullopt;
+  ArrayRef<llvm::APInt> values = constant->getSequence().getValues();
+  SmallVector<llvm::APInt> readOrder;
+  if (strides[0] == 1) {
+    if (static_cast<int64_t>(values.size()) != length)
+      return std::nullopt;
+    readOrder.assign(values.begin(), values.end());
+    return readOrder;
+  }
+  if (strides[0] != -1 || offset >= static_cast<int64_t>(values.size()) || length > offset + 1)
+    return std::nullopt;
+  for (int64_t index = 0; index < length; ++index)
+    readOrder.push_back(values[offset - index]);
+  return readOrder;
 }
 
 } // namespace ondrix::conversion

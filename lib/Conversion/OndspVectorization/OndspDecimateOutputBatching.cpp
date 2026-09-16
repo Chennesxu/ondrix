@@ -1,8 +1,8 @@
-#include "ondrix/Analysis/ConstantSequenceAnalysis.h"
 #include "ondrix/Analysis/FixedPointPrefixRangeAnalysis.h"
 #include "ondrix/Conversion/OndspVectorization/OndspVectorization.h"
 #include "ondrix/Conversion/Utils/FixedPointDomainUtils.h"
 #include "ondrix/Conversion/Utils/MemRefLayoutUtils.h"
+#include "ondrix/Conversion/Utils/ReductionUtils.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
@@ -100,41 +100,6 @@ bool isTapReadableRankOneMemRef(Value value) {
   int64_t offset = 0;
   return succeeded(getStridesAndOffset(type, strides, offset)) && strides.size() == 1 &&
          (strides[0] == 1 || strides[0] == -1);
-}
-
-/// The coefficients in the order the taps read them, when the memref is a
-/// constant global or a static reversed view of one.
-std::optional<SmallVector<llvm::APInt>> getConstantCoefficientsInReadOrder(Value coefficients,
-                                                                           int64_t length) {
-  auto type = cast<MemRefType>(coefficients.getType());
-  SmallVector<int64_t> strides;
-  int64_t offset = 0;
-  if (failed(getStridesAndOffset(type, strides, offset)) || strides.size() != 1)
-    return std::nullopt;
-  Value source = coefficients;
-  if (strides[0] == -1) {
-    auto subview = coefficients.getDefiningOp<memref::SubViewOp>();
-    if (!subview || ShapedType::isDynamic(offset))
-      return std::nullopt;
-    source = subview.getSource();
-  }
-  FailureOr<ondrix::ConstantIntegerMemRefFacts> constant =
-      ondrix::analyzeConstantIntegerMemRef(source, kMaxUnrolledTaps);
-  if (failed(constant))
-    return std::nullopt;
-  ArrayRef<llvm::APInt> values = constant->getSequence().getValues();
-  SmallVector<llvm::APInt> readOrder;
-  if (strides[0] == 1) {
-    if (static_cast<int64_t>(values.size()) != length)
-      return std::nullopt;
-    readOrder.assign(values.begin(), values.end());
-    return readOrder;
-  }
-  if (offset >= static_cast<int64_t>(values.size()) || length > offset + 1)
-    return std::nullopt;
-  for (int64_t index = 0; index < length; ++index)
-    readOrder.push_back(values[offset - index]);
-  return readOrder;
 }
 
 /// Rank-1 memref whose single dimension is contiguous and whose memory space
@@ -362,8 +327,8 @@ FailureOr<DecimateLoopShape> matchDecimateLoop(scf::ForOp loop, int64_t vectorWi
   // A saturating profile keeps its clamp per lane unless a constant coefficient
   // sequence certifies that no ordered prefix reaches the rail; a wrapping
   // profile needs no rail certificate, only the group one for narrow terms.
-  shape.constantCoefficients =
-      getConstantCoefficientsInReadOrder(shape.coefficients, shape.coefficientLength);
+  shape.constantCoefficients = ondrix::conversion::getConstantCoefficientsInReadOrder(
+      shape.coefficients, shape.coefficientLength, kMaxUnrolledTaps);
   const std::optional<SmallVector<llvm::APInt>> &constants = shape.constantCoefficients;
   if (!constants)
     return shape;
@@ -965,7 +930,7 @@ std::optional<ConstantRowOutput> matchConstantRowOutput(ondrix::ondsp::ReduceMac
       cast<MemRefType>(row.getType()).getElementType() != storage)
     return std::nullopt;
   std::optional<SmallVector<llvm::APInt>> coefficients =
-      getConstantCoefficientsInReadOrder(row, *length);
+      ondrix::conversion::getConstantCoefficientsInReadOrder(row, *length, kMaxUnrolledTaps);
   if (!coefficients)
     return std::nullopt;
   output.coefficients = std::move(*coefficients);

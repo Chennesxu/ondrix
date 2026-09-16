@@ -12,5 +12,6 @@ add_ondrix_library(OndrixScalarizeFixedReduceMac
   MLIRPass
   MLIRSCFDialect
   OndrixConversionUtils
+  OndrixFixedPointPrefixRangeAnalysis
   OndspIR
 )
