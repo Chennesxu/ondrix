@@ -77,3 +77,21 @@ func.func @shift_right(%a: tensor<8xi16>) -> tensor<8xi16> {
   } : (tensor<8xi16>) -> tensor<8xi16>
   return %0 : tensor<8xi16>
 }
+
+// -----
+
+// The quotient stays in the storage, so the body is the rounded division
+// alone: no widening, no pre-scale, the declared policy on the one boundary.
+// CHECK-LABEL: func.func @div_by_three
+// CHECK-NOT: arith.extsi
+// CHECK: ondsp.round_div {{.*}}divisor = 3{{.*}}pre_shift_left = 0{{.*}}rounding = #ondsp.rounding<nearest_ties_positive>
+// CHECK-SAME: (i16) -> i16
+func.func @div_by_three(%a: tensor<8xi16>) -> tensor<8xi16> {
+  %0 = ondrix.div %a {
+    divisor = 3 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return %0 : tensor<8xi16>
+}

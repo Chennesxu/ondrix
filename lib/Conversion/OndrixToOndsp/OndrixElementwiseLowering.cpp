@@ -203,6 +203,20 @@ Value ElementwiseOpLowering<ondrix::ir::ShiftOp>::emitBody(ondrix::ir::ShiftOp o
       narrowingScale(context, right, op.getRounding(), op.getOverflow(), storage));
 }
 
+template <>
+Value ElementwiseOpLowering<ondrix::ir::DivOp>::emitBody(ondrix::ir::DivOp op,
+                                                         ArrayRef<Value> elements,
+                                                         MLIRContext *context, IntegerType storage,
+                                                         IntegerType wide, Location loc,
+                                                         OpBuilder &builder) {
+  // The quotient's magnitude never exceeds the input's, so the storage is its
+  // own exact carrier: no pre-scale, and the narrowing is the declared boundary.
+  return builder.create<ondrix::ondsp::RoundDivOp>(
+      loc, storage, elements[0], builder.getI64IntegerAttr(op.getDivisorAttr().getInt()),
+      builder.getI64IntegerAttr(0), ondrix::ondsp::RoundingModeAttr::get(context, op.getRounding()),
+      ondrix::ondsp::OverflowModeAttr::get(context, op.getOverflow()));
+}
+
 // Shared table-plus-interpolation lowering for ondrix.sine/cosine. The
 // phase offset is 0 for sine and 16384 (one exact quarter turn) for
 // cosine; everything else — the tie-guarded 256-entry table, the Q8
@@ -1136,6 +1150,6 @@ void ondrix::conversion::populateOndrixElementwiseLoweringPatterns(RewritePatter
            Exp2OpLowering, ElementwiseOpLowering<ondrix::ir::AddOp>,
            ElementwiseOpLowering<ondrix::ir::SubOp>, ElementwiseOpLowering<ondrix::ir::MultOp>,
            ElementwiseOpLowering<ondrix::ir::AbsOp>, ElementwiseOpLowering<ondrix::ir::NegateOp>,
-           ElementwiseOpLowering<ondrix::ir::OffsetOp>, ElementwiseOpLowering<ondrix::ir::ShiftOp>>(
-          patterns.getContext());
+           ElementwiseOpLowering<ondrix::ir::OffsetOp>, ElementwiseOpLowering<ondrix::ir::ShiftOp>,
+           ElementwiseOpLowering<ondrix::ir::DivOp>>(patterns.getContext());
 }

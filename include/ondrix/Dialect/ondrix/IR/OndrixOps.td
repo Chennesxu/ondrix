@@ -2186,6 +2186,31 @@ def Ondrix_ShiftOp : Ondrix_ElementwiseOp<"shift"> {
                    Ondsp_OverflowModeAttr:$overflow);
 }
 
+def Ondrix_DivOp : Ondrix_ElementwiseOp<"div"> {
+  let summary = "Elementwise uniform-Q division by a declared positive integer";
+  let description = [{
+    ```text
+    y[i] = narrow_iW(round(x[i] / divisor))    one tie rule
+    ```
+
+    The elementwise form of `ondsp.round_div` with no pre-scale: the quotient
+    of a raw `Q1.(W-1)` value by a positive integer is again `Q1.(W-1)`, and
+    its magnitude never exceeds the input's, so the declared overflow cannot
+    fire and is stated anyway, for the reason `shift` declares a tie rule on
+    a left shift. `divisor` lies in `[1, 2^(W-1) - 1]`, the positive values
+    the storage's own carrier represents. An odd divisor has no reachable
+    tie, so both nearest modes agree there by construction; a power-of-two
+    divisor is `shift` by the negated exponent under the same policy. A
+    runtime divisor is a different operation that must declare its zero
+    policy, and fails closed here by not existing.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   I64Attr:$divisor,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_RoundingModeAttr:$rounding,
+                   Ondsp_OverflowModeAttr:$overflow);
+}
+
 def Ondrix_QuantizeOp : Ondrix_Op<"quantize", [Pure]> {
   let summary = "High-level numeric conversion intent";
   let arguments = (ins AnyType:$input, Ondsp_NumericAttr:$src,

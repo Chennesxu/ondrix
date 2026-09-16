@@ -90,3 +90,19 @@ func.func @elementwise_family_q31(%a: tensor<8xi32>, %b: tensor<8xi32>) -> tenso
   } : (tensor<8xi32>) -> tensor<8xi32>
   return %2 : tensor<8xi32>
 }
+
+// The quotient by a positive integer never leaves the width, so the overflow
+// is vacuous and still declared, as the tie rule is on a left shift.
+// CHECK-LABEL: func.func @div_declares_its_boundaries
+// CHECK: ondrix.div
+// CHECK-SAME: divisor = 6
+// CHECK-SAME: rounding = #ondsp.rounding<nearest_even>
+func.func @div_declares_its_boundaries(%a: tensor<8xi16>) -> tensor<8xi16> {
+  %0 = ondrix.div %a {
+    divisor = 6 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return %0 : tensor<8xi16>
+}

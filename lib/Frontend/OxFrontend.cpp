@@ -94,6 +94,7 @@ enum class TokenKind {
   Minus,
   Plus,
   Star,
+  Slash,
   Arrow,
   Invalid,
 };
@@ -160,10 +161,7 @@ public:
     case '*':
       return {TokenKind::Star, "*", start};
     case '/':
-      diagnostics.error(start, "'/' is not an operator: division needs a contract decision "
-                               "(divisor zero, quotient overflow, rounding) before it can be "
-                               "spelled");
-      return {TokenKind::Invalid, source.slice(start.offset, offset), start};
+      return {TokenKind::Slash, "/", start};
     default:
       diagnostics.error(start,
                         llvm::Twine("unexpected character '") + llvm::StringRef(&current, 1) + "'");
@@ -255,6 +253,7 @@ enum class ReductionKind {
   Negate,
   Offset,
   Shift,
+  Div,
   Log2,
   Exp2
 };
@@ -265,7 +264,8 @@ enum class ReductionKind {
 static bool isElementwiseKind(ReductionKind kind) {
   return kind == ReductionKind::Add || kind == ReductionKind::Sub || kind == ReductionKind::Mult ||
          kind == ReductionKind::Abs || kind == ReductionKind::Negate ||
-         kind == ReductionKind::Offset || kind == ReductionKind::Shift;
+         kind == ReductionKind::Offset || kind == ReductionKind::Shift ||
+         kind == ReductionKind::Div;
 }
 
 static bool isBinaryElementwiseKind(ReductionKind kind) {
@@ -397,6 +397,7 @@ struct BuiltinCallAst {
   int64_t delay = 0;
   int64_t bias = 0;
   int64_t amount = 0;
+  int64_t divisor = 0;
   SourcePosition position;
 };
 
@@ -687,7 +688,7 @@ public:
         !isIdentifier("lowpass") && !isIdentifier("cic_decimate") && !isIdentifier("add") &&
         !isIdentifier("sub") && !isIdentifier("mult") && !isIdentifier("abs") &&
         !isIdentifier("negate") && !isIdentifier("offset") && !isIdentifier("shift") &&
-        !isIdentifier("log2") && !isIdentifier("exp2")) {
+        !isIdentifier("div") && !isIdentifier("log2") && !isIdentifier("exp2")) {
       diagnostics.error(current.position,
                         "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
                         "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
@@ -697,7 +698,7 @@ public:
                         "moving_average(...), gain(...), rms(...), sine(...), cosine(...), "
                         "matmul(...), lms(...), cic_decimate(...), a lowpass/hamming/hann/"
                         "blackman/kaiser design, or an "
-                        "elementwise add/sub/mult/abs/negate/offset/shift builtin expression");
+                        "elementwise add/sub/mult/abs/negate/offset/shift/div builtin expression");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -768,6 +769,8 @@ public:
       call.kind = ReductionKind::Sub;
     else if (isIdentifier("mult"))
       call.kind = ReductionKind::Mult;
+    else if (isIdentifier("div"))
+      call.kind = ReductionKind::Div;
     else if (isIdentifier("abs"))
       call.kind = ReductionKind::Abs;
     else if (isIdentifier("negate"))
@@ -941,6 +944,8 @@ public:
       if (call.kind == ReductionKind::Offset && !parseNamedInteger("bias", call.bias))
         return std::nullopt;
       if (call.kind == ReductionKind::Shift && !parseNamedInteger("amount", call.amount))
+        return std::nullopt;
+      if (call.kind == ReductionKind::Div && !parseNamedInteger("divisor", call.divisor))
         return std::nullopt;
       // Both boundary choices are optional and both default to the rule the
       // rest of the language uses: unbiased, non-wrapping.
@@ -1433,15 +1438,35 @@ private:
     return lhs;
   }
 
+  // `/` is `div` and admits one positive integer constant: a runtime divisor
+  // is a different operation that must declare its zero policy.
   std::optional<ExpressionAst> parseTerm(std::optional<SourceType> rootPolicy) {
     std::optional<ExpressionAst> lhs = parsePrimary(rootPolicy);
-    while (lhs && current.kind == TokenKind::Star) {
+    while (lhs && (current.kind == TokenKind::Star || current.kind == TokenKind::Slash)) {
+      bool multiply = current.kind == TokenKind::Star;
       SourcePosition position = current.position;
       advance();
-      std::optional<ExpressionAst> rhs = parsePrimary(std::nullopt);
-      if (!rhs)
+      if (multiply) {
+        std::optional<ExpressionAst> rhs = parsePrimary(std::nullopt);
+        if (!rhs)
+          return std::nullopt;
+        lhs = makeInfix(ReductionKind::Mult, std::move(*lhs), std::move(*rhs), position);
+        continue;
+      }
+      if (current.kind != TokenKind::Integer) {
+        diagnostics.error(current.position,
+                          "'/' takes a positive integer constant divisor; a runtime divisor is a "
+                          "separate operation that must declare its zero policy");
         return std::nullopt;
-      lhs = makeInfix(ReductionKind::Mult, std::move(*lhs), std::move(*rhs), position);
+      }
+      std::optional<Token> divisor = parseInteger("expected a divisor constant");
+      BuiltinCallAst call;
+      call.kind = ReductionKind::Div;
+      call.operands.push_back(std::move(*lhs));
+      call.position = position;
+      if (divisor->spelling.getAsInteger(10, call.divisor))
+        call.divisor = 0;
+      lhs = ExpressionAst(std::move(call));
     }
     return lhs;
   }
@@ -1485,7 +1510,7 @@ private:
                            isIdentifier("irfft") || isIdentifier("magnitude") ||
                            isIdentifier("add") || isIdentifier("sub") || isIdentifier("mult") ||
                            isIdentifier("abs") || isIdentifier("negate") ||
-                           isIdentifier("offset") || isIdentifier("shift");
+                           isIdentifier("offset") || isIdentifier("shift") || isIdentifier("div");
     if (isCall && (rootPolicy || isNestedBuiltin)) {
       std::optional<BuiltinCallAst> call = parseBuiltinCall(rootPolicy.value_or(SourceType::Q15));
       if (!call)
@@ -2761,6 +2786,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                                              llvm::Twine(fractionalBits) + "]");
         return std::nullopt;
       }
+      if (call.kind == ReductionKind::Div && (call.divisor < 1 || call.divisor > biasBound - 1)) {
+        diagnostics.error(call.position, llvm::Twine("div divisor must be a positive integer in "
+                                                     "[1, ") +
+                                             llvm::Twine(biasBound - 1) + "]");
+        return std::nullopt;
+      }
       if (call.rounding.empty())
         call.rounding = "nearest_ties_positive";
       if (call.destinationOverflow.empty())
@@ -3882,6 +3913,10 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
           return builder.create<ir::OffsetOp>(callLocation, inputType, input,
                                               builder.getI64IntegerAttr(call.bias), elementwise,
                                               overflow);
+        if (call.kind == ReductionKind::Div)
+          return builder.create<ir::DivOp>(callLocation, inputType, input,
+                                           builder.getI64IntegerAttr(call.divisor), elementwise,
+                                           rounding, overflow);
         return builder.create<ir::ShiftOp>(callLocation, inputType, input,
                                            builder.getI64IntegerAttr(call.amount), elementwise,
                                            rounding, overflow);

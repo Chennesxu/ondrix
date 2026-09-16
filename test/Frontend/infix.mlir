@@ -45,7 +45,7 @@
 
 // MINUS: error: unary minus is not an operator; spell negate(...)
 // LITERAL: error: expected an operand name, a nested expression, or a parenthesized expression
-// DIVISION: error: '/' is not an operator: division needs a contract decision
+// DIVISION: error: '/' takes a positive integer constant divisor
 // FLOAT: error: elementwise builtins require q15 or q31 operand elements
 // EXTENT: error: binary elementwise builtins require operands of the same element type and extent
 // BARE: error: expected a builtin call or an infix expression, not a bare name

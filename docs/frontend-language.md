@@ -533,8 +533,8 @@ spelling one is an error.
 
 ### Elementwise Builtins
 
-`add`, `sub`, `mult`, `abs`, `negate`, `offset`, and `shift` map static rank-1
-Q15 tensors elementwise:
+`add`, `sub`, `mult`, `abs`, `negate`, `offset`, `shift`, and `div` map static
+rank-1 Q15 tensors elementwise:
 
 ```python
 def q15_envelope(x: tensor[q15,32], y: tensor[q15,32]) -> tensor[q15,32]:
@@ -548,16 +548,28 @@ left, and parentheses group. Every operator is one operation with its own
 quantization boundary, so `x + y * z` is `add(x, mult(y, z))` and nothing is
 reassociated or folded while parsing; the two spellings produce the identical
 module. A per-operation policy keeps the call spelling, and the two mix
-freely: `(x + y) * z - mult(y, z, overflow=wrap)`. Operands are tensor names,
-locals, calls and parenthesized expressions; there is no unary minus (spell
-`negate`), no literal or scalar operand, no `/`, and no promotion between
-widths, each of which is a separate contract decision rather than syntax.
+freely: `(x + y) * z - mult(y, z, overflow=wrap)`. `x / n` is
+`div(x, divisor=n)` for a positive integer constant `n`, at the precedence of
+`*`: the quotient of a raw `Q1.(W-1)` value by an integer is again
+`Q1.(W-1)`, its magnitude never grows, and the operation is `ondsp.round_div`
+with no pre-scale, so `divisor` lies in `[1, 2^(W-1) - 1]`. An odd divisor
+has no reachable tie, so both nearest modes agree there; an even one is where
+`rounding=nearest_even` and the default differ, and `x / 4` equals
+`shift(x, amount=-2)` under the same policy. A runtime divisor is a different
+operation that must declare its zero policy and does not exist yet; a
+rational scale such as `[3, 8]` is a gain, not a division. Operands are
+tensor names, locals, calls and parenthesized expressions; there is no unary
+minus (spell `negate`), no literal or scalar operand, and no promotion
+between widths, each of which is a separate contract decision rather than
+syntax.
 
 Both boundary parameters are optional and both take the language default,
 `rounding=nearest_ties_positive` and `overflow=saturate`. `offset` names a raw Q1.15
-`bias` and `shift` a signed `amount` in `[-15, 15]`; a left shift declares a
-tie rule too, even though the amount makes it vacuous, so changing the amount
-never silently changes which rule applies.
+`bias`, `shift` a signed `amount` in `[-15, 15]`, and `div` a positive
+integer `divisor` in `[1, 32767]`; a left shift declares a tie rule too, even
+though the amount makes it vacuous, and `div` declares an overflow it can
+never reach, so changing one attribute never silently changes which rule
+applies.
 
 The family is fixed point only. An elementwise IEEE operation has no
 requantization boundary, so an f32 profile would add source surface without

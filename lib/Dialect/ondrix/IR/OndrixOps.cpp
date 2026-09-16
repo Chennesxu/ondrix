@@ -1043,6 +1043,18 @@ LogicalResult ShiftOp::verify() {
   return verifyDeclaredRounding(getOperation(), getRounding(), "shift");
 }
 
+LogicalResult DivOp::verify() {
+  FailureOr<unsigned> storageWidth = verifyElementwiseDomain(
+      getOperation(), getNumeric(), {getInput().getType(), getResult().getType()});
+  if (failed(storageWidth))
+    return failure();
+  int64_t divisor = getDivisorAttr().getInt();
+  int64_t bound = (int64_t(1) << (*storageWidth - 1)) - 1;
+  if (divisor < 1 || divisor > bound)
+    return emitOpError() << "div divisor must be a positive integer in [1, " << bound << "]";
+  return verifyDeclaredRounding(getOperation(), getRounding(), "div");
+}
+
 int64_t CicDecimateOp::getGrowthBits() {
   return getStages() * llvm::Log2_64(uint64_t(getRate()) * uint64_t(getDelay()));
 }

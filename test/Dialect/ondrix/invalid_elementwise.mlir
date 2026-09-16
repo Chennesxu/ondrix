@@ -132,3 +132,29 @@ func.func @mult_non_uniform_q31(%a: tensor<8xi32>, %b: tensor<8xi32>) -> tensor<
   } : (tensor<8xi32>, tensor<8xi32>) -> tensor<8xi32>
   return %0 : tensor<8xi32>
 }
+
+// -----
+
+func.func @div_by_zero(%a: tensor<8xi16>) -> tensor<8xi16> {
+  // expected-error @below {{div divisor must be a positive integer in [1, 32767]}}
+  %0 = ondrix.div %a {
+    divisor = 0 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return %0 : tensor<8xi16>
+}
+
+// -----
+
+func.func @div_divisor_outside_the_carrier(%a: tensor<8xi16>) -> tensor<8xi16> {
+  // expected-error @below {{div divisor must be a positive integer in [1, 32767]}}
+  %0 = ondrix.div %a {
+    divisor = 32768 : i64,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (tensor<8xi16>) -> tensor<8xi16>
+  return %0 : tensor<8xi16>
+}
