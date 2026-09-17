@@ -132,10 +132,18 @@ lowering to the LLVM dialect.
   products are added as one term. The rewrite is authorized per reduction by
   the same interval analysis the horizontal routes replay in their proof
   traces, and refused for runtime coefficients, shifted products, or a result
-  read by anything but its export. What it buys is the scalar target once
-  more: on RV32IM under gem5 the DCT-32 and DCT-64 rows run in a quarter and a
-  third of the definitional expansion's instructions, the constant dot and
-  filter in four fifths.
+  read by anything but its export. What a group buys is one accumulator-width
+  add where the declared form takes one per product, so its worth is the
+  machine's register width and not a constant: the group sums as narrow as the
+  exact product allows but never narrower than one register, and where the
+  registers already hold the accumulator the narrowing is skipped and only
+  loop-form reductions are taken, since a straight-lined one has no per-term
+  overhead left for a block to amortize. On RV32IM under gem5 the DCT-32 and
+  DCT-64 rows run in a quarter and a third of the definitional expansion's
+  instructions and the constant dot and filter in four fifths; on a declared
+  64-bit machine the straight-lined reductions come out instruction for
+  instruction as before and the DCT rows run four times faster for three times
+  the object.
 
 - **Cost model.** The fixed priority order plus each pass's own
   profitability guards. A measured regret evaluation against the best legal
@@ -160,7 +168,7 @@ the fourth class requires dropping to `ondrix-opt` and naming passes.
 | Class | Meaning | Members |
 | --- | --- | --- |
 | Semantic contract | Declared in source; changes the admissible result set | Per-call-site numeric contracts (`accumulator`, `rounding`, `overflow`, `contract=off\|fma\|fast`), FIR `boundary`, algorithm parameters (`factor`, `window`, `gain`, `step_size`, design `taps`/`cutoff`) |
-| Target configuration | Describes the machine, not the program | `vector-bits` (register width; lane counts derive from it; zero withdraws the lanes but not the schedule stage — exact contracts get the ordered scalar program, while a `fast` reduction still carries its multi-chain rebuild as scalar chains); `hardware-repeat-block` (the target's counted loops run on a zero-overhead repeat block, so the straight-line reduction budgets drop to one term and every counted reduction keeps the loop the block claims — the straight-line form's whole purchase is the index update and the branch, which the block has already deleted) |
+| Target configuration | Describes the machine, not the program | `vector-bits` (register width; lane counts derive from it; zero withdraws the lanes but not the schedule stage — exact contracts get the ordered scalar program, while a `fast` reduction still carries its multi-chain rebuild as scalar chains); `scalar-register-bits` (the machine's integer register width; a certified constant reduction groups its products so one group shares a single accumulator-width add, which is an add, a carry test and a second add on a 32-bit machine and one instruction on a 64-bit one, so the wider machine declares itself and keeps the definitional expansion where a block has no per-term overhead to amortize); `hardware-repeat-block` (the target's counted loops run on a zero-overhead repeat block, so the straight-line reduction budgets drop to one term and every counted reduction keeps the loop the block claims — the straight-line form's whole purchase is the index update and the branch, which the block has already deleted) |
 | Compiler auto decision | Fixed inside the pipeline, not user-facing | Schedule-stage candidate selection, `preserve-bufferizable-reductions`, the constant-reassociation analysis budget, frontend accumulator-width inference |
 | Ablation and oracle interface | Forces or measures one alternative; never required to compile | `fft-loops`, `vectorize-static-cfft`, `sliding-window-reuse`, `specialize-canonical-twiddles`, `sqrt-estimate`, `tile-size`, `max-taps`, `record-refusals`, proof-trace emission and replay, individual schedule-pass flags |
 | Legacy | Retained for compatibility, outside current claims | `--print-source-locations` |

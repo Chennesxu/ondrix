@@ -103,10 +103,11 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   int64_t straightLineTerms = options.hardwareRepeatBlock ? 1 : 128;
   // Constant-coefficient reductions the lane stages left take their certified
   // 32-bit term groups first; the definitional expansion gets the rest.
-  os << llvm::formatv("scalarize-ondsp-certified-constant-reduce{{max-unrolled-terms={0}},"
+  os << llvm::formatv("scalarize-ondsp-certified-constant-reduce{{max-unrolled-terms={0} "
+                      "scalar-register-bits={1}},"
                       "scalarize-ondsp-fixed-reduce-mac{{max-unrolled-terms={0}},"
                       "unroll-ondsp-fixed-mac-loops{{max-unrolled-terms={0}},",
-                      straightLineTerms);
+                      straightLineTerms, options.scalarRegisterBits);
   // The f32 sibling under the same budget; above one lane the lane-blocked
   // ordered lowering is the better claim on a reduction, so only the
   // accumulator loops are left for it.

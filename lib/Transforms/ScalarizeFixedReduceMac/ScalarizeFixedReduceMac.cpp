@@ -96,11 +96,8 @@ llvm::DenseSet<Operation *> collectOverBudgetFunctions(ModuleOp module, int64_t 
   return overBudget;
 }
 
-/// Width every certified group is summed in: the scalar register of the
-/// targets this route serves, and the exact width of a Q15 product pair.
-constexpr unsigned kTermWidth = 32;
 /// Carrier of the certified chain: wide enough for any storage the match
-/// admits, and the natural register pair of the 32-bit targets.
+/// admits, and a register pair on the 32-bit targets this route serves.
 constexpr unsigned kCarrierWidth = 64;
 /// Products one loop iteration unrolls; past it the widening add is amortized
 /// and the body only grows.
@@ -113,9 +110,11 @@ struct CertifiedReduction {
   SmallVector<llvm::APInt> coefficients;
   int64_t terms;
   int64_t group;
+  unsigned termWidth;
 };
 
-std::optional<CertifiedReduction> matchCertifiedReduction(ReduceMacOp reduce, int64_t maxElements) {
+std::optional<CertifiedReduction> matchCertifiedReduction(ReduceMacOp reduce, int64_t maxElements,
+                                                          unsigned registerWidth) {
   auto accumulator = llvm::dyn_cast<AccType>(reduce.getInitial().getType());
   auto numeric = llvm::dyn_cast<FixedAttr>(reduce.getNumeric());
   if (!accumulator || !numeric || !reduce.getProduct() || !isSingleLaneAccumulator(accumulator) ||
@@ -126,9 +125,14 @@ std::optional<CertifiedReduction> matchCertifiedReduction(ReduceMacOp reduce, in
   auto storage = llvm::dyn_cast<IntegerType>(numeric.getStorage());
   auto accumulatorStorage = llvm::dyn_cast<IntegerType>(accumulator.getStorage());
   if (!storage || !accumulatorStorage || !accumulatorStorage.isSignless() ||
-      2 * storage.getWidth() > kTermWidth || accumulator.getFrac() != 2 * numeric.getFrac() ||
-      accumulatorStorage.getWidth() <= kTermWidth || accumulatorStorage.getWidth() > kCarrierWidth)
+      2 * storage.getWidth() > kCarrierWidth || accumulator.getFrac() != 2 * numeric.getFrac() ||
+      accumulatorStorage.getWidth() > kCarrierWidth)
     return std::nullopt;
+  // The group is summed as narrow as the exact product allows, but never
+  // narrower than one machine register: below that width a group shares no
+  // carrier-width add and the narrowing is pure cost.
+  unsigned termWidth =
+      std::max<unsigned>(2 * storage.getWidth(), std::min<unsigned>(kCarrierWidth, registerWidth));
   if (!reduce.getInitial().getDefiningOp<AccZeroOp>() ||
       !llvm::all_of(reduce.getResult().getUsers(),
                     [](Operation *user) { return llvm::isa<AccExportOp>(user); }))
@@ -152,9 +156,9 @@ std::optional<CertifiedReduction> matchCertifiedReduction(ReduceMacOp reduce, in
               reduce, *coefficients)))
     return std::nullopt;
   int64_t group = ondrix::analysis::FixedPointPrefixRangePlanner::largestCertifiedTermGroup(
-      reduce, *coefficients, kTermWidth);
+      reduce, *coefficients, termWidth);
   return CertifiedReduction{reduce, std::move(*coefficients), *lhsExtent,
-                            std::max<int64_t>(1, group)};
+                            std::max<int64_t>(1, group), termWidth};
 }
 
 /// One certified group: `count` products from `first` (a compile-time index
@@ -163,7 +167,7 @@ std::optional<CertifiedReduction> matchCertifiedReduction(ReduceMacOp reduce, in
 Value emitCertifiedGroup(OpBuilder &builder, Location loc, const CertifiedReduction &certified,
                          Value accumulator, Value base, int64_t first, int64_t count,
                          FixedAttr termNumeric) {
-  IntegerType termType = builder.getIntegerType(kTermWidth);
+  IntegerType termType = builder.getIntegerType(certified.termWidth);
   ReduceMacOp reduce = certified.reduce;
   Value sum;
   for (int64_t offset = 0; offset < count; ++offset) {
@@ -195,8 +199,19 @@ struct ScalarizeOndspCertifiedConstantReduce final
     SmallVector<ReduceMacOp> candidates;
     getOperation()->walk([&](ReduceMacOp op) { candidates.push_back(op); });
     for (ReduceMacOp reduce : candidates) {
-      std::optional<CertifiedReduction> certified = matchCertifiedReduction(reduce, maxElements);
+      std::optional<CertifiedReduction> certified =
+          matchCertifiedReduction(reduce, maxElements, unsigned(scalarRegisterBits));
       if (!certified)
+        continue;
+      bool straightLine = certified->terms <= kMaxUnrolledLength &&
+                          !overBudget.contains(reduce->getParentOfType<func::FuncOp>());
+      // On a machine whose registers already hold the carrier the narrow term
+      // buys nothing, so the only thing left to win is the per-term loop
+      // overhead a block amortizes. A reduction the budget already
+      // straight-lined has none, and its definitional expansion is the better
+      // form; the sibling pass prices the same candidates, so the two agree on
+      // which reductions those are.
+      if (straightLine && scalarRegisterBits >= int64_t(kCarrierWidth))
         continue;
       auto declared = llvm::cast<AccType>(reduce.getInitial().getType());
       auto numeric = llvm::cast<FixedAttr>(reduce.getNumeric());
@@ -208,12 +223,11 @@ struct ScalarizeOndspCertifiedConstantReduce final
       auto wrapping = AccType::get(declared.getContext(), builder.getIntegerType(kCarrierWidth),
                                    declared.getFrac(), declared.getSignedness(), OverflowMode::Wrap,
                                    declared.getLanes());
-      auto termNumeric = FixedAttr::get(numeric.getContext(), Signedness::Signed,
-                                        builder.getIntegerType(kTermWidth), declared.getFrac());
+      auto termNumeric =
+          FixedAttr::get(numeric.getContext(), Signedness::Signed,
+                         builder.getIntegerType(certified->termWidth), declared.getFrac());
       Value chain = builder.create<AccZeroOp>(loc, wrapping);
 
-      bool straightLine = certified->terms <= kMaxUnrolledLength &&
-                          !overBudget.contains(reduce->getParentOfType<func::FuncOp>());
       int64_t group = straightLine ? certified->group : std::min(certified->group, kMaxLoopGroup);
       int64_t fullGroups = certified->terms / group;
       int64_t covered = fullGroups * group;

@@ -583,6 +583,18 @@ def ScalarizeOndspCertifiedConstantReduce
     analysis cannot certify leaves every product a single term, still exact
     and still cheaper than the widened multiply.
 
+    The group width is `scalar-register-bits`, and it is the whole reason the
+    rewrite is worth anything. What a group buys is ONE carrier-width add
+    where the declared form takes one per product, and a carrier-width add is
+    only expensive on a machine whose registers are narrower than the carrier:
+    on a 32-bit target it is an add, a carry test and a second add, and on a
+    64-bit one it is a single instruction. So the group sums as narrow as the
+    exact product allows but never narrower than one register, and where the
+    registers already hold the carrier the narrowing is skipped entirely --
+    there the only thing left to win is the per-term loop overhead a block
+    amortizes, so a reduction the budget already straight-lined is left to the
+    definitional expansion, which is then the better form.
+
     Straight-line or loop form follows the sibling pass's rule and budgets: a
     reduction of at most 64 terms unrolls with its coefficients as constants
     unless the function's straight-line total exceeds `max-unrolled-terms`;
@@ -608,6 +620,10 @@ def ScalarizeOndspCertifiedConstantReduce
            "scalarize-ondsp-fixed-reduce-mac; 0 leaves the straight-line form unbounded">,
     Option<"maxElements", "max-elements", "int64_t", /*default=*/"256",
            "Longest constant coefficient table the certificates are built for">,
+    Option<"scalarRegisterBits", "scalar-register-bits", "int64_t", /*default=*/"32",
+           "Declared target quantity: the machine's integer register width, which "
+           "decides both the width a group sums in and whether a straight-lined "
+           "reduction is worth rewriting at all">,
   ];
   let constructor = "ondrix::createScalarizeOndspCertifiedConstantReducePass()";
   let dependentDialects = [

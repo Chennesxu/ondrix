@@ -46,6 +46,19 @@ struct OndrixDefaultPipelineOptions
       llvm::cl::desc("Declared target quantity: independent partial-sum chains the "
                      "target's multiply-add latency needs (0 derives it from the width)"),
       llvm::cl::init(0)};
+  /// The machine's integer register width in bits. A certified constant
+  /// reduction groups its products so one group shares a single
+  /// accumulator-width add, which is worth an add, a carry test and a second
+  /// add on a 32-bit machine and nothing at all on a 64-bit one. 32 is the
+  /// default because it assumes the narrower machine and so never withholds
+  /// the grouping; a target whose registers already hold the 64-bit carrier
+  /// declares it and gets the definitional form on its straight-line
+  /// reductions instead.
+  Option<int64_t> scalarRegisterBits{
+      *this, "scalar-register-bits",
+      llvm::cl::desc("Declared target quantity: the machine's integer register width in "
+                     "bits (32, the default, assumes the narrower machine)"),
+      llvm::cl::init(32)};
   /// How many machine-vector column blocks one matrix output row computes per
   /// iteration. Zero derives it from the width; a target declares its own when
   /// the operand matrix fits its register file and should stay resident.

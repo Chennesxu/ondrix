@@ -1,6 +1,7 @@
 // RUN: ondrix-opt %s --scalarize-ondsp-certified-constant-reduce --split-input-file | FileCheck %s
 // RUN: ondrix-opt %s --scalarize-ondsp-certified-constant-reduce=max-elements=1024 --split-input-file | FileCheck %s --check-prefix=WIDE
 // RUN: ondrix-opt %s --scalarize-ondsp-certified-constant-reduce=max-unrolled-terms=10 --split-input-file | FileCheck %s --check-prefix=OVER
+// RUN: ondrix-opt %s --scalarize-ondsp-certified-constant-reduce="max-elements=1024 scalar-register-bits=64" --split-input-file | FileCheck %s --check-prefix=WIDE64
 
 !sat = !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 memref.global "private" constant @pairs : memref<8xi16> = dense<[32767, -32768, 32767, -32768, 32767, -32768, 32767, -32768]>
@@ -20,6 +21,9 @@ memref.global "private" constant @pairs : memref<8xi16> = dense<[32767, -32768, 
 // CHECK: ondsp.acc_export %{{.*}} : (!ondsp.acc<storage = i64, frac = 30, signed, update_overflow = wrap>) -> i16
 // WIDE-LABEL: func.func @dot_pairs(
 // WIDE-COUNT-4: ondsp.acc_add_term
+// WIDE64-LABEL: func.func @dot_pairs(
+// WIDE64: ondsp.reduce_mac
+// WIDE64-NOT: ondsp.acc_add_term
 // OVER-LABEL: func.func @dot_pairs(
 // OVER-NOT: scf.for
 // OVER-COUNT-4: ondsp.acc_add_term
@@ -47,6 +51,9 @@ memref.global "private" constant @small : memref<8xi16> = dense<[1, 2, 3, 4, 5, 
 // CHECK: ondsp.acc_export
 // WIDE-LABEL: func.func @dot_reversed(
 // WIDE: ondsp.acc_add_term
+// WIDE64-LABEL: func.func @dot_reversed(
+// WIDE64: ondsp.reduce_mac
+// WIDE64-NOT: ondsp.acc_add_term
 // OVER-LABEL: func.func @dot_reversed(
 // OVER: ondsp.acc_add_term
 func.func @dot_reversed(%x: memref<8xi16>) -> i16 {
@@ -75,6 +82,12 @@ memref.global "private" constant @long : memref<70xi16> = dense<3>
 // CHECK: ondsp.acc_export
 // WIDE-LABEL: func.func @dot_long(
 // WIDE: scf.for
+// A loop-form reduction still has per-term overhead for the block to
+// amortize, so the wider machine keeps it and sums the group in the carrier.
+// WIDE64-LABEL: func.func @dot_long(
+// WIDE64: scf.for %{{.*}} step %c16
+// WIDE64: ondsp.acc_add_term %{{.*}} {term_numeric = #ondsp.fixed<signed, storage = i64, frac = 30>}
+// WIDE64-NOT: storage = i32
 // OVER-LABEL: func.func @dot_long(
 // OVER: scf.for
 func.func @dot_long(%x: memref<70xi16>) -> i16 {
@@ -104,6 +117,10 @@ memref.global "private" constant @rail : memref<600xi16> = dense<-32768>
 // WIDE: scf.for %{{.*}} = %c0 to %c600 step %c1
 // WIDE: ondsp.acc_add_term
 // WIDE-NOT: ondsp.reduce_mac
+// WIDE64-LABEL: func.func @rail_reachable(
+// WIDE64: ondsp.reduce_mac
+// WIDE64-LABEL: func.func @wrap_rail(
+// WIDE64: ondsp.acc_add_term
 // OVER-LABEL: func.func @rail_reachable(
 // OVER: ondsp.reduce_mac
 func.func @rail_reachable(%x: memref<600xi16>) -> i16 {
@@ -133,6 +150,8 @@ memref.global "private" constant @small : memref<8xi16> = dense<[1, 2, 3, 4, 5, 
 // CHECK: ondsp.mac
 // WIDE-LABEL: func.func @keeps_runtime_and_chained(
 // WIDE-COUNT-2: ondsp.reduce_mac
+// WIDE64-LABEL: func.func @keeps_runtime_and_chained(
+// WIDE64-COUNT-2: ondsp.reduce_mac
 // OVER-LABEL: func.func @keeps_runtime_and_chained(
 // OVER-COUNT-2: ondsp.reduce_mac
 func.func @keeps_runtime_and_chained(%x: memref<8xi16>, %runtime: memref<8xi16>, %a: i16, %b: i16) -> (i16, i16) {
@@ -158,6 +177,9 @@ memref.global "private" constant @small : memref<8xi16> = dense<[1, 2, 3, 4, 5, 
 // CHECK-COUNT-2: ondsp.acc_add_term
 // WIDE-LABEL: func.func @two_reductions(
 // WIDE-NOT: scf.for
+// WIDE64-LABEL: func.func @two_reductions(
+// WIDE64: ondsp.reduce_mac
+// WIDE64-NOT: ondsp.acc_add_term
 // OVER-LABEL: func.func @two_reductions(
 // OVER: scf.for %{{.*}} = %c0{{.*}} to %c8{{.*}} step %c8{{.*}} iter_args
 // OVER: scf.for %{{.*}} = %c0{{.*}} to %c8{{.*}} step %c8{{.*}} iter_args
