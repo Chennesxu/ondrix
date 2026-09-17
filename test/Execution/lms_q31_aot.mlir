@@ -8,6 +8,11 @@
 // RUN: llc -relocation-model=pic -filetype=obj %t.pipeline.ll -o %t.pipeline.o
 // RUN: cc %S/Inputs/lms_q31_aot.c %t.pipeline.o -o %t.pipeline
 // RUN: %t.pipeline
+// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=0" > %t.scalar.mlir
+// RUN: ondrix-translate %t.scalar.mlir --mlir-to-llvmir > %t.scalar.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.scalar.ll -o %t.scalar.o
+// RUN: cc %S/Inputs/lms_q31_aot.c %t.scalar.o -o %t.scalar
+// RUN: %t.scalar
 
 // Two tap counts derive two different product shifts, and K = 1 derives none.
 // The quantized weight state is part of the contract, so a one-LSB difference

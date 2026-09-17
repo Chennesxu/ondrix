@@ -55,6 +55,14 @@
 // CHECK: arith.muli %{{.*}} : vector<8xi64>
 // CHECK: vector.store %{{.*}} : memref<11xi16>, vector<8xi16>
 
+// The same update over a window the caller already positioned: the index walks
+// it forward, so the block loads at the block start and reverses no lane.
+// CHECK-LABEL: func.func @batch_forward_window
+// CHECK: scf.for %[[FBLOCK:.*]] = %{{.*}} to %{{.*}} step %{{.*}} {
+// CHECK: vector.load %{{.*}}[%[[FBLOCK]]] : memref<11xi16, strided<[1], offset: ?>>, vector<8xi16>
+// CHECK-NOT: vector.shuffle
+// CHECK: vector.store %{{.*}}, %{{.*}}[%[[FBLOCK]]] : memref<11xi16>, vector<8xi16>
+
 // One bit past what the narrowed carrier holds: i16 x i17 needs 33 bits, so
 // this batches with the declared carrier while @lms_q15's i16 x i16 narrows.
 // CHECK-LABEL: func.func @batch_step_one_bit_too_wide
@@ -93,6 +101,27 @@ func.func @batch_hand_written_control(%samples: memref<40xi16>, %state: memref<1
   return
 }
 
+func.func @batch_forward_window(%samples: memref<40xi16>, %state: memref<11xi16>,
+                                %base: index, %step: i64) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c11 = arith.constant 11 : index
+  %window = memref.subview %samples[%base] [11] [1]
+      : memref<40xi16> to memref<11xi16, strided<[1], offset: ?>>
+  scf.for %tap = %c0 to %c11 step %c1 {
+    %sample = memref.load %window[%tap] : memref<11xi16, strided<[1], offset: ?>>
+    %wide = arith.extsi %sample : i16 to i64
+    %product = arith.muli %step, %wide : i64
+    %scaled = ondsp.round_shift %product {scale = #ondsp.scale<pre_shift_left = 0, post_shift_right = 15, rounding = nearest_even, overflow = saturate, saturate_to = i16>} : (i64) -> i16
+    %element = memref.load %state[%tap] : memref<11xi16>
+    %element32 = arith.extsi %element : i16 to i32
+    %scaled32 = arith.extsi %scaled : i16 to i32
+    %sum = arith.addi %element32, %scaled32 : i32
+    %updated = ondsp.sat_cast %sum {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>} : (i32) -> i16
+    memref.store %updated, %state[%tap] : memref<11xi16>
+  }
+  return
+}
 func.func @batch_step_one_bit_too_wide(%samples: memref<40xi16>, %state: memref<11xi16>,
                                        %base: index, %narrow: i17) {
   %c0 = arith.constant 0 : index

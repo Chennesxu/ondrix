@@ -69,7 +69,7 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
     Option<"preserveBufferizableReductions", "preserve-bufferizable-reductions",
            "bool", /*default=*/"false",
            "Keep the algorithm operations whose reductions bufferize directly "
-           "(FIR filter/decimate, conv1d, matmul, rms, dct) in contract form, "
+           "(FIR filter/decimate, conv1d, matmul, rms, dct, lms) in contract form, "
            "so the post-bufferization schedule stage sees their reduce_mac "
            "loops instead of pre-lowered scalar bodies">,
     Option<"outputBatchVectorWidth", "output-batch-vector-width", "int64_t", /*default=*/"1",
@@ -809,12 +809,15 @@ def VectorizeOndspFixedElementwiseUpdates
     state there is no dependence at all: lane `k` reads and writes only
     `state[k]`, so the block's lanes are the ordered updates themselves.
 
-    The sample walk runs BACKWARD: index `k` reads `sample[base - k]`, so one
-    block of `vector-width` indices covers a contiguous span read in decreasing
-    order. The block issues one contiguous load of that span and one lane
-    reversal, which places on lane `k` exactly the element the ordered schedule
-    gave index `k`. The span is the set the ordered block already read, so
-    nothing widens and no new element is touched.
+    The sample walk runs in either direction. Where index `k` reads
+    `sample[base - k]` one block of `vector-width` indices covers a contiguous
+    span read in decreasing order, and the block issues one contiguous load of
+    that span and one lane reversal, which places on lane `k` exactly the
+    element the ordered schedule gave index `k`. Where the window reaches the
+    loop as a view already positioned at its first element, index `k` reads
+    `sample[k]` and the same load needs no reversal at all. Either way the span
+    is the set the ordered block already read, so nothing widens and no new
+    element is touched.
 
     The batched product may run in a carrier narrower than the declared one.
     The declared carrier is sized for the ordered chain, not for a single

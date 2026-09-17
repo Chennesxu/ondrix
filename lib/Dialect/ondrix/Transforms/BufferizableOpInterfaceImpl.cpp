@@ -1119,6 +1119,241 @@ struct MovingAverageOpInterface
   }
 };
 
+struct LmsOpInterface : public BufferizableOpInterface::ExternalModel<LmsOpInterface, LmsOp> {
+  bool bufferizesToAllocation(Operation *, OpResult) const { return true; }
+
+  bool bufferizesToMemoryRead(Operation *, OpOperand &, const AnalysisState &) const {
+    return true;
+  }
+
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &, const AnalysisState &) const {
+    return false;
+  }
+
+  AliasingOpResultList getAliasingOpResults(Operation *, OpOperand &, const AnalysisState &) const {
+    return {};
+  }
+
+  LogicalResult bufferize(Operation *operation, RewriterBase &rewriter,
+                          const BufferizationOptions &options) const {
+    auto op = cast<LmsOp>(operation);
+    // Only the fixed profile is preserved into bufferization: reversing the
+    // weight state to walk the window forward reorders the tap sum, which the
+    // exact-modulo accumulator admits and an ordered f32 reduction does not.
+    auto numeric = dyn_cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    if (!numeric)
+      return op.emitOpError("expected the fixed profile to reach bufferization");
+    FailureOr<Value> input = getBuffer(rewriter, op.getInput(), options);
+    FailureOr<Value> desired = getBuffer(rewriter, op.getDesired(), options);
+    FailureOr<Value> weights = getBuffer(rewriter, op.getWeights(), options);
+    if (failed(input) || failed(desired) || failed(weights))
+      return failure();
+
+    rewriter.setInsertionPoint(op);
+    Location loc = op.getLoc();
+    MLIRContext *context = rewriter.getContext();
+    FailureOr<Value> errors = createProducedResultBuffer(rewriter, op.getError(), options);
+    FailureOr<Value> adapted = createProducedResultBuffer(rewriter, op.getAdapted(), options);
+    if (failed(errors) || failed(adapted))
+      return failure();
+
+    int64_t samples = op.getInput().getType().getDimSize(0);
+    int64_t taps = op.getWeights().getType().getDimSize(0);
+    auto storage = cast<IntegerType>(numeric.getStorage());
+    unsigned width = storage.getWidth();
+    IntegerType i32 = rewriter.getIntegerType(32);
+    IntegerType i64 = rewriter.getIntegerType(64);
+    IntegerType wide = rewriter.getIntegerType(2 * width);
+    unsigned productShift = ondrix::ir::getReductionProductShift(width, taps);
+    auto rounding = *op.getRounding();
+    auto saturating = [&](unsigned shift, ondrix::ondsp::RoundingMode mode, Type destination) {
+      return ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, shift, mode,
+                                           ondrix::ondsp::OverflowMode::Saturate, destination);
+    };
+    ondrix::ondsp::ScaleAttr unitScale = saturating(width - 1, rounding, storage);
+    auto product =
+        productShift > 0
+            ? ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full,
+                                              productShift, *op.getProductRounding())
+            : ondrix::ondsp::ProductAttr::get(context, ondrix::ondsp::ProductSelection::Full);
+    // Wrap alone authorizes the reordering, and the exact sum stays inside the
+    // carrier: at most 64 Q30 products reach 2^36, and the Q31 products the
+    // shift above narrows reach 2^63 together, which is the bound
+    // `Ondrix_LmsOp` derives the shift from.
+    ondrix::ondsp::AccType accumulatorType =
+        width == 16 ? getExactWrapAccumulator(context, /*width=*/40)
+                    : getExactWrapAccumulator(context, /*width=*/64, /*frac=*/62 - productShift);
+
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value tapCount = rewriter.create<arith::ConstantIndexOp>(loc, taps);
+    Value lastTap = rewriter.create<arith::ConstantIndexOp>(loc, taps - 1);
+    Value zeroElement = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(storage));
+    Value mu = rewriter.create<arith::ConstantIntOp>(loc, op.getStepSizeAttr().getInt(), 64);
+
+    // The adapted weights hold the state REVERSED while it adapts: position j
+    // is tap K - 1 - j, so both the tap sum and the update walk one forward
+    // unit-stride window of the input. The one reversal per call is what puts
+    // the tap sum on `reduce_mac`; the result is reversed back in place below.
+    rewriter.create<scf::ForOp>(loc, zero, tapCount, one, ValueRange{},
+                                [&](OpBuilder &builder, Location tapLoc, Value tap, ValueRange) {
+                                  Value source =
+                                      builder.create<arith::SubIOp>(tapLoc, lastTap, tap);
+                                  Value weight =
+                                      builder.create<memref::LoadOp>(tapLoc, *weights, source);
+                                  builder.create<memref::StoreOp>(tapLoc, weight, *adapted, tap);
+                                  builder.create<scf::YieldOp>(tapLoc);
+                                });
+
+    // x[n - K + 1 + j] for the reversed tap j, zero before the signal starts.
+    auto guardedInput = [&](OpBuilder &builder, Location fetchLoc, Value base, Value tap) -> Value {
+      Value offset = builder.create<arith::AddIOp>(fetchLoc, base, tap);
+      Value valid =
+          builder.create<arith::CmpIOp>(fetchLoc, arith::CmpIPredicate::sge, offset, zero);
+      Value clamped = builder.create<arith::MaxSIOp>(fetchLoc, offset, zero);
+      Value value = builder.create<memref::LoadOp>(fetchLoc, *input, clamped);
+      return builder.create<arith::SelectOp>(fetchLoc, valid, value, zeroElement);
+    };
+
+    // The guard can fire only while n < K - 1, so the sample loop splits at
+    // min(K - 1, N): before it the window runs off the front of the signal and
+    // every term is fetched under the guard, after it the window is one
+    // unit-stride view and the tap sum is one `reduce_mac`.
+    int64_t peel = std::min(taps - 1, samples);
+    auto emitSample = [&](OpBuilder &builder, Location bodyLoc, Value sample, bool settled) {
+      Value base = builder.create<arith::SubIOp>(bodyLoc, sample, lastTap);
+      Value window;
+      if (settled)
+        window =
+            builder.create<memref::SubViewOp>(bodyLoc, *input, ArrayRef<OpFoldResult>{base},
+                                              ArrayRef<OpFoldResult>{builder.getIndexAttr(taps)},
+                                              ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
+      auto tapValue = [&](OpBuilder &tapBuilder, Location tapLoc, Value tap) -> Value {
+        if (settled)
+          return tapBuilder.create<memref::LoadOp>(tapLoc, window, tap);
+        return guardedInput(tapBuilder, tapLoc, base, tap);
+      };
+      // One ordered fold of the window against `coefficients`, or against
+      // itself where that is null: one operation where the window is a view,
+      // and the guarded loop it denotes where it is not.
+      auto reduce = [&](Value coefficients) -> Value {
+        Value initial = builder.create<ondrix::ondsp::AccZeroOp>(bodyLoc, accumulatorType);
+        if (settled)
+          return builder.create<ondrix::ondsp::ReduceMacOp>(
+              bodyLoc, accumulatorType, initial, window, coefficients ? coefficients : window,
+              numeric, product);
+        auto loop = builder.create<scf::ForOp>(
+            bodyLoc, zero, tapCount, one, ValueRange{initial},
+            [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange carried) {
+              Value value = tapValue(tapBuilder, tapLoc, tap);
+              Value coefficient =
+                  coefficients
+                      ? tapBuilder.create<memref::LoadOp>(tapLoc, coefficients, tap).getResult()
+                      : value;
+              Value updated = tapBuilder.create<ondrix::ondsp::MacOp>(
+                  tapLoc, accumulatorType, carried.front(), value, coefficient, numeric, product);
+              tapBuilder.create<scf::YieldOp>(tapLoc, updated);
+            });
+        return loop.getResult(0);
+      };
+
+      Value accumulator = reduce(*adapted);
+      Value output = builder.create<ondrix::ondsp::AccExportOp>(
+          bodyLoc, storage, accumulator, numeric, rounding, ondrix::ondsp::OverflowMode::Saturate);
+      Value target = builder.create<memref::LoadOp>(bodyLoc, *desired, sample);
+      Value targetWide = builder.create<arith::ExtSIOp>(bodyLoc, wide, target);
+      Value outputWide = builder.create<arith::ExtSIOp>(bodyLoc, wide, output);
+      Value difference = builder.create<arith::SubIOp>(bodyLoc, targetWide, outputWide);
+      Value error = builder.create<ondrix::ondsp::SatCastOp>(bodyLoc, storage, difference, numeric);
+      builder.create<memref::StoreOp>(bodyLoc, error, *errors, sample);
+
+      Value step;
+      if (op.getEpsilon()) {
+        // Normalized: the window energy is the same forward fold against
+        // itself, requantized once to the storage position.
+        Value energyAccumulator = reduce(/*coefficients=*/Value());
+        Value energy = builder.create<ondrix::ondsp::AccExportOp>(
+            bodyLoc, i32, energyAccumulator,
+            ondrix::ondsp::FixedAttr::get(context, ondrix::ondsp::Signedness::Signed, i32,
+                                          width - 1),
+            rounding, ondrix::ondsp::OverflowMode::Saturate);
+        Value epsilon =
+            builder.create<arith::ConstantIntOp>(bodyLoc, op.getEpsilonAttr().getInt(), 32);
+        Value divisor = builder.create<arith::AddIOp>(bodyLoc, epsilon, energy);
+        Value muNarrow =
+            builder.create<arith::ConstantIntOp>(bodyLoc, op.getStepSizeAttr().getInt(), 32);
+        Value errorNarrow = builder.create<arith::ExtSIOp>(bodyLoc, i32, error);
+        Value dividend = builder.create<arith::MulIOp>(bodyLoc, muNarrow, errorNarrow);
+        step = builder.create<ondrix::ondsp::RoundQuotientOp>(
+            bodyLoc, storage, dividend, divisor, builder.getI64IntegerAttr(0),
+            ondrix::ondsp::RoundingModeAttr::get(context, rounding),
+            ondrix::ondsp::OverflowModeAttr::get(context, ondrix::ondsp::OverflowMode::Saturate),
+            ondrix::ondsp::NonpositiveDivisorAttr::get(context,
+                                                       ondrix::ondsp::NonpositiveDivisor::Trap));
+      } else {
+        Value errorWide = builder.create<arith::ExtSIOp>(bodyLoc, i64, error);
+        Value stepProduct = builder.create<arith::MulIOp>(bodyLoc, mu, errorWide);
+        step =
+            builder.create<ondrix::ondsp::RoundShiftOp>(bodyLoc, storage, stepProduct, unitScale);
+      }
+      Value stepWide = builder.create<arith::ExtSIOp>(bodyLoc, i64, step);
+
+      builder.create<scf::ForOp>(
+          bodyLoc, zero, tapCount, one, ValueRange{},
+          [&](OpBuilder &tapBuilder, Location tapLoc, Value tap, ValueRange) {
+            Value value = tapValue(tapBuilder, tapLoc, tap);
+            Value valueWide = tapBuilder.create<arith::ExtSIOp>(tapLoc, i64, value);
+            Value increment = tapBuilder.create<arith::MulIOp>(tapLoc, stepWide, valueWide);
+            Value delta = tapBuilder.create<ondrix::ondsp::RoundShiftOp>(tapLoc, storage, increment,
+                                                                         unitScale);
+            Value weight = tapBuilder.create<memref::LoadOp>(tapLoc, *adapted, tap);
+            Value weightWide = tapBuilder.create<arith::ExtSIOp>(tapLoc, wide, weight);
+            Value deltaWide = tapBuilder.create<arith::ExtSIOp>(tapLoc, wide, delta);
+            Value updated = tapBuilder.create<arith::AddIOp>(tapLoc, weightWide, deltaWide);
+            Value saturated =
+                tapBuilder.create<ondrix::ondsp::SatCastOp>(tapLoc, storage, updated, numeric);
+            tapBuilder.create<memref::StoreOp>(tapLoc, saturated, *adapted, tap);
+            tapBuilder.create<scf::YieldOp>(tapLoc);
+          });
+    };
+
+    Value peelPoint = rewriter.create<arith::ConstantIndexOp>(loc, peel);
+    Value sampleCount = rewriter.create<arith::ConstantIndexOp>(loc, samples);
+    if (peel > 0)
+      rewriter.create<scf::ForOp>(
+          loc, zero, peelPoint, one, ValueRange{},
+          [&](OpBuilder &builder, Location bodyLoc, Value sample, ValueRange) {
+            emitSample(builder, bodyLoc, sample, /*settled=*/false);
+            builder.create<scf::YieldOp>(bodyLoc);
+          });
+    if (peel < samples)
+      rewriter.create<scf::ForOp>(
+          loc, peelPoint, sampleCount, one, ValueRange{},
+          [&](OpBuilder &builder, Location bodyLoc, Value sample, ValueRange) {
+            emitSample(builder, bodyLoc, sample, /*settled=*/true);
+            builder.create<scf::YieldOp>(bodyLoc);
+          });
+
+    // Back to tap order for the caller.
+    if (taps > 1) {
+      Value half = rewriter.create<arith::ConstantIndexOp>(loc, taps / 2);
+      rewriter.create<scf::ForOp>(
+          loc, zero, half, one, ValueRange{},
+          [&](OpBuilder &builder, Location tapLoc, Value tap, ValueRange) {
+            Value mirror = builder.create<arith::SubIOp>(tapLoc, lastTap, tap);
+            Value low = builder.create<memref::LoadOp>(tapLoc, *adapted, tap);
+            Value high = builder.create<memref::LoadOp>(tapLoc, *adapted, mirror);
+            builder.create<memref::StoreOp>(tapLoc, high, *adapted, tap);
+            builder.create<memref::StoreOp>(tapLoc, low, *adapted, mirror);
+            builder.create<scf::YieldOp>(tapLoc);
+          });
+    }
+
+    replaceOpWithBufferizedValues(rewriter, op, ValueRange{*errors, *adapted});
+    return success();
+  }
+};
+
 } // namespace
 
 void registerBufferizableOpInterfaceExternalModels(DialectRegistry &registry) {
@@ -1130,6 +1365,7 @@ void registerBufferizableOpInterfaceExternalModels(DialectRegistry &registry) {
     MatmulOp::attachInterface<MatmulOpInterface>(*context);
     RmsOp::attachInterface<RmsOpInterface>(*context);
     DctOp::attachInterface<DctOpInterface>(*context);
+    LmsOp::attachInterface<LmsOpInterface>(*context);
 
     // Bufferization materializes these dialects even when the input module
     // contains only tensor-form Ondrix operations.

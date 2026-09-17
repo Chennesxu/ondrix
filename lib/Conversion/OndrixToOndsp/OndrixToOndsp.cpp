@@ -88,6 +88,11 @@ public:
       target.addDynamicallyLegalOp<ondrix::ir::MovingAverageOp>([](ondrix::ir::MovingAverageOp op) {
         return isa<ondrix::ondsp::FpAttr>(op.getNumeric());
       });
+      // The fixed LMS bufferizes to a reduce_mac over a forward window, which
+      // costs one reversal of the weight state per call; an ordered f32 tap
+      // sum carries no permission to be walked in that direction.
+      target.addDynamicallyLegalOp<ondrix::ir::LmsOp>(
+          [](ondrix::ir::LmsOp op) { return !isa<ondrix::ondsp::FpAttr>(op.getNumeric()); });
     }
 
     if (failed(applyPartialConversion(module, target, std::move(patterns))))

@@ -32,8 +32,10 @@ constexpr int64_t kMaxVectorWidth = 4096;
 /// Operation count of the matched body. The rewrite claims every one of them,
 /// so an equal count plus pairwise distinct matches is an exact cover: nothing
 /// unrecognized, and therefore no unmodelled side effect or second consumer,
-/// can be hiding in the loop.
+/// can be hiding in the loop. A window already positioned by a view walks
+/// forward on the index alone and carries no index arithmetic.
 constexpr size_t kUpdateBodyOperations = 11;
+constexpr size_t kForwardUpdateBodyOperations = kUpdateBodyOperations - 1;
 
 /// Carrier the batched product narrows to when the declared one is provably
 /// wider than the exact product needs.
@@ -49,7 +51,8 @@ struct ElementwiseUpdateLoopShape {
   Value samples;
   Value state;
   /// The loop-invariant index the sample walk counts down from: index `k`
-  /// reads `samples[base - k]`.
+  /// reads `samples[base - k]`. Null where the window is a view the index
+  /// walks forward, which reads `samples[k]`.
   Value sampleBase;
   /// The loop-invariant scalar factor of the declared product.
   Value step;
@@ -118,10 +121,11 @@ template <typename OpTy> OpTy getSingleUseProducerIn(Value value, Block &body) {
 }
 
 /// Matches the loop shape a bufferized elementwise fixed-point state update
-/// emits: per index, one backward sample read, one product with a
-/// loop-invariant step, one declared rounding boundary, one saturating add
-/// into the state element the same index loads, and one store back to it.
-/// Anything else fails closed and keeps the ordered schedule.
+/// emits: per index, one sample read from a backward walk or a forward window
+/// view, one product with a loop-invariant step, one declared rounding
+/// boundary, one saturating add into the state element the same index loads,
+/// and one store back to it. Anything else fails closed and keeps the ordered
+/// schedule.
 FailureOr<ElementwiseUpdateLoopShape> matchUpdateLoop(scf::ForOp loop, int64_t vectorWidth) {
   if (!loop.getInitArgs().empty())
     return failure();
@@ -138,7 +142,8 @@ FailureOr<ElementwiseUpdateLoopShape> matchUpdateLoop(scf::ForOp loop, int64_t v
   SmallVector<Operation *> operations;
   for (Operation &operation : body.without_terminator())
     operations.push_back(&operation);
-  if (operations.size() != kUpdateBodyOperations)
+  if (operations.size() != kUpdateBodyOperations &&
+      operations.size() != kForwardUpdateBodyOperations)
     return failure();
 
   auto store = dyn_cast<memref::StoreOp>(operations.back());
@@ -185,14 +190,19 @@ FailureOr<ElementwiseUpdateLoopShape> matchUpdateLoop(scf::ForOp loop, int64_t v
   auto sampleLoad = getSingleUseProducerIn<memref::LoadOp>(sampleExtend.getIn(), body);
   if (!sampleLoad || sampleLoad.getIndices().size() != 1)
     return failure();
-  auto walk = getSingleUseProducerIn<arith::SubIOp>(sampleLoad.getIndices().front(), body);
-  if (!walk || walk.getRhs() != index || !isAvailableAtLoop(loop, walk.getLhs()))
-    return failure();
+  arith::SubIOp walk;
+  if (sampleLoad.getIndices().front() != index) {
+    walk = getSingleUseProducerIn<arith::SubIOp>(sampleLoad.getIndices().front(), body);
+    if (!walk || walk.getRhs() != index || !isAvailableAtLoop(loop, walk.getLhs()))
+      return failure();
+  }
 
   SmallPtrSet<Operation *, kUpdateBodyOperations> matched{
-      walk,        sampleLoad,   sampleExtend, product, scaled, stateLoad,
-      stateExtend, scaledExtend, sum,          updated, store};
-  if (matched.size() != kUpdateBodyOperations)
+      sampleLoad,  sampleExtend, product, scaled,  stateLoad,
+      stateExtend, scaledExtend, sum,     updated, store};
+  if (walk)
+    matched.insert(walk);
+  if (matched.size() != operations.size())
     return failure();
 
   ElementwiseUpdateLoopShape shape;
@@ -200,7 +210,7 @@ FailureOr<ElementwiseUpdateLoopShape> matchUpdateLoop(scf::ForOp loop, int64_t v
   shape.updateCount = *upperBound;
   shape.samples = sampleLoad.getMemRef();
   shape.state = store.getMemRef();
-  shape.sampleBase = walk.getLhs();
+  shape.sampleBase = walk ? walk.getLhs() : Value();
   shape.step = stepValue;
   shape.stepIsProductLhs = stepIsProductLhs;
   shape.stateIsSumLhs = stateIsSumLhs;
@@ -276,8 +286,8 @@ void batchElementwiseUpdates(const ElementwiseUpdateLoopShape &shape, int64_t ve
   auto stateLanes = VectorType::get({vectorWidth}, shape.stateElement);
   auto sumLanes = VectorType::get({vectorWidth}, shape.sumElement);
 
-  // The span load runs forward and the ordered walk runs backward, so lane `i`
-  // of the block starting at `j` must receive span element `W - 1 - i`.
+  // The span load runs forward, so a backward ordered walk needs lane `i` of
+  // the block to receive span element `W - 1 - i`; a forward one does not.
   SmallVector<int64_t> reversedLanes;
   for (int64_t lane = 0; lane < vectorWidth; ++lane)
     reversedLanes.push_back(vectorWidth - 1 - lane);
@@ -302,11 +312,19 @@ void batchElementwiseUpdates(const ElementwiseUpdateLoopShape &shape, int64_t ve
   builder.create<scf::ForOp>(
       loc, zeroIndex, batchedEnd, batchStep, ValueRange{},
       [&](OpBuilder &blockBuilder, Location blockLoc, Value blockStart, ValueRange) {
-        Value blockTop = blockBuilder.create<arith::SubIOp>(blockLoc, shape.sampleBase, blockStart);
-        Value spanBase = blockBuilder.create<arith::SubIOp>(blockLoc, blockTop, lastLane);
+        Value spanBase = blockStart;
+        if (shape.sampleBase) {
+          Value blockTop =
+              blockBuilder.create<arith::SubIOp>(blockLoc, shape.sampleBase, blockStart);
+          spanBase = blockBuilder.create<arith::SubIOp>(blockLoc, blockTop, lastLane);
+        }
         Value span = blockBuilder.create<vector::LoadOp>(blockLoc, sampleLanes, shape.samples,
                                                          ValueRange{spanBase});
-        Value samples = blockBuilder.create<vector::ShuffleOp>(blockLoc, span, span, reversedLanes);
+        Value samples =
+            shape.sampleBase
+                ? blockBuilder.create<vector::ShuffleOp>(blockLoc, span, span, reversedLanes)
+                      .getResult()
+                : span;
         Value wide = blockBuilder.create<arith::ExtSIOp>(blockLoc, productLanes, samples);
         Value product =
             shape.stepIsProductLhs
