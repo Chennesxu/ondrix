@@ -677,6 +677,45 @@ def UnrollOndspFixedMacLoops
   ];
 }
 
+def RelaxOndspUnreachableSaturation
+    : Pass<"relax-ondsp-unreachable-saturation", "::mlir::ModuleOp"> {
+  let summary = "Drop a declared saturating boundary a range proof shows can never fire";
+  let description = [{
+    Rewrites an `ondsp.round_shift` whose declared overflow is `saturate` to
+    `wrap` when the pass proves the shifted reading always lies inside the
+    destination storage. The two declarations denote the same function there,
+    so the rewrite is bit-exact by construction and the emitted code loses the
+    clamp: on rv32 an i64 reading narrowed to i16 costs fourteen instructions
+    for a comparison that the proof settles once, at compile time.
+
+    The bound is a signed interval walked back from the shift. A leaf, and any
+    producer outside the understood set, contributes its own type's full signed
+    range, so the walk is total rather than fail-closed; what keeps it sound is
+    that every arithmetic step whose exact interval would leave its own result
+    type falls back to that range as well, which is exactly what a wrapping
+    operation may produce. The understood set is the constants, sign extension,
+    truncation, addition, subtraction and multiplication the fixed routes emit,
+    plus the accumulator web: `acc_zero`, `acc_add_term` under its declared
+    update overflow, `acc_export`, and a chained `round_shift`.
+
+    This is where a declared output format earns its headroom. A transform
+    whose output frac leaves the reading a bit of room -- the DCT family, whose
+    k = 0 row is the extreme case -- never reaches its rails, and the check is
+    then pure cost; a filter whose taps can drive the accumulator past the
+    destination keeps every clamp it declared.
+
+    The rewrite weakens a policy the ondsp-to-ortumcore conversion may require,
+    so it belongs to the generic lowering flow: a target route that needs the
+    saturating readout runs its own pass list and never sees it.
+  }];
+  let constructor = "ondrix::createRelaxOndspUnreachableSaturationPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::scf::SCFDialect",
+    "ondrix::ondsp::OndspDialect",
+  ];
+}
+
 def WidenOndspExactAccumulators
     : Pass<"widen-ondsp-exact-accumulators", "::mlir::ModuleOp"> {
   let summary = "Retype provably exact wrap accumulators to the saturating target domain";

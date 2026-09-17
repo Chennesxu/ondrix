@@ -108,6 +108,9 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
                       "scalarize-ondsp-fixed-reduce-mac{{max-unrolled-terms={0}},"
                       "unroll-ondsp-fixed-mac-loops{{max-unrolled-terms={0}},",
                       straightLineTerms, options.scalarRegisterBits);
+  // A declared output format with headroom makes its saturating boundary
+  // unreachable; the proof runs once here so the narrowing never clamps.
+  os << "relax-ondsp-unreachable-saturation,";
   // The f32 sibling under the same budget; above one lane the lane-blocked
   // ordered lowering is the better claim on a reduction, so only the
   // accumulator loops are left for it.
