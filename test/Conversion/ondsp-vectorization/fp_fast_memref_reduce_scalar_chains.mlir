@@ -1,5 +1,6 @@
 // RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="vector-width=1 interleave=4" | FileCheck %s
-// RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="vector-width=1 interleave=4 supports-vector-fma=true" | FileCheck %s --check-prefix=FUSED
+// RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="vector-width=4 interleave=2" | FileCheck %s --check-prefix=LANESPLIT
+// RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="vector-width=4 interleave=2 supports-vector-fma=true" | FileCheck %s --check-prefix=FUSED
 // RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="vector-width=1 interleave=1" | FileCheck %s --check-prefix=SINGLE
 // RUN: ondrix-opt %s --vectorize-ondsp-fp-fast-memref-reduce="vector-width=4 interleave=4" | FileCheck %s --check-prefix=LANES
 
@@ -17,6 +18,9 @@
 // CHECK: %[[S2:.*]] = arith.mulf {{.*}} : f32
 // CHECK: %[[S3:.*]] = arith.mulf {{.*}} : f32
 // CHECK: %[[LOOP:.*]]:4 = scf.for {{.*}} iter_args(%[[A0:.*]] = %[[S0]], %[[A1:.*]] = %[[S1]], %[[A2:.*]] = %[[S2]], %[[A3:.*]] = %[[S3]]) -> (f32, f32, f32, f32)
+// A lane capability decides a lane question, so a single-lane chain fuses
+// whatever it says -- the same selection every other scalar lowering makes.
+// CHECK-COUNT-4: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : f32
 // CHECK: %[[M0:.*]] = arith.addf %[[LOOP]]#0, %[[LOOP]]#1 : f32
 // CHECK: %[[M1:.*]] = arith.addf %[[LOOP]]#2, %[[LOOP]]#3 : f32
 // CHECK: %[[TOP:.*]] = arith.addf %[[M0]], %[[M1]] : f32
@@ -27,10 +31,16 @@ func.func @scalar_chains(%lhs: memref<12xf32>, %rhs: memref<12xf32>, %init: f32)
   return %r : f32
 }
 
+// At more than one lane the capability still governs: undeclared keeps the
+// separate multiply and add, declared takes the fused event.
+// LANESPLIT-LABEL: func.func @scalar_chains
+// LANESPLIT: scf.for
+// LANESPLIT: arith.mulf {{.*}} : vector<4xf32>
+// LANESPLIT: arith.addf {{.*}} : vector<4xf32>
+// LANESPLIT-NOT: math.fma
 // FUSED-LABEL: func.func @scalar_chains
-// FUSED-COUNT-4: arith.mulf {{.*}} : f32
 // FUSED: scf.for
-// FUSED-COUNT-4: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : f32
+// FUSED-COUNT-2: math.fma {{.*}} {ondsp.fast_used = ["fuse_multiply_add"]} : vector<4xf32>
 
 // One effective chain at width one would spend R on the ordered schedule.
 // SINGLE-LABEL: func.func @scalar_chains

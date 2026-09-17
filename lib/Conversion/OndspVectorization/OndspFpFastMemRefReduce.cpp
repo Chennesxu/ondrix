@@ -253,10 +253,12 @@ public:
 private:
   /// Folds one term into an accumulator of the same type, scalar or vector.
   /// Both selections are inside the declared set, so the capability decides
-  /// performance rather than legality.
+  /// performance rather than legality. The capability is about LANES, so a
+  /// single-lane site does not ask it: it fuses like every other scalar
+  /// lowering of this contract (`createFpAccumulatorUpdate`).
   Value accumulateTerm(Location loc, Value lhs, Value rhs, Value accumulator,
                        OpBuilder &builder) const {
-    if (fuseTerms)
+    if (fuseTerms || vectorWidth == 1)
       return ondrix::ondsp::consumeFastPermission(
           builder.create<math::FmaOp>(loc, lhs, rhs, accumulator),
           ondrix::ondsp::FastPermission::FuseMultiplyAdd);
