@@ -957,6 +957,32 @@ public:
   }
 };
 
+/// One window sum. The declared shape is the left fold; `fast` spends its
+/// rebuild permission on a balanced tree instead, whose depth is log2(K)
+/// rather than K - 1. Below four terms both trees are the same expression,
+/// so the permission is neither needed nor recorded there.
+static Value createWindowSum(Location loc, ArrayRef<Value> terms, bool rebuild,
+                             ConversionPatternRewriter &rewriter) {
+  if (!rebuild || terms.size() < 4) {
+    Value sum = terms.front();
+    for (Value term : terms.drop_front())
+      sum = ondrix::conversion::createFpAdd(loc, sum, term, rewriter);
+    return sum;
+  }
+  SmallVector<Value> level(terms.begin(), terms.end());
+  while (level.size() > 1) {
+    SmallVector<Value> next;
+    for (size_t index = 0; index + 1 < level.size(); index += 2)
+      next.push_back(
+          ondrix::conversion::createFpAdd(loc, level[index], level[index + 1], rewriter));
+    if (level.size() % 2 != 0)
+      next.push_back(level.back());
+    level = std::move(next);
+  }
+  return ondrix::ondsp::consumeFastPermission(level.front().getDefiningOp(),
+                                              ondrix::ondsp::FastPermission::RebuildReductionTree);
+}
+
 class MovingAverageOpLowering final : public OpConversionPattern<ondrix::ir::MovingAverageOp> {
 public:
   MovingAverageOpLowering(MLIRContext *context, bool slidingWindowReuse)
@@ -977,13 +1003,15 @@ public:
       Value count = rewriter.create<arith::ConstantOp>(
           loc, rewriter.getFloatAttr(element, static_cast<double>(window)));
       Value output = rewriter.create<tensor::EmptyOp>(loc, outputType.getShape(), element);
+      bool rebuild = fp.getContract() == ondrix::ondsp::FpContractMode::Fast;
       for (int64_t n = 0; n < extent - window + 1; ++n) {
-        Value sum;
+        SmallVector<Value> terms;
+        terms.reserve(window);
         for (int64_t k = 0; k < window; ++k) {
           Value position = rewriter.create<arith::ConstantIndexOp>(loc, n + k);
-          Value value = rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position);
-          sum = sum ? createFpAdd(loc, sum, value, rewriter) : value;
+          terms.push_back(rewriter.create<tensor::ExtractOp>(loc, adaptor.getInput(), position));
         }
+        Value sum = createWindowSum(loc, terms, rebuild, rewriter);
         Value mean = rewriter.create<arith::DivFOp>(loc, sum, count);
         Value position = rewriter.create<arith::ConstantIndexOp>(loc, n);
         output = rewriter.create<tensor::InsertOp>(loc, mean, output, position);

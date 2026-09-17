@@ -18,6 +18,7 @@ typedef struct {
 extern void _mlir_ciface_f32_moving_average_off(MemRefF32 *, MemRefF32 *);
 extern void _mlir_ciface_f32_moving_average_fma(MemRefF32 *, MemRefF32 *);
 extern void _mlir_ciface_f32_moving_average_fast(MemRefF32 *, MemRefF32 *);
+extern void _mlir_ciface_f32_moving_average_fast8(MemRefF32 *, MemRefF32 *);
 extern void _mlir_ciface_f32_dct_off(MemRefF32 *, MemRefF32 *);
 extern void _mlir_ciface_f32_dct_fma(MemRefF32 *, MemRefF32 *);
 extern void _mlir_ciface_f32_dct_fast(MemRefF32 *, MemRefF32 *);
@@ -35,6 +36,21 @@ static float referenceAverage(const float *x, int64_t n) {
   for (int64_t k = 1; k < kWindow; ++k)
     sum = sum + x[n + k];
   return sum / (float)kWindow;
+}
+
+/* The whole-input window under fast: the rebuild's balanced tree, which R
+   authorizes and which the declared left fold below must disagree with. */
+static float referenceWideAverageTree(const float *x) {
+  const float a = (x[0] + x[1]) + (x[2] + x[3]);
+  const float b = (x[4] + x[5]) + (x[6] + x[7]);
+  return (a + b) / (float)kLength;
+}
+
+static float referenceWideAverageFold(const float *x) {
+  float sum = x[0];
+  for (int64_t k = 1; k < kLength; ++k)
+    sum = sum + x[k];
+  return sum / (float)kLength;
 }
 
 /* The reference derives the table itself, in double, and rounds once to f32 —
@@ -65,6 +81,8 @@ static int check(const float *x, const char *label) {
   memcpy(input, x, sizeof(input));
   MemRefF32 inputRef = {input, input, 0, {kLength}, {1}};
   float averageOut[kAverages], averageFmaOut[kAverages], averageFastOut[kAverages];
+  float wideOut[1];
+  MemRefF32 wide = {wideOut, wideOut, 0, {1}, {1}};
   float dctOffOut[kLength], dctFmaOut[kLength], dctFastOut[kLength];
   MemRefF32 average = {averageOut, averageOut, 0, {kAverages}, {1}};
   MemRefF32 averageFma = {averageFmaOut, averageFmaOut, 0, {kAverages}, {1}};
@@ -75,6 +93,7 @@ static int check(const float *x, const char *label) {
   _mlir_ciface_f32_moving_average_off(&inputRef, &average);
   _mlir_ciface_f32_moving_average_fma(&inputRef, &averageFma);
   _mlir_ciface_f32_moving_average_fast(&inputRef, &averageFast);
+  _mlir_ciface_f32_moving_average_fast8(&inputRef, &wide);
   _mlir_ciface_f32_dct_off(&inputRef, &dctOff);
   _mlir_ciface_f32_dct_fma(&inputRef, &dctFma);
   _mlir_ciface_f32_dct_fast(&inputRef, &dctFast);
@@ -94,6 +113,10 @@ static int check(const float *x, const char *label) {
         compare(label, "average fast", n,
                 averageFast.aligned[averageFast.offset + n * averageFast.strides[0]], expected);
   }
+  /* The eight-term window rebuilds, so its selected member is the balanced
+     tree rather than the declared fold. */
+  failed |=
+      compare(label, "average fast8", 0, wide.aligned[wide.offset], referenceWideAverageTree(x));
   for (int64_t k = 0; k < kLength; ++k) {
     const float expectedOff = referenceDct(x, k, 0);
     const float expectedFma = referenceDct(x, k, 1);
@@ -140,6 +163,20 @@ static int checkWindowAssociation(void) {
   return check(x, "window association");
 }
 
+/* The eight-term corpus must separate the balanced tree from the declared
+ * fold, or pinning the rebuilt member proves nothing about the rebuild. */
+static int checkWideWindowRebuild(void) {
+  float x[kLength];
+  for (int64_t i = 0; i < kLength; ++i)
+    x[i] = 3.0f;
+  x[0] = 1.0e8f;
+  if (floatBits(referenceWideAverageTree(x)) == floatBits(referenceWideAverageFold(x))) {
+    fprintf(stderr, "wide window corpus is vacuous: tree and fold agree\n");
+    return 1;
+  }
+  return check(x, "wide window rebuild");
+}
+
 int main(void) {
   float x[kLength];
   for (int64_t i = 0; i < kLength; ++i)
@@ -162,6 +199,7 @@ int main(void) {
   failed |= check(x, "contract split");
 
   failed |= checkWindowAssociation();
+  failed |= checkWideWindowRebuild();
 
   uint32_t state = UINT32_C(0x1F123BB5);
   for (int trial = 0; trial < kTrialCount; ++trial) {

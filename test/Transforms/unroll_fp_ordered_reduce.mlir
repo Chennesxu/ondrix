@@ -186,3 +186,48 @@ func.func @blocks_sample_recurrence(%x: memref<8xf32>, %y: memref<8xf32>, %b: f3
   }
   return %r#0 : f32
 }
+
+// -----
+
+// A bufferized window sum stamps its declaration on the loop so the additive
+// tree can still be rebuilt after the lane stages have stood down. Seedless,
+// so the initial value joins the leaves and the depth drops to its logarithm.
+// CHECK-LABEL: func.func @rebuilds_a_stamped_fast_window(
+// CHECK-NOT: scf.for
+// CHECK: %[[A:.*]] = arith.addf %[[L0:.*]], %[[L1:.*]] : f32
+// CHECK: %[[B:.*]] = arith.addf %[[L2:.*]], %[[L3:.*]] : f32
+// CHECK: arith.addf %[[A]], %[[B]] {ondsp.fast_used = ["rebuild_reduction_tree"]} : f32
+func.func @rebuilds_a_stamped_fast_window(%x: memref<8xf32>) -> f32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  %seed = memref.load %x[%c0] : memref<8xf32>
+  %sum = scf.for %i = %c1 to %c4 step %c1 iter_args(%acc = %seed) -> (f32) {
+    %v = memref.load %x[%i] : memref<8xf32>
+    %n = arith.addf %acc, %v : f32
+    scf.yield %n : f32
+  } {ondsp.numeric = #ondsp.fp<format = f32, contract = fast>}
+  return %sum : f32
+}
+
+// -----
+
+// The same loop without the stamp is the declared left fold; the rebuild is a
+// permission the declaration carries, not a shape this pass assumes.
+// CHECK-LABEL: func.func @keeps_an_unstamped_window_ordered(
+// CHECK: %[[A:.*]] = arith.addf %[[SEED:.*]], %{{.*}} : f32
+// CHECK: %[[B:.*]] = arith.addf %[[A]], %{{.*}} : f32
+// CHECK: arith.addf %[[B]], %{{.*}} : f32
+// CHECK-NOT: ondsp.fast_used
+func.func @keeps_an_unstamped_window_ordered(%x: memref<8xf32>) -> f32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  %seed = memref.load %x[%c0] : memref<8xf32>
+  %sum = scf.for %i = %c1 to %c4 step %c1 iter_args(%acc = %seed) -> (f32) {
+    %v = memref.load %x[%i] : memref<8xf32>
+    %n = arith.addf %acc, %v : f32
+    scf.yield %n : f32
+  }
+  return %sum : f32
+}

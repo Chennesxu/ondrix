@@ -2,6 +2,7 @@
 
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
+#include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -201,6 +202,68 @@ void unrollLoopByBlock(scf::ForOp loop, int64_t step, int64_t factor) {
   loop.erase();
 }
 
+/// The addend of a single-accumulator `acc = acc + t` body, or null. The
+/// addend must not read the accumulator, or the loop is not a sum.
+arith::AddFOp getAccumulatorFold(scf::ForOp loop) {
+  if (loop.getNumRegionIterArgs() != 1)
+    return nullptr;
+  auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+  auto add = yield.getOperand(0).getDefiningOp<arith::AddFOp>();
+  if (!add || add->getParentOp() != loop.getOperation())
+    return nullptr;
+  BlockArgument accumulator = loop.getRegionIterArgs()[0];
+  Value addend = add.getLhs() == accumulator   ? add.getRhs()
+                 : add.getRhs() == accumulator ? add.getLhs()
+                                               : nullptr;
+  return addend && addend != accumulator && !addend.getDefiningOp<arith::AddFOp>() ? add : nullptr;
+}
+
+/// Whether the loop carries a `fast` declaration, which is where a bufferized
+/// window sum records that its additive tree may be rebuilt.
+bool declaresFastContract(scf::ForOp loop) {
+  auto numeric =
+      loop->getAttrOfType<ondrix::ondsp::FpAttr>(ondrix::ondsp::getDeclaredNumericAttrName());
+  return numeric && numeric.getContract() == ondrix::ondsp::FpContractMode::Fast;
+}
+
+/// A balanced tree over the leaves, recording the rebuild on its root.
+Value buildBalancedSum(Location loc, SmallVector<Value> leaves, OpBuilder &builder) {
+  while (leaves.size() > 1) {
+    SmallVector<Value> next;
+    for (size_t index = 0; index + 1 < leaves.size(); index += 2)
+      next.push_back(builder.create<arith::AddFOp>(loc, leaves[index], leaves[index + 1]));
+    if (leaves.size() % 2 != 0)
+      next.push_back(leaves.back());
+    leaves = std::move(next);
+  }
+  return ondrix::ondsp::consumeFastPermission(leaves.front().getDefiningOp(),
+                                              ondrix::ondsp::FastPermission::RebuildReductionTree);
+}
+
+/// Replays the loop as a balanced tree over its leaves instead of the declared
+/// left fold. A seedless instance permutes all leaves, so the initial value
+/// joins them; the depth drops from `trip` to its logarithm, which is what a
+/// multiply-add latency of four costs on a chain nothing else overlaps.
+void rebuildAccLoopAsTree(scf::ForOp loop, arith::AddFOp fold, int64_t lower, int64_t step,
+                          int64_t trip) {
+  OpBuilder builder(loop);
+  Location loc = loop.getLoc();
+  BlockArgument accumulator = loop.getRegionIterArgs()[0];
+  Value addend = fold.getLhs() == accumulator ? fold.getRhs() : fold.getLhs();
+  SmallVector<Value> leaves{loop.getInitArgs().front()};
+  for (int64_t iteration = 0; iteration < trip; ++iteration) {
+    IRMapping mapping;
+    mapping.map(loop.getInductionVar(),
+                builder.create<arith::ConstantIndexOp>(loc, lower + iteration * step));
+    for (Operation &op : loop.getBody()->without_terminator())
+      if (&op != fold.getOperation())
+        builder.clone(op, mapping);
+    leaves.push_back(mapping.lookupOrDefault(addend));
+  }
+  loop.getResult(0).replaceAllUsesWith(buildBalancedSum(loc, std::move(leaves), builder));
+  loop.erase();
+}
+
 void unrollAccLoop(scf::ForOp loop, int64_t lower, int64_t step, int64_t trip) {
   OpBuilder builder(loop);
   Location loc = loop.getLoc();
@@ -313,8 +376,12 @@ struct UnrollOndspFpOrderedReduce final
       int64_t step = *getStaticIndex(loop.getStep());
       int64_t trip = *getUnrollableTripCount(loop, maxStraightLineTerms);
       int64_t replayed = replayedTrips(loop, trip);
-      if (replayed == trip)
-        unrollAccLoop(loop, *getStaticIndex(loop.getLowerBound()), step, trip);
+      int64_t lower = *getStaticIndex(loop.getLowerBound());
+      arith::AddFOp fold = declaresFastContract(loop) ? getAccumulatorFold(loop) : nullptr;
+      if (replayed == trip && fold && trip >= 3)
+        rebuildAccLoopAsTree(loop, fold, lower, step, trip);
+      else if (replayed == trip)
+        unrollAccLoop(loop, lower, step, trip);
       else if (replayed > 1)
         unrollLoopByBlock(loop, step, replayed);
     }
