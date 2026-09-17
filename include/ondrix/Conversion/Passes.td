@@ -938,10 +938,16 @@ def PairOndspFixedReductionOutputs
     batching, and the same contrast with the horizontal reduction passes,
     whose lanes do change the fold order and therefore do require proofs.
 
-    One lane per OUTPUT is the only exact pairing available. Splitting one
-    output's sum across the two lanes and re-adding the halves would recombine
-    through the export boundary's 32-bit saturating readout, which the declared
-    contract does not admit, so that shape is never produced.
+    One lane per OUTPUT is the pairing this pass produces. Splitting one
+    output's sum across the two lanes and re-adding the halves recombines
+    through the export boundary's 32-bit saturating readout, and that readout
+    is the identity on a half that still fits the narrower width, so a
+    prefix-range certificate over the even and odd subsequences makes the
+    split exact as well. It is not produced here because its cost is not this
+    pass's to price: the re-add spends one widening accumulate per certified
+    group, and a full-scale Q15 coefficient certifies only two products per
+    group, so the split is profitable only for a coefficient sequence whose
+    certified group is large.
 
     The shared stream becomes the multi-lane mac's scalar coefficient and the
     two differing streams become the two vector lanes. When the shared stream
