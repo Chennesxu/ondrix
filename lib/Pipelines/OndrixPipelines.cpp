@@ -66,8 +66,9 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
     // i64 accumulators on a 128-bit file. Requantized-product sites batch only
     // from 256 bits; the option's description carries the measurement.
     os << llvm::formatv("vectorize-ondsp-fixed-decimate-outputs{{vector-width={0} chunk-multiple=2 "
-                        "requantized-products={1}},",
-                        lanes, options.vectorBits >= 256 ? "true" : "false");
+                        "requantized-products={1} max-straight-line-coefficients={2}},",
+                        lanes, options.vectorBits >= 256 ? "true" : "false",
+                        options.maxStraightLineCoefficients);
     os << llvm::formatv("vectorize-ondsp-fixed-elementwise-updates{{vector-width={0}},", lanes);
     os << llvm::formatv("vectorize-ondsp-fixed-elementwise-loops{{vector-width={0}},", lanes);
     // The convolution-shaped reduction its operands walk in opposite

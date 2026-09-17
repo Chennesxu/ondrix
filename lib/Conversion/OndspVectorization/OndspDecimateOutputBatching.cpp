@@ -962,8 +962,69 @@ memref::StoreOp findRunEnd(MutableArrayRef<ConstantRowOutput> outputs) {
   return end;
 }
 
+/// The block's coefficients as one immutable column-major table: term `t`'s
+/// column occupies `lanes` consecutive elements at `t * lanes`, so the loop
+/// form reads one aligned machine vector per term.
+Value createColumnTable(OpBuilder &builder, Location loc, ArrayRef<ConstantRowOutput> outputs,
+                        int64_t length, IntegerType storage) {
+  auto lanes = static_cast<int64_t>(outputs.size());
+  SmallVector<llvm::APInt> values;
+  values.reserve(length * lanes);
+  for (int64_t term = 0; term < length; ++term)
+    for (const ConstantRowOutput &output : outputs)
+      values.push_back(output.coefficients[term]);
+  auto tableType = MemRefType::get({length * lanes}, storage);
+  auto initializer =
+      DenseIntElementsAttr::get(RankedTensorType::get({length * lanes}, storage), values);
+
+  auto module = builder.getInsertionBlock()->getParentOp()->getParentOfType<ModuleOp>();
+  std::string symbol;
+  for (int64_t ordinal = 0;; ++ordinal) {
+    symbol = ("__ondrix_row_table_" + Twine(ordinal)).str();
+    if (!SymbolTable::lookupSymbolIn(module, symbol))
+      break;
+  }
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToStart(module.getBody());
+    builder.create<memref::GlobalOp>(loc, symbol, builder.getStringAttr("private"), tableType,
+                                     initializer, /*constant=*/true,
+                                     builder.getI64IntegerAttr(lanes * storage.getWidth() / 8));
+  }
+  return builder.create<memref::GetGlobalOp>(loc, tableType, symbol);
+}
+
+/// The block's one export, its optional requantization, and the one store
+/// that replaces the run.
+void emitBlockTail(OpBuilder &builder, Location loc, Value acc, ConstantRowOutput &first,
+                   VectorType sampleType, int64_t lanes) {
+  Value samples = builder.create<ondrix::ondsp::AccExportOp>(
+      loc, sampleType, acc, first.exportOp.getDst(), first.exportOp.getRounding(),
+      first.exportOp.getOverflow());
+  if (first.roundShift) {
+    auto storedType = VectorType::get({lanes}, first.roundShift.getResult().getType());
+    samples = builder.create<ondrix::ondsp::RoundShiftOp>(loc, storedType, samples,
+                                                          first.roundShift.getScale());
+  }
+  Value position = builder.create<arith::ConstantIndexOp>(loc, first.position);
+  builder.create<vector::StoreOp>(loc, samples, first.store.getMemRef(), ValueRange{position});
+}
+
+void eraseBatchedOutputs(MutableArrayRef<ConstantRowOutput> outputs) {
+  for (ConstantRowOutput &output : outputs) {
+    output.store.erase();
+    if (output.roundShift)
+      output.roundShift.erase();
+    output.exportOp.erase();
+    output.reduce.erase();
+    if (output.zero.getAcc().use_empty())
+      output.zero.erase();
+  }
+}
+
 /// Rewrites `outputs`, whose positions are consecutive, into one lane block.
-void batchConstantRowOutputs(MutableArrayRef<ConstantRowOutput> outputs, OpBuilder &builder) {
+void batchConstantRowOutputs(MutableArrayRef<ConstantRowOutput> outputs, OpBuilder &builder,
+                             int64_t maxStraightLineCoefficients) {
   memref::StoreOp runEnd = findRunEnd(outputs);
   if (!runEnd)
     return;
@@ -1017,6 +1078,56 @@ void batchConstantRowOutputs(MutableArrayRef<ConstantRowOutput> outputs, OpBuild
       VectorType::get({lanes}, cast<IntegerType>(first.exportOp.getDst().getStorage()));
 
   builder.setInsertionPoint(runEnd);
+  // Above the budget the columns live in memory and the terms become a loop:
+  // the block's instruction memory stops growing with the table, at the price
+  // of the index arithmetic and the load the immediates did not need.
+  bool loopForm = maxStraightLineCoefficients > 0 && length * lanes > maxStraightLineCoefficients &&
+                  (groupedTerms == length || groupedTerms == 0);
+  if (loopForm) {
+    int64_t stride = groupedTerms == length ? termGroup : 1;
+    Value table = createColumnTable(builder, loc, outputs, length, storage);
+    Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
+    Value trips = builder.create<arith::ConstantIndexOp>(loc, length / stride);
+    Value seed = builder.create<ondrix::ondsp::AccZeroOp>(loc, laneAccumulator);
+    auto loop = builder.create<scf::ForOp>(
+        loc, zero, trips, one, ValueRange{seed},
+        [&](OpBuilder &body, Location bodyLoc, Value trip, ValueRange carried) {
+          Value running = carried.front();
+          Value inner = groupedTerms == length
+                            ? body.create<ondrix::ondsp::AccZeroOp>(bodyLoc, groupAccumulator)
+                            : running;
+          Value base = stride == 1 ? trip
+                                   : body.create<arith::MulIOp>(
+                                         bodyLoc, trip,
+                                         body.create<arith::ConstantIndexOp>(bodyLoc, stride));
+          for (int64_t step = 0; step < stride; ++step) {
+            Value index =
+                step == 0 ? base
+                          : body.create<arith::AddIOp>(
+                                bodyLoc, base, body.create<arith::ConstantIndexOp>(bodyLoc, step));
+            Value offset = body.create<arith::MulIOp>(
+                bodyLoc, index, body.create<arith::ConstantIndexOp>(bodyLoc, lanes));
+            Value column =
+                body.create<vector::LoadOp>(bodyLoc, columnType, table, ValueRange{offset});
+            Value element = body.create<memref::LoadOp>(bodyLoc, input, ValueRange{index});
+            inner = body.create<ondrix::ondsp::MacOp>(
+                bodyLoc, groupedTerms == length ? groupAccumulator : laneAccumulator, inner, column,
+                element, numeric, *first.reduce.getProduct());
+          }
+          if (groupedTerms == length) {
+            Value termValue = body.create<ondrix::ondsp::AccExportOp>(
+                bodyLoc, groupTermType, inner, groupTermNumeric,
+                ondrix::ondsp::RoundingMode::TowardNegative, ondrix::ondsp::OverflowMode::Wrap);
+            inner = body.create<ondrix::ondsp::AccAddTermOp>(bodyLoc, laneAccumulator, running,
+                                                             termValue, groupTermNumeric);
+          }
+          body.create<scf::YieldOp>(bodyLoc, inner);
+        });
+    emitBlockTail(builder, loc, loop.getResult(0), first, sampleType, lanes);
+    eraseBatchedOutputs(outputs);
+    return;
+  }
   Value acc = builder.create<ondrix::ondsp::AccZeroOp>(loc, laneAccumulator);
   Value group;
   for (int64_t term = 0; term < length; ++term) {
@@ -1046,32 +1157,14 @@ void batchConstantRowOutputs(MutableArrayRef<ConstantRowOutput> outputs, OpBuild
                                                         groupTermNumeric);
     }
   }
-  Value samples = builder.create<ondrix::ondsp::AccExportOp>(
-      loc, sampleType, acc, first.exportOp.getDst(), first.exportOp.getRounding(),
-      first.exportOp.getOverflow());
-  if (first.roundShift) {
-    auto storedType = VectorType::get({lanes}, first.roundShift.getResult().getType());
-    samples = builder.create<ondrix::ondsp::RoundShiftOp>(loc, storedType, samples,
-                                                          first.roundShift.getScale());
-  }
-  Value position = builder.create<arith::ConstantIndexOp>(loc, first.position);
-  builder.create<vector::StoreOp>(loc, samples, first.store.getMemRef(), ValueRange{position});
-
-  for (ConstantRowOutput &output : outputs) {
-    output.store.erase();
-    if (output.roundShift)
-      output.roundShift.erase();
-    output.exportOp.erase();
-    output.reduce.erase();
-    if (output.zero.getAcc().use_empty())
-      output.zero.erase();
-  }
+  emitBlockTail(builder, loc, acc, first, sampleType, lanes);
+  eraseBatchedOutputs(outputs);
 }
 
 /// Groups the unrolled constant-row outputs of one block into runs of
 /// `vectorWidth` consecutive positions under one contract, and batches each.
 void batchConstantRowOutputsInBlock(Block &block, int64_t vectorWidth, bool requantizedProducts,
-                                    OpBuilder &builder) {
+                                    int64_t maxStraightLineCoefficients, OpBuilder &builder) {
   SmallVector<ConstantRowOutput> outputs;
   for (auto reduce : block.getOps<ondrix::ondsp::ReduceMacOp>())
     if (std::optional<ConstantRowOutput> output = matchConstantRowOutput(reduce))
@@ -1093,7 +1186,7 @@ void batchConstantRowOutputsInBlock(Block &block, int64_t vectorWidth, bool requ
       continue;
     }
     batchConstantRowOutputs(MutableArrayRef<ConstantRowOutput>(outputs).slice(start, vectorWidth),
-                            builder);
+                            builder, maxStraightLineCoefficients);
     start += vectorWidth;
   }
 }
@@ -1167,7 +1260,8 @@ public:
     });
     for (Block *block : blocks)
       for (int64_t lanes = vectorWidth; lanes > 1; lanes /= 2)
-        batchConstantRowOutputsInBlock(*block, lanes, requantizedProducts, builder);
+        batchConstantRowOutputsInBlock(*block, lanes, requantizedProducts,
+                                       maxStraightLineCoefficients, builder);
   }
 };
 

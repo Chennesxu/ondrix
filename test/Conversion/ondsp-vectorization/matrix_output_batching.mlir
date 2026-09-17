@@ -1,4 +1,6 @@
 // RUN: ondrix-opt %s --vectorize-ondsp-fixed-decimate-outputs=vector-width=4 | FileCheck %s
+// RUN: ondrix-opt %s --vectorize-ondsp-fixed-decimate-outputs="vector-width=4 max-straight-line-coefficients=16" | FileCheck %s --check-prefix=LOOP
+// RUN: ondrix-opt %s --vectorize-ondsp-fixed-decimate-outputs="vector-width=4 max-straight-line-coefficients=32" | FileCheck %s --check-prefix=UNDER
 
 // Width 4 over eight columns: two blocks read B row segments directly, the
 // ordered loop and the packed copy that fed it are gone.
@@ -103,6 +105,25 @@ memref.global "private" constant @row3 : memref<8xi16> = dense<[27245, -6392, -3
 // CHECK: ondsp.round_shift {{.*}} : (vector<4xi64>) -> vector<4xi16>
 // CHECK: vector.store %{{.*}} : memref<4xi16>, vector<4xi16>
 // CHECK-NOT: ondsp.reduce_mac
+
+// Past the budget the columns move into one immutable column-major table --
+// term t's column at t * lanes -- and the terms become a loop over groups.
+// LOOP: memref.global "private" constant @__ondrix_row_table_0 : memref<32xi16> = dense<[32767, 32138, 30273, 27245, 32767, 27245, 12539, -6392,
+// LOOP-LABEL: func.func @constant_rows
+// LOOP: %[[TABLE:.*]] = memref.get_global @__ondrix_row_table_0
+// LOOP: scf.for
+// LOOP: ondsp.acc_zero : <storage = i32, frac = 30, signed, update_overflow = wrap, lanes = 4>
+// LOOP: vector.load %[[TABLE]]{{.*}} : memref<32xi16>, vector<4xi16>
+// LOOP-COUNT-2: ondsp.mac
+// LOOP: ondsp.acc_add_term
+// LOOP: scf.yield
+// LOOP-NOT: arith.constant dense<[32767, 32138, 30273, 27245]>
+
+// A block exactly at the budget is not past it: eight terms across four lanes
+// is thirty-two coefficients, and thirty-two stays straight-line.
+// UNDER-LABEL: func.func @constant_rows
+// UNDER: arith.constant dense<[32767, 32138, 30273, 27245]> : vector<4xi16>
+// UNDER-NOT: memref.get_global @__ondrix_row_table_0
 func.func @constant_rows(%input: memref<8xi16>) -> memref<4xi16> {
   %c3 = arith.constant 3 : index
   %c2 = arith.constant 2 : index

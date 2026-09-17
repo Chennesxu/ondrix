@@ -96,6 +96,20 @@ struct OndrixDefaultPipelineOptions
       llvm::cl::desc("Declared target capability: counted loops run on a zero-overhead "
                      "hardware repeat block, so reductions keep their loop form"),
       llvm::cl::init(false)};
+  /// Coefficient immediates one constant-row block may materialize before its
+  /// terms become a loop over an immutable column-major table. Like `fftLoops`
+  /// below this is a SCHEDULE CHOICE and not a target fact: it trades runtime
+  /// for instruction memory, and the exchange rate is measured, not derived.
+  /// On gem5 AArch64 hpi at 128 bits, the Q15 DCT family (8, 32 and 64 in one
+  /// module) runs 1.77x slower under a budget of 128 for an object 1.45x
+  /// smaller and codegen 3.1x faster, so zero -- every block straight-line --
+  /// is the default and a memory-bounded target opts in.
+  Option<int64_t> maxStraightLineCoefficients{
+      *this, "max-straight-line-coefficients",
+      llvm::cl::desc("Schedule choice: coefficient immediates one constant-row block may "
+                     "materialize before its terms become a loop over a column table (0, the "
+                     "default, keeps every block straight-line)"),
+      llvm::cl::init(0)};
   /// Which code shape the static transforms take. This is an explicit
   /// SCHEDULE CHOICE, not a target fact, and it must not be derived from a
   /// target description: whether the instruction memory holds the unrolled

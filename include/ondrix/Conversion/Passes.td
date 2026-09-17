@@ -725,6 +725,13 @@ def VectorizeOndspFixedDecimateOutputs
            "DCT profiles). Off, such a site keeps its ordered schedule: on a 128-bit file the "
            "rounded i64 product lanes cost more than they save (gem5 HPI, matmul4x16x3 Q31 "
            "3136 vs 1844 ordered cycles, dct64 56940 vs 47927), while at 256 bits they win">,
+    Option<"maxStraightLineCoefficients", "max-straight-line-coefficients", "int64_t",
+           /*default=*/"0",
+           "Coefficient immediates one constant-row block may materialize before its terms "
+           "become a loop over an immutable column-major table; 0 leaves every block "
+           "straight-line. A transform's rows are what reach it: the block's table is "
+           "`length * vector-width` wide, so a large extent grows the object with the square "
+           "of itself until this bounds it">,
   ];
 }
 

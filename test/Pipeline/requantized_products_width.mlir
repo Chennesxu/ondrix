@@ -6,9 +6,9 @@
 // A Q31 DCT requantizes every product; at 128 bits the rounded i64 lanes lose
 // to the ordered schedule, so both routes decline the site and only there.
 
-// NARROW: vectorize-ondsp-fixed-decimate-outputs{chunk-multiple=2 requantized-products=false vector-width=4}
+// NARROW: vectorize-ondsp-fixed-decimate-outputs{chunk-multiple=2 max-straight-line-coefficients=0 requantized-products=false vector-width=4}
 // NARROW-SAME: vectorize-ondsp-fixed-memref-reduce{chunk-multiple=4 pair-fold-squares=true requantized-products=false vector-width=4}
-// WIDE: vectorize-ondsp-fixed-decimate-outputs{chunk-multiple=2 requantized-products=true vector-width=8}
+// WIDE: vectorize-ondsp-fixed-decimate-outputs{chunk-multiple=2 max-straight-line-coefficients=0 requantized-products=true vector-width=8}
 // WIDE-SAME: vectorize-ondsp-fixed-memref-reduce{chunk-multiple=4 pair-fold-squares=true requantized-products=true vector-width=8}
 
 // ORDERED-LABEL: llvm.func @dct8_q31
