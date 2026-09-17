@@ -183,12 +183,32 @@ Value createRoundedSignedRightShift(Location loc, Value input, unsigned shift,
   // lane value is what lets LLVM shrink the surrounding arithmetic into a
   // worse x86 legalization.
   if (roundingMode == ondrix::ondsp::RoundingMode::NearestEven && !isa<VectorType>(type)) {
-    Value mask = constant(static_cast<int64_t>((uint64_t{1} << shift) - 1));
-    Value remainder = builder.create<arith::AndIOp>(loc, input, mask);
-    Value lowBit = builder.create<arith::AndIOp>(loc, quotient, constant(1));
+    // The window reads bits [0, shift] of the input, so it fits `shift + 1`
+    // bits and is computed in the narrowest type that holds them. A carrier
+    // wider than one machine register would otherwise pay a carry chain per
+    // window add for a carry that provably never happens.
+    unsigned windowWidth = std::max(shift + 1, 32u);
+    Type windowType =
+        windowWidth < element.getWidth() ? cast<Type>(builder.getIntegerType(windowWidth)) : type;
+    Value window = input;
+    if (windowType != type)
+      window = builder.create<arith::TruncIOp>(loc, windowType, input);
+    auto windowConstant = [&](int64_t value) -> Value {
+      return builder.create<arith::ConstantOp>(loc, windowType,
+                                               builder.getIntegerAttr(windowType, value));
+    };
+    Value remainder = builder.create<arith::AndIOp>(
+        loc, window, windowConstant(static_cast<int64_t>((uint64_t{1} << shift) - 1)));
+    Value narrowQuotient = quotient;
+    if (windowType != type)
+      narrowQuotient = builder.create<arith::TruncIOp>(loc, windowType, quotient);
+    Value lowBit = builder.create<arith::AndIOp>(loc, narrowQuotient, windowConstant(1));
     Value biased = builder.create<arith::AddIOp>(loc, remainder, lowBit);
-    biased = builder.create<arith::AddIOp>(loc, biased, constant((int64_t{1} << (shift - 1)) - 1));
-    Value carry = builder.create<arith::ShRUIOp>(loc, biased, constant(shift));
+    biased =
+        builder.create<arith::AddIOp>(loc, biased, windowConstant((int64_t{1} << (shift - 1)) - 1));
+    Value carry = builder.create<arith::ShRUIOp>(loc, biased, windowConstant(shift));
+    if (windowType != type)
+      carry = builder.create<arith::ExtUIOp>(loc, type, carry);
     return builder.create<arith::AddIOp>(loc, quotient, carry);
   }
   // The remainder is taken from the low `shift` bits, so no add-half in the

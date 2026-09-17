@@ -56,14 +56,16 @@ func.func @export_q30(
 // CHECK-SAME: %[[ACC:.*]]: i64) -> i32
 // CHECK: %[[SHIFT:.*]] = arith.constant 31 : i64
 // CHECK: %[[QUOTIENT:.*]] = arith.shrsi %[[ACC]], %[[SHIFT]] : i64
-// CHECK: %[[MASK:.*]] = arith.constant 2147483647 : i64
-// CHECK: %[[REMAINDER:.*]] = arith.andi %[[ACC]], %[[MASK]] : i64
-// CHECK: %[[LOW_BIT:.*]] = arith.andi %[[QUOTIENT]], {{.*}} : i64
-// CHECK: %[[SUM:.*]] = arith.addi %[[REMAINDER]], %[[LOW_BIT]] : i64
-// CHECK: %[[BELOW_HALF:.*]] = arith.constant 1073741823 : i64
-// CHECK: %[[BIASED:.*]] = arith.addi %[[SUM]], %[[BELOW_HALF]] : i64
-// CHECK: %[[CARRY:.*]] = arith.shrui %[[BIASED]], {{.*}} : i64
-// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[CARRY]] : i64
+// CHECK: %[[WINDOW:.*]] = arith.trunci %[[ACC]] : i64 to i32
+// CHECK: %[[MASK:.*]] = arith.constant 2147483647 : i32
+// CHECK: %[[REMAINDER:.*]] = arith.andi %[[WINDOW]], %[[MASK]] : i32
+// CHECK: %[[LOW_BIT:.*]] = arith.andi %{{.*}}, {{.*}} : i32
+// CHECK: %[[SUM:.*]] = arith.addi %[[REMAINDER]], %[[LOW_BIT]] : i32
+// CHECK: %[[BELOW_HALF:.*]] = arith.constant 1073741823 : i32
+// CHECK: %[[BIASED:.*]] = arith.addi %[[SUM]], %[[BELOW_HALF]] : i32
+// CHECK: %[[CARRY:.*]] = arith.shrui %[[BIASED]], {{.*}} : i32
+// CHECK: %[[WIDE_CARRY:.*]] = arith.extui %[[CARRY]] : i32 to i64
+// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[WIDE_CARRY]] : i64
 // CHECK: %[[NARROWED:.*]] = arith.trunci %[[ROUNDED]] : i64 to i32
 // CHECK: %[[FITS:.*]] = arith.cmpi eq, %{{.*}}, %[[ROUNDED]] : i64
 // CHECK: %[[RESULT:.*]] = arith.select %[[FITS]], %[[NARROWED]], %{{.*}} : i32

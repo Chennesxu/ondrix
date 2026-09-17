@@ -138,18 +138,20 @@ func.func @export_same_width_saturate(
 // CHECK: return %[[RESULT]] : i16
 
 // A storage as wide as its carrier cannot take the bias: nearest-even is the
-// carry out of the remainder window, and 2^30 - 1 turns only a tie odd into a carry.
+// carry out of the remainder window, in i32 because the window reads 32 bits.
 // CHECK-LABEL: func.func @export_nearest_even_full_width(
 // CHECK-SAME: %[[ACC:.*]]: i64) -> i32
 // CHECK: %[[QUOTIENT:.*]] = arith.shrsi %[[ACC]], %{{.*}} : i64
-// CHECK: %[[MASK:.*]] = arith.constant 2147483647 : i64
-// CHECK: %[[REMAINDER:.*]] = arith.andi %[[ACC]], %[[MASK]] : i64
-// CHECK: %[[LOW_BIT:.*]] = arith.andi %[[QUOTIENT]], %{{.*}} : i64
-// CHECK: %[[SUM:.*]] = arith.addi %[[REMAINDER]], %[[LOW_BIT]] : i64
-// CHECK: %[[BELOW_HALF:.*]] = arith.constant 1073741823 : i64
-// CHECK: %[[BIASED:.*]] = arith.addi %[[SUM]], %[[BELOW_HALF]] : i64
-// CHECK: %[[CARRY:.*]] = arith.shrui %[[BIASED]], %{{.*}} : i64
-// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[CARRY]] : i64
+// CHECK: %[[WINDOW:.*]] = arith.trunci %[[ACC]] : i64 to i32
+// CHECK: %[[MASK:.*]] = arith.constant 2147483647 : i32
+// CHECK: %[[REMAINDER:.*]] = arith.andi %[[WINDOW]], %[[MASK]] : i32
+// CHECK: %[[LOW_BIT:.*]] = arith.andi %{{.*}}, %{{.*}} : i32
+// CHECK: %[[SUM:.*]] = arith.addi %[[REMAINDER]], %[[LOW_BIT]] : i32
+// CHECK: %[[BELOW_HALF:.*]] = arith.constant 1073741823 : i32
+// CHECK: %[[BIASED:.*]] = arith.addi %[[SUM]], %[[BELOW_HALF]] : i32
+// CHECK: %[[CARRY:.*]] = arith.shrui %[[BIASED]], %{{.*}} : i32
+// CHECK: %[[WIDE_CARRY:.*]] = arith.extui %[[CARRY]] : i32 to i64
+// CHECK: %[[ROUNDED:.*]] = arith.addi %[[QUOTIENT]], %[[WIDE_CARRY]] : i64
 // CHECK-NOT: arith.select
 // CHECK: return
 
