@@ -85,3 +85,54 @@ func.func @wrapping_sum_of_squares(
   } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>, memref<64xi16>, memref<64xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
   return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = wrap>
 }
+
+// An adapting state another stage updates in narrower lanes alongside the
+// reduction cannot stay in registers across a wider chunk.
+func.func @agrees_with_an_interleaved_writer(
+    %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    %window: memref<64xi16>, %state: memref<64xi16>, %count: index)
+    -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %update = arith.constant dense<1> : vector<4xi16>
+  %result = scf.for %i = %c0 to %count step %c1
+      iter_args(%acc = %initial)
+      -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) {
+    %sum = ondsp.reduce_mac %acc, %window, %state {
+      numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+      product = #ondsp.product<full>
+    } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<64xi16>, memref<64xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    vector.store %update, %state[%c0] : memref<64xi16>, vector<4xi16>
+    scf.yield %sum : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  }
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @agrees_with_an_interleaved_writer
+// CHECK: vector.load {{.*}} : memref<64xi16>, vector<4xi16>
+// CHECK-NOT: vector<16xi16>
+
+// The same writer outside the loop is a one-time fill, which dominates the
+// reduction instead of competing with it, so the chunk still fills.
+func.func @a_fill_before_the_loop_still_fills_the_chunk(
+    %initial: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>,
+    %window: memref<64xi16>, %state: memref<64xi16>, %count: index)
+    -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %update = arith.constant dense<1> : vector<4xi16>
+  vector.store %update, %state[%c0] : memref<64xi16>, vector<4xi16>
+  %result = scf.for %i = %c0 to %count step %c1
+      iter_args(%acc = %initial)
+      -> (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) {
+    %sum = ondsp.reduce_mac %acc, %window, %state {
+      numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+      product = #ondsp.product<full>
+    } : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, memref<64xi16>, memref<64xi16>) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+    scf.yield %sum : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  }
+  return %result : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+}
+
+// CHECK-LABEL: func.func @a_fill_before_the_loop_still_fills_the_chunk
+// CHECK: vector.load {{.*}} : memref<64xi16>, vector<16xi16>

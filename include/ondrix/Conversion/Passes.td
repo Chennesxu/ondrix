@@ -552,7 +552,13 @@ def VectorizeOndspFixedMemRefReduce
     A chunk may span several machine vectors: `chunk-multiple` names the
     widest one and the width steps down to what the reduction's static extent
     admits, because a chunk wider than the extent leaves an empty vector loop
-    and moves the whole reduction into the scalar tail. Chunking is
+    and moves the whole reduction into the scalar tail. The width also steps
+    down to meet a narrower vectorized writer that updates one of the operand
+    buffers inside a loop the reduction itself runs in: an adapting state read
+    wider than it is written cannot stay in registers across both, and the
+    repack costs more than a full chunk buys. A writer outside that loop is a
+    one-time fill, which dominates the reduction rather than competing with
+    it, and does not narrow the chunk. Chunking is
     order-preserving at any width, so this needs no reassociation argument;
     what it changes is how often the consumer's horizontal collapse lands in
     the loop-carried recurrence. Dynamic extents keep one machine vector.

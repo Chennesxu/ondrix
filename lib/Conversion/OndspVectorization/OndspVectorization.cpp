@@ -23,6 +23,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -59,6 +60,41 @@ LogicalResult checkChunkLadder(Operation *op, int64_t vectorWidth, int64_t chunk
   if (chunkMultiple < 1 || chunkMultiple > maxChunkMultiple)
     return op->emitError("chunk-multiple must be between 1 and ") << maxChunkMultiple;
   return success();
+}
+
+// A one-time fill dominates the reduction instead of interleaving with it, so
+// only a writer under a loop the reduction also runs in competes for the same
+// registers.
+bool sharesEnclosingLoop(Operation *writer, Operation *reduction) {
+  for (Operation *parent = reduction->getParentOp(); parent; parent = parent->getParentOp())
+    if (isa<scf::ForOp, scf::WhileOp>(parent) && parent->isAncestor(writer))
+      return true;
+  return false;
+}
+
+// The narrowest lane count an interleaved vectorized writer already uses on the
+// buffer this value views, or zero when none does. A reduction reading a buffer
+// in wider lanes than the writer updating it alongside cannot keep that buffer
+// in registers across both, and the repack costs more than the chunk buys.
+int64_t narrowestVectorWriterLanes(Value operand, Operation *reduction) {
+  Value base = operand;
+  while (auto view = base.getDefiningOp<ViewLikeOpInterface>())
+    base = view.getViewSource();
+  int64_t narrowest = 0;
+  for (Operation *user : base.getUsers()) {
+    VectorType stored;
+    if (auto store = dyn_cast<vector::StoreOp>(user))
+      stored = store.getVectorType();
+    else if (auto write = dyn_cast<vector::TransferWriteOp>(user))
+      stored = write.getVectorType();
+    if (!stored || stored.getRank() != 1 || stored.isScalable())
+      continue;
+    if (!sharesEnclosingLoop(user, reduction))
+      continue;
+    int64_t lanes = stored.getNumElements();
+    narrowest = narrowest == 0 ? lanes : std::min(narrowest, lanes);
+  }
+  return narrowest;
 }
 
 bool isRepresentableLLVMAddressSpace(IntegerAttr memorySpace) {
@@ -636,6 +672,13 @@ public:
     int64_t extent = lhsType.isDynamicDim(0) ? 0 : lhsType.getDimSize(0);
     while (chunkWidth > vectorWidth && (extent == 0 || extent < chunkWidth))
       chunkWidth -= vectorWidth;
+    // An adapting state another stage already updates in narrower lanes is the
+    // other bound: agreeing with that writer keeps the buffer in registers.
+    for (Value operand : {op.getLhs(), op.getRhs()}) {
+      int64_t writerWidth = narrowestVectorWriterLanes(operand, op);
+      while (writerWidth > 0 && chunkWidth > vectorWidth && chunkWidth > writerWidth)
+        chunkWidth -= vectorWidth;
+    }
     Value vectorStep = rewriter.create<arith::ConstantIndexOp>(loc, chunkWidth);
     Value remainder = rewriter.create<arith::RemUIOp>(loc, bounds->upperBound, vectorStep);
     Value vectorEnd = rewriter.create<arith::SubIOp>(loc, bounds->upperBound, remainder);
