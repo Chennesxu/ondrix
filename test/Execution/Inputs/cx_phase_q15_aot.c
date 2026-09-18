@@ -35,6 +35,17 @@ enum { kBlock = 4096 };
 static int failures;
 static int32_t arctangentTable[129];
 
+/* The extent lives in the kernel's type, not in the descriptor it is handed,
+ * so the result descriptor is the only thing that says how long the input had
+ * to be; a widened kernel must fail here rather than read past the buffer. */
+static void requireExtent(int64_t reported, int64_t held, const char *label) {
+  if (reported != held) {
+    fprintf(stderr, "%s: kernel extent %lld, harness holds %lld\n", label, (long long)reported,
+            (long long)held);
+    exit(2);
+  }
+}
+
 /* Independent reference: the declared table regenerated from its definition
  * and the declared arithmetic written out, so a table that stops being the
  * contract's table disagrees here. */
@@ -92,6 +103,7 @@ static void checkBatch(const int32_t *packed, int64_t count, const char *label) 
   MemRefI32 inputRef = {(int32_t *)packed, (int32_t *)packed, 0, {count}, {1}};
   MemRefI16 output;
   _mlir_ciface_cx_phase_q15(&output, &inputRef);
+  requireExtent(output.sizes[0], count, label);
   for (int64_t i = 0; i < count; ++i) {
     int16_t real = (int16_t)(packed[i] & 0xFFFF);
     int16_t imaginary = (int16_t)((uint32_t)packed[i] >> 16);
@@ -137,13 +149,17 @@ static void checkStructuralAngles(void) {
       {32767, 32767, 8192, "northeast rail"},
       {-32768, -32768, 40960, "southwest rail"},
   };
-  int32_t packed[sizeof cases / sizeof cases[0]];
-  for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i)
-    packed[i] = pack(cases[i].real, cases[i].imaginary);
-  MemRefI32 inputRef = {packed, packed, 0, {(int64_t)(sizeof cases / sizeof cases[0])}, {1}};
+  /* The buffer is the declared block, not the case count; the tail is the
+   * origin, whose turn the contract fixes at zero. */
+  size_t count = sizeof cases / sizeof cases[0];
+  static int32_t packed[kBlock];
+  for (size_t i = 0; i < kBlock; ++i)
+    packed[i] = i < count ? pack(cases[i].real, cases[i].imaginary) : 0;
+  MemRefI32 inputRef = {packed, packed, 0, {kBlock}, {1}};
   MemRefI16 output;
   _mlir_ciface_cx_phase_q15(&output, &inputRef);
-  for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+  requireExtent(output.sizes[0], kBlock, "structural angles");
+  for (size_t i = 0; i < count; ++i) {
     uint16_t got = (uint16_t)output.aligned[output.offset + (int64_t)i];
     if (got != cases[i].turn) {
       fprintf(stderr, "%s: phase(%d, %d) got %u, contract says %u\n", cases[i].name, cases[i].real,
@@ -265,6 +281,7 @@ int main(void) {
     MemRefI64 inputRef = {packedWide, packedWide, 0, {count}, {1}};
     MemRefI16 output;
     _mlir_ciface_cx_phase_q31(&output, &inputRef);
+    requireExtent(output.sizes[0], count, "q31 arm");
     for (int64_t i = 0; i < count; ++i) {
       uint16_t got = (uint16_t)output.aligned[output.offset + i];
       uint16_t want = referencePhase(wide[i].real, wide[i].imaginary);
