@@ -1,15 +1,9 @@
 #include <stdint.h>
 #include <stdio.h>
 
-struct MemRef1D {
-  int16_t *allocated;
-  int16_t *aligned;
-  int64_t offset;
-  int64_t size;
-  int64_t stride;
-};
-
-extern void _mlir_ciface_dct32_q15(struct MemRef1D *, struct MemRef1D *);
+// The canonical pipeline gives a static tensor result an OUT PARAMETER, so the
+// generated entry point takes the input first and the caller's buffer last.
+extern void ondrix_dct32_q15(const int16_t *input, int16_t *output);
 
 // The rails first: a column read from memory and a column materialized as an
 // immediate must agree everywhere, and the rails are where a transposed or
@@ -30,12 +24,20 @@ int main(void) {
         state = state * 1103515245u + 12345u;
         input[i] = (int16_t)(state >> 16);
       }
+      // A sentinel no rail can produce: an output the kernel never wrote would
+      // otherwise let two schedules agree on uninitialized memory.
+      output[i] = 12345;
     }
-    struct MemRef1D source = {input, input, 0, 32, 1};
-    struct MemRef1D result = {output, output, 0, 32, 1};
-    _mlir_ciface_dct32_q15(&result, &source);
+    ondrix_dct32_q15(input, output);
+    int written = 0;
     for (int i = 0; i < 32; ++i)
-      printf("%d %d %d\n", pattern, i, (int)result.aligned[result.offset + i]);
+      written |= output[i] != 12345;
+    if (!written) {
+      fprintf(stderr, "pattern %d: the kernel wrote no output\n", pattern);
+      return 2;
+    }
+    for (int i = 0; i < 32; ++i)
+      printf("%d %d %d\n", pattern, i, (int)output[i]);
   }
   return 0;
 }
