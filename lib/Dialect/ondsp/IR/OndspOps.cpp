@@ -227,6 +227,67 @@ Speculation::Speculatability ReduceMacOp::getSpeculatability() {
              : Speculation::Speculatable;
 }
 
+LogicalResult CxReduceMacOp::verify() {
+  auto lhs = dyn_cast<MemRefType>(getLhs().getType());
+  auto rhs = dyn_cast<MemRefType>(getRhs().getType());
+  if (!lhs || !rhs || lhs.getRank() != 1 || rhs.getRank() != 1)
+    return emitOpError("cx_reduce_mac operands must be rank-1 memrefs of packed complex values");
+  if (lhs.getElementType() != rhs.getElementType())
+    return emitOpError("shaped operand element types must match");
+  int64_t lhsLength = lhs.getDimSize(0);
+  int64_t rhsLength = rhs.getDimSize(0);
+  if (!ShapedType::isDynamic(lhsLength) && !ShapedType::isDynamic(rhsLength) &&
+      lhsLength != rhsLength)
+    return emitOpError("shaped operands must have equal static lengths");
+
+  auto fixed = dyn_cast<FixedAttr>(getNumeric());
+  if (!fixed)
+    return emitOpError("cx_reduce_mac requires a fixed-point numeric policy");
+  std::optional<PackedComplexProfile> profile = getPackedComplexProfile(getLayout().getLayout());
+  if (!profile)
+    return emitOpError("cx_reduce_mac requires an executable packed complex layout");
+  auto container = dyn_cast<IntegerType>(lhs.getElementType());
+  if (!container || container.getWidth() != profile->containerWidth)
+    return emitOpError() << "packed operand element must be i" << profile->containerWidth
+                         << " for this layout";
+  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
+  if (!storage || storage.getWidth() != profile->storageWidth)
+    return emitOpError() << "numeric storage must be i" << profile->storageWidth
+                         << " for this layout";
+
+  for (auto [value, name] :
+       {std::pair{getInitialReal(), "real"}, std::pair{getInitialImag(), "imaginary"}}) {
+    auto accumulator = dyn_cast<AccType>(value.getType());
+    if (!accumulator)
+      return emitOpError() << "the " << name << " accumulator must use !ondsp.acc";
+    if (failed(verifySingleLaneAccumulator(*this, accumulator, "cx_reduce_mac")))
+      return failure();
+    if (accumulator.getSignedness() != fixed.getSignedness())
+      return emitOpError() << "the " << name
+                           << " accumulator signedness must match the fixed numeric policy";
+    // Every product is exact and the cross terms combine before the update, so
+    // the only declared requantization is the accumulator's own.
+    if (accumulator.getFrac() != 2 * fixed.getFrac())
+      return emitOpError() << "the " << name << " accumulator frac " << accumulator.getFrac()
+                           << " does not match the exact product frac " << 2 * fixed.getFrac();
+  }
+  if (getInitialReal().getType() != getInitialImag().getType())
+    return emitOpError("both accumulators must have the same type");
+  return success();
+}
+
+void CxReduceMacOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  addMemRefReadEffect(getLhs(), effects);
+  addMemRefReadEffect(getRhs(), effects);
+}
+
+Speculation::Speculatability CxReduceMacOp::getSpeculatability() {
+  return (ondrix::requiresConservativeDSPSpeculation(getLhs().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getRhs().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
+
 LogicalResult AssumeNumericOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();

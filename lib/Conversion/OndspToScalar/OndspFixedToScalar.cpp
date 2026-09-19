@@ -417,8 +417,7 @@ static Value requantizeSignedValue(Location loc, Value input, ondrix::ondsp::Sca
 // exactly two components wide, so the real part is the low truncation and the
 // imaginary part is the logical high half.
 static std::pair<Value, Value> unpackPackedComplex(Location loc, Value packed,
-                                                   unsigned storageWidth,
-                                                   ConversionPatternRewriter &rewriter) {
+                                                   unsigned storageWidth, OpBuilder &rewriter) {
   Type component = getIntegerTypeLike(packed.getType(), storageWidth, rewriter);
   Type container = packed.getType();
   Value real = rewriter.create<arith::TruncIOp>(loc, component, packed);
@@ -771,6 +770,81 @@ public:
         });
 
     rewriter.replaceOp(op, loop.getResult(0));
+    return success();
+  }
+};
+
+class CxReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::CxReduceMacOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::CxReduceMacOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::CxReduceMacOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto accumulator = cast<ondrix::ondsp::AccType>(op.getInitialReal().getType());
+    auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    std::optional<ondrix::ondsp::PackedComplexProfile> profile =
+        ondrix::ondsp::getPackedComplexProfile(op.getLayout().getLayout());
+    if (!profile)
+      return op.emitOpError("fixed scalar lowering requires an executable packed complex layout");
+
+    // The reduction walks packed containers, not components, so the element
+    // type it checks is the container the layout declares.
+    Type container = rewriter.getIntegerType(profile->containerWidth);
+    FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
+        ondrix::conversion::createRankOneMemRefReductionBounds(
+            op, adaptor.getLhs(), adaptor.getRhs(), container, "complex fixed scalar lowering",
+            rewriter);
+    if (failed(bounds))
+      return failure();
+
+    // Two components multiply to twice their width and the two cross terms
+    // combine with one more bit, so this width holds every term exactly and
+    // the accumulator update below is the only place anything requantizes.
+    unsigned termWidth = 2 * profile->storageWidth + 1;
+    unsigned storageWidth = cast<IntegerType>(accumulator.getStorage()).getWidth();
+    bool conjugate = op.getConjugate();
+
+    Location loc = op.getLoc();
+    Value step = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    auto loop = rewriter.create<scf::ForOp>(
+        loc, bounds->lowerBound, bounds->upperBound, step,
+        ValueRange{adaptor.getInitialReal(), adaptor.getInitialImag()},
+        [&](OpBuilder &builder, Location bodyLoc, Value iv, ValueRange iterArgs) {
+          Value lhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), iv);
+          Value rhs = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), iv);
+          auto [xReal, xImaginary] =
+              unpackPackedComplex(bodyLoc, lhs, profile->storageWidth, builder);
+          auto [yReal, yImaginary] =
+              unpackPackedComplex(bodyLoc, rhs, profile->storageWidth, builder);
+          Type termType = getIntegerTypeLike(lhs.getType(), termWidth, builder);
+          auto widen = [&](Value value) {
+            return builder.create<arith::ExtSIOp>(bodyLoc, termType, value).getResult();
+          };
+          Value xr = widen(xReal), xi = widen(xImaginary);
+          Value yr = widen(yReal), yi = widen(yImaginary);
+          auto multiply = [&](Value a, Value b) {
+            return builder.create<arith::MulIOp>(bodyLoc, a, b).getResult();
+          };
+          Value realTerm =
+              conjugate ? builder.create<arith::AddIOp>(bodyLoc, multiply(xr, yr), multiply(xi, yi))
+                              .getResult()
+                        : builder.create<arith::SubIOp>(bodyLoc, multiply(xr, yr), multiply(xi, yi))
+                              .getResult();
+          Value imagTerm =
+              conjugate ? builder.create<arith::SubIOp>(bodyLoc, multiply(xi, yr), multiply(xr, yi))
+                              .getResult()
+                        : builder.create<arith::AddIOp>(bodyLoc, multiply(xr, yi), multiply(xi, yr))
+                              .getResult();
+          Value nextReal = lowerAccumulatorUpdate(
+              bodyLoc, iterArgs[0], realTerm, storageWidth, accumulator.getUpdateOverflow(),
+              ondrix::fixedpoint::AccumulatorUpdateOperation::Add, builder);
+          Value nextImaginary = lowerAccumulatorUpdate(
+              bodyLoc, iterArgs[1], imagTerm, storageWidth, accumulator.getUpdateOverflow(),
+              ondrix::fixedpoint::AccumulatorUpdateOperation::Add, builder);
+          builder.create<scf::YieldOp>(bodyLoc, ValueRange{nextReal, nextImaginary});
+        });
+
+    rewriter.replaceOp(op, loop.getResults());
     return success();
   }
 };
@@ -1351,8 +1425,9 @@ public:
     RewritePatternSet patterns(&getContext());
     patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
                  AddShiftOpLowering, BitrevAddOpLowering, ConvertOpLowering, ReduceMacOpLowering,
-                 RoundDivOpLowering, RoundQuotientOpLowering, RoundShiftOpLowering,
-                 SatCastOpLowering, SubShiftOpLowering>(typeConverter, &getContext());
+                 CxReduceMacOpLowering, RoundDivOpLowering, RoundQuotientOpLowering,
+                 RoundShiftOpLowering, SatCastOpLowering, SubShiftOpLowering>(typeConverter,
+                                                                              &getContext());
     patterns.add<MacOpLowering, MacSubOpLowering>(typeConverter, &getContext(),
                                                   wideningMultiplyLowHalves);
     patterns.add<SqrtFixedOpLowering>(typeConverter, &getContext(), sqrtEstimate);

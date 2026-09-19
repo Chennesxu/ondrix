@@ -377,6 +377,47 @@ def Ondsp_ReduceMacOp
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondsp_CxReduceMacOp
+    : Ondsp_Op<"cx_reduce_mac", [AllTypesMatch<["initialReal", "resultReal"]>,
+                                 AllTypesMatch<["initialImag", "resultImag"]>,
+                                 DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+                                 DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
+  let summary = "Ordered packed-complex rank-1 dot/reduce MAC semantic operation";
+  let description = [{
+    Folds the pairwise complex products of two equal-length rank-1 memrefs of
+    packed complex fixed-point values into a pair of accumulators, in
+    increasing index order. `conjugate` conjugates the right operand, which is
+    what a correlation wants; without it this is the complex dot product.
+
+    The accumulators are two ordinary `!ondsp.acc` values, one per component,
+    because a complex accumulator is exactly that and nothing here needs a new
+    type. Both carry the same declared width, fractional position, signedness
+    and per-update overflow, and each component updates independently under
+    that declared policy.
+
+    Every product is exact and the two cross terms of one component combine
+    exactly before a single accumulator update sees them, so the only declared
+    rounding or saturation in the whole reduction is the accumulator's own.
+    That makes the accumulator frac twice the operand frac, the same
+    relationship `reduce_mac` states for a `full` product.
+
+    This is the ordered left-fold contract of `reduce_mac`, one component at a
+    time: `initialReal`/`initialImag` seed it, the loop index is the term
+    domain, and a consumer may reorder it only where the numeric policy or a
+    range proof admits the rebuild. The wide per-component accumulator is the
+    point: a packed complex route requantizes to the operand width at every
+    step, and this one does not.
+  }];
+  let arguments = (ins AnyType:$initialReal, AnyType:$initialImag,
+                   AnyType:$lhs, AnyType:$rhs,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_CxLayoutAttr:$layout,
+                   UnitAttr:$conjugate);
+  let results = (outs AnyType:$resultReal, AnyType:$resultImag);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
   let summary = "Packed fixed-point elementwise radix-2 butterfly semantic operation";
   let description = [{
