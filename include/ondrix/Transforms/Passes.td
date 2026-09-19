@@ -677,6 +677,35 @@ def UnrollOndspFixedMacLoops
   ];
 }
 
+def UnfuseOndspSharedFpProducts
+    : Pass<"unfuse-ondsp-shared-fp-products", "::mlir::ModuleOp"> {
+  let summary = "Decline the fuse permission where it would recompute a shared product";
+  let description = [{
+    Rewrites a `math.fma` that SPENT the `fast` contract's fuse permission back
+    to the ordered multiply-then-add when the product it fuses is already
+    computed by a dominating `arith.mulf` that some other reader needs.
+
+    A fused multiply-add hides its product inside one instruction. That is a
+    win only while nothing else wants the product: when something does, the
+    multiply stays, and the fused form computes the same product a second time.
+    The instruction count does not move -- one `math.fma` becomes one
+    `arith.addf` over a multiply that was already there -- so the exchange is a
+    multiply for nothing, plus a longer chain into the fused result.
+
+    Declining a permission is always legal, which is what makes this a cost
+    decision rather than a contract one. The pass therefore fires ONLY on an
+    operation carrying the spent-permission record, so the `fma` contract mode,
+    where the fused form IS the declared numeric, is never touched. Rounding
+    differs between the two forms and both lie inside what `fast` declares.
+  }];
+  let constructor = "ondrix::createUnfuseOndspSharedFpProductsPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::math::MathDialect",
+    "ondrix::ondsp::OndspDialect",
+  ];
+}
+
 def RelaxOndspUnreachableSaturation
     : Pass<"relax-ondsp-unreachable-saturation", "::mlir::ModuleOp"> {
   let summary = "Drop a declared saturating boundary a range proof shows can never fire";

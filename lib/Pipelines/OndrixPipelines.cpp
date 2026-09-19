@@ -120,6 +120,10 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
                       options.vectorBits >= 64 ? options.vectorBits / 32 : 1,
                       options.hardwareRepeatBlock ? 1 : 256, options.hardwareRepeatBlock ? 1 : 512);
 
+  // Every fused member is in place by here, so this is where a spent fuse
+  // permission can be priced: cse first, because the shared product it looks
+  // for is the one cse has just merged.
+  os << "cse,unfuse-ondsp-shared-fp-products,";
   // Lowering tail down to the LLVM dialect. The declared-off reduction batches
   // its products at the target width; the fold order is untouched, so this is
   // reached whether or not the schedule stage ran.

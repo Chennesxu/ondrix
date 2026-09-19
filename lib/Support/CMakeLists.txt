@@ -56,6 +56,7 @@ add_ondrix_library(OndrixSupport
   OndrixUnrollFixedMacLoops
   OndrixUnrollFpOrderedReduce
   OndrixRelaxUnreachableSaturation
+  OndrixUnfuseSharedFpProducts
   OndrixWidenExactAccumulators
   OndrixFuseGainIntoFir
   OndrixFuseElementwiseChains
