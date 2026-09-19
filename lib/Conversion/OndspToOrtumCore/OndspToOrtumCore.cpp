@@ -55,6 +55,13 @@ static bool isSupportedOrtumCoreAccumulator(ondrix::ondsp::AccType accumulator) 
          ondrix::conversion::isOrtumCoreLaneDomain(accumulator);
 }
 
+static bool isOrtumCoreComplexAccumulator(ondrix::ondsp::AccType type) {
+  auto storage = dyn_cast<IntegerType>(type.getStorage());
+  return storage && storage.getWidth() == 32 && type.getFrac() == 30 &&
+         type.getSignedness() == ondrix::ondsp::Signedness::Signed &&
+         type.getUpdateOverflow() == ondrix::ondsp::OverflowMode::Saturate && type.getLanes() == 1;
+}
+
 class OndspToOrtumCoreTypeConverter final : public TypeConverter {
 public:
   explicit OndspToOrtumCoreTypeConverter(MLIRContext *context) {
@@ -63,6 +70,13 @@ public:
                             SmallVectorImpl<Type> &results) -> std::optional<LogicalResult> {
       // Failing the specific conversion prevents the identity rule from
       // allowing an unsupported source accumulator to escape legalization.
+      // The complex reduction's components are a 32-bit saturating domain
+      // whose readout is a plain move, so they carry as raw i32 rather than
+      // through the 40-bit accumulator type.
+      if (isOrtumCoreComplexAccumulator(type)) {
+        results.push_back(IntegerType::get(context, 32));
+        return success();
+      }
       if (!isSupportedOrtumCoreAccumulator(type))
         return failure();
       results.push_back(ondrix::ortumcore::AccumType::get(context));
@@ -132,7 +146,10 @@ static LogicalResult verifySupportedAccumulatorTypes(Operation *root) {
 
     for (Type type : types) {
       ondrix::ondsp::AccType unsupported =
-          ondrix::ondsp::findRejectedAccumulator(type, isSupportedOrtumCoreAccumulator);
+          ondrix::ondsp::findRejectedAccumulator(type, [](ondrix::ondsp::AccType candidate) {
+            return isSupportedOrtumCoreAccumulator(candidate) ||
+                   isOrtumCoreComplexAccumulator(candidate);
+          });
       if (!unsupported)
         continue;
       op->emitOpError() << "unsupported accumulator type " << unsupported
@@ -174,6 +191,12 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::AccZeroOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     (void)adaptor;
+    // The complex reduction's components carry as raw i32, so their zero is
+    // the integer zero rather than a target accumulator value.
+    if (isOrtumCoreComplexAccumulator(op.getAcc().getType())) {
+      rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, rewriter.getI32IntegerAttr(0));
+      return success();
+    }
     if (failed(verifyOrtumCoreAccumulator(op, op.getAcc().getType())))
       return failure();
     Type resultType = getTypeConverter()->convertType(op.getAcc().getType());
@@ -202,6 +225,17 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::AccExportOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    // Reading a complex component back is a plain move: the domain is already
+    // i32 at frac 30, so only the identity export has a target sequence.
+    if (isOrtumCoreComplexAccumulator(op.getAcc().getType())) {
+      auto dst = dyn_cast<ondrix::ondsp::FixedAttr>(op.getDst());
+      auto storage = dst ? dyn_cast<IntegerType>(dst.getStorage()) : nullptr;
+      if (!storage || storage.getWidth() != 32 || dst.getFrac() != 30 ||
+          dst.getSignedness() != ondrix::ondsp::Signedness::Signed)
+        return op.emitOpError("a complex component reads back only as signed i32 at frac 30");
+      rewriter.replaceOp(op, adaptor.getAcc());
+      return success();
+    }
     std::optional<ondrix::conversion::OrtumCoreExportPolicy> policy =
         ondrix::conversion::classifyOrtumCoreExport(op);
     if (!policy || !isa<IntegerType>(op.getResult().getType()))
@@ -288,6 +322,26 @@ public:
   }
 };
 
+class CxReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::CxReduceMacOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::CxReduceMacOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::CxReduceMacOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto accumulator = cast<ondrix::ondsp::AccType>(op.getInitialReal().getType());
+    if (!isOrtumCoreComplexAccumulator(accumulator))
+      return op.emitOpError("ortumcore lowering requires a signed 32-bit complex accumulator "
+                            "with frac=30 and saturating updates");
+    auto layout = op.getLayout().getLayout();
+    if (layout != ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo)
+      return op.emitOpError("ortumcore lowering requires the packed Q15 imag-high layout");
+    rewriter.replaceOpWithNewOp<ondrix::ortumcore::CxReduceMacOp>(
+        op, rewriter.getI32Type(), rewriter.getI32Type(), adaptor.getInitialReal(),
+        adaptor.getInitialImag(), adaptor.getLhs(), adaptor.getRhs(), op.getConjugateAttr());
+    return success();
+  }
+};
+
 class ConvertOndspToOrtumCorePass final
     : public ondrix::impl::ConvertOndspToOrtumCoreBase<ConvertOndspToOrtumCorePass> {
 public:
@@ -303,7 +357,8 @@ public:
     OndspToOrtumCoreTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
     patterns.add<AccZeroOpLowering, AccImportOpLowering, AccExportOpLowering, MacOpLowering,
-                 MacSubOpLowering, ReduceMacOpLowering>(typeConverter, &getContext());
+                 MacSubOpLowering, ReduceMacOpLowering, CxReduceMacOpLowering>(typeConverter,
+                                                                               &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);

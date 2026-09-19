@@ -137,6 +137,37 @@ def OrtumCore_AccOutOp : OrtumCore_Op<"acc_out", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def OrtumCore_CxReduceMacOp
+    : OrtumCore_Op<"cx_reduce_mac",
+                   [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Packed complex reduction into a pair of raw i32 accumulators";
+  let description = [{
+    Folds the pairwise complex products of two equal-length rank-1 memrefs of
+    packed signed Q15 values (imaginary in bits 31:16, real in bits 15:0) into
+    two raw signed i32 frac30 accumulators, in increasing index order.
+    `conjugate` conjugates the right operand.
+
+    Every product is exact and the two cross terms of a component combine
+    exactly, so the only requantization is the saturating i32 accumulator
+    update, once per component per term. The accumulators are raw i32 rather
+    than `!ortumcore.acc` because this domain is 32 bits wide, not 40, and its
+    readout is a plain move with no shift and no second saturation.
+
+    The reduction stays one operation down to the target adapter on purpose.
+    Its accumulator is a fixed register pair on the unit, so an adapter cannot
+    interleave another user of that pair between the seed, the steps and the
+    readout, and splitting this into separate init/step/readout operations
+    would invite exactly that.
+  }];
+  let arguments = (ins I32:$initialReal, I32:$initialImag,
+                   MemRefRankOf<[I32], [1]>:$lhs,
+                   MemRefRankOf<[I32], [1]>:$rhs,
+                   UnitAttr:$conjugate);
+  let results = (outs I32:$resultReal, I32:$resultImag);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def OrtumCore_CxMulConjOp : OrtumCore_Op<"cx_mul_conj", [Pure]> {
   let summary = "Packed complex multiply by the conjugated twiddle";
   let description = [{
