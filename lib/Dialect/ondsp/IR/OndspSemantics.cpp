@@ -389,6 +389,39 @@ LogicalResult verifySingleLaneAccumulator(Operation *op, AccType accumulator, St
                               "acc_zero, mac, acc_add_term, and acc_export";
 }
 
+LogicalResult verifyPackedComplexReductionPolicy(Operation *op, Type packedElement,
+                                                 Attribute numeric, CxLayoutAttr layout,
+                                                 Type accumulatorType, StringRef executable) {
+  auto fixed = dyn_cast<FixedAttr>(numeric);
+  if (!fixed)
+    return op->emitOpError() << executable << " requires a fixed-point numeric policy";
+  std::optional<PackedComplexProfile> profile = getPackedComplexProfile(layout.getLayout());
+  if (!profile)
+    return op->emitOpError() << executable << " requires an executable packed complex layout";
+  auto container = dyn_cast<IntegerType>(packedElement);
+  if (!container || container.getWidth() != profile->containerWidth)
+    return op->emitOpError() << "packed operand element must be i" << profile->containerWidth
+                             << " for this layout";
+  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
+  if (!storage || storage.getWidth() != profile->storageWidth)
+    return op->emitOpError() << "numeric storage must be i" << profile->storageWidth
+                             << " for this layout";
+
+  auto accumulator = dyn_cast<AccType>(accumulatorType);
+  if (!accumulator)
+    return op->emitOpError() << executable << " requires an !ondsp.acc accumulator";
+  if (failed(verifySingleLaneAccumulator(op, accumulator, executable)))
+    return failure();
+  if (accumulator.getSignedness() != fixed.getSignedness())
+    return op->emitOpError("the accumulator signedness must match the fixed numeric policy");
+  // Every product is exact and the cross terms combine before the update, so
+  // the only declared requantization is the accumulator's own.
+  if (accumulator.getFrac() != 2 * fixed.getFrac())
+    return op->emitOpError() << "the accumulator frac " << accumulator.getFrac()
+                             << " does not match the exact product frac " << 2 * fixed.getFrac();
+  return success();
+}
+
 LogicalResult verifyPackedComplexReduction(Operation *op, Value lhs, Value rhs, Attribute numeric,
                                            CxLayoutAttr layout, Type realAccumulator,
                                            Type imagAccumulator, StringRef executable) {
@@ -404,41 +437,10 @@ LogicalResult verifyPackedComplexReduction(Operation *op, Value lhs, Value rhs, 
   if (!ShapedType::isDynamic(lhsLength) && !ShapedType::isDynamic(rhsLength) &&
       lhsLength != rhsLength)
     return op->emitOpError("shaped operands must have equal static lengths");
-
-  auto fixed = dyn_cast<FixedAttr>(numeric);
-  if (!fixed)
-    return op->emitOpError() << executable << " requires a fixed-point numeric policy";
-  std::optional<PackedComplexProfile> profile = getPackedComplexProfile(layout.getLayout());
-  if (!profile)
-    return op->emitOpError() << executable << " requires an executable packed complex layout";
-  auto container = dyn_cast<IntegerType>(lhsType.getElementType());
-  if (!container || container.getWidth() != profile->containerWidth)
-    return op->emitOpError() << "packed operand element must be i" << profile->containerWidth
-                             << " for this layout";
-  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
-  if (!storage || storage.getWidth() != profile->storageWidth)
-    return op->emitOpError() << "numeric storage must be i" << profile->storageWidth
-                             << " for this layout";
-
-  for (auto [type, name] :
-       {std::pair{realAccumulator, "real"}, std::pair{imagAccumulator, "imaginary"}}) {
-    auto accumulator = dyn_cast<AccType>(type);
-    if (!accumulator)
-      return op->emitOpError() << "the " << name << " accumulator must use !ondsp.acc";
-    if (failed(verifySingleLaneAccumulator(op, accumulator, executable)))
-      return failure();
-    if (accumulator.getSignedness() != fixed.getSignedness())
-      return op->emitOpError() << "the " << name
-                               << " accumulator signedness must match the fixed numeric policy";
-    // Every product is exact and the cross terms combine before the update, so
-    // the only declared requantization is the accumulator's own.
-    if (accumulator.getFrac() != 2 * fixed.getFrac())
-      return op->emitOpError() << "the " << name << " accumulator frac " << accumulator.getFrac()
-                               << " does not match the exact product frac " << 2 * fixed.getFrac();
-  }
   if (realAccumulator != imagAccumulator)
     return op->emitOpError("both accumulators must have the same type");
-  return success();
+  return verifyPackedComplexReductionPolicy(op, lhsType.getElementType(), numeric, layout,
+                                            realAccumulator, executable);
 }
 
 bool isSignedQ15(FixedAttr numeric) {

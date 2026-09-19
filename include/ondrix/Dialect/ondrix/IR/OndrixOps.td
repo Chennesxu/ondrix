@@ -595,6 +595,55 @@ def Ondrix_CxDotOp
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_CxFirFilterOp
+    : Ondrix_Op<"cx_fir_filter", [
+        DestinationStyleOpInterface,
+        DeclareOpInterfaceMethods<ConditionallySpeculatable>,
+        NoMemoryEffect,
+        TypesMatchWith<"result type matches init type", "init", "result",
+                       "$_self">]> {
+  let summary = "Compute a rank-one packed complex FIR output tensor";
+  let description = [{
+    `ondrix.cx_fir_filter` slides the `ondrix.cx_dot` reduction over a rank-1
+    packed complex signal. Input length `N` and non-empty coefficient length
+    `K` require `N >= K`, the output length is `N - K + 1`, and output sample
+    `n` pairs `input[n + k]` with `coeffs[k]` for `k = 0..K-1`, visiting `k` in
+    increasing order from a zero accumulator pair. `conjugate` conjugates the
+    coefficient of every term, which turns the filter into a correlation.
+
+    Each output sample is one complex value: the two component accumulators
+    are exported under the declared `rounding` and `overflow` and packed back
+    into the layout's container. The accumulator is the only declared
+    requantization inside a sample, for the reason `ondrix.cx_dot` states.
+
+    The one executable boundary is the valid one. `init` provides the
+    destination shape and storage; its element values are not part of the
+    mathematical result.
+
+    This operation has no scalar tensor lowering. Its reduction is a packed
+    walk over a window of the input, which exists only once the operands are
+    buffers, so bufferization is the whole of its lowering.
+  }];
+  let arguments = (ins
+      AnyRankedTensor:$input,
+      AnyRankedTensor:$coeffs,
+      AnyRankedTensor:$init,
+      Ondsp_NumericAttr:$numeric,
+      Ondsp_CxLayoutAttr:$layout,
+      TypeAttrOf<Ondsp_Acc>:$accumulator,
+      Ondsp_RoundingModeAttr:$rounding,
+      Ondsp_OverflowModeAttr:$overflow,
+      UnitAttr:$conjugate);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    std::pair<int64_t, int64_t> getDpsInitsPositionRange() {
+      return {2, 3};
+    }
+  }];
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_ButterflyOp : Ondrix_Op<"butterfly", [Pure]> {
   let summary = "Packed-Q15 radix-2 butterfly intent";
   let description = [{

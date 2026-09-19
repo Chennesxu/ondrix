@@ -157,10 +157,19 @@ struct PackedComplexProfile {
 /// interleaved, and the real-high packed spelling deliberately have none.
 std::optional<PackedComplexProfile> getPackedComplexProfile(ComplexLayout layout);
 
-/// Verifies the contract every packed-complex reduction shares: rank-1 packed
-/// operands of equal static length whose container and component widths are
-/// the ones `layout` fixes, and two accumulators of one type carrying the
-/// exact product frac. `executable` names the operation in diagnostics.
+/// Verifies the numeric contract every packed-complex reduction shares: an
+/// executable layout, a packed element and a fixed policy at the container and
+/// component widths that layout fixes, and an accumulator carrying the exact
+/// product frac. `executable` names the operation in diagnostics.
+mlir::LogicalResult verifyPackedComplexReductionPolicy(mlir::Operation *op,
+                                                       mlir::Type packedElement,
+                                                       mlir::Attribute numeric, CxLayoutAttr layout,
+                                                       mlir::Type accumulator,
+                                                       llvm::StringRef executable);
+
+/// The contract above plus the operand shape the whole-buffer reductions take:
+/// rank-1 packed memrefs of equal static length, and two accumulators of one
+/// type.
 mlir::LogicalResult verifyPackedComplexReduction(mlir::Operation *op, mlir::Value lhs,
                                                  mlir::Value rhs, mlir::Attribute numeric,
                                                  CxLayoutAttr layout, mlir::Type realAccumulator,

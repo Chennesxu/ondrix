@@ -216,6 +216,7 @@ enum class ContainerKind { Scalar, Buffer, Tensor, Constexpr };
 enum class ReductionKind {
   Dot,
   CxDot,
+  CxFirFilter,
   Fir,
   FirFilter,
   FirDecimate,
@@ -776,10 +777,11 @@ public:
         !isIdentifier("shift") && !isIdentifier("div") && !isIdentifier("ratio") &&
         !isIdentifier("widen") && !isIdentifier("narrow") && !isIdentifier("quantize") &&
         !isIdentifier("dequantize") && !isIdentifier("log2") && !isIdentifier("exp2") &&
-        !isIdentifier("cx_dot")) {
+        !isIdentifier("cx_dot") && !isIdentifier("cx_fir_filter")) {
       diagnostics.error(
           current.position,
-          "expected dot(...), cx_dot(...), fir(...), fir_filter(...), fir_decimate(...), "
+          "expected dot(...), cx_dot(...), fir(...), fir_filter(...), "
+          "cx_fir_filter(...), fir_decimate(...), "
           "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
           "sos_tdf2(...), goertzel(...), "
           "convolution(...), correlation(...), butterfly(...), cfft(...), or "
@@ -795,6 +797,8 @@ public:
       call.kind = ReductionKind::Dot;
     else if (isIdentifier("cx_dot"))
       call.kind = ReductionKind::CxDot;
+    else if (isIdentifier("cx_fir_filter"))
+      call.kind = ReductionKind::CxFirFilter;
     else if (isIdentifier("fir"))
       call.kind = ReductionKind::Fir;
     else if (isIdentifier("fir_filter"))
@@ -1435,8 +1439,8 @@ public:
     // Which operand is conjugated is the difference between a complex dot
     // product and a correlation, so the call site names it; omission is the
     // plain product.
-    if (call.kind == ReductionKind::CxDot && current.kind == TokenKind::Comma &&
-        next.spelling == "conjugate") {
+    if ((call.kind == ReductionKind::CxDot || call.kind == ReductionKind::CxFirFilter) &&
+        current.kind == TokenKind::Comma && next.spelling == "conjugate") {
       if (!expect(TokenKind::Comma, "expected ',' before conjugate selection") ||
           !expectIdentifier("conjugate", "expected conjugate selection") ||
           !expect(TokenKind::Equal, "expected '=' after conjugate"))
@@ -1446,7 +1450,7 @@ public:
         return std::nullopt;
       if (conjugate->spelling != "true" && conjugate->spelling != "false") {
         diagnostics.error(conjugate->position,
-                          "cx_dot accepts only conjugate=true or conjugate=false");
+                          "a complex reduction accepts only conjugate=true or conjugate=false");
         return std::nullopt;
       }
       call.conjugate = conjugate->spelling == "true";
@@ -1495,7 +1499,7 @@ public:
         return std::nullopt;
       return call;
     }
-    if (call.kind == ReductionKind::FirFilter) {
+    if (call.kind == ReductionKind::FirFilter || call.kind == ReductionKind::CxFirFilter) {
       if (!expect(TokenKind::Comma, "expected ',' before FIR boundary policy"))
         return std::nullopt;
       if (!expectIdentifier("boundary", "expected FIR boundary policy") ||
@@ -2465,6 +2469,58 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       diagnostics.error(ast.result.position,
                         llvm::Twine("unsupported destination overflow mode '") +
                             ast.result.destinationOverflow + "'");
+      return std::nullopt;
+    }
+    return CheckedKernel{std::move(ast), *updateOverflow, *rounding, *destinationOverflow,
+                         std::nullopt};
+  }
+  if (ast.result.kind == ReductionKind::CxFirFilter) {
+    if (ast.results.size() != 1 || !ast.primaryResult().tensor ||
+        ast.primaryResult().type != SourceType::ComplexQ15 || !lhsParameter || !rhsParameter ||
+        !lhsParameter->isTensor() || !rhsParameter->isTensor() ||
+        !hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
+        !hasRank(ast.primaryResult().shape, 1)) {
+      diagnostics.error(ast.result.position,
+                        "cx_fir_filter requires two rank-1 complex_q15 tensor parameters and one "
+                        "rank-1 complex_q15 tensor result");
+      return std::nullopt;
+    }
+    if (ast.result.boundary != "valid") {
+      diagnostics.error(ast.result.position, "cx_fir_filter currently supports boundary=valid");
+      return std::nullopt;
+    }
+    const std::optional<int64_t> &inputExtent = getRankOneExtent(lhsParameter->shape);
+    const std::optional<int64_t> &tapExtent = getRankOneExtent(rhsParameter->shape);
+    const std::optional<int64_t> &outputExtent = getRankOneExtent(ast.primaryResult().shape);
+    if (!inputExtent || !tapExtent || !outputExtent) {
+      diagnostics.error(ast.result.position, "cx_fir_filter requires static extents");
+      return std::nullopt;
+    }
+    if (*inputExtent < *tapExtent || *outputExtent != *inputExtent - *tapExtent + 1) {
+      diagnostics.error(ast.result.position,
+                        "valid-boundary cx_fir_filter requires input extent >= tap count and "
+                        "result extent = input extent - tap count + 1");
+      return std::nullopt;
+    }
+    // The per-sample contract is the one cx_dot declares; the window only
+    // decides how many times it runs.
+    if (ast.result.accumulatorAuto ||
+        (ast.result.accumulatorWidth != 32 && ast.result.accumulatorWidth != 40)) {
+      diagnostics.error(ast.result.position,
+                        "cx_fir_filter requires an explicit exact accumulator of width 32 or 40");
+      return std::nullopt;
+    }
+    auto updateOverflow = parseOverflow(ast.result.updateOverflow);
+    auto rounding = parseRounding(ast.result.rounding);
+    auto destinationOverflow = parseOverflow(ast.result.destinationOverflow);
+    if (!updateOverflow || !destinationOverflow) {
+      diagnostics.error(ast.result.position, "unsupported cx_fir_filter overflow mode");
+      return std::nullopt;
+    }
+    if (!rounding || !isDeclaredExportRounding(*rounding)) {
+      diagnostics.error(ast.result.position,
+                        "export rounding must be nearest_even, nearest_ties_positive, "
+                        "toward_negative, or toward_zero");
       return std::nullopt;
     }
     return CheckedKernel{std::move(ast), *updateOverflow, *rounding, *destinationOverflow,
@@ -4749,6 +4805,28 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     Value high = builder.create<arith::ShLIOp>(expressionLocation, imaginary, shift);
     Value packed = builder.create<arith::OrIOp>(expressionLocation, real, high);
     builder.create<func::ReturnOp>(expressionLocation, packed);
+    module->push_back(function);
+    if (failed(verify(*module)))
+      return {};
+    return module;
+  }
+  if (kernel.ast.result.kind == ReductionKind::CxFirFilter) {
+    auto outputType = cast<RankedTensorType>(resultType);
+    auto component = builder.getIntegerType(16);
+    auto numeric =
+        ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, component, /*frac=*/15);
+    auto layout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI16ImagHiRealLo);
+    auto accumulatorType =
+        ondsp::AccType::get(&context, builder.getIntegerType(kernel.ast.result.accumulatorWidth),
+                            /*frac=*/30, ondsp::Signedness::Signed, *kernel.updateOverflow);
+    Value init =
+        builder.create<tensor::EmptyOp>(expressionLocation, outputType.getShape(), elementType);
+    Value result = builder.create<ir::CxFirFilterOp>(
+        expressionLocation, outputType, lhs, rhs, init, numeric, layout,
+        TypeAttr::get(accumulatorType), ondsp::RoundingModeAttr::get(&context, *kernel.rounding),
+        ondsp::OverflowModeAttr::get(&context, *kernel.destinationOverflow),
+        kernel.ast.result.conjugate ? builder.getUnitAttr() : UnitAttr());
+    builder.create<func::ReturnOp>(expressionLocation, result);
     module->push_back(function);
     if (failed(verify(*module)))
       return {};

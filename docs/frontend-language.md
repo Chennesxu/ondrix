@@ -156,6 +156,24 @@ The accumulator width is 32 or 40 and is never inferred: two products bound
 each component term by `2^31`, so the width is what decides how many terms
 saturate. Width 32 is the carrier a packed complex target reads back.
 
+Sliding the same reduction over a signal is `cx_fir_filter`, which takes
+rank-1 `complex_q15` tensors under the valid boundary and returns one complex
+sample per window. `conjugate=true` makes it a matched filter:
+
+```python
+def q15_cx_matched_filter(
+    input: tensor[complex_q15, 256], reference: tensor[complex_q15, 16])
+    -> tensor[complex_q15, 241]:
+  return cx_fir_filter(input, reference, conjugate=true, boundary=valid,
+                       accumulator=exact[32, saturate],
+                       rounding=nearest_ties_positive,
+                       overflow=saturate)
+```
+
+Every extent is static and the result extent is the input extent minus the tap
+count plus one. The per-sample contract is `cx_dot`'s, so the accumulator width
+is declared the same way.
+
 Full-output valid FIR uses rank-1 tensor values rather than mutable source
 buffers. It returns a new tensor and preserves the existing `ondrix.fir_filter`
 algorithm contract:

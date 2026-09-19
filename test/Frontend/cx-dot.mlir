@@ -39,4 +39,4 @@
 
 // WIDTH: error: cx_dot requires an explicit exact accumulator of width 32 or 40
 // CONTAINER: error: cx_dot requires two rank-1 complex_q15 buffer parameters
-// CONJUGATE: error: cx_dot accepts only conjugate=true or conjugate=false
+// CONJUGATE: error: a complex reduction accepts only conjugate=true or conjugate=false

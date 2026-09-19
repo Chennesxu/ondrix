@@ -53,6 +53,10 @@ public:
                            scf::SCFDialect, tensor::TensorDialect, vector::VectorDialect,
                            ondrix::ondsp::OndspDialect>();
     target.addIllegalDialect<ondrix::ir::OndrixDialect>();
+    // The packed complex filter has no scalar tensor form: its reduction walks
+    // a window of the input as a buffer, so bufferization is its only
+    // lowering and this pass leaves it alone whatever the option below says.
+    target.addLegalOp<ondrix::ir::CxFirFilterOp>();
     // In the canonical pipeline the operations whose reductions have a direct
     // bufferization stay in contract form through this pass: bufferization
     // lowers them to the reduce_mac loops the schedule stage authorizes over,

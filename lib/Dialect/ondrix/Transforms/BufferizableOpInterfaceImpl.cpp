@@ -203,6 +203,76 @@ static void assertValidFirDecimateShape(Location loc, Value inputLength, Value c
           "factor) plus one"));
 }
 
+struct CxFirFilterOpInterface
+    : public DstBufferizableOpInterfaceExternalModel<CxFirFilterOpInterface, CxFirFilterOp> {
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand, const AnalysisState &) const {
+    return !cast<CxFirFilterOp>(op).isDpsInit(&opOperand);
+  }
+
+  LogicalResult bufferize(Operation *operation, RewriterBase &rewriter,
+                          const BufferizationOptions &options) const {
+    auto op = cast<CxFirFilterOp>(operation);
+    FailureOr<Value> input = getBuffer(rewriter, op.getInput(), options);
+    FailureOr<Value> coefficients = getBuffer(rewriter, op.getCoeffs(), options);
+    FailureOr<Value> output = getBuffer(rewriter, op.getInit(), options);
+    if (failed(input) || failed(coefficients) || failed(output))
+      return failure();
+
+    rewriter.setInsertionPoint(op);
+    Location loc = op.getLoc();
+    auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    auto container = cast<IntegerType>(op.getInput().getType().getElementType());
+    auto component = cast<IntegerType>(numeric.getStorage());
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    // The window keeps the coefficient tensor's static length where it has
+    // one: a target reduction is selected on the extent, and a length read
+    // back through memref.dim would hide it behind an SSA value.
+    RankedTensorType coeffType = op.getCoeffs().getType();
+    OpFoldResult coefficientLength =
+        coeffType.isDynamicDim(0)
+            ? OpFoldResult(rewriter.create<memref::DimOp>(loc, *coefficients, zero).getResult())
+            : OpFoldResult(rewriter.getIndexAttr(coeffType.getDimSize(0)));
+    Value outputLength = rewriter.create<memref::DimOp>(loc, *output, zero);
+    Value coefficientView = rewriter.create<memref::SubViewOp>(
+        loc, *coefficients, SmallVector<OpFoldResult>{rewriter.getIndexAttr(0)},
+        SmallVector<OpFoldResult>{coefficientLength},
+        SmallVector<OpFoldResult>{rewriter.getIndexAttr(1)});
+
+    rewriter.create<scf::ForOp>(
+        loc, zero, outputLength, one, ValueRange{},
+        [&](OpBuilder &builder, Location bodyLoc, Value outputIndex, ValueRange) {
+          Value window = builder.create<memref::SubViewOp>(
+              bodyLoc, *input, SmallVector<OpFoldResult>{outputIndex},
+              SmallVector<OpFoldResult>{coefficientLength},
+              SmallVector<OpFoldResult>{builder.getIndexAttr(1)});
+          Type accumulatorType = op.getAccumulator();
+          Value real = builder.create<ondrix::ondsp::AccZeroOp>(bodyLoc, accumulatorType);
+          Value imaginary = builder.create<ondrix::ondsp::AccZeroOp>(bodyLoc, accumulatorType);
+          auto reduced = builder.create<ondrix::ondsp::CxReduceMacOp>(
+              bodyLoc, accumulatorType, accumulatorType, real, imaginary, window, coefficientView,
+              op.getNumeric(), op.getLayout(), op.getConjugateAttr());
+          SmallVector<Value> halves;
+          for (Value accumulator : {reduced.getResultReal(), reduced.getResultImag()})
+            halves.push_back(builder.create<ondrix::ondsp::AccExportOp>(
+                bodyLoc, component, accumulator, numeric, op.getRounding(), op.getOverflow()));
+          // Zero extension, not sign extension: a negative real component
+          // would otherwise flood the half the imaginary component occupies.
+          Value low = builder.create<arith::ExtUIOp>(bodyLoc, container, halves[0]);
+          Value high = builder.create<arith::ExtUIOp>(bodyLoc, container, halves[1]);
+          Value shift =
+              builder.create<arith::ConstantIntOp>(bodyLoc, component.getWidth(), container);
+          Value shifted = builder.create<arith::ShLIOp>(bodyLoc, high, shift);
+          Value packed = builder.create<arith::OrIOp>(bodyLoc, low, shifted);
+          builder.create<memref::StoreOp>(bodyLoc, packed, *output, outputIndex);
+          builder.create<scf::YieldOp>(bodyLoc);
+        });
+
+    replaceOpWithBufferizedValues(rewriter, op, *output);
+    return success();
+  }
+};
+
 struct FirFilterOpInterface
     : public DstBufferizableOpInterfaceExternalModel<FirFilterOpInterface, FirFilterOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand, const AnalysisState &) const {
@@ -1359,6 +1429,7 @@ struct LmsOpInterface : public BufferizableOpInterface::ExternalModel<LmsOpInter
 void registerBufferizableOpInterfaceExternalModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *context, OndrixDialect *) {
     FirFilterOp::attachInterface<FirFilterOpInterface>(*context);
+    CxFirFilterOp::attachInterface<CxFirFilterOpInterface>(*context);
     FirDecimateOp::attachInterface<FirDecimateOpInterface>(*context);
     Conv1DOp::attachInterface<Conv1DOpInterface>(*context);
     MovingAverageOp::attachInterface<MovingAverageOpInterface>(*context);

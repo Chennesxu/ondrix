@@ -1270,6 +1270,40 @@ Speculation::Speculatability CxDotOp::getSpeculatability() {
              : Speculation::Speculatable;
 }
 
+LogicalResult CxFirFilterOp::verify() {
+  RankedTensorType inputType = getInput().getType();
+  RankedTensorType coeffType = getCoeffs().getType();
+  RankedTensorType initType = getInit().getType();
+  if (inputType.getRank() != 1 || coeffType.getRank() != 1 || initType.getRank() != 1)
+    return emitOpError("requires rank-1 input, coefficient, and init tensors");
+  if (inputType.getElementType() != coeffType.getElementType() ||
+      inputType.getElementType() != initType.getElementType())
+    return emitOpError("input, coefficient, and output element types must match");
+
+  int64_t inputLength = inputType.getDimSize(0);
+  int64_t coeffLength = coeffType.getDimSize(0);
+  int64_t outputLength = initType.getDimSize(0);
+  if (!ShapedType::isDynamic(coeffLength) && coeffLength < 1)
+    return emitOpError("requires a non-empty coefficient tensor");
+  if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(coeffLength) &&
+      inputLength < coeffLength)
+    return emitOpError("valid boundary requires input length >= coefficient length");
+  if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(coeffLength) &&
+      !ShapedType::isDynamic(outputLength) && outputLength != inputLength - coeffLength + 1)
+    return emitOpError() << "valid boundary output length must be " << inputLength - coeffLength + 1
+                         << ", not " << outputLength;
+  return ondrix::ondsp::verifyPackedComplexReductionPolicy(*this, inputType.getElementType(),
+                                                           getNumeric(), getLayout(),
+                                                           getAccumulator(), "cx_fir_filter");
+}
+
+Speculation::Speculatability CxFirFilterOp::getSpeculatability() {
+  return (ondrix::requiresConservativeDSPSpeculation(getInput().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getCoeffs().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
+
 // The value domain runs before the numeric policy in every FFT-family
 // verifier below. The policy is layout-driven now, so a Q15-only operation
 // must reject an unsupported layout with its own diagnostic before the shared
