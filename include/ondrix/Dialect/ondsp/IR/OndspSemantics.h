@@ -157,6 +157,16 @@ struct PackedComplexProfile {
 /// interleaved, and the real-high packed spelling deliberately have none.
 std::optional<PackedComplexProfile> getPackedComplexProfile(ComplexLayout layout);
 
+/// Verifies the contract every packed-complex reduction shares: rank-1 packed
+/// operands of equal static length whose container and component widths are
+/// the ones `layout` fixes, and two accumulators of one type carrying the
+/// exact product frac. `executable` names the operation in diagnostics.
+mlir::LogicalResult verifyPackedComplexReduction(mlir::Operation *op, mlir::Value lhs,
+                                                 mlir::Value rhs, mlir::Attribute numeric,
+                                                 CxLayoutAttr layout, mlir::Type realAccumulator,
+                                                 mlir::Type imagAccumulator,
+                                                 llvm::StringRef executable);
+
 /// Verifies the executable floating-point complex-transform profile: an
 /// `interleaved` layout, an executable format, and no requantization
 /// attributes at all. A floating-point transform contains no requantization
@@ -236,6 +246,11 @@ AccType findRejectedAccumulator(mlir::Type type, llvm::function_ref<bool(AccType
 /// accumulator consumer calls this and fails closed, so adding the lane
 /// parameter cannot silently widen an existing presence-only check.
 bool isSingleLaneAccumulator(AccType accumulator);
+
+/// Rejects a multi-lane accumulator on a consumer that has no per-lane
+/// meaning. `consumer` names the operation in the diagnostic.
+mlir::LogicalResult verifySingleLaneAccumulator(mlir::Operation *op, AccType accumulator,
+                                                llvm::StringRef consumer);
 
 /// Returns whether a policy denotes signed Q15 in signless i16 storage.
 bool isSignedQ15(FixedAttr numeric);

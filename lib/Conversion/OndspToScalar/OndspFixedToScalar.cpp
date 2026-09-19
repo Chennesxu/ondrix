@@ -781,7 +781,6 @@ public:
   LogicalResult matchAndRewrite(ondrix::ondsp::CxReduceMacOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto accumulator = cast<ondrix::ondsp::AccType>(op.getInitialReal().getType());
-    auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     std::optional<ondrix::ondsp::PackedComplexProfile> profile =
         ondrix::ondsp::getPackedComplexProfile(op.getLayout().getLayout());
     if (!profile)

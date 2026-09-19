@@ -112,19 +112,6 @@ static StringRef getProductName(ProductAttr product) {
   return "unsupported";
 }
 
-/// Rejects a multi-lane accumulator on a consumer that has no per-lane
-/// meaning. The lane parameter defaults to one, so without this check every
-/// existing "is it an accumulator?" test would silently accept W independent
-/// accumulators as if they were a single one.
-static LogicalResult verifySingleLaneAccumulator(Operation *op, AccType accumulator,
-                                                 StringRef consumer) {
-  if (isSingleLaneAccumulator(accumulator))
-    return success();
-  return op->emitOpError() << consumer
-                           << " requires a single-lane accumulator; lanes > 1 is accepted only by "
-                              "acc_zero, mac, acc_add_term, and acc_export";
-}
-
 /// Returns the lane count of a value in the accumulator's lane domain: the
 /// element count for a fixed-length rank-1 vector, and nothing for any other
 /// shape. A scalar has no lane count of its own; it is the single-lane form.
@@ -228,52 +215,9 @@ Speculation::Speculatability ReduceMacOp::getSpeculatability() {
 }
 
 LogicalResult CxReduceMacOp::verify() {
-  auto lhs = dyn_cast<MemRefType>(getLhs().getType());
-  auto rhs = dyn_cast<MemRefType>(getRhs().getType());
-  if (!lhs || !rhs || lhs.getRank() != 1 || rhs.getRank() != 1)
-    return emitOpError("cx_reduce_mac operands must be rank-1 memrefs of packed complex values");
-  if (lhs.getElementType() != rhs.getElementType())
-    return emitOpError("shaped operand element types must match");
-  int64_t lhsLength = lhs.getDimSize(0);
-  int64_t rhsLength = rhs.getDimSize(0);
-  if (!ShapedType::isDynamic(lhsLength) && !ShapedType::isDynamic(rhsLength) &&
-      lhsLength != rhsLength)
-    return emitOpError("shaped operands must have equal static lengths");
-
-  auto fixed = dyn_cast<FixedAttr>(getNumeric());
-  if (!fixed)
-    return emitOpError("cx_reduce_mac requires a fixed-point numeric policy");
-  std::optional<PackedComplexProfile> profile = getPackedComplexProfile(getLayout().getLayout());
-  if (!profile)
-    return emitOpError("cx_reduce_mac requires an executable packed complex layout");
-  auto container = dyn_cast<IntegerType>(lhs.getElementType());
-  if (!container || container.getWidth() != profile->containerWidth)
-    return emitOpError() << "packed operand element must be i" << profile->containerWidth
-                         << " for this layout";
-  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
-  if (!storage || storage.getWidth() != profile->storageWidth)
-    return emitOpError() << "numeric storage must be i" << profile->storageWidth
-                         << " for this layout";
-
-  for (auto [value, name] :
-       {std::pair{getInitialReal(), "real"}, std::pair{getInitialImag(), "imaginary"}}) {
-    auto accumulator = dyn_cast<AccType>(value.getType());
-    if (!accumulator)
-      return emitOpError() << "the " << name << " accumulator must use !ondsp.acc";
-    if (failed(verifySingleLaneAccumulator(*this, accumulator, "cx_reduce_mac")))
-      return failure();
-    if (accumulator.getSignedness() != fixed.getSignedness())
-      return emitOpError() << "the " << name
-                           << " accumulator signedness must match the fixed numeric policy";
-    // Every product is exact and the cross terms combine before the update, so
-    // the only declared requantization is the accumulator's own.
-    if (accumulator.getFrac() != 2 * fixed.getFrac())
-      return emitOpError() << "the " << name << " accumulator frac " << accumulator.getFrac()
-                           << " does not match the exact product frac " << 2 * fixed.getFrac();
-  }
-  if (getInitialReal().getType() != getInitialImag().getType())
-    return emitOpError("both accumulators must have the same type");
-  return success();
+  return verifyPackedComplexReduction(*this, getLhs(), getRhs(), getNumeric(), getLayout(),
+                                      getInitialReal().getType(), getInitialImag().getType(),
+                                      "cx_reduce_mac");
 }
 
 void CxReduceMacOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {

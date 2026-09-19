@@ -381,6 +381,66 @@ AccType findRejectedAccumulator(Type type, llvm::function_ref<bool(AccType)> acc
 
 bool isSingleLaneAccumulator(AccType accumulator) { return accumulator.getLanes() == 1; }
 
+LogicalResult verifySingleLaneAccumulator(Operation *op, AccType accumulator, StringRef consumer) {
+  if (isSingleLaneAccumulator(accumulator))
+    return success();
+  return op->emitOpError() << consumer
+                           << " requires a single-lane accumulator; lanes > 1 is accepted only by "
+                              "acc_zero, mac, acc_add_term, and acc_export";
+}
+
+LogicalResult verifyPackedComplexReduction(Operation *op, Value lhs, Value rhs, Attribute numeric,
+                                           CxLayoutAttr layout, Type realAccumulator,
+                                           Type imagAccumulator, StringRef executable) {
+  auto lhsType = dyn_cast<MemRefType>(lhs.getType());
+  auto rhsType = dyn_cast<MemRefType>(rhs.getType());
+  if (!lhsType || !rhsType || lhsType.getRank() != 1 || rhsType.getRank() != 1)
+    return op->emitOpError() << executable
+                             << " operands must be rank-1 memrefs of packed complex values";
+  if (lhsType.getElementType() != rhsType.getElementType())
+    return op->emitOpError("shaped operand element types must match");
+  int64_t lhsLength = lhsType.getDimSize(0);
+  int64_t rhsLength = rhsType.getDimSize(0);
+  if (!ShapedType::isDynamic(lhsLength) && !ShapedType::isDynamic(rhsLength) &&
+      lhsLength != rhsLength)
+    return op->emitOpError("shaped operands must have equal static lengths");
+
+  auto fixed = dyn_cast<FixedAttr>(numeric);
+  if (!fixed)
+    return op->emitOpError() << executable << " requires a fixed-point numeric policy";
+  std::optional<PackedComplexProfile> profile = getPackedComplexProfile(layout.getLayout());
+  if (!profile)
+    return op->emitOpError() << executable << " requires an executable packed complex layout";
+  auto container = dyn_cast<IntegerType>(lhsType.getElementType());
+  if (!container || container.getWidth() != profile->containerWidth)
+    return op->emitOpError() << "packed operand element must be i" << profile->containerWidth
+                             << " for this layout";
+  auto storage = dyn_cast<IntegerType>(fixed.getStorage());
+  if (!storage || storage.getWidth() != profile->storageWidth)
+    return op->emitOpError() << "numeric storage must be i" << profile->storageWidth
+                             << " for this layout";
+
+  for (auto [type, name] :
+       {std::pair{realAccumulator, "real"}, std::pair{imagAccumulator, "imaginary"}}) {
+    auto accumulator = dyn_cast<AccType>(type);
+    if (!accumulator)
+      return op->emitOpError() << "the " << name << " accumulator must use !ondsp.acc";
+    if (failed(verifySingleLaneAccumulator(op, accumulator, executable)))
+      return failure();
+    if (accumulator.getSignedness() != fixed.getSignedness())
+      return op->emitOpError() << "the " << name
+                               << " accumulator signedness must match the fixed numeric policy";
+    // Every product is exact and the cross terms combine before the update, so
+    // the only declared requantization is the accumulator's own.
+    if (accumulator.getFrac() != 2 * fixed.getFrac())
+      return op->emitOpError() << "the " << name << " accumulator frac " << accumulator.getFrac()
+                               << " does not match the exact product frac " << 2 * fixed.getFrac();
+  }
+  if (realAccumulator != imagAccumulator)
+    return op->emitOpError("both accumulators must have the same type");
+  return success();
+}
+
 bool isSignedQ15(FixedAttr numeric) {
   auto storage = dyn_cast<IntegerType>(numeric.getStorage());
   return storage && storage.isSignless() && storage.getWidth() == 16 && numeric.getFrac() == 15 &&

@@ -43,6 +43,12 @@ std::optional<OrtumCoreExportPolicy> classifyOrtumCoreExport(ondsp::AccExportOp 
 mlir::Value emitOrtumCoreReadout(mlir::OpBuilder &builder, mlir::Location loc, mlir::Value acc,
                                  const OrtumCoreExportPolicy &policy);
 
+/// Clamps a signed i32 into `storage` and truncates; the identity at i32.
+/// Clamping to a wider range first cannot change a narrower clamp, which is
+/// what lets a readout compose with this.
+mlir::Value emitSignedSaturatingNarrow(mlir::OpBuilder &builder, mlir::Location loc,
+                                       mlir::Value value, mlir::IntegerType storage);
+
 } // namespace ondrix::conversion
 
 #endif // ONDRIX_LIB_CONVERSION_ONDSPTOORTUMCORE_ORTUMCORELOWERINGSUPPORT_H

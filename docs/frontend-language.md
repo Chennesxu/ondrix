@@ -137,6 +137,25 @@ def f32_fir(window: buffer[f32], coefficients: buffer[f32]) -> f32:
   return fir(window, coefficients, contract=off)
 ```
 
+A packed complex reduction folds two `complex_q15` buffers into one complex
+value. `conjugate=` is the algorithm choice: omitted or `false` it is the dot
+product `sum x*y`, and `true` conjugates the right operand for the correlation
+`sum x*conj(y)`. Both components accumulate at twice the operand fraction and
+export under the one declared rounding and overflow:
+
+```python
+def q15_cx_correlate(
+    lhs: buffer[complex_q15, 64], rhs: buffer[complex_q15, 64]) -> complex_q15:
+  return cx_dot(lhs, rhs, conjugate=true,
+                accumulator=exact[40, saturate],
+                rounding=nearest_even,
+                overflow=saturate)
+```
+
+The accumulator width is 32 or 40 and is never inferred: two products bound
+each component term by `2^31`, so the width is what decides how many terms
+saturate. Width 32 is the carrier a packed complex target reads back.
+
 Full-output valid FIR uses rank-1 tensor values rather than mutable source
 buffers. It returns a new tensor and preserves the existing `ondrix.fir_filter`
 algorithm contract:

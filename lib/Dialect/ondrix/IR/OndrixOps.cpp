@@ -1252,6 +1252,24 @@ LogicalResult DotOp::verify() {
   return verifyDotDomain(*this);
 }
 
+LogicalResult CxDotOp::verify() {
+  return ondrix::ondsp::verifyPackedComplexReduction(*this, getLhs(), getRhs(), getNumeric(),
+                                                     getLayout(), getResultReal().getType(),
+                                                     getResultImag().getType(), "cx_dot");
+}
+
+void CxDotOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  addMemRefReadEffect(getLhs(), effects);
+  addMemRefReadEffect(getRhs(), effects);
+}
+
+Speculation::Speculatability CxDotOp::getSpeculatability() {
+  return (ondrix::requiresConservativeDSPSpeculation(getLhs().getType()) ||
+          ondrix::requiresConservativeDSPSpeculation(getRhs().getType()))
+             ? Speculation::NotSpeculatable
+             : Speculation::Speculatable;
+}
+
 // The value domain runs before the numeric policy in every FFT-family
 // verifier below. The policy is layout-driven now, so a Q15-only operation
 // must reject an unsupported layout with its own diagnostic before the shared

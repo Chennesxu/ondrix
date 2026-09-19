@@ -215,6 +215,7 @@ enum class ContainerKind { Scalar, Buffer, Tensor, Constexpr };
 
 enum class ReductionKind {
   Dot,
+  CxDot,
   Fir,
   FirFilter,
   FirDecimate,
@@ -424,6 +425,7 @@ struct BuiltinCallAst {
   int64_t divisor = 0;
   std::string nonpositive;
   std::string product;
+  bool conjugate = false;
   bool normalized = false;
   int64_t epsilon = 0;
   SourceType target = SourceType::Q15;
@@ -773,10 +775,11 @@ public:
         !isIdentifier("abs") && !isIdentifier("negate") && !isIdentifier("offset") &&
         !isIdentifier("shift") && !isIdentifier("div") && !isIdentifier("ratio") &&
         !isIdentifier("widen") && !isIdentifier("narrow") && !isIdentifier("quantize") &&
-        !isIdentifier("dequantize") && !isIdentifier("log2") && !isIdentifier("exp2")) {
+        !isIdentifier("dequantize") && !isIdentifier("log2") && !isIdentifier("exp2") &&
+        !isIdentifier("cx_dot")) {
       diagnostics.error(
           current.position,
-          "expected dot(...), fir(...), fir_filter(...), fir_decimate(...), "
+          "expected dot(...), cx_dot(...), fir(...), fir_filter(...), fir_decimate(...), "
           "fir_interpolate(...), fir_stream(...), sos_df2_fixed(...), "
           "sos_tdf2(...), goertzel(...), "
           "convolution(...), correlation(...), butterfly(...), cfft(...), or "
@@ -790,6 +793,8 @@ public:
     }
     if (isIdentifier("dot"))
       call.kind = ReductionKind::Dot;
+    else if (isIdentifier("cx_dot"))
+      call.kind = ReductionKind::CxDot;
     else if (isIdentifier("fir"))
       call.kind = ReductionKind::Fir;
     else if (isIdentifier("fir_filter"))
@@ -1426,6 +1431,26 @@ public:
     if (!rhs)
       return std::nullopt;
     call.operands.push_back(resolveOperand(*rhs));
+
+    // Which operand is conjugated is the difference between a complex dot
+    // product and a correlation, so the call site names it; omission is the
+    // plain product.
+    if (call.kind == ReductionKind::CxDot && current.kind == TokenKind::Comma &&
+        next.spelling == "conjugate") {
+      if (!expect(TokenKind::Comma, "expected ',' before conjugate selection") ||
+          !expectIdentifier("conjugate", "expected conjugate selection") ||
+          !expect(TokenKind::Equal, "expected '=' after conjugate"))
+        return std::nullopt;
+      auto conjugate = parseIdentifier("expected conjugate selection 'true' or 'false'");
+      if (!conjugate)
+        return std::nullopt;
+      if (conjugate->spelling != "true" && conjugate->spelling != "false") {
+        diagnostics.error(conjugate->position,
+                          "cx_dot accepts only conjugate=true or conjugate=false");
+        return std::nullopt;
+      }
+      call.conjugate = conjugate->spelling == "true";
+    }
 
     if (call.kind == ReductionKind::Matmul) {
       if (policyType == SourceType::F32) {
@@ -2396,6 +2421,54 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       return std::nullopt;
     }
     return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, std::nullopt};
+  }
+  if (ast.result.kind == ReductionKind::CxDot) {
+    if (ast.results.size() != 1 || ast.primaryResult().tensor ||
+        ast.primaryResult().type != SourceType::ComplexQ15 || !lhsParameter || !rhsParameter ||
+        !lhsParameter->isBuffer() || !rhsParameter->isBuffer() ||
+        !hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1)) {
+      diagnostics.error(ast.result.position,
+                        "cx_dot requires two rank-1 complex_q15 buffer parameters and one "
+                        "complex_q15 scalar result");
+      return std::nullopt;
+    }
+    const std::optional<int64_t> &lhsExtent = getRankOneExtent(lhsParameter->shape);
+    const std::optional<int64_t> &rhsExtent = getRankOneExtent(rhsParameter->shape);
+    if (lhsExtent && rhsExtent && *lhsExtent != *rhsExtent) {
+      diagnostics.error(ast.result.position, "cx_dot operands must have equal static extents");
+      return std::nullopt;
+    }
+    // Two products bound each component term by 2^31, so the accumulator
+    // width is what fixes how many terms saturate: the 32-bit carrier is the
+    // one a packed complex unit reads back, and 40 is the Q15 profile's.
+    if (ast.result.accumulatorAuto ||
+        (ast.result.accumulatorWidth != 32 && ast.result.accumulatorWidth != 40)) {
+      diagnostics.error(ast.result.position,
+                        "cx_dot requires an explicit exact accumulator of width 32 or 40");
+      return std::nullopt;
+    }
+    auto updateOverflow = parseOverflow(ast.result.updateOverflow);
+    if (!updateOverflow) {
+      diagnostics.error(ast.result.position, llvm::Twine("unsupported update overflow mode '") +
+                                                 ast.result.updateOverflow + "'");
+      return std::nullopt;
+    }
+    auto rounding = parseRounding(ast.result.rounding);
+    if (!rounding || !isDeclaredExportRounding(*rounding)) {
+      diagnostics.error(ast.result.position,
+                        "export rounding must be nearest_even, nearest_ties_positive, "
+                        "toward_negative, or toward_zero");
+      return std::nullopt;
+    }
+    auto destinationOverflow = parseOverflow(ast.result.destinationOverflow);
+    if (!destinationOverflow) {
+      diagnostics.error(ast.result.position,
+                        llvm::Twine("unsupported destination overflow mode '") +
+                            ast.result.destinationOverflow + "'");
+      return std::nullopt;
+    }
+    return CheckedKernel{std::move(ast), *updateOverflow, *rounding, *destinationOverflow,
+                         std::nullopt};
   }
   if (ast.result.kind == ReductionKind::FirStream) {
     bool isQ31 = ast.primaryResult().type == SourceType::Q31;
@@ -4651,6 +4724,36 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
 
   Value rhs = arguments.lookup(*getParameterOperand(kernel.ast.result, 1));
+  if (kernel.ast.result.kind == ReductionKind::CxDot) {
+    auto component = builder.getIntegerType(16);
+    auto numeric =
+        ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, component, /*frac=*/15);
+    auto layout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI16ImagHiRealLo);
+    auto accumulatorType =
+        ondsp::AccType::get(&context, builder.getIntegerType(kernel.ast.result.accumulatorWidth),
+                            /*frac=*/30, ondsp::Signedness::Signed, *kernel.updateOverflow);
+    auto reduction = builder.create<ir::CxDotOp>(
+        expressionLocation, accumulatorType, accumulatorType, lhs, rhs, numeric, layout,
+        kernel.ast.result.conjugate ? builder.getUnitAttr() : UnitAttr());
+    SmallVector<Value> components;
+    for (Value accumulator : {reduction.getResultReal(), reduction.getResultImag()})
+      components.push_back(
+          builder.create<ondsp::AccExportOp>(expressionLocation, component, accumulator, numeric,
+                                             *kernel.rounding, *kernel.destinationOverflow));
+    // Zero extension, not sign extension: a negative real component would
+    // otherwise flood the half the imaginary component occupies.
+    Value real = builder.create<arith::ExtUIOp>(expressionLocation, elementType, components[0]);
+    Value imaginary =
+        builder.create<arith::ExtUIOp>(expressionLocation, elementType, components[1]);
+    Value shift = builder.create<arith::ConstantIntOp>(expressionLocation, 16, elementType);
+    Value high = builder.create<arith::ShLIOp>(expressionLocation, imaginary, shift);
+    Value packed = builder.create<arith::OrIOp>(expressionLocation, real, high);
+    builder.create<func::ReturnOp>(expressionLocation, packed);
+    module->push_back(function);
+    if (failed(verify(*module)))
+      return {};
+    return module;
+  }
   if (kernel.ast.result.kind == ReductionKind::SosDf2Fixed) {
     Value scales = arguments.lookup(*getParameterOperand(kernel.ast.result, 2));
     Value state = arguments.lookup(*getParameterOperand(kernel.ast.result, 3));

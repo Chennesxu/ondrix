@@ -563,6 +563,38 @@ def Ondrix_DotOp
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_CxDotOp
+    : Ondrix_Op<"cx_dot", [AllTypesMatch<["resultReal", "resultImag"]>,
+                           DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+                           DeclareOpInterfaceMethods<ConditionallySpeculatable>]> {
+  let summary = "Complex reduction kernel intent over packed fixed-point operands";
+  let description = [{
+    Reduces two equal-length rank-1 buffers of packed complex values to one
+    complex value, pairing them in increasing index order. For operands
+    `x = xr + j*xi` and `y = yr + j*yi` the term is `x*y` by default and
+    `x*conj(y)` when `conjugate` is present:
+
+    ```
+    plain      re += xr*yr - xi*yi      im += xr*yi + xi*yr
+    conjugate  re += xr*yr + xi*yi      im += xi*yr - xr*yi
+    ```
+
+    Every component product is exact and the two cross terms of a component
+    combine before the accumulator sees them, so each result is an explicit
+    `!ondsp.acc` at twice the operand's fraction and the only declared
+    requantization is its own. Destination rounding and overflow are modeled
+    by a subsequent `ondsp.acc_export` per component, as for `ondrix.dot`.
+
+    The conjugate form at `lhs == rhs` is the energy `sum |x|^2` in the real
+    component with an identically zero imaginary component.
+  }];
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_NumericAttr:$numeric,
+                   Ondsp_CxLayoutAttr:$layout, UnitAttr:$conjugate);
+  let results = (outs AnyType:$resultReal, AnyType:$resultImag);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_ButterflyOp : Ondrix_Op<"butterfly", [Pure]> {
   let summary = "Packed-Q15 radix-2 butterfly intent";
   let description = [{

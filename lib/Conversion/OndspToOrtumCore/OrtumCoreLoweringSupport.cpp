@@ -82,19 +82,26 @@ Value emitOrtumCoreReadout(OpBuilder &builder, Location loc, Value acc,
       out = builder.create<arith::ShRSIOp>(loc, out, amount);
     }
   }
-  if (policy.storage.getWidth() == 32)
-    return out;
   // The i16 destination clamp composes exactly: the readout's wider i32
   // saturation cannot change a subsequent narrower clamp (Passes.td carries
   // the argument).
-  Value minimum = builder.create<arith::ConstantIntOp>(loc, -32768, 32);
-  Value maximum = builder.create<arith::ConstantIntOp>(loc, 32767, 32);
-  Value belowMinimum = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, out, minimum);
-  Value lowerClamped = builder.create<arith::SelectOp>(loc, belowMinimum, minimum, out);
+  return emitSignedSaturatingNarrow(builder, loc, out, policy.storage);
+}
+
+Value emitSignedSaturatingNarrow(OpBuilder &builder, Location loc, Value value,
+                                 IntegerType storage) {
+  if (storage.getWidth() == 32)
+    return value;
+  int64_t limit = int64_t{1} << (storage.getWidth() - 1);
+  Value minimum = builder.create<arith::ConstantIntOp>(loc, -limit, 32);
+  Value maximum = builder.create<arith::ConstantIntOp>(loc, limit - 1, 32);
+  Value belowMinimum =
+      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, value, minimum);
+  Value lowerClamped = builder.create<arith::SelectOp>(loc, belowMinimum, minimum, value);
   Value aboveMaximum =
       builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, lowerClamped, maximum);
   Value clamped = builder.create<arith::SelectOp>(loc, aboveMaximum, maximum, lowerClamped);
-  return builder.create<arith::TruncIOp>(loc, builder.getI16Type(), clamped);
+  return builder.create<arith::TruncIOp>(loc, storage, clamped);
 }
 
 } // namespace ondrix::conversion

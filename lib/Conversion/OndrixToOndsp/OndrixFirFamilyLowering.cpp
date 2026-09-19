@@ -698,6 +698,22 @@ public:
   }
 };
 
+class CxDotOpLowering final : public OpConversionPattern<ondrix::ir::CxDotOp> {
+public:
+  using OpConversionPattern<ondrix::ir::CxDotOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::CxDotOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type accumulatorType = op.getResultReal().getType();
+    Value real = createReductionZero(op.getLoc(), accumulatorType, rewriter);
+    Value imaginary = createReductionZero(op.getLoc(), accumulatorType, rewriter);
+    rewriter.replaceOpWithNewOp<ondrix::ondsp::CxReduceMacOp>(
+        op, accumulatorType, accumulatorType, real, imaginary, adaptor.getLhs(), adaptor.getRhs(),
+        op.getNumeric(), op.getLayout(), op.getConjugateAttr());
+    return success();
+  }
+};
+
 class MatmulOpLowering final : public OpConversionPattern<ondrix::ir::MatmulOp> {
 public:
   using OpConversionPattern<ondrix::ir::MatmulOp>::OpConversionPattern;
@@ -1093,7 +1109,7 @@ void ondrix::conversion::populateOndrixFirFamilyLoweringPatterns(RewritePatternS
                                                                  bool slidingWindowReuse) {
   MLIRContext *context = patterns.getContext();
   patterns.add<FirOpLowering, FirFilterOpLowering, FirDecimateOpLowering, FirInterpolateOpLowering,
-               Conv1DOpLowering, FirStreamOpLowering, DotOpLowering, MatmulOpLowering,
-               RmsOpLowering, GainOpLowering>(context);
+               Conv1DOpLowering, FirStreamOpLowering, DotOpLowering, CxDotOpLowering,
+               MatmulOpLowering, RmsOpLowering, GainOpLowering>(context);
   patterns.add<MovingAverageOpLowering>(context, slidingWindowReuse);
 }

@@ -1,6 +1,7 @@
 #include "ondrix/Conversion/OndspToOrtumCore/OndspToOrtumCore.h"
 #include "OrtumCoreLoweringSupport.h"
 #include "ondrix/Conversion/Utils/ConversionLegality.h"
+#include "ondrix/Conversion/Utils/FixedPointDomainUtils.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
@@ -225,15 +226,22 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ondsp::AccExportOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    // Reading a complex component back is a plain move: the domain is already
-    // i32 at frac 30, so only the identity export has a target sequence.
+    // A complex component already carries as a raw signed i32 at frac 30, so
+    // its readout is the declared narrowing itself rather than the 40-bit
+    // accumulator's output path.
     if (isOrtumCoreComplexAccumulator(op.getAcc().getType())) {
       auto dst = dyn_cast<ondrix::ondsp::FixedAttr>(op.getDst());
       auto storage = dst ? dyn_cast<IntegerType>(dst.getStorage()) : nullptr;
-      if (!storage || storage.getWidth() != 32 || dst.getFrac() != 30 ||
-          dst.getSignedness() != ondrix::ondsp::Signedness::Signed)
-        return op.emitOpError("a complex component reads back only as signed i32 at frac 30");
-      rewriter.replaceOp(op, adaptor.getAcc());
+      int64_t shift = dst ? int64_t(30) - int64_t(dst.getFrac()) : -1;
+      if (!storage || (storage.getWidth() != 32 && storage.getWidth() != 16) || shift < 0 ||
+          shift > 31 || dst.getSignedness() != ondrix::ondsp::Signedness::Signed ||
+          op.getOverflow() != ondrix::ondsp::OverflowMode::Saturate)
+        return op.emitOpError("a complex component reads back only as a saturating signed i32 or "
+                              "i16 destination at a non-negative fractional shift");
+      Value narrowed = ondrix::conversion::createRoundedSignedRightShift(
+          op.getLoc(), adaptor.getAcc(), shift, op.getRounding(), rewriter);
+      rewriter.replaceOp(op, ondrix::conversion::emitSignedSaturatingNarrow(rewriter, op.getLoc(),
+                                                                            narrowed, storage));
       return success();
     }
     std::optional<ondrix::conversion::OrtumCoreExportPolicy> policy =
