@@ -231,6 +231,7 @@ enum class ReductionKind {
   Rfft,
   Irfft,
   Magnitude,
+  Power,
   Phase,
   Dct,
   MovingAverage,
@@ -327,7 +328,8 @@ static bool isFftKind(ReductionKind kind) {
 }
 
 static bool isFftComposableKind(ReductionKind kind) {
-  return isFftKind(kind) || kind == ReductionKind::Magnitude || kind == ReductionKind::Phase;
+  return isFftKind(kind) || kind == ReductionKind::Magnitude || kind == ReductionKind::Power ||
+         kind == ReductionKind::Phase;
 }
 
 // The set whose members may hold one another as operands. Its checker
@@ -768,16 +770,16 @@ public:
         !isIdentifier("convolution") && !isIdentifier("correlation") &&
         !isIdentifier("butterfly") && !isIdentifier("cfft") && !isIdentifier("icfft") &&
         !isIdentifier("rfft") && !isIdentifier("irfft") && !isIdentifier("magnitude") &&
-        !isIdentifier("phase") && !isIdentifier("dct") && !isIdentifier("moving_average") &&
-        !isIdentifier("gain") && !isIdentifier("rms") && !isIdentifier("sine") &&
-        !isIdentifier("cosine") && !isIdentifier("matmul") && !isIdentifier("lms") &&
-        !isIdentifier("nlms") && !isIdentifier("lowpass") && !isIdentifier("cic_decimate") &&
-        !isIdentifier("add") && !isIdentifier("sub") && !isIdentifier("mult") &&
-        !isIdentifier("abs") && !isIdentifier("negate") && !isIdentifier("offset") &&
-        !isIdentifier("shift") && !isIdentifier("div") && !isIdentifier("ratio") &&
-        !isIdentifier("widen") && !isIdentifier("narrow") && !isIdentifier("quantize") &&
-        !isIdentifier("dequantize") && !isIdentifier("log2") && !isIdentifier("exp2") &&
-        !isIdentifier("cx_dot") && !isIdentifier("cx_fir_filter")) {
+        !isIdentifier("power") && !isIdentifier("phase") && !isIdentifier("dct") &&
+        !isIdentifier("moving_average") && !isIdentifier("gain") && !isIdentifier("rms") &&
+        !isIdentifier("sine") && !isIdentifier("cosine") && !isIdentifier("matmul") &&
+        !isIdentifier("lms") && !isIdentifier("nlms") && !isIdentifier("lowpass") &&
+        !isIdentifier("cic_decimate") && !isIdentifier("add") && !isIdentifier("sub") &&
+        !isIdentifier("mult") && !isIdentifier("abs") && !isIdentifier("negate") &&
+        !isIdentifier("offset") && !isIdentifier("shift") && !isIdentifier("div") &&
+        !isIdentifier("ratio") && !isIdentifier("widen") && !isIdentifier("narrow") &&
+        !isIdentifier("quantize") && !isIdentifier("dequantize") && !isIdentifier("log2") &&
+        !isIdentifier("exp2") && !isIdentifier("cx_dot") && !isIdentifier("cx_fir_filter")) {
       diagnostics.error(
           current.position,
           "expected dot(...), cx_dot(...), fir(...), fir_filter(...), "
@@ -786,7 +788,7 @@ public:
           "sos_tdf2(...), goertzel(...), "
           "convolution(...), correlation(...), butterfly(...), cfft(...), or "
           "icfft(...), rfft(...), irfft(...), magnitude(...), phase(...), dct(...), "
-          "moving_average(...), gain(...), rms(...), sine(...), cosine(...), "
+          "moving_average(...), gain(...), rms(...), power(...), sine(...), cosine(...), "
           "matmul(...), lms(...), nlms(...), cic_decimate(...), a lowpass/hamming/hann/"
           "blackman/kaiser design, or an "
           "elementwise add/sub/mult/abs/negate/offset/shift/div/ratio builtin "
@@ -839,6 +841,8 @@ public:
       call.kind = ReductionKind::Irfft;
     else if (isIdentifier("magnitude"))
       call.kind = ReductionKind::Magnitude;
+    else if (isIdentifier("power"))
+      call.kind = ReductionKind::Power;
     else if (isIdentifier("phase"))
       call.kind = ReductionKind::Phase;
     else if (isIdentifier("dct"))
@@ -1034,6 +1038,27 @@ public:
         (isRoot ? call.rounding : call.inputRounding) = rounding->spelling.str();
       }
       if (!expect(TokenKind::RightParen, "expected ')' after magnitude operand"))
+        return std::nullopt;
+      return call;
+    }
+    if (call.kind == ReductionKind::Power) {
+      std::optional<ExpressionAst> operand = parseExpression(std::nullopt);
+      if (!operand)
+        return std::nullopt;
+      call.operands.push_back(std::move(*operand));
+      // One boundary: the sum is exact, so the only choice is how it is read
+      // back at the narrower width.
+      if (current.kind == TokenKind::Comma) {
+        advance();
+        if (!expectIdentifier("rounding", "expected rounding policy") ||
+            !expect(TokenKind::Equal, "expected '=' after rounding"))
+          return std::nullopt;
+        auto rounding = parseIdentifier("expected rounding mode");
+        if (!rounding)
+          return std::nullopt;
+        call.rounding = rounding->spelling.str();
+      }
+      if (!expect(TokenKind::RightParen, "expected ')' after power operand"))
         return std::nullopt;
       return call;
     }
@@ -3396,6 +3421,29 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           return ComposedType{SourceType::Q31, input->extent};
         return ComposedType{SourceType::Q15, input->extent};
       }
+      if (call.kind == ReductionKind::Power) {
+        if (input->elementType != SourceType::ComplexQ15) {
+          diagnostics.error(call.position, "power requires complex_q15 operand elements");
+          return std::nullopt;
+        }
+        if (input->extent < 1 || input->extent > 4096) {
+          diagnostics.error(call.position,
+                            "power currently requires an operand extent in [1, 4096]");
+          return std::nullopt;
+        }
+        // The sum is exact at fraction 30 and the result is read at 15, so
+        // this is the one boundary and it always exists.
+        if (!call.rounding.empty()) {
+          std::optional<ondsp::RoundingMode> parsed = parseRounding(call.rounding);
+          if (!parsed || !isDeclaredExportRounding(*parsed)) {
+            diagnostics.error(call.position,
+                              "power rounding must be nearest_even, nearest_ties_positive, "
+                              "toward_negative, or toward_zero");
+            return std::nullopt;
+          }
+        }
+        return ComposedType{SourceType::Q15, input->extent};
+      }
       if (call.kind == ReductionKind::Magnitude) {
         bool complexQ31 = input->elementType == SourceType::ComplexQ31;
         if (input->elementType != SourceType::ComplexQ15 && !complexQ31) {
@@ -4571,6 +4619,19 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
             callLocation, outputType, input, wideComponents ? q31Layout : layout,
             wideComponents ? q31Numeric : numeric, turn,
             ondsp::RoundingModeAttr::get(&context, ondsp::RoundingMode::NearestEven));
+      }
+      if (call.kind == ReductionKind::Power) {
+        auto outputType =
+            RankedTensorType::get({inputType.getDimSize(0)}, builder.getIntegerType(16));
+        // The export default, which is also what the packed complex unit
+        // rounds with; omission keeps it.
+        ondsp::RoundingMode rounding = ondsp::RoundingMode::NearestTiesPositive;
+        if (!call.rounding.empty())
+          rounding = *parseRounding(call.rounding);
+        return builder.create<ir::CxPowerOp>(
+            callLocation, outputType, input, layout, numeric,
+            ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, builder.getI16Type(), 15),
+            ondsp::RoundingModeAttr::get(&context, rounding));
       }
       if (call.kind == ReductionKind::Magnitude) {
         // The packed container the operand carries selects the profile, and

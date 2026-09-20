@@ -1918,6 +1918,44 @@ def Ondrix_CxMagnitudeOp : Ondrix_Op<"cx_magnitude", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_CxPowerOp : Ondrix_Op<"cx_power", [Pure]> {
+  let summary = "Fixed-point squared magnitude of a packed Q15 complex tensor";
+  let description = [{
+    `ondrix.cx_power` computes the elementwise squared magnitude of a rank-1
+    packed signed-Q1.15 complex tensor. For each packed element with
+    components `re` and `im`:
+
+    ```
+    s      = re*re + im*im            exact, at most 2^31, fraction 30
+    result = round_shift(s, 30 - f)   under `rounding`, saturating
+    ```
+
+    where `f` is the fraction `output_numeric` declares. The sum is symmetric
+    in the components, so unlike the other packed complex operations this one
+    does not depend on which half holds the real part.
+
+    `output_numeric` names the reading of the result rather than a scaling:
+    the shift is derived from it, and `rounding` is declared exactly when that
+    shift exists. A fraction above 30 is refused -- it would name precision
+    the product does not have -- and the whole sum survives in an i32 result
+    at fraction 30, where saturation is reachable at exactly one input.
+
+    `ondrix.cx_magnitude` is the square root of this value, so composing the
+    two is the magnitude and reading this one alone is the power spectrum.
+    The packed Q31 profile is deliberately absent: it would requantize each
+    component before squaring, and whether restoring that scaling costs
+    anything depends on the fraction the result is read at.
+  }];
+  let arguments = (ins AnyRankedTensor:$input,
+                   Ondsp_CxLayoutAttr:$layout,
+                   Ondsp_NumericAttr:$numeric,
+                   Ondsp_FixedAttr:$output_numeric,
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_CxPhaseOp : Ondrix_Op<"cx_phase", [Pure]> {
   let summary = "Fixed-point phase of a packed complex tensor, as a turn";
   let description = [{

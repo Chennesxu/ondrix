@@ -46,6 +46,13 @@ LogicalResult CxMulConjOp::verify() {
   return success();
 }
 
+LogicalResult CxPowerOp::verify() {
+  int64_t shift = getShift();
+  if (shift < 0 || shift > 31)
+    return emitOpError("packed complex squared magnitude shift must lie in [0, 31]");
+  return success();
+}
+
 LogicalResult CxBflyOp::verify() {
   int64_t shift = getShift();
   if (shift < 0 || shift > 1)

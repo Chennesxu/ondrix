@@ -1,3 +1,4 @@
+#include "OrtumCoreLoweringSupport.h"
 #include "ondrix/Conversion/OndspToOrtumCore/OndspToOrtumCore.h"
 
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
@@ -21,24 +22,6 @@ using namespace mlir;
 
 namespace {
 
-// The packed target rounding inventory. nearest_even and toward_zero
-// deliberately map to nothing so those profiles stay on the generic path,
-// and a newly declared mode lands there too (plus a -Wswitch finding here)
-// instead of borrowing an inventory member.
-static std::optional<ondrix::ortumcore::CxRounding>
-selectTargetRounding(ondrix::ondsp::RoundingMode mode) {
-  switch (mode) {
-  case ondrix::ondsp::RoundingMode::TowardNegative:
-    return ondrix::ortumcore::CxRounding::TowardNegative;
-  case ondrix::ondsp::RoundingMode::NearestTiesPositive:
-    return ondrix::ortumcore::CxRounding::NearestTiesPositive;
-  case ondrix::ondsp::RoundingMode::NearestEven:
-  case ondrix::ondsp::RoundingMode::TowardZero:
-    return std::nullopt;
-  }
-  return std::nullopt;
-}
-
 static std::optional<ondrix::ortumcore::CxOverflow>
 selectTargetOverflow(ondrix::ondsp::OverflowMode mode) {
   switch (mode) {
@@ -57,7 +40,8 @@ struct TargetScale {
 };
 
 static std::optional<TargetScale> classifyTargetScale(ondrix::ondsp::ScaleAttr scale) {
-  std::optional<ondrix::ortumcore::CxRounding> rounding = selectTargetRounding(scale.getRounding());
+  std::optional<ondrix::ortumcore::CxRounding> rounding =
+      ondrix::conversion::selectPackedComplexRounding(scale.getRounding());
   std::optional<ondrix::ortumcore::CxOverflow> overflow = selectTargetOverflow(scale.getOverflow());
   if (!rounding || !overflow || scale.getPreShiftLeft() != 0)
     return std::nullopt;

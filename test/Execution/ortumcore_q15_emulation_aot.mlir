@@ -100,3 +100,19 @@ func.func @ortumcore_dmac_walk(%lhs0: i16, %rhs0: i16, %lhs1: i16, %rhs1: i16,
   %out = arith.select %pick, %out0, %out1 : i32
   return %out : i32
 }
+
+// The squared magnitude is the one packed capability symmetric in the two
+// halves, and its 32-bit saturation is reachable at exactly one input.
+func.func @ortumcore_cx_power(%value: i32, %shift: i32, %ties: i32) -> i32 {
+  %c0_i32 = arith.constant 0 : i32
+  %floor0 = ortumcore.cx_power %value {shift = 0 : i64, rounding = #ortumcore<cx_rounding toward_negative>} : (i32) -> i32
+  %ties0 = ortumcore.cx_power %value {shift = 0 : i64, rounding = #ortumcore<cx_rounding nearest_ties_positive>} : (i32) -> i32
+  %floor15 = ortumcore.cx_power %value {shift = 15 : i64, rounding = #ortumcore<cx_rounding toward_negative>} : (i32) -> i32
+  %ties15 = ortumcore.cx_power %value {shift = 15 : i64, rounding = #ortumcore<cx_rounding nearest_ties_positive>} : (i32) -> i32
+  %pickTies = arith.cmpi ne, %ties, %c0_i32 : i32
+  %atZero = arith.select %pickTies, %ties0, %floor0 : i32
+  %atFifteen = arith.select %pickTies, %ties15, %floor15 : i32
+  %pickZero = arith.cmpi eq, %shift, %c0_i32 : i32
+  %out = arith.select %pickZero, %atZero, %atFifteen : i32
+  return %out : i32
+}

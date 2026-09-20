@@ -774,6 +774,32 @@ public:
   }
 };
 
+class CxPowerOpLowering final : public OpConversionPattern<ondrix::ondsp::CxPowerOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::CxPowerOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::CxPowerOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    std::optional<ondrix::ondsp::PackedComplexProfile> profile =
+        ondrix::ondsp::getPackedComplexProfile(op.getLayout().getLayout());
+    if (!profile)
+      return op.emitOpError("fixed scalar lowering requires an executable packed complex layout");
+    unsigned storageWidth = profile->storageWidth;
+    auto [real, imaginary] = unpackPackedComplex(loc, adaptor.getInput(), storageWidth, rewriter);
+    // The sum of two squares of W-bit components reaches 2^(2W-1), one past
+    // the signed container, so the exact carrier is one bit wider than it.
+    Type sum = getIntegerTypeLike(adaptor.getInput().getType(), 2 * storageWidth + 1, rewriter);
+    Value wideReal = rewriter.create<arith::ExtSIOp>(loc, sum, real);
+    Value wideImaginary = rewriter.create<arith::ExtSIOp>(loc, sum, imaginary);
+    Value squares = rewriter.create<arith::AddIOp>(
+        loc, rewriter.create<arith::MulIOp>(loc, wideReal, wideReal),
+        rewriter.create<arith::MulIOp>(loc, wideImaginary, wideImaginary));
+    rewriter.replaceOp(op, requantizeSignedValue(loc, squares, op.getOutputScale(), rewriter));
+    return success();
+  }
+};
+
 class CxReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::CxReduceMacOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::CxReduceMacOp>::OpConversionPattern;
@@ -1422,11 +1448,12 @@ public:
 
     OndspFixedToScalarTypeConverter typeConverter;
     RewritePatternSet patterns(&getContext());
-    patterns.add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
-                 AddShiftOpLowering, BitrevAddOpLowering, ConvertOpLowering, ReduceMacOpLowering,
-                 CxReduceMacOpLowering, RoundDivOpLowering, RoundQuotientOpLowering,
-                 RoundShiftOpLowering, SatCastOpLowering, SubShiftOpLowering>(typeConverter,
-                                                                              &getContext());
+    patterns
+        .add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
+             AddShiftOpLowering, BitrevAddOpLowering, ConvertOpLowering, ReduceMacOpLowering,
+             CxReduceMacOpLowering, CxPowerOpLowering, RoundDivOpLowering, RoundQuotientOpLowering,
+             RoundShiftOpLowering, SatCastOpLowering, SubShiftOpLowering>(typeConverter,
+                                                                          &getContext());
     patterns.add<MacOpLowering, MacSubOpLowering>(typeConverter, &getContext(),
                                                   wideningMultiplyLowHalves);
     patterns.add<SqrtFixedOpLowering>(typeConverter, &getContext(), sqrtEstimate);

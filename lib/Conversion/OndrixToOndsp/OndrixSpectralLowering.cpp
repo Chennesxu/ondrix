@@ -1720,6 +1720,46 @@ public:
   }
 };
 
+class CxPowerOpLowering final : public OpConversionPattern<ondrix::ir::CxPowerOp> {
+public:
+  using OpConversionPattern<ondrix::ir::CxPowerOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::CxPowerOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    MLIRContext *context = rewriter.getContext();
+    auto output = cast<ondrix::ondsp::FixedAttr>(op.getOutputNumeric());
+    auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
+    // The shift is the distance between the exact sum's fraction and the one
+    // the result is declared at; the verifier already refused the other
+    // direction, so it is never a left shift.
+    unsigned shift = 2 * numeric.getFrac() - output.getFrac();
+    auto scale = ondrix::ondsp::ScaleAttr::get(
+        context, /*preShiftLeft=*/0, shift,
+        op.getRounding().value_or(ondrix::ondsp::RoundingMode::TowardNegative),
+        ondrix::ondsp::OverflowMode::Saturate, output.getStorage());
+
+    RankedTensorType resultType = op.getResult().getType();
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value extent = rewriter.create<arith::ConstantIndexOp>(loc, resultType.getDimSize(0));
+    Value empty =
+        rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    auto loop = rewriter.create<scf::ForOp>(
+        loc, zero, extent, one, ValueRange{empty},
+        [&](OpBuilder &builder, Location bodyLoc, Value position, ValueRange iterArgs) {
+          Value packed = builder.create<tensor::ExtractOp>(bodyLoc, adaptor.getInput(), position);
+          Value power = builder.create<ondrix::ondsp::CxPowerOp>(
+              bodyLoc, output.getStorage(), packed, op.getLayout(), op.getNumeric(), scale);
+          Value updated =
+              builder.create<tensor::InsertOp>(bodyLoc, power, iterArgs.front(), position);
+          builder.create<scf::YieldOp>(bodyLoc, updated);
+        });
+    rewriter.replaceOp(op, loop.getResult(0));
+    return success();
+  }
+};
+
 class CxMagnitudeOpLowering final : public OpConversionPattern<ondrix::ir::CxMagnitudeOp> {
 public:
   using OpConversionPattern<ondrix::ir::CxMagnitudeOp>::OpConversionPattern;
@@ -1793,7 +1833,7 @@ void ondrix::conversion::populateOndrixSpectralLoweringPatterns(RewritePatternSe
                                                                 int64_t fftLoopsVectorWidth) {
   MLIRContext *context = patterns.getContext();
   patterns.add<ButterflyOpLowering, RfftRadix4SplitOpLowering, RfftSplitOpLowering, DctOpLowering,
-               CxMagnitudeOpLowering>(context);
+               CxMagnitudeOpLowering, CxPowerOpLowering>(context);
   patterns.add<CfftOpLowering, RfftOpLowering, IrfftOpLowering>(context, vectorizeStaticCfft,
                                                                 fftLoops, fftLoopsVectorWidth);
 }

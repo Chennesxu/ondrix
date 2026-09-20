@@ -360,6 +360,32 @@ public:
   }
 };
 
+class CxPowerOpLowering final : public OpConversionPattern<ondrix::ortumcore::CxPowerOp> {
+public:
+  using OpConversionPattern<ondrix::ortumcore::CxPowerOp>::OpConversionPattern;
+
+  // The sum reaches 2^31 at both halves of the component minimum, so the
+  // exact carrier is wider than the result and the saturation is real.
+  LogicalResult matchAndRewrite(ondrix::ortumcore::CxPowerOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    std::optional<ondrix::ondsp::RoundingMode> mode = convertCxRounding(op.getRounding());
+    if (!mode)
+      return rewriter.notifyMatchFailure(op, "declared mode has no ondsp emulation mapping");
+    Type carrier = rewriter.getI64Type();
+    Value real = extractComponent(rewriter, loc, adaptor.getValue(), false, carrier);
+    Value imaginary = extractComponent(rewriter, loc, adaptor.getValue(), true, carrier);
+    Value sum =
+        rewriter.create<arith::AddIOp>(loc, rewriter.create<arith::MulIOp>(loc, real, real),
+                                       rewriter.create<arith::MulIOp>(loc, imaginary, imaginary));
+    auto scale =
+        ondrix::ondsp::ScaleAttr::get(rewriter.getContext(), 0, unsigned(op.getShift()), *mode,
+                                      ondrix::ondsp::OverflowMode::Saturate, rewriter.getI32Type());
+    rewriter.replaceOpWithNewOp<ondrix::ondsp::RoundShiftOp>(op, rewriter.getI32Type(), sum, scale);
+    return success();
+  }
+};
+
 class CxBflyOpLowering final : public OpConversionPattern<ondrix::ortumcore::CxBflyOp> {
 public:
   using OpConversionPattern<ondrix::ortumcore::CxBflyOp>::OpConversionPattern;
@@ -461,8 +487,8 @@ public:
     RewritePatternSet patterns(&getContext());
     patterns.add<AccInitOpLowering, MacAddOpLowering, MacSubOpLowering, Q31MacAddOpLowering,
                  Q31MacSubOpLowering, DmacOpLowering, AccOutOpLowering, SatShiftAddOpLowering,
-                 SatShiftSubOpLowering, CxMulConjOpLowering, CxBflyOpLowering, BitrevAddOpLowering,
-                 BitrevSubOpLowering>(typeConverter, &getContext());
+                 SatShiftSubOpLowering, CxMulConjOpLowering, CxBflyOpLowering, CxPowerOpLowering,
+                 BitrevAddOpLowering, BitrevSubOpLowering>(typeConverter, &getContext());
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);

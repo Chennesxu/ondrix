@@ -418,6 +418,34 @@ def Ondsp_CxReduceMacOp
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondsp_CxPowerOp : Ondsp_Op<"cx_power", [Pure]> {
+  let summary = "Squared magnitude of one packed complex value";
+  let description = [{
+    Computes `re*re + im*im` over the two components of one packed container
+    and reads the sum back through `output_scale`. The sum is symmetric in the
+    components, so this is the one member of the packed complex family that
+    does not depend on which half holds the real part.
+
+    The sum of two squares of `W`-bit components needs `2W + 1` bits, which is
+    what makes it exact: at the packed Q15 profile it reaches exactly `2^31`,
+    one past the signed container, and that single value is the only place
+    `output_scale`'s saturation is reachable at shift zero.
+
+    `output_scale` carries no left shift: the sum has no precision below its
+    own fraction to shift up to.
+
+    Only the packed Q15 profile is admitted. The Q31 one would have to
+    requantize each component before squaring, and whether restoring that
+    scaling costs anything depends on the fraction the result is read at, so
+    it needs its own evidence rather than this operation's.
+  }];
+  let arguments = (ins AnyType:$input, Ondsp_CxLayoutAttr:$layout,
+                   Ondsp_NumericAttr:$numeric, Ondsp_ScaleAttr:$output_scale);
+  let results = (outs AnyType:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondsp_CxButterflyOp : Ondsp_Op<"cx_butterfly", [Pure]> {
   let summary = "Packed fixed-point elementwise radix-2 butterfly semantic operation";
   let description = [{

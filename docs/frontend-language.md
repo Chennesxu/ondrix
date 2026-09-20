@@ -157,6 +157,18 @@ two products, so no width makes the update vacuous and the call site declares
 its carrier. At `complex_q15` it is 32 or 40 -- 32 is the one a packed complex
 target reads back -- and at `complex_q31` it is 64.
 
+`power` is the elementwise squared magnitude of a packed `complex_q15`
+tensor, so `power(rfft(x))` is the power spectrum and `magnitude` is its
+square root:
+
+```python
+def q15_power_spectrum(input: tensor[q15, 256]) -> tensor[q15, 129]:
+  return power(rfft(input))
+```
+
+The sum of two squares is exact, so the only call-site choice is the tie rule
+the narrower result is read back with; omitting it keeps the export default.
+
 The two complex element types are the same contract one component width apart:
 `complex_q31` puts two Q31 components in an `i64` container and accumulates at
 frac 62. It has no specialized target route, so it compiles through the

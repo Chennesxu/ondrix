@@ -1977,6 +1977,48 @@ LogicalResult CxMagnitudeOp::verify() {
   return success();
 }
 
+LogicalResult CxPowerOp::verify() {
+  std::optional<ondrix::ondsp::PackedComplexProfile> profile =
+      ondrix::ondsp::getPackedComplexProfile(getLayout().getLayout());
+  if (!profile || profile->storageWidth != 16)
+    return emitOpError("executable squared magnitude requires packed_i16_imag_hi_real_lo layout");
+  if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
+    return failure();
+
+  auto output = dyn_cast<ondrix::ondsp::FixedAttr>(getOutputNumeric());
+  auto outputStorage = output ? dyn_cast<IntegerType>(output.getStorage()) : nullptr;
+  if (!output || output.getSignedness() != ondrix::ondsp::Signedness::Signed || !outputStorage ||
+      (outputStorage.getWidth() != 16 && outputStorage.getWidth() != 32))
+    return emitOpError("cx_power output_numeric must be signed fixed point in i16 or i32");
+  unsigned exactFrac = 2 * 15;
+  if (output.getFrac() > exactFrac)
+    return emitOpError() << "output_numeric frac " << output.getFrac()
+                         << " exceeds the exact product frac " << exactFrac
+                         << "; a squared magnitude has no precision to shift up to";
+  bool hasShift = output.getFrac() < exactFrac;
+  if (hasShift && !getRounding())
+    return emitOpError() << "reading the sum at frac " << output.getFrac() << " shifts it right by "
+                         << exactFrac - output.getFrac() << " and must declare rounding";
+  if (!hasShift && getRounding())
+    return emitOpError("cx_power at this reading has no shift boundary to round");
+
+  RankedTensorType inputType = getInput().getType();
+  RankedTensorType resultType = getResult().getType();
+  if (failed(verifyUnencodedTensorTypes(getOperation(), {inputType, resultType})))
+    return failure();
+  int64_t inputExtent = inputType.getRank() == 1 ? inputType.getDimSize(0) : ShapedType::kDynamic;
+  int64_t resultExtent =
+      resultType.getRank() == 1 ? resultType.getDimSize(0) : ShapedType::kDynamic;
+  if (inputExtent == ShapedType::kDynamic || inputExtent < 1 || inputExtent > 4096 ||
+      resultExtent != inputExtent ||
+      !inputType.getElementType().isSignlessInteger(profile->containerWidth) ||
+      resultType.getElementType() != outputStorage)
+    return emitOpError() << "executable squared magnitude requires tensor<Nxi"
+                         << profile->containerWidth << "> to tensor<Nxi" << outputStorage.getWidth()
+                         << "> with static N in [1, 4096]";
+  return success();
+}
+
 LogicalResult CxPhaseOp::verify() {
   std::optional<unsigned> componentWidth = getUniformQStorageWidth(getNumeric());
   if (!componentWidth)

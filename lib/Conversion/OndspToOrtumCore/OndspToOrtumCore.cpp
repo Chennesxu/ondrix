@@ -350,6 +350,32 @@ public:
   }
 };
 
+class CxPowerOpLowering final : public OpConversionPattern<ondrix::ondsp::CxPowerOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::CxPowerOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::CxPowerOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    ondrix::ondsp::ScaleAttr scale = op.getOutputScale();
+    std::optional<ondrix::ortumcore::CxRounding> rounding =
+        ondrix::conversion::selectPackedComplexRounding(scale.getRounding());
+    int64_t shift = scale.getPostShiftRight();
+    if (!rounding || shift > 31 || scale.getOverflow() != ondrix::ondsp::OverflowMode::Saturate)
+      return op.emitOpError("the target squared magnitude reads its sum back through one "
+                            "saturating right shift of at most 31 under toward_negative or "
+                            "nearest_ties_positive rounding");
+    auto storage = cast<IntegerType>(scale.getSaturateTo());
+    Value wide = rewriter.create<ondrix::ortumcore::CxPowerOp>(
+        op.getLoc(), rewriter.getI32Type(), adaptor.getInput(), rewriter.getI64IntegerAttr(shift),
+        ondrix::ortumcore::CxRoundingAttr::get(rewriter.getContext(), *rounding));
+    // The 32-bit readout is the capability; a narrower destination composes
+    // with it, which is exact because the wider clamp cannot change it.
+    rewriter.replaceOp(
+        op, ondrix::conversion::emitSignedSaturatingNarrow(rewriter, op.getLoc(), wide, storage));
+    return success();
+  }
+};
+
 class ConvertOndspToOrtumCorePass final
     : public ondrix::impl::ConvertOndspToOrtumCoreBase<ConvertOndspToOrtumCorePass> {
 public:
@@ -365,8 +391,8 @@ public:
     OndspToOrtumCoreTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
     patterns.add<AccZeroOpLowering, AccImportOpLowering, AccExportOpLowering, MacOpLowering,
-                 MacSubOpLowering, ReduceMacOpLowering, CxReduceMacOpLowering>(typeConverter,
-                                                                               &getContext());
+                 MacSubOpLowering, ReduceMacOpLowering, CxReduceMacOpLowering, CxPowerOpLowering>(
+        typeConverter, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);

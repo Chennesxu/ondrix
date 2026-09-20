@@ -88,6 +88,19 @@ Value emitOrtumCoreReadout(OpBuilder &builder, Location loc, Value acc,
   return emitSignedSaturatingNarrow(builder, loc, out, policy.storage);
 }
 
+std::optional<ortumcore::CxRounding> selectPackedComplexRounding(ondsp::RoundingMode mode) {
+  switch (mode) {
+  case ondsp::RoundingMode::TowardNegative:
+    return ortumcore::CxRounding::TowardNegative;
+  case ondsp::RoundingMode::NearestTiesPositive:
+    return ortumcore::CxRounding::NearestTiesPositive;
+  case ondsp::RoundingMode::NearestEven:
+  case ondsp::RoundingMode::TowardZero:
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
 Value emitSignedSaturatingNarrow(OpBuilder &builder, Location loc, Value value,
                                  IntegerType storage) {
   if (storage.getWidth() == 32)

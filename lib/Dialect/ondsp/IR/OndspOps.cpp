@@ -474,6 +474,36 @@ LogicalResult ReduceMacOp::verify() {
   return success();
 }
 
+LogicalResult CxPowerOp::verify() {
+  if (failed(verifyValueOnlyTypes(*this)))
+    return failure();
+  std::optional<PackedComplexProfile> profile = getPackedComplexProfile(getLayout().getLayout());
+  if (!profile || profile->storageWidth != 16)
+    return emitOpError("executable squared magnitude requires packed_i16_imag_hi_real_lo layout");
+  if (!getInput().getType().isSignlessInteger(profile->containerWidth))
+    return emitOpError() << "executable squared magnitude requires a signless i"
+                         << profile->containerWidth << " packed value";
+  auto numeric = dyn_cast<FixedAttr>(getNumeric());
+  if (!numeric || !isSignedQ15(numeric))
+    return emitOpError("numeric must be signed Q15 in i16 for this layout");
+
+  ScaleAttr output = getOutputScale();
+  if (output.getPreShiftLeft() != 0)
+    return emitOpError("output_scale carries no left shift: the sum has no precision below its "
+                       "own fraction");
+  // The sum reads at twice the component fraction, so a shift past it would
+  // read below the product's last bit.
+  if (output.getPostShiftRight() > 2 * numeric.getFrac())
+    return emitOpError() << "output_scale shifts past the sum's fraction " << 2 * numeric.getFrac();
+  auto destination = dyn_cast<IntegerType>(output.getSaturateTo());
+  if (!destination || !destination.isSignless() ||
+      (destination.getWidth() != 16 && destination.getWidth() != 32))
+    return emitOpError("output_scale must saturate to signless i16 or i32");
+  if (getResult().getType() != destination)
+    return emitOpError("the result type must be the output_scale destination storage");
+  return success();
+}
+
 LogicalResult CxButterflyOp::verify() {
   if (failed(verifyValueOnlyTypes(*this)))
     return failure();

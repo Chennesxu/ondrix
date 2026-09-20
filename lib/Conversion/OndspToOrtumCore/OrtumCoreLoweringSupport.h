@@ -4,6 +4,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspAttrs.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspTypes.h"
+#include "ondrix/Dialect/ortumcore/IR/OrtumCoreEnums.h"
 #include "ondrix/Target/OrtumCore/OrtumCoreTargetProfile.h"
 
 #include "mlir/IR/Builders.h"
@@ -42,6 +43,12 @@ std::optional<OrtumCoreExportPolicy> classifyOrtumCoreExport(ondsp::AccExportOp 
 /// exactness argument lives on the ConvertOndspToOrtumCore description.
 mlir::Value emitOrtumCoreReadout(mlir::OpBuilder &builder, mlir::Location loc, mlir::Value acc,
                                  const OrtumCoreExportPolicy &policy);
+
+/// The packed target rounding inventory. nearest_even and toward_zero
+/// deliberately map to nothing so those profiles stay on the generic path,
+/// and a newly declared mode lands there too (plus a -Wswitch finding in the
+/// definition) instead of borrowing an inventory member.
+std::optional<ortumcore::CxRounding> selectPackedComplexRounding(ondsp::RoundingMode mode);
 
 /// Clamps a signed i32 into `storage` and truncates; the identity at i32.
 /// Clamping to a wider range first cannot change a narrower clamp, which is

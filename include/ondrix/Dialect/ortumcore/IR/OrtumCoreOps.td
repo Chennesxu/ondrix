@@ -198,6 +198,34 @@ def OrtumCore_CxMulConjOp : OrtumCore_Op<"cx_mul_conj", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def OrtumCore_CxPowerOp : OrtumCore_Op<"cx_power", [Pure]> {
+  let summary = "Packed complex squared magnitude with a shifted saturating readout";
+  let description = [{
+    Interprets `value` as a packed complex signed Q15 pair and computes
+    `re*re + im*im` exactly, then reads the sum back through the target's
+    output path:
+
+    ```
+    sum    = re*re + im*im                 exact, at most 2^31
+    result = sat32(round(sum >> shift))
+    ```
+
+    The sum is symmetric in the two halves, so this capability alone among the
+    packed complex family is independent of which half carries the real part.
+    Rounding acts on the exact wide sum, so its increment cannot overflow, and
+    a `shift` of zero bypasses it. The saturation boundary is the 32-bit result
+    storage and is reachable there at exactly one input, both halves at the
+    component minimum; a narrower destination composes this operation with an
+    explicit saturating cast, which is exact because clamping to a wider range
+    first cannot change a subsequent narrower clamp. `shift` models the
+    target's output shift and must lie in [0, 31].
+  }];
+  let arguments = (ins I32:$value, I64Attr:$shift, OrtumCore_CxRoundingAttr:$rounding);
+  let results = (outs I32:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def OrtumCore_CxBflyOp : OrtumCore_Op<"cx_bfly", [Pure]> {
   let summary = "Packed complex butterfly with per-component scaling";
   let description = [{

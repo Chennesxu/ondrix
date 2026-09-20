@@ -73,6 +73,8 @@ static int check(const char *name, int16_t lhs, int16_t rhs, int64_t count, int 
   return 1;
 }
 
+int32_t ortumcore_cx_power(int32_t value, int32_t shift, int32_t ties);
+
 int main(void) {
   static const int64_t counts[] = {0, 1, 2, 511, 512, 513};
   int failed = 0;
@@ -178,6 +180,55 @@ int main(void) {
       }
     }
   }
+  static const struct PowerCase {
+    const char *name;
+    uint32_t packed;
+  } power_cases[] = {
+      {"both halves at the component minimum", 0x80008000u},
+      {"a tie at the declared shift", 0xEA80F700u},
+      {"another tie", 0x3C807200u},
+      {"both halves at the maximum", 0x7FFF7FFFu},
+      {"zero", 0x00000000u},
+      {"asymmetric halves", 0x0001FFFFu},
+  };
+  int saturating = 0;
+  int separated = 0;
+  for (unsigned i = 0; i < sizeof(power_cases) / sizeof(power_cases[0]); ++i) {
+    const struct PowerCase *c = &power_cases[i];
+    int64_t real = (int16_t)(uint16_t)c->packed;
+    int64_t imaginary = (int16_t)(uint16_t)(c->packed >> 16);
+    int64_t sum = real * real + imaginary * imaginary;
+    for (int shift = 0; shift <= 15; shift += 15) {
+      for (int ties = 0; ties < 2; ++ties) {
+        int64_t scaled =
+            shift == 0 ? sum : (ties ? (sum + (INT64_C(1) << (shift - 1))) >> shift : sum >> shift);
+        int32_t expected = scaled > INT32_MAX   ? INT32_MAX
+                           : scaled < INT32_MIN ? INT32_MIN
+                                                : (int32_t)scaled;
+        if (scaled > INT32_MAX)
+          saturating = 1;
+        int32_t actual = ortumcore_cx_power((int32_t)c->packed, shift, ties);
+        if (actual != expected) {
+          fprintf(stderr, "power %s shift %d ties %d: expected %d, got %d\n", c->name, shift, ties,
+                  expected, actual);
+          failed = 1;
+        }
+      }
+    }
+    int64_t floored = sum >> 15;
+    int64_t rounded = (sum + (INT64_C(1) << 14)) >> 15;
+    if (floored != rounded)
+      separated = 1;
+  }
+  if (!saturating) {
+    fprintf(stderr, "power corpus never reaches the 32-bit saturation\n");
+    failed = 1;
+  }
+  if (!separated) {
+    fprintf(stderr, "power corpus cannot separate the two tie rules\n");
+    failed = 1;
+  }
+
   // The opposite-signs case must discriminate lane crosstalk: the two lane
   // readouts differ, so a swapped or shared accumulator cannot pass.
   if (readout_reference(repeat_reference(INT16_MIN, INT16_MIN, 19, 0), 15) ==
