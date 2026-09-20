@@ -2271,6 +2271,38 @@ static bool isDeclaredExportRounding(ondsp::RoundingMode mode) {
          mode == ondsp::RoundingMode::NearestTiesPositive;
 }
 
+// The two executable packed complex profiles. A container holds two
+// components side by side, so the source type fixes the component width and
+// the layout together, and the accumulator carries the exact product frac.
+static bool isPackedComplexType(SourceType type) {
+  return type == SourceType::ComplexQ15 || type == SourceType::ComplexQ31;
+}
+
+static unsigned getComplexComponentWidth(SourceType type) {
+  assert(isPackedComplexType(type) && "a packed profile is the caller's precondition");
+  return type == SourceType::ComplexQ15 ? 16 : 32;
+}
+
+// A component term is a DIFFERENCE of two products, so no width makes the
+// update vacuous and every call site declares its carrier. 32 is the one a
+// packed complex target reads back; 40 and 64 are the Q15 and Q31 reduction
+// families' own.
+static bool isDeclaredComplexAccumulatorWidth(SourceType type, uint64_t width) {
+  assert(isPackedComplexType(type) && "a packed profile is the caller's precondition");
+  return type == SourceType::ComplexQ15 ? width == 32 || width == 40 : width == 64;
+}
+
+static llvm::StringRef describeComplexAccumulatorWidths(SourceType type) {
+  assert(isPackedComplexType(type) && "a packed profile is the caller's precondition");
+  return type == SourceType::ComplexQ15 ? "32 or 40" : "64";
+}
+
+static ondsp::ComplexLayout getPackedComplexLayout(SourceType type) {
+  assert(isPackedComplexType(type) && "a packed profile is the caller's precondition");
+  return type == SourceType::ComplexQ15 ? ondsp::ComplexLayout::PackedI16ImagHiRealLo
+                                        : ondsp::ComplexLayout::PackedI32ImagHiRealLo;
+}
+
 static std::optional<ondsp::FpContractMode> parseFpContract(llvm::StringRef value) {
   if (value == "off")
     return ondsp::FpContractMode::Off;
@@ -2427,13 +2459,14 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, std::nullopt};
   }
   if (ast.result.kind == ReductionKind::CxDot) {
+    SourceType complexType = ast.primaryResult().type;
     if (ast.results.size() != 1 || ast.primaryResult().tensor ||
-        ast.primaryResult().type != SourceType::ComplexQ15 || !lhsParameter || !rhsParameter ||
+        !isPackedComplexType(complexType) || !lhsParameter || !rhsParameter ||
         !lhsParameter->isBuffer() || !rhsParameter->isBuffer() ||
         !hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1)) {
       diagnostics.error(ast.result.position,
-                        "cx_dot requires two rank-1 complex_q15 buffer parameters and one "
-                        "complex_q15 scalar result");
+                        "cx_dot requires two rank-1 complex_q15 or complex_q31 buffer parameters "
+                        "and one matching complex scalar result");
       return std::nullopt;
     }
     const std::optional<int64_t> &lhsExtent = getRankOneExtent(lhsParameter->shape);
@@ -2442,13 +2475,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       diagnostics.error(ast.result.position, "cx_dot operands must have equal static extents");
       return std::nullopt;
     }
-    // Two products bound each component term by 2^31, so the accumulator
-    // width is what fixes how many terms saturate: the 32-bit carrier is the
-    // one a packed complex unit reads back, and 40 is the Q15 profile's.
     if (ast.result.accumulatorAuto ||
-        (ast.result.accumulatorWidth != 32 && ast.result.accumulatorWidth != 40)) {
+        !isDeclaredComplexAccumulatorWidth(complexType, ast.result.accumulatorWidth)) {
       diagnostics.error(ast.result.position,
-                        "cx_dot requires an explicit exact accumulator of width 32 or 40");
+                        llvm::Twine("cx_dot requires an explicit exact accumulator of width ") +
+                            describeComplexAccumulatorWidths(complexType));
       return std::nullopt;
     }
     auto updateOverflow = parseOverflow(ast.result.updateOverflow);
@@ -2475,14 +2506,15 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                          std::nullopt};
   }
   if (ast.result.kind == ReductionKind::CxFirFilter) {
+    SourceType complexType = ast.primaryResult().type;
     if (ast.results.size() != 1 || !ast.primaryResult().tensor ||
-        ast.primaryResult().type != SourceType::ComplexQ15 || !lhsParameter || !rhsParameter ||
+        !isPackedComplexType(complexType) || !lhsParameter || !rhsParameter ||
         !lhsParameter->isTensor() || !rhsParameter->isTensor() ||
         !hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
         !hasRank(ast.primaryResult().shape, 1)) {
       diagnostics.error(ast.result.position,
-                        "cx_fir_filter requires two rank-1 complex_q15 tensor parameters and one "
-                        "rank-1 complex_q15 tensor result");
+                        "cx_fir_filter requires two rank-1 complex_q15 or complex_q31 tensor "
+                        "parameters and one matching complex tensor result");
       return std::nullopt;
     }
     if (ast.result.boundary != "valid") {
@@ -2505,9 +2537,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     // The per-sample contract is the one cx_dot declares; the window only
     // decides how many times it runs.
     if (ast.result.accumulatorAuto ||
-        (ast.result.accumulatorWidth != 32 && ast.result.accumulatorWidth != 40)) {
-      diagnostics.error(ast.result.position,
-                        "cx_fir_filter requires an explicit exact accumulator of width 32 or 40");
+        !isDeclaredComplexAccumulatorWidth(complexType, ast.result.accumulatorWidth)) {
+      diagnostics.error(
+          ast.result.position,
+          llvm::Twine("cx_fir_filter requires an explicit exact accumulator of width ") +
+              describeComplexAccumulatorWidths(complexType));
       return std::nullopt;
     }
     auto updateOverflow = parseOverflow(ast.result.updateOverflow);
@@ -3568,8 +3602,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     return std::nullopt;
   }
   if (ast.primaryResult().type == SourceType::ComplexQ31) {
-    diagnostics.error(ast.result.position, "complex_q31 is currently supported only by the cfft, "
-                                           "icfft, rfft, and irfft builtins");
+    diagnostics.error(ast.result.position,
+                      "complex_q31 is currently supported only by the cfft, icfft, rfft, and "
+                      "irfft builtins and the complex reductions");
     return std::nullopt;
   }
   if (ast.primaryResult().type == SourceType::ComplexF32) {
@@ -4781,13 +4816,15 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
 
   Value rhs = arguments.lookup(*getParameterOperand(kernel.ast.result, 1));
   if (kernel.ast.result.kind == ReductionKind::CxDot) {
-    auto component = builder.getIntegerType(16);
+    SourceType complexType = kernel.ast.primaryResult().type;
+    unsigned componentWidth = getComplexComponentWidth(complexType);
+    auto component = builder.getIntegerType(componentWidth);
     auto numeric =
-        ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, component, /*frac=*/15);
-    auto layout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI16ImagHiRealLo);
-    auto accumulatorType =
-        ondsp::AccType::get(&context, builder.getIntegerType(kernel.ast.result.accumulatorWidth),
-                            /*frac=*/30, ondsp::Signedness::Signed, *kernel.updateOverflow);
+        ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, component, componentWidth - 1);
+    auto layout = ondsp::CxLayoutAttr::get(&context, getPackedComplexLayout(complexType));
+    auto accumulatorType = ondsp::AccType::get(
+        &context, builder.getIntegerType(kernel.ast.result.accumulatorWidth),
+        2 * (componentWidth - 1), ondsp::Signedness::Signed, *kernel.updateOverflow);
     auto reduction = builder.create<ir::CxDotOp>(
         expressionLocation, accumulatorType, accumulatorType, lhs, rhs, numeric, layout,
         kernel.ast.result.conjugate ? builder.getUnitAttr() : UnitAttr());
@@ -4801,7 +4838,8 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     Value real = builder.create<arith::ExtUIOp>(expressionLocation, elementType, components[0]);
     Value imaginary =
         builder.create<arith::ExtUIOp>(expressionLocation, elementType, components[1]);
-    Value shift = builder.create<arith::ConstantIntOp>(expressionLocation, 16, elementType);
+    Value shift =
+        builder.create<arith::ConstantIntOp>(expressionLocation, componentWidth, elementType);
     Value high = builder.create<arith::ShLIOp>(expressionLocation, imaginary, shift);
     Value packed = builder.create<arith::OrIOp>(expressionLocation, real, high);
     builder.create<func::ReturnOp>(expressionLocation, packed);
@@ -4812,13 +4850,15 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   }
   if (kernel.ast.result.kind == ReductionKind::CxFirFilter) {
     auto outputType = cast<RankedTensorType>(resultType);
-    auto component = builder.getIntegerType(16);
+    SourceType complexType = kernel.ast.primaryResult().type;
+    unsigned componentWidth = getComplexComponentWidth(complexType);
+    auto component = builder.getIntegerType(componentWidth);
     auto numeric =
-        ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, component, /*frac=*/15);
-    auto layout = ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::PackedI16ImagHiRealLo);
-    auto accumulatorType =
-        ondsp::AccType::get(&context, builder.getIntegerType(kernel.ast.result.accumulatorWidth),
-                            /*frac=*/30, ondsp::Signedness::Signed, *kernel.updateOverflow);
+        ondsp::FixedAttr::get(&context, ondsp::Signedness::Signed, component, componentWidth - 1);
+    auto layout = ondsp::CxLayoutAttr::get(&context, getPackedComplexLayout(complexType));
+    auto accumulatorType = ondsp::AccType::get(
+        &context, builder.getIntegerType(kernel.ast.result.accumulatorWidth),
+        2 * (componentWidth - 1), ondsp::Signedness::Signed, *kernel.updateOverflow);
     Value init =
         builder.create<tensor::EmptyOp>(expressionLocation, outputType.getShape(), elementType);
     Value result = builder.create<ir::CxFirFilterOp>(

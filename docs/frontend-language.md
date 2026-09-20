@@ -152,9 +152,15 @@ def q15_cx_correlate(
                 overflow=saturate)
 ```
 
-The accumulator width is 32 or 40 and is never inferred: two products bound
-each component term by `2^31`, so the width is what decides how many terms
-saturate. Width 32 is the carrier a packed complex target reads back.
+The accumulator width is never inferred: a component term is a *difference* of
+two products, so no width makes the update vacuous and the call site declares
+its carrier. At `complex_q15` it is 32 or 40 -- 32 is the one a packed complex
+target reads back -- and at `complex_q31` it is 64.
+
+The two complex element types are the same contract one component width apart:
+`complex_q31` puts two Q31 components in an `i64` container and accumulates at
+frac 62. It has no specialized target route, so it compiles through the
+generic path.
 
 Sliding the same reduction over a signal is `cx_fir_filter`, which takes
 rank-1 `complex_q15` tensors under the valid boundary and returns one complex

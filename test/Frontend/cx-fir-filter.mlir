@@ -1,6 +1,7 @@
 // RUN: ondrix-compile %S/Inputs/q15_cx_fir.ox | FileCheck %s --check-prefix=FIR
 // RUN: ondrix-compile %S/Inputs/q15_cx_fir.ox | ondrix-opt --convert-ondrix-to-ondsp --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --convert-ondsp-to-ortumcore | FileCheck %s --check-prefix=TARGET
 // RUN: ondrix-compile %S/Inputs/q15_cx_matched_filter.ox | FileCheck %s --check-prefix=MATCHED
+// RUN: ondrix-compile %S/Inputs/q31_cx_fir.ox | FileCheck %s --check-prefix=Q31
 // RUN: not ondrix-compile %S/Inputs/invalid_cx_fir_boundary.ox 2>&1 | FileCheck %s --check-prefix=BOUNDARY
 // RUN: not ondrix-compile %S/Inputs/invalid_cx_fir_extent.ox 2>&1 | FileCheck %s --check-prefix=EXTENT
 
@@ -24,6 +25,13 @@
 // MATCHED: ondrix.cx_fir_filter
 // MATCHED-SAME: !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
 // MATCHED-SAME: conjugate
+
+// Q31-LABEL: func.func @q31_cx_fir
+// Q31-SAME: tensor<10xi64>
+// Q31-SAME: -> tensor<7xi64>
+// Q31: ondrix.cx_fir_filter
+// Q31-SAME: !ondsp.acc<storage = i64, frac = 62, signed, update_overflow = saturate>
+// Q31-SAME: layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>
 
 // BOUNDARY: error: cx_fir_filter currently supports boundary=valid
 // EXTENT: error: valid-boundary cx_fir_filter requires input extent >= tap count
