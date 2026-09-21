@@ -167,9 +167,21 @@ mlir::LogicalResult verifyPackedComplexReductionPolicy(mlir::Operation *op,
                                                        mlir::Type accumulator,
                                                        llvm::StringRef executable);
 
+/// Verifies the executable interleaved floating-point complex reduction: an
+/// `interleaved` layout, an executable format, rank-1 memrefs of that format
+/// whose equal length is an even element count because one complex value is
+/// two adjacent elements, and two accumulators that ARE the format. A
+/// floating-point reduction has no accumulator width to declare, so declaring
+/// one would name a carrier the program does not have.
+mlir::LogicalResult
+verifyInterleavedFpComplexReduction(mlir::Operation *op, mlir::Value lhs, mlir::Value rhs,
+                                    FpAttr numeric, CxLayoutAttr layout, mlir::Type realAccumulator,
+                                    mlir::Type imagAccumulator, llvm::StringRef executable);
+
 /// The contract above plus the operand shape the whole-buffer reductions take:
 /// rank-1 packed memrefs of equal static length, and two accumulators of one
-/// type.
+/// type. Dispatches to the interleaved floating-point contract when the
+/// numeric policy is a format rather than a Q reading.
 mlir::LogicalResult verifyPackedComplexReduction(mlir::Operation *op, mlir::Value lhs,
                                                  mlir::Value rhs, mlir::Attribute numeric,
                                                  CxLayoutAttr layout, mlir::Type realAccumulator,

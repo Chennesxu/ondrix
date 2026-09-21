@@ -422,9 +422,49 @@ LogicalResult verifyPackedComplexReductionPolicy(Operation *op, Type packedEleme
   return success();
 }
 
+LogicalResult verifyInterleavedFpComplexReduction(Operation *op, Value lhs, Value rhs,
+                                                  FpAttr numeric, CxLayoutAttr layout,
+                                                  Type realAccumulator, Type imagAccumulator,
+                                                  StringRef executable) {
+  if (layout.getLayout() != ComplexLayout::Interleaved)
+    return op->emitOpError() << "floating-point " << executable << " requires interleaved layout";
+  if (failed(verifyExecutableFpFormat(op, numeric, executable)))
+    return failure();
+  auto lhsType = dyn_cast<MemRefType>(lhs.getType());
+  auto rhsType = dyn_cast<MemRefType>(rhs.getType());
+  if (!lhsType || !rhsType || lhsType.getRank() != 1 || rhsType.getRank() != 1 ||
+      lhsType.getElementType() != numeric.getFormat() ||
+      rhsType.getElementType() != numeric.getFormat())
+    return op->emitOpError() << "floating-point " << executable
+                             << " operands must be rank-1 memrefs of the numeric format";
+  int64_t lhsLength = lhsType.getDimSize(0);
+  int64_t rhsLength = rhsType.getDimSize(0);
+  if (!ShapedType::isDynamic(lhsLength) && !ShapedType::isDynamic(rhsLength) &&
+      lhsLength != rhsLength)
+    return op->emitOpError("shaped operands must have equal static lengths");
+  // One complex value is two adjacent elements, so an odd length names half a
+  // value at the end of the buffer.
+  for (int64_t length : {lhsLength, rhsLength})
+    if (!ShapedType::isDynamic(length) && (length < 2 || length % 2 != 0))
+      return op->emitOpError() << "floating-point " << executable
+                               << " reads two elements per complex value and requires an even "
+                                  "operand length of at least two";
+  if (realAccumulator != imagAccumulator)
+    return op->emitOpError("both accumulators must have the same type");
+  // The format IS the carrier here; there is no width left to declare.
+  if (realAccumulator != numeric.getFormat())
+    return op->emitOpError() << "floating-point " << executable
+                             << " accumulates in the numeric format and declares no accumulator "
+                                "type of its own";
+  return success();
+}
+
 LogicalResult verifyPackedComplexReduction(Operation *op, Value lhs, Value rhs, Attribute numeric,
                                            CxLayoutAttr layout, Type realAccumulator,
                                            Type imagAccumulator, StringRef executable) {
+  if (auto fp = dyn_cast<FpAttr>(numeric))
+    return verifyInterleavedFpComplexReduction(op, lhs, rhs, fp, layout, realAccumulator,
+                                               imagAccumulator, executable);
   auto lhsType = dyn_cast<MemRefType>(lhs.getType());
   auto rhsType = dyn_cast<MemRefType>(rhs.getType());
   if (!lhsType || !rhsType || lhsType.getRank() != 1 || rhsType.getRank() != 1)

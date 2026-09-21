@@ -39,6 +39,82 @@ static bool isSupportedF32MemRefReduction(ondrix::ondsp::ReduceMacOp op) {
          op.getResult().getType().isF32();
 }
 
+static bool isSupportedF32ComplexMemRefReduction(ondrix::ondsp::CxReduceMacOp op) {
+  auto numeric = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+  return numeric && numeric.getFormat().isF32() && isa<MemRefType>(op.getLhs().getType());
+}
+
+// One complex term under the declared contract: `a*b + c*d`, or `a*b - c*d`
+// when `subtract`. The sum seeds on the first product, so the fused modes
+// spend one update where `off` spends a multiply and an add.
+static Value createFpComplexTerm(Location loc, Value a, Value b, Value c, Value d, bool subtract,
+                                 ondrix::ondsp::FpAttr numeric, OpBuilder &builder) {
+  Value seed = builder.create<arith::MulFOp>(loc, a, b);
+  if (numeric.getContract() == ondrix::ondsp::FpContractMode::Off) {
+    Value product = builder.create<arith::MulFOp>(loc, c, d);
+    return subtract ? builder.create<arith::SubFOp>(loc, seed, product).getResult()
+                    : builder.create<arith::AddFOp>(loc, seed, product).getResult();
+  }
+  // Negating a multiplicand is exact, so the subtraction rides the same fused
+  // update rather than costing a rounding of its own.
+  Value multiplicand = subtract ? builder.create<arith::NegFOp>(loc, c).getResult() : c;
+  Value fused = builder.create<math::FmaOp>(loc, multiplicand, d, seed);
+  if (numeric.getContract() == ondrix::ondsp::FpContractMode::Fast)
+    return ondrix::ondsp::consumeFastPermission(fused.getDefiningOp(),
+                                                ondrix::ondsp::FastPermission::FuseMultiplyAdd);
+  return fused;
+}
+
+// The interleaved f32 complex reduction: the same pairing the packed profile
+// declares, over two adjacent elements per value and with the format itself
+// as the carrier, so nothing here requantizes.
+class CxReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::CxReduceMacOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::CxReduceMacOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::CxReduceMacOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto numeric = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric());
+    if (!numeric || !numeric.getFormat().isF32())
+      return rewriter.notifyMatchFailure(op, "not the interleaved f32 complex profile");
+    FailureOr<ondrix::conversion::RankOneReductionBounds> bounds =
+        ondrix::conversion::createRankOneMemRefReductionBounds(
+            op, adaptor.getLhs(), adaptor.getRhs(), rewriter.getF32Type(),
+            "interleaved f32 complex scalar lowering", rewriter);
+    if (failed(bounds))
+      return failure();
+
+    Location loc = op.getLoc();
+    bool conjugate = op.getConjugate();
+    Value two = rewriter.create<arith::ConstantIndexOp>(loc, 2);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    // The bounds walk elements; a complex value is two of them.
+    Value values = rewriter.create<arith::DivUIOp>(loc, bounds->upperBound, two);
+    auto loop = rewriter.create<scf::ForOp>(
+        loc, bounds->lowerBound, values, one,
+        ValueRange{adaptor.getInitialReal(), adaptor.getInitialImag()},
+        [&](OpBuilder &builder, Location bodyLoc, Value index, ValueRange iterArgs) {
+          Value realIndex = builder.create<arith::MulIOp>(bodyLoc, index, two);
+          Value imagIndex = builder.create<arith::AddIOp>(bodyLoc, realIndex, one);
+          Value xr = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), realIndex);
+          Value xi = builder.create<memref::LoadOp>(bodyLoc, adaptor.getLhs(), imagIndex);
+          Value yr = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), realIndex);
+          Value yi = builder.create<memref::LoadOp>(bodyLoc, adaptor.getRhs(), imagIndex);
+          Value realTerm =
+              createFpComplexTerm(bodyLoc, xr, yr, xi, yi, !conjugate, numeric, builder);
+          Value imagTerm = conjugate ? createFpComplexTerm(bodyLoc, xi, yr, xr, yi,
+                                                           /*subtract=*/true, numeric, builder)
+                                     : createFpComplexTerm(bodyLoc, xr, yi, xi, yr,
+                                                           /*subtract=*/false, numeric, builder);
+          Value nextReal = builder.create<arith::AddFOp>(bodyLoc, iterArgs[0], realTerm);
+          Value nextImag = builder.create<arith::AddFOp>(bodyLoc, iterArgs[1], imagTerm);
+          builder.create<scf::YieldOp>(bodyLoc, ValueRange{nextReal, nextImag});
+        });
+    rewriter.replaceOp(op, loop.getResults());
+    return success();
+  }
+};
+
 class ReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::ReduceMacOp> {
 public:
   ReduceMacOpLowering(MLIRContext *context, int64_t vectorWidth)
@@ -146,6 +222,7 @@ public:
     }
     RewritePatternSet patterns(&getContext());
     patterns.add<ReduceMacOpLowering>(&getContext(), vectorWidth);
+    patterns.add<CxReduceMacOpLowering>(&getContext());
 
     ConversionTarget target(getContext());
     target.addLegalDialect<BuiltinDialect, arith::ArithDialect, cf::ControlFlowDialect,
@@ -153,6 +230,8 @@ public:
                            scf::SCFDialect, vector::VectorDialect, ondrix::ondsp::OndspDialect>();
     target.addDynamicallyLegalOp<ondrix::ondsp::ReduceMacOp>(
         [](ondrix::ondsp::ReduceMacOp op) { return !isSupportedF32MemRefReduction(op); });
+    target.addDynamicallyLegalOp<ondrix::ondsp::CxReduceMacOp>(
+        [](ondrix::ondsp::CxReduceMacOp op) { return !isSupportedF32ComplexMemRefReduction(op); });
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       return signalPassFailure();

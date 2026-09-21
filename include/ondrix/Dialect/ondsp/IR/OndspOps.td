@@ -407,6 +407,19 @@ def Ondsp_CxReduceMacOp
     range proof admits the rebuild. The wide per-component accumulator is the
     point: a packed complex route requantizes to the operand width at every
     step, and this one does not.
+
+    The interleaved f32 profile is a separate contract rather than a third
+    width: one complex value is two adjacent elements of the format, real
+    first, so the operands are rank-1 memrefs of `2N` elements and the two
+    accumulators ARE the format. There is no accumulator width to declare
+    and nothing requantizes anywhere, so the policy axis the packed widths
+    spend on an accumulator this one spends on the format's contract mode.
+    The pairing is unchanged, and so is the shape of the term: a component's
+    two cross products combine into one term before the accumulator update
+    sees it. The term seeds on its first product and takes the second as one
+    update, so `off` spends a multiply and an add where `fma` and `fast`
+    spend one fused update; a subtracted product rides the same fused update
+    by negating its multiplicand, which is exact.
   }];
   let arguments = (ins AnyType:$initialReal, AnyType:$initialImag,
                    AnyType:$lhs, AnyType:$rhs,
