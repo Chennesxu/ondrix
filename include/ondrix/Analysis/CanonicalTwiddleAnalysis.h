@@ -43,6 +43,15 @@ llvm::StringRef stringifyCanonicalPackedQ15TwiddleStatus(CanonicalPackedQ15Twidd
 CanonicalPackedQ15TwiddleClassification
 classifyCanonicalPackedQ15Twiddle(ondsp::CxButterflyOp butterfly);
 
+/// Whether the packed-Q15 product carrier may be 32 bits instead of 33 for
+/// this butterfly. The wider carrier exists only because the operation admits
+/// an ARBITRARY i16 twiddle, whose imaginary cross sum reaches exactly 2^31
+/// at `w = (-32768, -32768)`. Both cross sums are bounded by
+/// `32768 * (|wr| + |wi|)`, so a constant twiddle with `|wr| + |wi| <= 65535`
+/// keeps them inside i32; every quantized unit-modulus twiddle satisfies that
+/// with a factor of sqrt(2) to spare, and a runtime twiddle fails closed.
+bool packedQ15ProductFitsNarrowCarrier(ondsp::CxButterflyOp butterfly);
+
 using CanonicalPackedQ15TwiddleConsumer =
     llvm::function_ref<mlir::LogicalResult(CanonicalPackedQ15TwiddleIdentity)>;
 

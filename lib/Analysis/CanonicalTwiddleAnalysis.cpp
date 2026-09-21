@@ -83,6 +83,28 @@ classifyCanonicalPackedQ15Twiddle(ondsp::CxButterflyOp butterfly) {
   return {CanonicalPackedQ15TwiddleStatus::NonCanonicalTwiddle, std::nullopt};
 }
 
+bool packedQ15ProductFitsNarrowCarrier(ondsp::CxButterflyOp butterfly) {
+  if (butterfly.getLayout().getLayout() != ondsp::ComplexLayout::PackedI16ImagHiRealLo)
+    return false;
+  auto numeric = dyn_cast<ondsp::FixedAttr>(butterfly.getNumeric());
+  if (!numeric || !ondsp::isSignedQ15(numeric))
+    return false;
+  auto constant = butterfly.getTwiddle().getDefiningOp<arith::ConstantOp>();
+  auto integer = constant ? dyn_cast<IntegerAttr>(constant.getValue()) : IntegerAttr();
+  auto integerType = integer ? dyn_cast<IntegerType>(integer.getType()) : IntegerType();
+  if (!integerType || integerType.getWidth() != 32)
+    return false;
+  uint64_t bits = integer.getValue().getZExtValue();
+  // Real is the low half under this layout. The magnitudes are summed at 64
+  // bits because negating the component minimum leaves i16.
+  int64_t real = static_cast<int16_t>(bits & 0xFFFFU);
+  int64_t imaginary = static_cast<int16_t>((bits >> 16) & 0xFFFFU);
+  int64_t magnitudeSum = (real < 0 ? -real : real) + (imaginary < 0 ? -imaginary : imaginary);
+  // 32768 * 65535 is one unit of twiddle short of 2^31, which is the single
+  // value a 32-bit carrier cannot hold.
+  return magnitudeSum <= 65535;
+}
+
 CanonicalPackedQ15TwiddlePlan::CanonicalPackedQ15TwiddlePlan(
     ondsp::CxButterflyOp butterfly, CanonicalPackedQ15TwiddleIdentity identity)
     : subject(butterfly.getOperation()), twiddle(butterfly.getTwiddle()),

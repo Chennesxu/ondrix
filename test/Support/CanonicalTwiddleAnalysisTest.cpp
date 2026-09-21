@@ -16,6 +16,7 @@
 using ondrix::analysis::CanonicalPackedQ15TwiddleIdentity;
 using ondrix::analysis::CanonicalPackedQ15TwiddleStatus;
 using ondrix::analysis::classifyCanonicalPackedQ15Twiddle;
+using ondrix::analysis::packedQ15ProductFitsNarrowCarrier;
 using ondrix::analysis::planCanonicalPackedQ15Twiddle;
 using ondrix::fixedpoint::AccumulatorOverflowMode;
 using ondrix::fixedpoint::computeSignedFullProduct;
@@ -275,11 +276,62 @@ bool testExhaustiveGroundTruth() {
   return true;
 }
 
+// The narrow-carrier query's whole content is one inequality, so the bound is
+// pinned here rather than inferred from a codegen witness: the cross sums are
+// bounded by 32768 * (|wr| + |wi|), and 65535 is the largest sum an i32
+// carrier holds.
+bool testNarrowCarrierBound() {
+  constexpr int64_t kInt32Max = 2147483647;
+  constexpr int64_t kComponentMagnitude = 32768;
+  // The arithmetic claim, swept rather than asserted: at the admitted bound
+  // every cross sum over the extreme component pairs fits, and one unit past
+  // it the imaginary sum is exactly 2^31.
+  for (int64_t real = -32768; real <= 32767; ++real) {
+    int64_t remaining = 65535 - (real < 0 ? -real : real);
+    if (remaining < 0 || remaining > 32767)
+      continue;
+    for (int64_t imaginary : {remaining, -remaining}) {
+      for (int64_t br : {int64_t{-32768}, int64_t{32767}}) {
+        for (int64_t bi : {int64_t{-32768}, int64_t{32767}}) {
+          if (br * real - bi * imaginary > kInt32Max || br * imaginary + bi * real > kInt32Max ||
+              br * real - bi * imaginary < -kInt32Max - 1 ||
+              br * imaginary + bi * real < -kInt32Max - 1)
+            return false;
+        }
+      }
+    }
+  }
+  if (-kComponentMagnitude * -kComponentMagnitude + -kComponentMagnitude * -kComponentMagnitude !=
+      kInt32Max + 1)
+    return false;
+
+  // And the query itself, at the boundary and at the two failing shapes.
+  Fixture fixture;
+  auto packed = [](int32_t real, int32_t imaginary) {
+    return static_cast<int32_t>((static_cast<uint32_t>(imaginary) << 16) |
+                                (static_cast<uint32_t>(real) & 0xFFFFU));
+  };
+  // The 45-degree twiddle: what every quantized unit-modulus value looks like.
+  if (!packedQ15ProductFitsNarrowCarrier(fixture.create(fixture.constant(packed(23170, -23170)))))
+    return false;
+  // Exactly at the bound, 32767 + 32768.
+  if (!packedQ15ProductFitsNarrowCarrier(fixture.create(fixture.constant(packed(32767, -32768)))))
+    return false;
+  // One unit past it: the only pair a 32-bit carrier cannot hold.
+  if (packedQ15ProductFitsNarrowCarrier(fixture.create(fixture.constant(packed(-32768, -32768)))))
+    return false;
+  // A runtime twiddle carries no value, so it fails closed.
+  if (packedQ15ProductFitsNarrowCarrier(fixture.create(fixture.block->getArgument(2))))
+    return false;
+  return true;
+}
+
 } // namespace
 
 int main() {
   if (!testClassificationReasons() || !testSubjectBoundPlan() ||
-      !testPolicyMutationInvalidation() || !testExhaustiveGroundTruth()) {
+      !testPolicyMutationInvalidation() || !testExhaustiveGroundTruth() ||
+      !testNarrowCarrierBound()) {
     llvm::errs() << "canonical twiddle analysis: FAIL\n";
     return 1;
   }

@@ -656,8 +656,12 @@ public:
         // Exact carrier for both cross sums: the binding imaginary term reaches
         // 2^63, so Q15 needs 33 bits and Q31 needs 65. i128 is the generic
         // choice the backend chain already handles, not a minimality claim.
-        Type productType =
-            getIntegerTypeLike(bReal.getType(), storageWidth == 16 ? 33 : 128, rewriter);
+        // The 33rd bit at Q15 is there for an ARBITRARY twiddle; one proven
+        // unit-modulus cannot reach it, and the narrower carrier is what a
+        // 32-bit lane and a 32-bit register hold.
+        bool narrow = storageWidth == 16 && ondrix::analysis::packedQ15ProductFitsNarrowCarrier(op);
+        Type productType = getIntegerTypeLike(
+            bReal.getType(), storageWidth == 16 ? (narrow ? 32 : 33) : 128, rewriter);
         auto extendProductOperand = [&](Value value) {
           return rewriter.create<arith::ExtSIOp>(loc, productType, value);
         };
