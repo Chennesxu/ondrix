@@ -209,6 +209,50 @@ struct CxFirFilterOpInterface
     return !cast<CxFirFilterOp>(op).isDpsInit(&opOperand);
   }
 
+  // One interleaved f32 output: the same window reduction, but a complex
+  // value is two elements, so the window and the store both stride by two and
+  // the components come back as plain values with nothing to export.
+  static LogicalResult bufferizeInterleavedFp(CxFirFilterOp op, ondrix::ondsp::FpAttr numeric,
+                                              Value input, Value coefficients, Value output,
+                                              RewriterBase &rewriter) {
+    Location loc = op.getLoc();
+    Type element = numeric.getFormat();
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value two = rewriter.create<arith::ConstantIndexOp>(loc, 2);
+    RankedTensorType coeffType = op.getCoeffs().getType();
+    OpFoldResult coefficientLength =
+        coeffType.isDynamicDim(0)
+            ? OpFoldResult(rewriter.create<memref::DimOp>(loc, coefficients, zero).getResult())
+            : OpFoldResult(rewriter.getIndexAttr(coeffType.getDimSize(0)));
+    Value coefficientView = rewriter.create<memref::SubViewOp>(
+        loc, coefficients, SmallVector<OpFoldResult>{rewriter.getIndexAttr(0)},
+        SmallVector<OpFoldResult>{coefficientLength},
+        SmallVector<OpFoldResult>{rewriter.getIndexAttr(1)});
+    Value outputElements = rewriter.create<memref::DimOp>(loc, output, zero);
+    Value outputValues = rewriter.create<arith::DivUIOp>(loc, outputElements, two);
+    Value seed = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(element));
+
+    rewriter.create<scf::ForOp>(
+        loc, zero, outputValues, one, ValueRange{},
+        [&](OpBuilder &builder, Location bodyLoc, Value valueIndex, ValueRange) {
+          Value realIndex = builder.create<arith::MulIOp>(bodyLoc, valueIndex, two);
+          Value imagIndex = builder.create<arith::AddIOp>(bodyLoc, realIndex, one);
+          Value window = builder.create<memref::SubViewOp>(
+              bodyLoc, input, SmallVector<OpFoldResult>{realIndex},
+              SmallVector<OpFoldResult>{coefficientLength},
+              SmallVector<OpFoldResult>{builder.getIndexAttr(1)});
+          auto reduced = builder.create<ondrix::ondsp::CxReduceMacOp>(
+              bodyLoc, element, element, seed, seed, window, coefficientView, op.getNumeric(),
+              op.getLayout(), op.getConjugateAttr());
+          builder.create<memref::StoreOp>(bodyLoc, reduced.getResultReal(), output, realIndex);
+          builder.create<memref::StoreOp>(bodyLoc, reduced.getResultImag(), output, imagIndex);
+          builder.create<scf::YieldOp>(bodyLoc);
+        });
+    replaceOpWithBufferizedValues(rewriter, op, output);
+    return success();
+  }
+
   LogicalResult bufferize(Operation *operation, RewriterBase &rewriter,
                           const BufferizationOptions &options) const {
     auto op = cast<CxFirFilterOp>(operation);
@@ -220,6 +264,8 @@ struct CxFirFilterOpInterface
 
     rewriter.setInsertionPoint(op);
     Location loc = op.getLoc();
+    if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric()))
+      return bufferizeInterleavedFp(op, fp, *input, *coefficients, *output, rewriter);
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     auto container = cast<IntegerType>(op.getInput().getType().getElementType());
     auto component = cast<IntegerType>(numeric.getStorage());
@@ -246,7 +292,7 @@ struct CxFirFilterOpInterface
               bodyLoc, *input, SmallVector<OpFoldResult>{outputIndex},
               SmallVector<OpFoldResult>{coefficientLength},
               SmallVector<OpFoldResult>{builder.getIndexAttr(1)});
-          Type accumulatorType = op.getAccumulator();
+          Type accumulatorType = *op.getAccumulator();
           Value real = builder.create<ondrix::ondsp::AccZeroOp>(bodyLoc, accumulatorType);
           Value imaginary = builder.create<ondrix::ondsp::AccZeroOp>(bodyLoc, accumulatorType);
           auto reduced = builder.create<ondrix::ondsp::CxReduceMacOp>(
@@ -255,7 +301,7 @@ struct CxFirFilterOpInterface
           SmallVector<Value> halves;
           for (Value accumulator : {reduced.getResultReal(), reduced.getResultImag()})
             halves.push_back(builder.create<ondrix::ondsp::AccExportOp>(
-                bodyLoc, component, accumulator, numeric, op.getRounding(), op.getOverflow()));
+                bodyLoc, component, accumulator, numeric, *op.getRounding(), *op.getOverflow()));
           // Zero extension, not sign extension: a negative real component
           // would otherwise flood the half the imaginary component occupies.
           Value low = builder.create<arith::ExtUIOp>(bodyLoc, container, halves[0]);

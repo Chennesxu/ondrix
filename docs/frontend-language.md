@@ -174,6 +174,24 @@ The two complex element types are the same contract one component width apart:
 frac 62. It has no specialized target route, so it compiles through the
 generic path.
 
+`cx_fir_filter` also takes `complex_f32`, where the format is the carrier:
+there is no accumulator triple to declare and the call spells `contract=`
+in its place, exactly as the other f32 builtins do. Extents count complex
+values as always, so `tensor[complex_f32, 12]` with four complex taps is
+`tensor<24xf32>` and `tensor<8xf32>` in the emitted IR and yields
+`tensor<18xf32>`:
+
+```python
+def f32_matched(signal: tensor[complex_f32, 12], taps: tensor[complex_f32, 4])
+    -> tensor[complex_f32, 9]:
+  return cx_fir_filter(signal, taps, conjugate=true, boundary=valid, contract=fma)
+```
+
+`cx_dot` has no `complex_f32` spelling and says so: its result is a complex
+SCALAR, which is two values, and a kernel returns one. The operation carries
+the profile at the IR level; naming a source form for it is a language
+decision, not part of the reduction.
+
 Sliding the same reduction over a signal is `cx_fir_filter`, which takes
 rank-1 `complex_q15` tensors under the valid boundary and returns one complex
 sample per window. `conjugate=true` makes it a matched filter:

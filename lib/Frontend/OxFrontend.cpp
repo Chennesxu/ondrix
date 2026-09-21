@@ -1613,13 +1613,13 @@ public:
                   llvm::Twine("expected ')' after ") + operation + " expression"))
         return std::nullopt;
       return call;
-    } else if (current.kind == TokenKind::RightParen && policyType != SourceType::F32) {
+    } else if (current.kind == TokenKind::RightParen && !isFpPolicyType(policyType)) {
       applyDefaultFixedPolicy(call);
     } else if (!expect(TokenKind::Comma, "expected ',' before numeric policy")) {
       return std::nullopt;
     }
 
-    if (policyType != SourceType::F32) {
+    if (!isFpPolicyType(policyType)) {
       if (!call.accumulatorAuto && !parseFixedPolicy(call))
         return std::nullopt;
     } else {
@@ -2147,6 +2147,13 @@ private:
   // non-wrapping where information must be lost. Export boundaries default
   // to nearest_ties_positive, the tie rule fixed-point DSP export hardware
   // realizes natively; nearest_even stays available per call site.
+  // A floating-point policy names a contract mode where a fixed one names an
+  // accumulator triple, and `complex_f32` is a floating-point policy whose
+  // values happen to occupy two elements each.
+  static bool isFpPolicyType(SourceType type) {
+    return type == SourceType::F32 || type == SourceType::ComplexF32;
+  }
+
   static void applyDefaultFixedPolicy(BuiltinCallAst &result) {
     result.accumulatorAuto = true;
     result.rounding = "nearest_ties_positive";
@@ -2517,6 +2524,16 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   }
   if (ast.result.kind == ReductionKind::CxDot) {
     SourceType complexType = ast.primaryResult().type;
+    if (complexType == SourceType::ComplexF32) {
+      // The operation carries the interleaved f32 profile; the SOURCE has no
+      // spelling for a complex f32 scalar, because a function returns one
+      // value and this result is two. Naming that is a language decision, so
+      // it is refused here rather than deferred silently.
+      diagnostics.error(ast.result.position,
+                        "cx_dot has no complex_f32 spelling: a complex f32 result is two values "
+                        "and a kernel returns one; use cx_fir_filter, whose result is a tensor");
+      return std::nullopt;
+    }
     if (ast.results.size() != 1 || ast.primaryResult().tensor ||
         !isPackedComplexType(complexType) || !lhsParameter || !rhsParameter ||
         !lhsParameter->isBuffer() || !rhsParameter->isBuffer() ||
@@ -2564,14 +2581,15 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   }
   if (ast.result.kind == ReductionKind::CxFirFilter) {
     SourceType complexType = ast.primaryResult().type;
+    bool interleavedFp = complexType == SourceType::ComplexF32;
     if (ast.results.size() != 1 || !ast.primaryResult().tensor ||
-        !isPackedComplexType(complexType) || !lhsParameter || !rhsParameter ||
+        (!isPackedComplexType(complexType) && !interleavedFp) || !lhsParameter || !rhsParameter ||
         !lhsParameter->isTensor() || !rhsParameter->isTensor() ||
         !hasRank(lhsParameter->shape, 1) || !hasRank(rhsParameter->shape, 1) ||
         !hasRank(ast.primaryResult().shape, 1)) {
       diagnostics.error(ast.result.position,
-                        "cx_fir_filter requires two rank-1 complex_q15 or complex_q31 tensor "
-                        "parameters and one matching complex tensor result");
+                        "cx_fir_filter requires two rank-1 complex_q15, complex_q31 or "
+                        "complex_f32 tensor parameters and one matching complex tensor result");
       return std::nullopt;
     }
     if (ast.result.boundary != "valid") {
@@ -2590,6 +2608,17 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                         "valid-boundary cx_fir_filter requires input extent >= tap count and "
                         "result extent = input extent - tap count + 1");
       return std::nullopt;
+    }
+    if (interleavedFp) {
+      // The format is the carrier, so the window declares a contract mode
+      // where the packed widths declare an accumulator triple.
+      std::optional<ondsp::FpContractMode> contract = parseFpContract(ast.result.fpContract);
+      if (!contract) {
+        diagnostics.error(ast.result.position,
+                          "an interleaved f32 cx_fir_filter requires contract = off, fma, or fast");
+        return std::nullopt;
+      }
+      return CheckedKernel{std::move(ast), std::nullopt, std::nullopt, std::nullopt, *contract};
     }
     // The per-sample contract is the one cx_dot declares; the window only
     // decides how many times it runs.
@@ -5024,6 +5053,21 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   if (kernel.ast.result.kind == ReductionKind::CxFirFilter) {
     auto outputType = cast<RankedTensorType>(resultType);
     SourceType complexType = kernel.ast.primaryResult().type;
+    if (complexType == SourceType::ComplexF32) {
+      Value init =
+          builder.create<tensor::EmptyOp>(expressionLocation, outputType.getShape(), elementType);
+      Value result = builder.create<ir::CxFirFilterOp>(
+          expressionLocation, outputType, lhs, rhs, init,
+          ondsp::FpAttr::get(&context, builder.getF32Type(), *kernel.fpContract),
+          ondsp::CxLayoutAttr::get(&context, ondsp::ComplexLayout::Interleaved), TypeAttr(),
+          ondsp::RoundingModeAttr(), ondsp::OverflowModeAttr(),
+          kernel.ast.result.conjugate ? builder.getUnitAttr() : UnitAttr());
+      builder.create<func::ReturnOp>(expressionLocation, result);
+      module->push_back(function);
+      if (failed(verify(*module)))
+        return {};
+      return module;
+    }
     unsigned componentWidth = getComplexComponentWidth(complexType);
     auto component = builder.getIntegerType(componentWidth);
     auto numeric =

@@ -643,9 +643,9 @@ def Ondrix_CxFirFilterOp
       AnyRankedTensor:$init,
       Ondsp_NumericAttr:$numeric,
       Ondsp_CxLayoutAttr:$layout,
-      TypeAttrOf<Ondsp_Acc>:$accumulator,
-      Ondsp_RoundingModeAttr:$rounding,
-      Ondsp_OverflowModeAttr:$overflow,
+      OptionalAttr<TypeAttrOf<Ondsp_Acc>>:$accumulator,
+      OptionalAttr<Ondsp_RoundingModeAttr>:$rounding,
+      OptionalAttr<Ondsp_OverflowModeAttr>:$overflow,
       UnitAttr:$conjugate);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;

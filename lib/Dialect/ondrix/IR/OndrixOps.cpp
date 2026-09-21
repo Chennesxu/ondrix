@@ -1280,9 +1280,30 @@ LogicalResult CxFirFilterOp::verify() {
       inputType.getElementType() != initType.getElementType())
     return emitOpError("input, coefficient, and output element types must match");
 
-  int64_t inputLength = inputType.getDimSize(0);
-  int64_t coeffLength = coeffType.getDimSize(0);
-  int64_t outputLength = initType.getDimSize(0);
+  // A packed value is one element and an interleaved f32 value is two, so
+  // the window arithmetic below counts complex values rather than elements.
+  auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
+  int64_t perValue = fp ? 2 : 1;
+  auto complexCount = [&](int64_t elements) {
+    return ShapedType::isDynamic(elements) ? elements : elements / perValue;
+  };
+  if (fp) {
+    if (getAccumulator() || getRounding() || getOverflow())
+      return emitOpError("floating-point cx_fir_filter accumulates in the numeric format and "
+                         "declares no accumulator, rounding, or overflow");
+    for (int64_t elements :
+         {inputType.getDimSize(0), coeffType.getDimSize(0), initType.getDimSize(0)})
+      if (!ShapedType::isDynamic(elements) && elements % 2 != 0)
+        return emitOpError("floating-point cx_fir_filter reads two elements per complex value and "
+                           "requires even tensor lengths");
+  } else if (!getAccumulator() || !getRounding() || !getOverflow()) {
+    return emitOpError("cx_fir_filter requires an accumulator, rounding, and overflow at this "
+                       "numeric policy");
+  }
+
+  int64_t inputLength = complexCount(inputType.getDimSize(0));
+  int64_t coeffLength = complexCount(coeffType.getDimSize(0));
+  int64_t outputLength = complexCount(initType.getDimSize(0));
   if (!ShapedType::isDynamic(coeffLength) && coeffLength < 1)
     return emitOpError("requires a non-empty coefficient tensor");
   if (!ShapedType::isDynamic(inputLength) && !ShapedType::isDynamic(coeffLength) &&
@@ -1292,9 +1313,11 @@ LogicalResult CxFirFilterOp::verify() {
       !ShapedType::isDynamic(outputLength) && outputLength != inputLength - coeffLength + 1)
     return emitOpError() << "valid boundary output length must be " << inputLength - coeffLength + 1
                          << ", not " << outputLength;
+  if (fp)
+    return ondrix::ondsp::verifyExecutableFpFormat(*this, fp, "cx_fir_filter");
   return ondrix::ondsp::verifyPackedComplexReductionPolicy(*this, inputType.getElementType(),
                                                            getNumeric(), getLayout(),
-                                                           getAccumulator(), "cx_fir_filter");
+                                                           *getAccumulator(), "cx_fir_filter");
 }
 
 Speculation::Speculatability CxFirFilterOp::getSpeculatability() {
