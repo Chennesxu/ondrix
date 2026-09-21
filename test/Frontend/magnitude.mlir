@@ -7,6 +7,9 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_magnitude_rounding.ox 2>&1 | FileCheck %s --check-prefix=ROUNDING
 // RUN: ondrix-compile %S/Inputs/q31_magnitude_floor.ox | FileCheck %s --check-prefix=Q31FLOOR
 // RUN: not ondrix-compile %S/Inputs/invalid_q15_magnitude_input_rounding.ox 2>&1 | FileCheck %s --check-prefix=NOPRESHIFT
+// RUN: ondrix-compile %S/Inputs/f32_magnitude_spectrum.ox | FileCheck %s --check-prefix=F32
+// RUN: not ondrix-compile %S/Inputs/invalid_f32_magnitude_contract.ox 2>&1 | FileCheck %s --check-prefix=F32CONTRACT
+// RUN: not ondrix-compile %S/Inputs/invalid_q15_magnitude_contract.ox 2>&1 | FileCheck %s --check-prefix=FIXEDCONTRACT
 
 // CHECK-LABEL: func.func @q15_magnitude(
 // CHECK-SAME: %[[SPECTRUM:.*]]: tensor<9xi32>) -> tensor<9xi16>
@@ -33,7 +36,7 @@
 // FLOOR: ondrix.cx_magnitude
 // FLOOR-SAME: rounding = #ondsp.rounding<toward_negative>
 
-// ELEMENT: invalid_magnitude_element.ox:2:10: error: magnitude requires complex_q15 or complex_q31 operand elements
+// ELEMENT: invalid_magnitude_element.ox:2:10: error: magnitude requires complex_q15, complex_q31, or complex_f32 operand elements
 // MISMATCH: invalid_magnitude_result.ox:2:10: error: declared result type does not match the builtin expression
 // ROUNDING: invalid_magnitude_rounding.ox:2:10: error: magnitude root_rounding must be nearest_even or toward_negative
 
@@ -55,3 +58,15 @@
 // Q31FLOOR-SAME: rounding = #ondsp.rounding<toward_negative>
 
 // NOPRESHIFT: invalid_q15_magnitude_input_rounding.ox:2:10: error: magnitude at this width has no component pre-shift to round
+
+// The contract mode is the f32 profile's only call-site choice, and it is
+// required there exactly as the tie rule is required at a fixed width.
+// F32-LABEL: func.func @f32_magnitude_spectrum
+// F32: ondrix.cx_magnitude
+// F32-SAME: layout = #ondsp.cx_layout<interleaved>
+// F32-SAME: numeric = #ondsp.fp<format = f32, contract = fma>
+// F32-SAME: (tensor<66xf32>) -> tensor<33xf32>
+// F32-NOT: rounding
+
+// F32CONTRACT: error: an f32 magnitude requires contract = off, fma, or fast
+// FIXEDCONTRACT: error: a fixed-point magnitude declares no floating-point contract

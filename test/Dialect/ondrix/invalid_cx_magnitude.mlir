@@ -80,3 +80,53 @@ func.func @q15_magnitude_with_input_rounding(%input: tensor<5xi32>) -> tensor<5x
   } : (tensor<5xi32>) -> tensor<5xi16>
   return %magnitudes : tensor<5xi16>
 }
+
+// -----
+
+// The f32 profile squares the components as they arrive; there is no
+// narrowing before the sum and so no tie rule to declare.
+func.func @f32_has_no_component_pre_shift(%input: tensor<16xf32>) -> tensor<8xf32> {
+  // expected-error @+1 {{floating-point magnitude has no component pre-shift to round}}
+  %out = ondrix.cx_magnitude %input {
+    layout = #ondsp.cx_layout<interleaved>,
+    numeric = #ondsp.fp<format = f32, contract = off>,
+    input_rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<16xf32>) -> tensor<8xf32>
+  return %out : tensor<8xf32>
+}
+
+// -----
+
+func.func @f32_root_has_no_declared_rounding(%input: tensor<16xf32>) -> tensor<8xf32> {
+  // expected-error @+1 {{floating-point magnitude rounds at no declared boundary of its own}}
+  %out = ondrix.cx_magnitude %input {
+    layout = #ondsp.cx_layout<interleaved>,
+    numeric = #ondsp.fp<format = f32, contract = off>,
+    rounding = #ondsp.rounding<nearest_even>
+  } : (tensor<16xf32>) -> tensor<8xf32>
+  return %out : tensor<8xf32>
+}
+
+// -----
+
+func.func @f32_refuses_a_packed_layout(%input: tensor<16xf32>) -> tensor<8xf32> {
+  // expected-error @+1 {{floating-point magnitude requires interleaved layout}}
+  %out = ondrix.cx_magnitude %input {
+    layout = #ondsp.cx_layout<packed_i32_imag_hi_real_lo>,
+    numeric = #ondsp.fp<format = f32, contract = off>
+  } : (tensor<16xf32>) -> tensor<8xf32>
+  return %out : tensor<8xf32>
+}
+
+// -----
+
+// The fixed-point profiles keep their root boundary: dropping the attribute
+// is an undeclared rounding, not the f32 contract.
+func.func @fixed_still_declares_its_root(%input: tensor<8xi32>) -> tensor<8xi16> {
+  // expected-error @+1 {{cx_magnitude supports toward_negative or nearest_even rounding}}
+  %out = ondrix.cx_magnitude %input {
+    layout = #ondsp.cx_layout<packed_i16_imag_hi_real_lo>,
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>
+  } : (tensor<8xi32>) -> tensor<8xi16>
+  return %out : tensor<8xi16>
+}

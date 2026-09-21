@@ -157,9 +157,9 @@ two products, so no width makes the update vacuous and the call site declares
 its carrier. At `complex_q15` it is 32 or 40 -- 32 is the one a packed complex
 target reads back -- and at `complex_q31` it is 64.
 
-`power` is the elementwise squared magnitude of a packed `complex_q15`
-tensor, so `power(rfft(x))` is the power spectrum and `magnitude` is its
-square root:
+`power` is the elementwise squared magnitude of a packed `complex_q15` or
+interleaved `complex_f32` tensor, so `power(rfft(x))` is the power spectrum
+and `magnitude` is its square root:
 
 ```python
 def q15_power_spectrum(input: tensor[q15, 256]) -> tensor[q15, 129]:
@@ -375,6 +375,23 @@ def spectrum(x: tensor[complex_f32,256]) -> tensor[complex_f32,256]:
 Naming `contract=` on a fixed-point transform is refused for the mirror
 reason.
 
+`magnitude` and `power` accept `complex_f32` operands as well, so the f32
+spectrum has the same two readouts the packed widths have and
+`magnitude(rfft(x, contract = off), contract = off)` is a whole program. A
+bin is two elements, so the result is half as long as the operand:
+
+```python
+def f32_power_spectrum(input: tensor[f32, 64]) -> tensor[f32, 33]:
+  return power(rfft(input, contract = off), contract = off)
+```
+
+Neither readout has a requantization boundary at that profile, so both
+REFUSE `rounding=`, `magnitude` also refuses `input_rounding=`, and both
+REQUIRE `contract=`. The sum of squares seeds on the real square and takes
+the imaginary one as one update, which is where the contract mode is
+observable; the root is the platform's square root, the one f32 `rms`
+already reads. `phase` keeps its fixed-point operands.
+
 Three fixed-point builtins gained a Q31 profile whose extra boundary is a
 per-call-site parameter, each required exactly where the boundary exists and
 refused where it does not:
@@ -561,7 +578,8 @@ it out is a parse error. `rounding=` keeps its usual optional form, since both
 tie rules the boundary admits are defensible.
 
 f32 dot, FIR, `matmul`, `rms`, `moving_average`, `dct`, `fir_decimate`,
-`fir_interpolate`, `gain`, `lms`, and `goertzel` support `contract=off`,
+`fir_interpolate`, `gain`, `lms`, `goertzel`, `magnitude`, and `power`
+support `contract=off`,
 `contract=fma`, and `contract=fast`; `sos_tdf2` admits only the two exact
 modes, because its operation contract has no realization gate for `fast`.
 The floating-point spellings name a contract where their

@@ -1024,9 +1024,22 @@ public:
       // root. Sema decides which of them the operand's width actually has.
       while (current.kind == TokenKind::Comma) {
         advance();
+        // The interleaved f32 profile has neither boundary, so its one axis
+        // is the contract mode; sema decides which set the operand admits.
+        if (isIdentifier("contract")) {
+          advance();
+          if (!expect(TokenKind::Equal, "expected '=' after contract"))
+            return std::nullopt;
+          auto contract = parseIdentifier("expected floating-point contract mode");
+          if (!contract)
+            return std::nullopt;
+          call.fpContract = contract->spelling.str();
+          continue;
+        }
         bool isRoot = isIdentifier("root_rounding");
         if (!isRoot && !isIdentifier("input_rounding")) {
-          diagnostics.error(current.position, "expected root_rounding or input_rounding policy");
+          diagnostics.error(current.position,
+                            "expected root_rounding, input_rounding, or contract policy");
           return std::nullopt;
         }
         advance();
@@ -1046,17 +1059,23 @@ public:
       if (!operand)
         return std::nullopt;
       call.operands.push_back(std::move(*operand));
-      // One boundary: the sum is exact, so the only choice is how it is read
-      // back at the narrower width.
+      // One choice either way: the fixed sum is exact and only its reading is
+      // open, and the f32 sum has no reading but does have a contract mode.
       if (current.kind == TokenKind::Comma) {
         advance();
-        if (!expectIdentifier("rounding", "expected rounding policy") ||
-            !expect(TokenKind::Equal, "expected '=' after rounding"))
+        bool isContract = isIdentifier("contract");
+        if (!isContract && !isIdentifier("rounding")) {
+          diagnostics.error(current.position, "expected rounding or contract policy");
           return std::nullopt;
-        auto rounding = parseIdentifier("expected rounding mode");
-        if (!rounding)
+        }
+        advance();
+        if (!expect(TokenKind::Equal, "expected '=' after the power policy"))
           return std::nullopt;
-        call.rounding = rounding->spelling.str();
+        auto mode = parseIdentifier(isContract ? "expected floating-point contract mode"
+                                               : "expected rounding mode");
+        if (!mode)
+          return std::nullopt;
+        (isContract ? call.fpContract : call.rounding) = mode->spelling.str();
       }
       if (!expect(TokenKind::RightParen, "expected ')' after power operand"))
         return std::nullopt;
@@ -3422,13 +3441,32 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return ComposedType{SourceType::Q15, input->extent};
       }
       if (call.kind == ReductionKind::Power) {
-        if (input->elementType != SourceType::ComplexQ15) {
-          diagnostics.error(call.position, "power requires complex_q15 operand elements");
+        bool interleavedFp = input->elementType == SourceType::ComplexF32;
+        if (input->elementType != SourceType::ComplexQ15 && !interleavedFp) {
+          diagnostics.error(call.position,
+                            "power requires complex_q15 or complex_f32 operand elements");
           return std::nullopt;
         }
         if (input->extent < 1 || input->extent > 4096) {
           diagnostics.error(call.position,
                             "power currently requires an operand extent in [1, 4096]");
+          return std::nullopt;
+        }
+        if (interleavedFp) {
+          if (!call.rounding.empty()) {
+            diagnostics.error(call.position, "an f32 squared magnitude has no boundary to round");
+            return std::nullopt;
+          }
+          if (!parseFpContract(call.fpContract)) {
+            diagnostics.error(call.position,
+                              "an f32 squared magnitude requires contract = off, fma, or fast");
+            return std::nullopt;
+          }
+          return ComposedType{SourceType::F32, input->extent};
+        }
+        if (!call.fpContract.empty()) {
+          diagnostics.error(call.position,
+                            "a fixed-point squared magnitude declares no floating-point contract");
           return std::nullopt;
         }
         // The sum is exact at fraction 30 and the result is read at 15, so
@@ -3446,14 +3484,33 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       if (call.kind == ReductionKind::Magnitude) {
         bool complexQ31 = input->elementType == SourceType::ComplexQ31;
-        if (input->elementType != SourceType::ComplexQ15 && !complexQ31) {
-          diagnostics.error(call.position,
-                            "magnitude requires complex_q15 or complex_q31 operand elements");
+        bool interleavedFp = input->elementType == SourceType::ComplexF32;
+        if (input->elementType != SourceType::ComplexQ15 && !complexQ31 && !interleavedFp) {
+          diagnostics.error(
+              call.position,
+              "magnitude requires complex_q15, complex_q31, or complex_f32 operand elements");
           return std::nullopt;
         }
         if (input->extent < 1 || input->extent > 4096) {
           diagnostics.error(call.position,
                             "magnitude currently requires an operand extent in [1, 4096]");
+          return std::nullopt;
+        }
+        if (interleavedFp) {
+          if (!call.rounding.empty() || !call.inputRounding.empty()) {
+            diagnostics.error(call.position, "an f32 magnitude has no boundary to round");
+            return std::nullopt;
+          }
+          if (!parseFpContract(call.fpContract)) {
+            diagnostics.error(call.position,
+                              "an f32 magnitude requires contract = off, fma, or fast");
+            return std::nullopt;
+          }
+          return ComposedType{SourceType::F32, input->extent};
+        }
+        if (!call.fpContract.empty()) {
+          diagnostics.error(call.position,
+                            "a fixed-point magnitude declares no floating-point contract");
           return std::nullopt;
         }
         if (!call.rounding.empty()) {
@@ -4621,6 +4678,15 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
             ondsp::RoundingModeAttr::get(&context, ondsp::RoundingMode::NearestEven));
       }
       if (call.kind == ReductionKind::Power) {
+        // One interleaved bin is two elements, so the readout is half as long
+        // as the operand and carries no declared boundary at all.
+        if (inputType.getElementType().isF32()) {
+          auto outputType =
+              RankedTensorType::get({inputType.getDimSize(0) / 2}, builder.getF32Type());
+          return builder.create<ir::CxPowerOp>(callLocation, outputType, input, interleavedLayout,
+                                               getFpNumeric(call), ondsp::FixedAttr(),
+                                               ondsp::RoundingModeAttr());
+        }
         auto outputType =
             RankedTensorType::get({inputType.getDimSize(0)}, builder.getIntegerType(16));
         // The export default, which is also what the packed complex unit
@@ -4634,6 +4700,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
             ondsp::RoundingModeAttr::get(&context, rounding));
       }
       if (call.kind == ReductionKind::Magnitude) {
+        if (inputType.getElementType().isF32()) {
+          auto outputType =
+              RankedTensorType::get({inputType.getDimSize(0) / 2}, builder.getF32Type());
+          return builder.create<ir::CxMagnitudeOp>(
+              callLocation, outputType, input, interleavedLayout, getFpNumeric(call),
+              ondsp::RoundingModeAttr(), ondsp::RoundingModeAttr());
+        }
         // The packed container the operand carries selects the profile, and
         // the Q31 sum of squares takes the pre-shift boundary its width
         // forces.

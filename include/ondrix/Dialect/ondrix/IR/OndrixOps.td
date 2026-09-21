@@ -1863,7 +1863,7 @@ def Ondrix_LmsOp : Ondrix_Op<"lms", [Pure]> {
 }
 
 def Ondrix_CxMagnitudeOp : Ondrix_Op<"cx_magnitude", [Pure]> {
-  let summary = "Fixed-point magnitude of a packed Q15 complex tensor";
+  let summary = "Magnitude of a packed fixed-point or interleaved f32 complex tensor";
   let description = [{
     `ondrix.cx_magnitude` computes the elementwise magnitude of a rank-1
     packed signed-Q1.15 complex tensor. For each packed element with real
@@ -1907,19 +1907,35 @@ def Ondrix_CxMagnitudeOp : Ondrix_Op<"cx_magnitude", [Pure]> {
     `nearest_even` rounding (the integer square root has no reachable
     nearest ties). `input_rounding` is refused there: an exact sum of two
     Q15 squares reaches only `2^31`.
+
+    The interleaved f32 profile is a separate contract rather than a third
+    width. One complex value is two adjacent elements of the format itself,
+    real first, so the operation maps `tensor<2Nxf32>` to `tensor<Nxf32>`
+    with `N` in `[1, 4096]`, and the transform that produces those bins is
+    the interleaved `ondrix.cfft`/`ondrix.rfft`. It carries no requantization
+    anywhere: there is no component pre-shift, no reading to declare and no
+    saturation rail, so `input_rounding` and `rounding` are both refused, and
+    the one policy axis is the format's own contract mode. The sum of squares
+    seeds on `re*re` and takes `im*im` as one accumulator update, so `off`
+    spends a second multiply and an add where `fma` and `fast` spend one
+    fused update; the root is the platform's `math.sqrt`, the same elementary
+    function the f32 `ondrix.rms` reads. `re*re + im*im` overflows where
+    `hypot` would not, which is a property of this formula and not of the
+    format: the bound is a component magnitude of `2^64`, far above every
+    spectrum the transforms produce.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_CxLayoutAttr:$layout,
                    Ondsp_NumericAttr:$numeric,
                    OptionalAttr<Ondsp_RoundingModeAttr>:$input_rounding,
-                   Ondsp_RoundingModeAttr:$rounding);
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
 def Ondrix_CxPowerOp : Ondrix_Op<"cx_power", [Pure]> {
-  let summary = "Fixed-point squared magnitude of a packed Q15 complex tensor";
+  let summary = "Squared magnitude of a packed Q15 or interleaved f32 complex tensor";
   let description = [{
     `ondrix.cx_power` computes the elementwise squared magnitude of a rank-1
     packed signed-Q1.15 complex tensor. For each packed element with
@@ -1945,11 +1961,19 @@ def Ondrix_CxPowerOp : Ondrix_Op<"cx_power", [Pure]> {
     The packed Q31 profile is deliberately absent: it would requantize each
     component before squaring, and whether restoring that scaling costs
     anything depends on the fraction the result is read at.
+
+    The interleaved f32 profile maps `tensor<2Nxf32>` to `tensor<Nxf32>`,
+    `N` in `[1, 4096]`, one complex value being two adjacent elements, real
+    first. It declares neither `output_numeric` nor `rounding`: an f32 sum
+    names its own reading and has no boundary to round. Its one policy axis
+    is the format's contract mode, which decides whether the second square
+    is a separate multiply and add or one fused update, and it is the same
+    sum `ondrix.cx_magnitude` takes the root of at that profile.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_CxLayoutAttr:$layout,
                    Ondsp_NumericAttr:$numeric,
-                   Ondsp_FixedAttr:$output_numeric,
+                   OptionalAttr<Ondsp_FixedAttr>:$output_numeric,
                    OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;

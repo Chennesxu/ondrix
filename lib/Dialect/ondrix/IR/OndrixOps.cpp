@@ -1935,7 +1935,38 @@ LogicalResult LmsOp::verify() {
   return success();
 }
 
+// The interleaved f32 complex readouts share one shape rule and one refusal:
+// a complex value is two adjacent elements, so an N-bin readout reads 2N of
+// them, and no member of the profile has a requantization boundary.
+static LogicalResult
+verifyInterleavedFpComplexReadout(Operation *op, ondrix::ondsp::CxLayoutAttr layout,
+                                  ondrix::ondsp::FpAttr numeric, RankedTensorType inputType,
+                                  RankedTensorType resultType, StringRef executable) {
+  if (layout.getLayout() != ondrix::ondsp::ComplexLayout::Interleaved)
+    return op->emitOpError() << "floating-point " << executable << " requires interleaved layout";
+  if (failed(ondrix::ondsp::verifyExecutableFpFormat(op, numeric, executable)))
+    return failure();
+  if (failed(verifyUnencodedTensorTypes(op, {inputType, resultType})))
+    return failure();
+  int64_t bins = getStaticExtent(resultType);
+  if (bins == ShapedType::kDynamic || bins < 1 || bins > 4096 ||
+      getStaticExtent(inputType) != 2 * bins || inputType.getElementType() != numeric.getFormat() ||
+      resultType.getElementType() != numeric.getFormat())
+    return op->emitOpError() << "executable floating-point " << executable
+                             << " requires tensor<2Nxf32> to tensor<Nxf32> with static N in "
+                                "[1, 4096]";
+  return success();
+}
+
 LogicalResult CxMagnitudeOp::verify() {
+  if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric())) {
+    if (getInputRounding())
+      return emitOpError("floating-point magnitude has no component pre-shift to round");
+    if (getRounding())
+      return emitOpError("floating-point magnitude rounds at no declared boundary of its own");
+    return verifyInterleavedFpComplexReadout(getOperation(), getLayout(), fp, getInput().getType(),
+                                             getResult().getType(), "magnitude");
+  }
   std::optional<ondrix::ondsp::PackedComplexProfile> profile =
       ondrix::ondsp::getPackedComplexProfile(getLayout().getLayout());
   if (!profile)
@@ -1957,9 +1988,8 @@ LogicalResult CxMagnitudeOp::verify() {
   if (getInputRounding() && *getInputRounding() != ondrix::ondsp::RoundingMode::TowardNegative &&
       *getInputRounding() != ondrix::ondsp::RoundingMode::NearestEven)
     return emitOpError("cx_magnitude input_rounding supports toward_negative or nearest_even");
-  ondrix::ondsp::RoundingMode rounding = getRounding();
-  if (rounding != ondrix::ondsp::RoundingMode::TowardNegative &&
-      rounding != ondrix::ondsp::RoundingMode::NearestEven)
+  if (!getRounding() || (*getRounding() != ondrix::ondsp::RoundingMode::TowardNegative &&
+                         *getRounding() != ondrix::ondsp::RoundingMode::NearestEven))
     return emitOpError("cx_magnitude supports toward_negative or nearest_even rounding");
   RankedTensorType inputType = getInput().getType();
   RankedTensorType resultType = getResult().getType();
@@ -1978,6 +2008,16 @@ LogicalResult CxMagnitudeOp::verify() {
 }
 
 LogicalResult CxPowerOp::verify() {
+  if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric())) {
+    if (getOutputNumeric())
+      return emitOpError("floating-point squared magnitude names its own reading and declares no "
+                         "output_numeric");
+    if (getRounding())
+      return emitOpError(
+          "floating-point squared magnitude rounds at no declared boundary of its own");
+    return verifyInterleavedFpComplexReadout(getOperation(), getLayout(), fp, getInput().getType(),
+                                             getResult().getType(), "squared magnitude");
+  }
   std::optional<ondrix::ondsp::PackedComplexProfile> profile =
       ondrix::ondsp::getPackedComplexProfile(getLayout().getLayout());
   if (!profile || profile->storageWidth != 16)
@@ -1985,7 +2025,7 @@ LogicalResult CxPowerOp::verify() {
   if (failed(verifySignedFixedFormat(getOperation(), getNumeric(), 16, 15, "numeric")))
     return failure();
 
-  auto output = dyn_cast<ondrix::ondsp::FixedAttr>(getOutputNumeric());
+  ondrix::ondsp::FixedAttr output = getOutputNumericAttr();
   auto outputStorage = output ? dyn_cast<IntegerType>(output.getStorage()) : nullptr;
   if (!output || output.getSignedness() != ondrix::ondsp::Signedness::Signed || !outputStorage ||
       (outputStorage.getWidth() != 16 && outputStorage.getWidth() != 32))
@@ -2026,7 +2066,7 @@ LogicalResult CxPhaseOp::verify() {
                        "#ondsp.fixed<signed, storage = i32, frac = 31>");
   // The turn width is declared on its own, independent of the component
   // width: each turn profile is its own construction, not a rescaling.
-  ondrix::ondsp::FixedAttr output = getOutputNumeric();
+  ondrix::ondsp::FixedAttr output = getOutputNumericAttr();
   unsigned turnWidth = output.getStorage().isSignlessInteger(32) ? 32 : 16;
   if (output.getSignedness() != ondrix::ondsp::Signedness::Unsigned ||
       !output.getStorage().isSignlessInteger(turnWidth) || output.getFrac() != turnWidth)

@@ -15,6 +15,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -1720,15 +1721,59 @@ public:
   }
 };
 
+// One interleaved f32 bin's sum of squares. The sum seeds on the first
+// product rather than on +0.0, so `off` spends one multiply and one add after
+// it and the fused modes spend a single update.
+static Value createInterleavedFpSquaredMagnitude(Location loc, Value input, Value bin,
+                                                 ondrix::ondsp::FpAttr numeric,
+                                                 OpBuilder &builder) {
+  Value two = builder.create<arith::ConstantIndexOp>(loc, 2);
+  Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
+  Value realIndex = builder.create<arith::MulIOp>(loc, bin, two);
+  Value imaginaryIndex = builder.create<arith::AddIOp>(loc, realIndex, one);
+  Value real = builder.create<tensor::ExtractOp>(loc, input, realIndex);
+  Value imaginary = builder.create<tensor::ExtractOp>(loc, input, imaginaryIndex);
+  Value sum = createFpMultiply(loc, real, real, builder);
+  return createFpAccumulatorUpdate(loc, imaginary, imaginary, sum, numeric, builder);
+}
+
+// The two interleaved f32 readouts are the same loop over the same sum; only
+// the root separates them.
+static LogicalResult lowerInterleavedFpComplexReadout(Operation *op, Value input,
+                                                      ondrix::ondsp::FpAttr numeric, bool takeRoot,
+                                                      ConversionPatternRewriter &rewriter) {
+  Location loc = op->getLoc();
+  auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
+  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value step = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value bins = rewriter.create<arith::ConstantIndexOp>(loc, resultType.getDimSize(0));
+  Value empty =
+      rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+  auto loop = rewriter.create<scf::ForOp>(
+      loc, zero, bins, step, ValueRange{empty},
+      [&](OpBuilder &builder, Location bodyLoc, Value bin, ValueRange iterArgs) {
+        Value value = createInterleavedFpSquaredMagnitude(bodyLoc, input, bin, numeric, builder);
+        if (takeRoot)
+          value = builder.create<math::SqrtOp>(bodyLoc, value);
+        Value updated = builder.create<tensor::InsertOp>(bodyLoc, value, iterArgs.front(), bin);
+        builder.create<scf::YieldOp>(bodyLoc, updated);
+      });
+  rewriter.replaceOp(op, loop.getResult(0));
+  return success();
+}
+
 class CxPowerOpLowering final : public OpConversionPattern<ondrix::ir::CxPowerOp> {
 public:
   using OpConversionPattern<ondrix::ir::CxPowerOp>::OpConversionPattern;
 
   LogicalResult matchAndRewrite(ondrix::ir::CxPowerOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric()))
+      return lowerInterleavedFpComplexReadout(op, adaptor.getInput(), fp, /*takeRoot=*/false,
+                                              rewriter);
     Location loc = op.getLoc();
     MLIRContext *context = rewriter.getContext();
-    auto output = cast<ondrix::ondsp::FixedAttr>(op.getOutputNumeric());
+    ondrix::ondsp::FixedAttr output = op.getOutputNumericAttr();
     auto numeric = cast<ondrix::ondsp::FixedAttr>(op.getNumeric());
     // The shift is the distance between the exact sum's fraction and the one
     // the result is declared at; the verifier already refused the other
@@ -1766,10 +1811,13 @@ public:
 
   LogicalResult matchAndRewrite(ondrix::ir::CxMagnitudeOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric()))
+      return lowerInterleavedFpComplexReadout(op, adaptor.getInput(), fp, /*takeRoot=*/true,
+                                              rewriter);
     Location loc = op.getLoc();
     MLIRContext *context = rewriter.getContext();
     IntegerType i64 = rewriter.getIntegerType(64);
-    auto roundingAttr = ondrix::ondsp::RoundingModeAttr::get(context, op.getRounding());
+    auto roundingAttr = ondrix::ondsp::RoundingModeAttr::get(context, *op.getRounding());
     ondrix::ondsp::PackedComplexProfile profile =
         *ondrix::ondsp::getPackedComplexProfile(op.getLayout().getLayout());
     IntegerType component = rewriter.getIntegerType(profile.storageWidth);
