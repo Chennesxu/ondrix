@@ -994,21 +994,34 @@ public:
       call.operands.push_back(std::move(*operand));
       if (current.kind == TokenKind::Comma) {
         advance();
-        std::optional<Token> name = parseIdentifier("expected phase turn width");
-        if (!name || name->spelling != "turn" ||
-            !expect(TokenKind::Equal, "expected '=' after turn")) {
-          if (name && name->spelling != "turn")
-            diagnostics.error(name->position, "phase accepts only turn=q15 or turn=q31");
-          return std::nullopt;
+        // The interleaved f32 turn is the format's own, so that profile spells
+        // a contract mode where the fixed widths spell a turn width.
+        if (isIdentifier("contract")) {
+          advance();
+          if (!expect(TokenKind::Equal, "expected '=' after contract"))
+            return std::nullopt;
+          std::optional<Token> contract = parseIdentifier("expected floating-point contract mode");
+          if (!contract)
+            return std::nullopt;
+          call.fpContract = contract->spelling.str();
+        } else {
+          std::optional<Token> name = parseIdentifier("expected phase turn width");
+          if (!name || name->spelling != "turn" ||
+              !expect(TokenKind::Equal, "expected '=' after turn")) {
+            if (name && name->spelling != "turn")
+              diagnostics.error(name->position,
+                                "phase accepts only turn=q15, turn=q31, or contract=");
+            return std::nullopt;
+          }
+          std::optional<Token> width = parseIdentifier("expected phase turn width");
+          if (!width)
+            return std::nullopt;
+          if (width->spelling != "q15" && width->spelling != "q31") {
+            diagnostics.error(width->position, "phase accepts only turn=q15 or turn=q31");
+            return std::nullopt;
+          }
+          call.turn = width->spelling.str();
         }
-        std::optional<Token> width = parseIdentifier("expected phase turn width");
-        if (!width)
-          return std::nullopt;
-        if (width->spelling != "q15" && width->spelling != "q31") {
-          diagnostics.error(width->position, "phase accepts only turn=q15 or turn=q31");
-          return std::nullopt;
-        }
-        call.turn = width->spelling.str();
       }
       if (!expect(TokenKind::RightParen, "expected ')' after phase operand"))
         return std::nullopt;
@@ -3423,15 +3436,34 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
 
       if (call.kind == ReductionKind::Phase) {
+        bool interleavedFp = input->elementType == SourceType::ComplexF32;
         if (input->elementType != SourceType::ComplexQ15 &&
-            input->elementType != SourceType::ComplexQ31) {
-          diagnostics.error(call.position,
-                            "phase requires complex_q15 or complex_q31 operand elements");
+            input->elementType != SourceType::ComplexQ31 && !interleavedFp) {
+          diagnostics.error(
+              call.position,
+              "phase requires complex_q15, complex_q31, or complex_f32 operand elements");
           return std::nullopt;
         }
         if (input->extent < 1 || input->extent > 4096) {
           diagnostics.error(call.position,
                             "phase currently requires an operand extent in [1, 4096]");
+          return std::nullopt;
+        }
+        if (interleavedFp) {
+          if (!call.turn.empty()) {
+            diagnostics.error(call.position,
+                              "an f32 phase returns the format's own turn and names no width");
+            return std::nullopt;
+          }
+          if (!parseFpContract(call.fpContract)) {
+            diagnostics.error(call.position, "an f32 phase requires contract = off, fma, or fast");
+            return std::nullopt;
+          }
+          return ComposedType{SourceType::F32, input->extent};
+        }
+        if (!call.fpContract.empty()) {
+          diagnostics.error(call.position,
+                            "a fixed-point phase declares no floating-point contract");
           return std::nullopt;
         }
         // The turn width is the call site's, independent of the component
@@ -4664,6 +4696,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       }
       Location callLocation = getLocation(context, sourceName, call.position);
       if (call.kind == ReductionKind::Phase) {
+        if (inputType.getElementType().isF32()) {
+          auto outputType =
+              RankedTensorType::get({inputType.getDimSize(0) / 2}, builder.getF32Type());
+          return builder.create<ir::CxPhaseOp>(callLocation, outputType, input, interleavedLayout,
+                                               getFpNumeric(call), ondsp::FixedAttr(),
+                                               ondsp::RoundingModeAttr());
+        }
         // The result reading is the unsigned turn at the declared width; the
         // source type system names only the storage, so the binding supplies
         // the reading — the same projection log2/exp2 use.

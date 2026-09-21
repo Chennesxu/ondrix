@@ -6,6 +6,8 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_phase_turn.ox 2>&1 | FileCheck %s --check-prefix=TURN
 // RUN: not ondrix-compile %S/Inputs/invalid_phase_element.ox 2>&1 | FileCheck %s --check-prefix=ELEMENT
 // RUN: not ondrix-compile %S/Inputs/invalid_phase_rounding.ox 2>&1 | FileCheck %s --check-prefix=ROUNDING
+// RUN: ondrix-compile %S/Inputs/f32_phase_spectrum.ox | FileCheck %s --check-prefix=F32
+// RUN: not ondrix-compile %S/Inputs/invalid_f32_phase_turn.ox 2>&1 | FileCheck %s --check-prefix=F32TURN
 
 // The result reading is the unsigned Q0.16 turn, supplied by the binding
 // because the source type system names only the i16 storage.
@@ -26,7 +28,7 @@
 // Q31-SAME: numeric = #ondsp.fixed<signed, storage = i32, frac = 31>
 // Q31-SAME: output_numeric = #ondsp.fixed<unsigned, storage = i16, frac = 16>
 
-// ELEMENT: error: phase requires complex_q15 or complex_q31 operand elements
+// ELEMENT: error: phase requires complex_q15, complex_q31, or complex_f32 operand elements
 
 // The turn width is the one call-site choice, independent of the component
 // width; q31 names the i32 storage of the Q0.32 turn the Q31 sine reads.
@@ -40,7 +42,18 @@
 // WIDE32: ondrix.cx_phase
 // WIDE32-SAME: output_numeric = #ondsp.fixed<unsigned, storage = i32, frac = 32>
 
-// The contract admits exactly one tie rule, so there is no rounding
+// The fixed contract admits exactly one tie rule, so there is no rounding
 // parameter to accept, and the turn takes only the two widths that exist.
-// ROUNDING: error: phase accepts only turn=q15 or turn=q31
+// ROUNDING: error: phase accepts only turn=q15, turn=q31, or contract=
 // TURN: error: phase accepts only turn=q15 or turn=q31
+
+// The f32 turn is the format's own, so that profile names a contract mode
+// where the fixed widths name a width, and naming a width there is refused.
+// F32-LABEL: func.func @f32_phase_spectrum
+// F32: ondrix.cx_phase
+// F32-SAME: layout = #ondsp.cx_layout<interleaved>
+// F32-SAME: numeric = #ondsp.fp<format = f32, contract = off>
+// F32-SAME: (tensor<66xf32>) -> tensor<33xf32>
+// F32-NOT: output_numeric
+
+// F32TURN: error: an f32 phase returns the format's own turn and names no width

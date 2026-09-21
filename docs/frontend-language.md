@@ -390,7 +390,8 @@ REFUSE `rounding=`, `magnitude` also refuses `input_rounding=`, and both
 REQUIRE `contract=`. The sum of squares seeds on the real square and takes
 the imaginary one as one update, which is where the contract mode is
 observable; the root is the platform's square root, the one f32 `rms`
-already reads. `phase` keeps its fixed-point operands.
+already reads. `phase` takes the same operands, under the reading described
+with the fixed-point spelling below.
 
 Three fixed-point builtins gained a Q31 profile whose extra boundary is a
 per-call-site parameter, each required exactly where the boundary exists and
@@ -412,7 +413,8 @@ All four admit `nearest_even` and `toward_negative`; `matmul` additionally
 admits `nearest_ties_positive`, and `lms` does not. Omission keeps the
 `nearest_even` default. Of the remaining fixed-point builtins only
 `butterfly` is Q15-only; `log2` and `exp2` take `q31`, and `phase` takes
-`complex_q15` or `complex_q31` operands and either turn width (see below).
+`complex_q15`, `complex_q31` or `complex_f32` operands, either turn width at
+the fixed widths and the format's own turn at f32 (see below).
 
 `nlms(x, d, w, step_size=mu, epsilon=eps)` is the normalized recursion at
 `q15`: per sample the tap window's exact energy `sum x[n-k]^2` is requantized
@@ -578,8 +580,8 @@ it out is a parse error. `rounding=` keeps its usual optional form, since both
 tie rules the boundary admits are defensible.
 
 f32 dot, FIR, `matmul`, `rms`, `moving_average`, `dct`, `fir_decimate`,
-`fir_interpolate`, `gain`, `lms`, `goertzel`, `magnitude`, and `power`
-support `contract=off`,
+`fir_interpolate`, `gain`, `lms`, `goertzel`, `magnitude`, `power`, and
+`phase` support `contract=off`,
 `contract=fma`, and `contract=fast`; `sos_tdf2` admits only the two exact
 modes, because its operation contract has no realization gate for `fast`.
 The floating-point spellings name a contract where their
@@ -641,15 +643,24 @@ uses. Neither is part of the composable set yet, so like `dct`, `rms`,
 `sine`, and `cosine` they take an operand name rather than a nested
 expression.
 
-`phase(z)` maps a `complex_q15` or `complex_q31` tensor to the unsigned turn
-its elements' arguments name, in the reading `sine` consumes. It composes
-exactly where `magnitude` does — `phase(rfft(x))` is the phase spectrum. The
-one call-site choice is the turn width, independent of the component width:
-`phase(z)` and `phase(z, turn=q15)` return the `Q0.16` turn in `q15` storage
-for the Q15 sine, `phase(z, turn=q31)` the `Q0.32` turn in `q31` storage for
-the Q31 sine. Its contract admits exactly one tie rule, so unlike
-`magnitude`'s `root_rounding=` there is no rounding parameter to accept, and
-spelling one is an error.
+`phase(z)` maps a `complex_q15`, `complex_q31` or `complex_f32` tensor to
+the unsigned turn its elements' arguments name, in the reading `sine`
+consumes. It composes exactly where `magnitude` does — `phase(rfft(x))` is
+the phase spectrum. At the fixed widths the one call-site choice is the turn
+width, independent of the component width: `phase(z)` and
+`phase(z, turn=q15)` return the `Q0.16` turn in `q15` storage for the Q15
+sine, `phase(z, turn=q31)` the `Q0.32` turn in `q31` storage for the Q31
+sine. Their contract admits exactly one tie rule, so unlike `magnitude`'s
+`root_rounding=` there is no rounding parameter to accept, and spelling one
+is an error.
+
+`complex_f32` is the same quantity without the scaling: `phase(z,
+contract=...)` returns the turn as an `f32` in `[0, 1)`, so there is no width
+to name and `turn=` is refused there exactly as `contract=` is refused at the
+fixed widths. It is a bit-determined function of its input like every other
+Ondrix contract — a ratio, a nine-term polynomial and exact power-of-two
+folds, not a call into the platform's `atan2`, whose result is not required
+to be correctly rounded and differs between libraries.
 
 ### Elementwise Builtins
 

@@ -2060,6 +2060,15 @@ LogicalResult CxPowerOp::verify() {
 }
 
 LogicalResult CxPhaseOp::verify() {
+  if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric())) {
+    if (getOutputNumeric())
+      return emitOpError(
+          "the floating-point turn is the format's own and declares no output_numeric");
+    if (getRounding())
+      return emitOpError("floating-point phase rounds at no declared boundary of its own");
+    return verifyInterleavedFpComplexReadout(getOperation(), getLayout(), fp, getInput().getType(),
+                                             getResult().getType(), "phase");
+  }
   std::optional<unsigned> componentWidth = getUniformQStorageWidth(getNumeric());
   if (!componentWidth)
     return emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
@@ -2067,8 +2076,8 @@ LogicalResult CxPhaseOp::verify() {
   // The turn width is declared on its own, independent of the component
   // width: each turn profile is its own construction, not a rescaling.
   ondrix::ondsp::FixedAttr output = getOutputNumericAttr();
-  unsigned turnWidth = output.getStorage().isSignlessInteger(32) ? 32 : 16;
-  if (output.getSignedness() != ondrix::ondsp::Signedness::Unsigned ||
+  unsigned turnWidth = output && output.getStorage().isSignlessInteger(32) ? 32 : 16;
+  if (!output || output.getSignedness() != ondrix::ondsp::Signedness::Unsigned ||
       !output.getStorage().isSignlessInteger(turnWidth) || output.getFrac() != turnWidth)
     return emitOpError(
         "cx_phase returns the unsigned Q0.16 or Q0.32 turn and must declare that reading");

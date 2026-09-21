@@ -1981,7 +1981,7 @@ def Ondrix_CxPowerOp : Ondrix_Op<"cx_power", [Pure]> {
 }
 
 def Ondrix_CxPhaseOp : Ondrix_Op<"cx_phase", [Pure]> {
-  let summary = "Fixed-point phase of a packed complex tensor, as a turn";
+  let summary = "Phase of a packed or interleaved complex tensor, as a turn";
   let description = [{
     `ondrix.cx_phase` maps each packed signed-Q1.(W-1) complex element, `W`
     of 16 or 32, to its argument, expressed in the unsigned turn
@@ -2056,12 +2056,55 @@ def Ondrix_CxPhaseOp : Ondrix_Op<"cx_phase", [Pure]> {
     the gate enforces that one-LSB bound at both
     component widths alongside bit-exactness against a restatement. The axes
     and diagonals are exact at both turn widths.
+
+    ### The interleaved f32 turn: one polynomial over the folded octant
+
+    The f32 profile keeps the same quantity -- the argument as a turn -- and
+    drops the scaling: the result is `atan2(im, re) / (2*pi)` reduced modulo
+    one, an `f32` in `[0, 1)`, and the operation maps `tensor<2Nxf32>` to
+    `tensor<Nxf32>` with `N` in `[1, 4096]`. There is no turn width to
+    declare and no requantization boundary, so `output_numeric` and
+    `rounding` are both refused and the policy axis is the format's contract
+    mode, which the polynomial's Horner chain spends.
+
+    ```text
+    a, b   = |re|, |im|
+    hi, lo = max(a,b), min(a,b)             hi = 1 at the origin, whose
+                                            declared turn is +0.0
+    r      = lo / hi                        in [0, 1]
+    t      = r * g(r*r)                     ~ atan(r)/(2*pi), in [0, 1/8]
+    q      = b > a ? 0.25 - t : t           the octant fold
+    turn   = re >= 0 ? (im >= 0 ? q : 1 - q) : (im >= 0 ? 0.5 - q : 0.5 + q)
+    ```
+
+    The fold needs no range reduction, no table and no second division,
+    because the fold already confines the ratio to `[0, 1]`, where nine
+    minimax terms sit `1.5e-8` relative from the real arctangent -- a quarter
+    of a binary32 epsilon (`scripts/generate-f32-arctangent-turn.py` derives
+    them and `ondrix/Support/F32ArctangentTurn.h` freezes them). Every fold
+    and unfold constant is a negative power of two, so the eight octants meet
+    exactly at the axes and diagonals rather than nearly, and a fourth-
+    quadrant turn that would round up to `1.0` is returned as `+0.0`, the
+    same angle and the only one of the two inside the half-open turn.
+
+    Measured against a binary64 `atan2` over about thirty million pairs --
+    four million on the unit circle, four million dense around the eight
+    diagonals, and twenty million spanning a hundred and twenty binary
+    octaves -- the result is never more than `5.85e-8` turns from the exact
+    argument, which is `0.98` of `2^-24`, the binary32 step just below one,
+    and it is the correctly rounded turn at 82% of the circle and 91% of the
+    scattered corpus. The gate enforces `2^-23`, two of those steps, because
+    the reachable budget is wider than the measurement: the unfold alone
+    spends half a step where the result lands in `[0.5, 1)` and the format
+    itself is that coarse. On the four axes and four diagonals the result is
+    EXACT. Like the fixed widths this contract is NOT gated exhaustively,
+    and the gate records the structure it covers instead.
   }];
   let arguments = (ins AnyRankedTensor:$input,
                    Ondsp_CxLayoutAttr:$layout,
                    Ondsp_NumericAttr:$numeric,
-                   Ondsp_FixedAttr:$output_numeric,
-                   Ondsp_RoundingModeAttr:$rounding);
+                   OptionalAttr<Ondsp_FixedAttr>:$output_numeric,
+                   OptionalAttr<Ondsp_RoundingModeAttr>:$rounding);
   let results = (outs AnyRankedTensor:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

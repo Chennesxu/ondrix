@@ -5,6 +5,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
+#include "ondrix/Support/F32ArctangentTurn.h"
 #include "ondrix/Support/GuardedFixedQuantization.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -453,7 +454,7 @@ static LogicalResult lowerWideTurnCxPhase(ondrix::ir::CxPhaseOp op, Value input,
   int64_t extent = resultType.getDimSize(0);
   auto turnScale =
       ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, /*postShiftRight=*/33,
-                                    op.getRounding(), ondrix::ondsp::OverflowMode::Saturate, i32);
+                                    *op.getRounding(), ondrix::ondsp::OverflowMode::Saturate, i32);
   Value tableConstant = rewriter.create<arith::ConstantOp>(
       loc,
       DenseElementsAttr::get(RankedTensorType::get({1025}, i32), llvm::ArrayRef<int32_t>(*table)));
@@ -563,18 +564,94 @@ static LogicalResult lowerWideTurnCxPhase(ondrix::ir::CxPhaseOp op, Value input,
   return success();
 }
 
+// The interleaved f32 turn. The octant fold leaves the ratio inside [0, 1],
+// which one polynomial covers, and every fold and unfold constant is a
+// negative power of two, so only the ratio and the polynomial round.
+static LogicalResult lowerInterleavedFpCxPhase(ondrix::ir::CxPhaseOp op, Value input,
+                                               ondrix::ondsp::FpAttr numeric,
+                                               ConversionPatternRewriter &rewriter) {
+  Location loc = op.getLoc();
+  RankedTensorType resultType = op.getResult().getType();
+  Type element = numeric.getFormat();
+  Value zeroIndex = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value oneIndex = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value twoIndex = rewriter.create<arith::ConstantIndexOp>(loc, 2);
+  Value bins = rewriter.create<arith::ConstantIndexOp>(loc, resultType.getDimSize(0));
+  Value empty = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), element);
+  auto loop = rewriter.create<scf::ForOp>(
+      loc, zeroIndex, bins, oneIndex, ValueRange{empty},
+      [&](OpBuilder &builder, Location bodyLoc, Value bin, ValueRange iterArgs) {
+        auto constant = [&](double value) -> Value {
+          return builder.create<arith::ConstantOp>(bodyLoc, builder.getFloatAttr(element, value));
+        };
+        Value realIndex = builder.create<arith::MulIOp>(bodyLoc, bin, twoIndex);
+        Value imaginaryIndex = builder.create<arith::AddIOp>(bodyLoc, realIndex, oneIndex);
+        Value real = builder.create<tensor::ExtractOp>(bodyLoc, input, realIndex);
+        Value imaginary = builder.create<tensor::ExtractOp>(bodyLoc, input, imaginaryIndex);
+        Value zero = constant(0.0);
+        Value absoluteReal = builder.create<math::AbsFOp>(bodyLoc, real);
+        Value absoluteImaginary = builder.create<math::AbsFOp>(bodyLoc, imaginary);
+        Value folded = builder.create<arith::CmpFOp>(bodyLoc, arith::CmpFPredicate::OGT,
+                                                     absoluteImaginary, absoluteReal);
+        Value high =
+            builder.create<arith::SelectOp>(bodyLoc, folded, absoluteImaginary, absoluteReal);
+        Value low =
+            builder.create<arith::SelectOp>(bodyLoc, folded, absoluteReal, absoluteImaginary);
+        // The origin is the one input with no ratio. Substituting a unit
+        // divisor there carries it to the declared turn through the same
+        // arithmetic instead of selecting on the result.
+        Value atOrigin =
+            builder.create<arith::CmpFOp>(bodyLoc, arith::CmpFPredicate::OEQ, high, zero);
+        Value denominator = builder.create<arith::SelectOp>(bodyLoc, atOrigin, constant(1.0), high);
+        Value ratio = builder.create<arith::DivFOp>(bodyLoc, low, denominator);
+        Value square = builder.create<arith::MulFOp>(bodyLoc, ratio, ratio);
+        llvm::ArrayRef<float> coefficients = ondrix::getF32ArctangentTurnCoefficients();
+        Value accumulator = constant(coefficients.back());
+        for (size_t index = coefficients.size() - 1; index-- > 0;)
+          accumulator = createFpAccumulatorUpdate(bodyLoc, square, accumulator,
+                                                  constant(coefficients[index]), numeric, builder);
+        Value eighth = builder.create<arith::MulFOp>(bodyLoc, ratio, accumulator);
+        Value octant = builder.create<arith::SelectOp>(
+            bodyLoc, folded, builder.create<arith::SubFOp>(bodyLoc, constant(0.25), eighth),
+            eighth);
+        Value positiveImaginary =
+            builder.create<arith::CmpFOp>(bodyLoc, arith::CmpFPredicate::OGE, imaginary, zero);
+        // A fourth-quadrant turn that rounds up to 1.0 is the same angle as
+        // +0.0, and only +0.0 is inside the half-open turn.
+        Value reflected = builder.create<arith::SubFOp>(bodyLoc, constant(1.0), octant);
+        Value wrapped = builder.create<arith::CmpFOp>(bodyLoc, arith::CmpFPredicate::OEQ, reflected,
+                                                      constant(1.0));
+        reflected = builder.create<arith::SelectOp>(bodyLoc, wrapped, zero, reflected);
+        Value right =
+            builder.create<arith::SelectOp>(bodyLoc, positiveImaginary, octant, reflected);
+        Value left = builder.create<arith::SelectOp>(
+            bodyLoc, positiveImaginary,
+            builder.create<arith::SubFOp>(bodyLoc, constant(0.5), octant),
+            builder.create<arith::AddFOp>(bodyLoc, constant(0.5), octant));
+        Value positiveReal =
+            builder.create<arith::CmpFOp>(bodyLoc, arith::CmpFPredicate::OGE, real, zero);
+        Value turn = builder.create<arith::SelectOp>(bodyLoc, positiveReal, right, left);
+        Value updated = builder.create<tensor::InsertOp>(bodyLoc, turn, iterArgs.front(), bin);
+        builder.create<scf::YieldOp>(bodyLoc, updated);
+      });
+  rewriter.replaceOp(op, loop.getResult(0));
+  return success();
+}
+
 class CxPhaseOpLowering final : public OpConversionPattern<ondrix::ir::CxPhaseOp> {
 public:
   using OpConversionPattern<ondrix::ir::CxPhaseOp>::OpConversionPattern;
 
   LogicalResult matchAndRewrite(ondrix::ir::CxPhaseOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    if (auto fp = dyn_cast<ondrix::ondsp::FpAttr>(op.getNumeric()))
+      return lowerInterleavedFpCxPhase(op, adaptor.getInput(), fp, rewriter);
     // The ratio division below writes nearest-even inline (its divisor is a
     // runtime value, so round_div cannot carry it). Same self-guard as exp2:
     // one operation must not follow two tie rules without a diagnostic.
-    if (op.getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
+    if (*op.getRounding() != ondrix::ondsp::RoundingMode::NearestEven)
       return rewriter.notifyMatchFailure(op, "cx_phase lowering implements nearest_even only");
-    if (op.getOutputNumeric().getStorage().isSignlessInteger(32))
+    if (op.getOutputNumericAttr().getStorage().isSignlessInteger(32))
       return lowerWideTurnCxPhase(op, adaptor.getInput(), rewriter);
     std::optional<SmallVector<int32_t>> table = buildArctangentTable();
     if (!table)
@@ -596,9 +673,9 @@ public:
     IntegerType work = rewriter.getIntegerType(profile.containerWidth);
     RankedTensorType resultType = op.getResult().getType();
     int64_t extent = resultType.getDimSize(0);
-    auto interpolation =
-        ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0, /*postShiftRight=*/9,
-                                      op.getRounding(), ondrix::ondsp::OverflowMode::Saturate, i32);
+    auto interpolation = ondrix::ondsp::ScaleAttr::get(context, /*preShiftLeft=*/0,
+                                                       /*postShiftRight=*/9, *op.getRounding(),
+                                                       ondrix::ondsp::OverflowMode::Saturate, i32);
 
     Value tableConstant = rewriter.create<arith::ConstantOp>(
         loc,
