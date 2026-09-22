@@ -13,5 +13,6 @@ add_ondrix_library(OndrixScalarizeFixedReduceMac
   MLIRSCFDialect
   OndrixConversionUtils
   OndrixFixedPointPrefixRangeAnalysis
+  OndrixReductionWindowAnalysis
   OndspIR
 )

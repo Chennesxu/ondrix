@@ -35,3 +35,18 @@ add_ondrix_library(OndrixCanonicalTwiddleAnalysis
   OndrixConstantSequenceAnalysis
   OndspIR
 )
+
+add_ondrix_library(OndrixReductionWindowAnalysis
+  ReductionWindowAnalysis.cpp
+
+  PARTIAL_SOURCES_INTENDED
+
+  LINK_LIBS PUBLIC
+  MLIRArithDialect
+  MLIRIR
+  MLIRMemRefDialect
+  MLIRSCFDialect
+  MLIRSupport
+  MLIRTensorDialect
+  OndspIR
+)

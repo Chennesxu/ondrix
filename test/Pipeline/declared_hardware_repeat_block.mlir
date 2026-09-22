@@ -5,14 +5,17 @@
 // The straight-line reduction form pays for itself by deleting the index
 // update and the branch. A declared repeat block has already deleted both, so
 // the budgets drop to one term and the counted loop survives for it to claim.
+// That is a blunt instrument -- a reduction carrying nothing across a loop
+// still wins unrolled -- which is what `max-carried-window` exists to refine;
+// it stays 0 here because no target has declared one.
 
-// NOBLOCK: scalarize-ondsp-certified-constant-reduce{max-elements=256 max-unrolled-terms=128 scalar-register-bits=32}
-// NOBLOCK: scalarize-ondsp-fixed-reduce-mac{max-unrolled-terms=128}
-// NOBLOCK: unroll-ondsp-fixed-mac-loops{max-unrolled-terms=128}
+// NOBLOCK: scalarize-ondsp-certified-constant-reduce{max-carried-window=0 max-elements=256 max-unrolled-terms=128 scalar-register-bits=32}
+// NOBLOCK: scalarize-ondsp-fixed-reduce-mac{max-carried-window=0 max-unrolled-terms=128}
+// NOBLOCK: unroll-ondsp-fixed-mac-loops{max-carried-window=0 max-unrolled-terms=128}
 // NOBLOCK: unroll-ondsp-fp-ordered-reduce{{.*}}max-straight-line-terms=256 max-unrolled-terms=512
-// BLOCK: scalarize-ondsp-certified-constant-reduce{max-elements=256 max-unrolled-terms=1 scalar-register-bits=32}
-// BLOCK: scalarize-ondsp-fixed-reduce-mac{max-unrolled-terms=1}
-// BLOCK: unroll-ondsp-fixed-mac-loops{max-unrolled-terms=1}
+// BLOCK: scalarize-ondsp-certified-constant-reduce{max-carried-window=0 max-elements=256 max-unrolled-terms=1 scalar-register-bits=32}
+// BLOCK: scalarize-ondsp-fixed-reduce-mac{max-carried-window=0 max-unrolled-terms=1}
+// BLOCK: unroll-ondsp-fixed-mac-loops{max-carried-window=0 max-unrolled-terms=1}
 // BLOCK: unroll-ondsp-fp-ordered-reduce{{.*}}max-straight-line-terms=1 max-unrolled-terms=1
 
 // The budget is not bookkeeping: under it the 64 taps stay one counted loop

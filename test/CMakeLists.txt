@@ -11,6 +11,7 @@ set(ONDRIX_TEST_DEPENDS
   llc
   not
   ondrix-canonical-twiddle-analysis-test
+  ondrix-reduction-window-analysis-test
   ondrix-constant-sequence-analysis-test
   ondrix-fixed-point-prefix-range-analysis-test
   ondrix-fixed-point-semantics-test
@@ -39,6 +40,18 @@ target_link_libraries(ondrix-canonical-twiddle-analysis-test PRIVATE
   MLIRTensorDialect
   OndrixCanonicalTwiddleAnalysis
   OndrixFixedPointSemantics
+)
+
+add_llvm_executable(ondrix-reduction-window-analysis-test EXCLUDE_FROM_ALL
+  Support/ReductionWindowAnalysisTest.cpp
+)
+llvm_update_compile_flags(ondrix-reduction-window-analysis-test)
+target_link_libraries(ondrix-reduction-window-analysis-test PRIVATE
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRMemRefDialect
+  MLIRSCFDialect
+  OndrixReductionWindowAnalysis
 )
 
 add_llvm_executable(ondrix-fixed-point-prefix-range-analysis-test EXCLUDE_FROM_ALL

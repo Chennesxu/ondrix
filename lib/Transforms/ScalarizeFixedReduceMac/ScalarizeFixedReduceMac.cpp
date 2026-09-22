@@ -1,6 +1,7 @@
 #include "ondrix/Transforms/Passes.h"
 
 #include "ondrix/Analysis/FixedPointPrefixRangeAnalysis.h"
+#include "ondrix/Analysis/ReductionWindowAnalysis.h"
 #include "ondrix/Conversion/Utils/ReductionUtils.h"
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
@@ -73,12 +74,17 @@ std::optional<int64_t> getStraightLineTerms(ReduceMacOp reduce) {
   return *lhsExtent;
 }
 
-/// Functions whose straight-line total exceeds the budget; every reduction
-/// there keeps the loop form so one function never mixes the two shapes. Both
-/// passes price the same candidates, so their budgets agree on every function.
-llvm::DenseSet<Operation *> collectOverBudgetFunctions(ModuleOp module, int64_t maxUnrolledTerms) {
+/// Functions the straight-line form is declined for; every reduction there
+/// keeps the loop so one function never mixes the two shapes. Both passes
+/// price the same candidates, so their verdicts agree on every function. Two
+/// independent quantities decline it: the per-function TERM total, which buys
+/// instruction count with instruction cache, and one reduction's CARRIED
+/// WINDOW, which the term total cannot see -- a 64-term dot carries nothing
+/// while a 16-tap filter carries fifteen values across its sample loop.
+llvm::DenseSet<Operation *> collectOverBudgetFunctions(ModuleOp module, int64_t maxUnrolledTerms,
+                                                       int64_t maxCarriedWindow) {
   llvm::DenseSet<Operation *> overBudget;
-  if (maxUnrolledTerms <= 0)
+  if (maxUnrolledTerms <= 0 && maxCarriedWindow <= 0)
     return overBudget;
   llvm::DenseMap<Operation *, int64_t> totals;
   module.walk([&](ReduceMacOp op) {
@@ -87,12 +93,20 @@ llvm::DenseSet<Operation *> collectOverBudgetFunctions(ModuleOp module, int64_t 
       return;
     if (!isStraightLineCandidate(op))
       return;
+    if (maxCarriedWindow > 0) {
+      // A window this analysis cannot read declines the straight-line form
+      // rather than being assumed to carry nothing.
+      std::optional<int64_t> carried = ondrix::analysis::getStraightLineCarriedWindow(op);
+      if (!carried || *carried > maxCarriedWindow)
+        overBudget.insert(function);
+    }
     if (std::optional<int64_t> terms = getStraightLineTerms(op))
       totals[function] += *terms;
   });
-  for (auto [function, total] : totals)
-    if (total > maxUnrolledTerms)
-      overBudget.insert(function);
+  if (maxUnrolledTerms > 0)
+    for (auto [function, total] : totals)
+      if (total > maxUnrolledTerms)
+        overBudget.insert(function);
   return overBudget;
 }
 
@@ -195,7 +209,7 @@ struct ScalarizeOndspCertifiedConstantReduce final
           ScalarizeOndspCertifiedConstantReduce> {
   void runOnOperation() override {
     llvm::DenseSet<Operation *> overBudget =
-        collectOverBudgetFunctions(getOperation(), maxUnrolledTerms);
+        collectOverBudgetFunctions(getOperation(), maxUnrolledTerms, maxCarriedWindow);
     SmallVector<ReduceMacOp> candidates;
     getOperation()->walk([&](ReduceMacOp op) { candidates.push_back(op); });
     for (ReduceMacOp reduce : candidates) {
@@ -265,7 +279,7 @@ struct ScalarizeOndspFixedReduceMac final
   llvm::DenseSet<Operation *> overBudget;
 
   void runOnOperation() override {
-    overBudget = collectOverBudgetFunctions(getOperation(), maxUnrolledTerms);
+    overBudget = collectOverBudgetFunctions(getOperation(), maxUnrolledTerms, maxCarriedWindow);
     SmallVector<ReduceMacOp> candidates;
     getOperation()->walk([&](ReduceMacOp op) { candidates.push_back(op); });
     for (ReduceMacOp reduce : candidates) {

@@ -96,6 +96,17 @@ struct OndrixDefaultPipelineOptions
       llvm::cl::desc("Declared target capability: counted loops run on a zero-overhead "
                      "hardware repeat block, so reductions keep their loop form"),
       llvm::cl::init(false)};
+  /// Values a straight-lined reduction may keep live across its enclosing
+  /// loop. A sliding filter carries about one per tap and a dot carries none,
+  /// which is the difference the term budget above cannot see: one budget wide
+  /// enough for a 64-term dot is far too wide for a 16-tap filter. Zero by
+  /// default, because the crossover is a register-file fact no target has
+  /// declared yet.
+  Option<int64_t> maxCarriedWindow{
+      *this, "max-carried-window",
+      llvm::cl::desc("Declared target quantity: values a straight-lined reduction may keep "
+                     "live across its enclosing loop before the loop form is kept"),
+      llvm::cl::init(0)};
   /// Coefficient immediates one constant-row block may materialize before its
   /// terms become a loop over an immutable column-major table. Like `fftLoops`
   /// below this is a SCHEDULE CHOICE and not a target fact: it trades runtime

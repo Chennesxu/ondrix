@@ -105,10 +105,12 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   // Constant-coefficient reductions the lane stages left take their certified
   // 32-bit term groups first; the definitional expansion gets the rest.
   os << llvm::formatv("scalarize-ondsp-certified-constant-reduce{{max-unrolled-terms={0} "
-                      "scalar-register-bits={1}},"
-                      "scalarize-ondsp-fixed-reduce-mac{{max-unrolled-terms={0}},"
-                      "unroll-ondsp-fixed-mac-loops{{max-unrolled-terms={0}},",
-                      straightLineTerms, options.scalarRegisterBits);
+                      "max-carried-window={2} scalar-register-bits={1}},"
+                      "scalarize-ondsp-fixed-reduce-mac{{max-unrolled-terms={0} "
+                      "max-carried-window={2}},"
+                      "unroll-ondsp-fixed-mac-loops{{max-unrolled-terms={0} "
+                      "max-carried-window={2}},",
+                      straightLineTerms, options.scalarRegisterBits, options.maxCarriedWindow);
   // A declared output format with headroom makes its saturating boundary
   // unreachable; the proof runs once here so the narrowing never clamps.
   os << "relax-ondsp-unreachable-saturation,";

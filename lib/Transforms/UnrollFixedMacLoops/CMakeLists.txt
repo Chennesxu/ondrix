@@ -10,5 +10,6 @@ add_ondrix_library(OndrixUnrollFixedMacLoops
   MLIRPass
   MLIRSCFDialect
   MLIRTensorDialect
+  OndrixReductionWindowAnalysis
   OndspIR
 )

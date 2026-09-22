@@ -541,6 +541,10 @@ def ScalarizeOndspFixedReduceMac
     Option<"maxUnrolledTerms", "max-unrolled-terms", "int64_t", /*default=*/"0",
            "Per-function budget of straight-line reduction terms; 0 leaves the "
            "straight-line form unbounded">,
+    Option<"maxCarriedWindow", "max-carried-window", "int64_t", /*default=*/"0",
+           "Largest window a straight-lined reduction may keep live across its "
+           "enclosing loop; past it every reduction in the function keeps the "
+           "loop form. 0 leaves it unbounded">,
   ];
   let constructor = "ondrix::createScalarizeOndspFixedReduceMacPass()";
   let dependentDialects = [
@@ -618,6 +622,10 @@ def ScalarizeOndspCertifiedConstantReduce
     Option<"maxUnrolledTerms", "max-unrolled-terms", "int64_t", /*default=*/"0",
            "Per-function budget of straight-line reduction terms shared with "
            "scalarize-ondsp-fixed-reduce-mac; 0 leaves the straight-line form unbounded">,
+    Option<"maxCarriedWindow", "max-carried-window", "int64_t", /*default=*/"0",
+           "Largest window a straight-lined reduction may keep live across its "
+           "enclosing loop; past it every reduction in the function keeps the "
+           "loop form. 0 leaves it unbounded">,
     Option<"maxElements", "max-elements", "int64_t", /*default=*/"256",
            "Longest constant coefficient table the certificates are built for">,
     Option<"scalarRegisterBits", "scalar-register-bits", "int64_t", /*default=*/"32",
@@ -668,6 +676,10 @@ def UnrollOndspFixedMacLoops
     Option<"maxUnrolledTerms", "max-unrolled-terms", "int64_t", /*default=*/"0",
            "Per-function budget of unrolled iterations; 0 leaves unrolling "
            "unbounded">,
+    Option<"maxCarriedWindow", "max-carried-window", "int64_t", /*default=*/"0",
+           "Largest window a straight-lined reduction may keep live across its "
+           "enclosing loop; past it every reduction in the function keeps the "
+           "loop form. 0 leaves it unbounded">,
   ];
   let constructor = "ondrix::createUnrollOndspFixedMacLoopsPass()";
   let dependentDialects = [

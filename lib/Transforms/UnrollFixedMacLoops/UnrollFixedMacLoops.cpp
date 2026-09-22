@@ -1,5 +1,7 @@
 #include "ondrix/Transforms/Passes.h"
 
+#include "ondrix/Analysis/ReductionWindowAnalysis.h"
+
 #include "ondrix/Dialect/ondsp/IR/OndspDialect.h"
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
@@ -142,19 +144,29 @@ struct UnrollOndspFixedMacLoops final
     // scalarizer's own refusal emits, and skipping it is how the two passes
     // once disagreed about the same function.
     llvm::DenseSet<Operation *> overBudget;
-    if (maxUnrolledTerms > 0) {
+    if (maxUnrolledTerms > 0 || maxCarriedWindow > 0) {
       llvm::DenseMap<Operation *, int64_t> totals;
       getOperation()->walk([&](scf::ForOp loop) {
         auto function = loop->getParentOfType<func::FuncOp>();
         if (!function || !isSingleLaneAccLoop(loop))
           return;
+        // The scalarizer declines the same function on the same window, and
+        // a window it cannot read declines rather than being read as none.
+        if (maxCarriedWindow > 0) {
+          std::optional<int64_t> carried = ondrix::analysis::getStraightLineCarriedWindow(loop);
+          if (!carried || *carried > maxCarriedWindow)
+            overBudget.insert(function);
+        }
+        if (maxUnrolledTerms <= 0)
+          return;
         std::optional<int64_t> cost = getUnrolledMacCost(loop);
         if (!cost || llvm::AddOverflow(totals[function], *cost, totals[function]))
           overBudget.insert(function);
       });
-      for (auto [function, total] : totals)
-        if (total > maxUnrolledTerms)
-          overBudget.insert(function);
+      if (maxUnrolledTerms > 0)
+        for (auto [function, total] : totals)
+          if (total > maxUnrolledTerms)
+            overBudget.insert(function);
     }
 
     for (scf::ForOp loop : candidates) {
