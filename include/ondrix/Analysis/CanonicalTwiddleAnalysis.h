@@ -49,7 +49,9 @@ classifyCanonicalPackedQ15Twiddle(ondsp::CxButterflyOp butterfly);
 /// at `w = (-32768, -32768)`. Both cross sums are bounded by
 /// `32768 * (|wr| + |wi|)`, so a constant twiddle with `|wr| + |wi| <= 65535`
 /// keeps them inside i32; every quantized unit-modulus twiddle satisfies that
-/// with a factor of sqrt(2) to spare, and a runtime twiddle fails closed.
+/// with a factor of sqrt(2) to spare. The loop form reads its twiddle from a
+/// constant table instead, and the index is a runtime value, so there the
+/// obligation covers EVERY entry. Anything else fails closed.
 bool packedQ15ProductFitsNarrowCarrier(ondsp::CxButterflyOp butterfly);
 
 using CanonicalPackedQ15TwiddleConsumer =

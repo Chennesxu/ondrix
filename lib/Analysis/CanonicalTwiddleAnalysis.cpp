@@ -1,8 +1,11 @@
 #include "ondrix/Analysis/CanonicalTwiddleAnalysis.h"
 
+#include "ondrix/Analysis/ConstantSequenceAnalysis.h"
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
 
 using namespace mlir;
@@ -10,6 +13,48 @@ using namespace mlir;
 namespace ondrix::analysis {
 
 namespace {
+
+/// A packed twiddle table never outgrows its transform, and the packed FFT
+/// family stops at 1024 points; a longer table fails closed rather than being
+/// materialized.
+constexpr int64_t kMaxTwiddleTableEntries = 4096;
+
+bool packedQ15WordFitsNarrowCarrier(const llvm::APInt &word) {
+  if (word.getBitWidth() != 32)
+    return false;
+  uint64_t bits = word.getZExtValue();
+  // Real is the low half under this layout. The magnitudes are summed at 64
+  // bits because negating the component minimum leaves i16.
+  int64_t real = static_cast<int16_t>(bits & 0xFFFFU);
+  int64_t imaginary = static_cast<int16_t>((bits >> 16) & 0xFFFFU);
+  int64_t magnitudeSum = (real < 0 ? -real : real) + (imaginary < 0 ? -imaginary : imaginary);
+  // 32768 * 65536 is exactly 2^31, the single value a 32-bit carrier misses.
+  return magnitudeSum <= 65535;
+}
+
+/// A twiddle read from a compile-time table at a runtime index: the bound is
+/// owed by every entry, since any of them can be the one selected. The
+/// bufferized form is a load from a constant global, the pre-bufferization
+/// form an extract from a constant tensor; both resolve fail-closed.
+bool everyTwiddleTableEntryFitsNarrowCarrier(Value twiddle) {
+  if (auto load = twiddle.getDefiningOp<memref::LoadOp>()) {
+    FailureOr<ConstantIntegerMemRefFacts> facts =
+        analyzeConstantIntegerMemRef(load.getMemRef(), kMaxTwiddleTableEntries);
+    if (failed(facts))
+      return false;
+    return llvm::all_of(facts->getSequence().getValues(), packedQ15WordFitsNarrowCarrier);
+  }
+  auto extract = twiddle.getDefiningOp<tensor::ExtractOp>();
+  auto table = extract ? extract.getTensor().getDefiningOp<arith::ConstantOp>() : nullptr;
+  auto elements = table ? dyn_cast<DenseIntElementsAttr>(table.getValue()) : DenseIntElementsAttr();
+  if (!elements)
+    return false;
+  FailureOr<ConstantSequenceFacts> sequence =
+      analyzeConstantIntegerSequence(elements, kMaxTwiddleTableEntries);
+  if (failed(sequence))
+    return false;
+  return llvm::all_of(sequence->getValues(), packedQ15WordFitsNarrowCarrier);
+}
 
 bool hasSupportedScaleShape(ondsp::ScaleAttr scale, unsigned rightShift) {
   auto destination = dyn_cast<IntegerType>(scale.getSaturateTo());
@@ -90,19 +135,13 @@ bool packedQ15ProductFitsNarrowCarrier(ondsp::CxButterflyOp butterfly) {
   if (!numeric || !ondsp::isSignedQ15(numeric))
     return false;
   auto constant = butterfly.getTwiddle().getDefiningOp<arith::ConstantOp>();
-  auto integer = constant ? dyn_cast<IntegerAttr>(constant.getValue()) : IntegerAttr();
+  if (!constant)
+    return everyTwiddleTableEntryFitsNarrowCarrier(butterfly.getTwiddle());
+  auto integer = dyn_cast<IntegerAttr>(constant.getValue());
   auto integerType = integer ? dyn_cast<IntegerType>(integer.getType()) : IntegerType();
   if (!integerType || integerType.getWidth() != 32)
     return false;
-  uint64_t bits = integer.getValue().getZExtValue();
-  // Real is the low half under this layout. The magnitudes are summed at 64
-  // bits because negating the component minimum leaves i16.
-  int64_t real = static_cast<int16_t>(bits & 0xFFFFU);
-  int64_t imaginary = static_cast<int16_t>((bits >> 16) & 0xFFFFU);
-  int64_t magnitudeSum = (real < 0 ? -real : real) + (imaginary < 0 ? -imaginary : imaginary);
-  // 32768 * 65535 is one unit of twiddle short of 2^31, which is the single
-  // value a 32-bit carrier cannot hold.
-  return magnitudeSum <= 65535;
+  return packedQ15WordFitsNarrowCarrier(integer.getValue());
 }
 
 CanonicalPackedQ15TwiddlePlan::CanonicalPackedQ15TwiddlePlan(

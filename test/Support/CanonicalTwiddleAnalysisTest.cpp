@@ -6,6 +6,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -38,7 +39,7 @@ struct Fixture {
 
   Fixture() : module(mlir::ModuleOp::create(mlir::UnknownLoc::get(&context))) {
     context.loadDialect<mlir::arith::ArithDialect, mlir::func::FuncDialect,
-                        ondrix::ondsp::OndspDialect>();
+                        mlir::tensor::TensorDialect, ondrix::ondsp::OndspDialect>();
     mlir::OpBuilder builder(&context);
     mlir::Type i16 = builder.getI16Type();
     mlir::Type i32 = builder.getI32Type();
@@ -63,6 +64,17 @@ struct Fixture {
     mlir::OpBuilder builder(block, block->end());
     return builder.create<mlir::arith::ConstantIntOp>(module->getLoc(), static_cast<int64_t>(value),
                                                       width);
+  }
+
+  /// A twiddle the loop form reads from a constant table at a runtime index.
+  mlir::Value tableTwiddle(llvm::ArrayRef<int32_t> entries) {
+    mlir::OpBuilder builder(block, block->end());
+    auto type =
+        mlir::RankedTensorType::get({static_cast<int64_t>(entries.size())}, builder.getI32Type());
+    mlir::Value table = builder.create<mlir::arith::ConstantOp>(
+        module->getLoc(), mlir::DenseIntElementsAttr::get(type, entries));
+    mlir::Value index = builder.create<mlir::arith::ConstantIndexOp>(module->getLoc(), 0);
+    return builder.create<mlir::tensor::ExtractOp>(module->getLoc(), table, index);
   }
 
   ondrix::ondsp::CxButterflyOp create(mlir::Value twiddle) {
@@ -322,6 +334,24 @@ bool testNarrowCarrierBound() {
     return false;
   // A runtime twiddle carries no value, so it fails closed.
   if (packedQ15ProductFitsNarrowCarrier(fixture.create(fixture.block->getArgument(2))))
+    return false;
+
+  // Sharper than the inequality, and what makes the table obligation cheap:
+  // since neither magnitude exceeds 32768, the sum reaches 65536 only when
+  // both components are the minimum, so ONE word of the packed domain fails.
+  for (int64_t real = -32768; real <= 32767; ++real) {
+    int64_t best = (real < 0 ? -real : real) + 32768;
+    if ((best > 65535) != (real == -32768))
+      return false;
+  }
+
+  // The loop form's table, where the index is a runtime value: the bound is
+  // owed by every entry, so one failing entry withdraws the whole table.
+  if (!packedQ15ProductFitsNarrowCarrier(
+          fixture.create(fixture.tableTwiddle({packed(23170, -23170), packed(32767, -32768)}))))
+    return false;
+  if (packedQ15ProductFitsNarrowCarrier(
+          fixture.create(fixture.tableTwiddle({packed(23170, -23170), packed(-32768, -32768)}))))
     return false;
   return true;
 }

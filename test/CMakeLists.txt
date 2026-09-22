@@ -36,6 +36,7 @@ llvm_update_compile_flags(ondrix-canonical-twiddle-analysis-test)
 target_link_libraries(ondrix-canonical-twiddle-analysis-test PRIVATE
   MLIRArithDialect
   MLIRFuncDialect
+  MLIRTensorDialect
   OndrixCanonicalTwiddleAnalysis
   OndrixFixedPointSemantics
 )
