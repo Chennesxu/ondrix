@@ -25,6 +25,10 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
                       "output-batch-vector-width={0} fft-loops={1}},",
                       options.vectorBits >= 64 ? options.vectorBits / 32 : 1,
                       options.fftLoops ? "true" : "false");
+  // No host schedule reads a declared coefficient bound, so it is discharged
+  // at once: trusted, or tested at run time under the checked entries.
+  os << llvm::formatv("lower-ondsp-assumptions{{checked={0}},",
+                      options.checkedEntries ? "true" : "false");
   // Forwarding must precede bufferization so a forwarded intermediate is
   // never materialized as a buffer.
   os << "canonicalize,cse,forward-ondrix-insert-extract,canonicalize,cse,";

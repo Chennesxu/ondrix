@@ -124,6 +124,26 @@ def q31_dot_raw_high(lhs: buffer[q31], rhs: buffer[q31]) -> q31:
              overflow=saturate)
 ```
 
+A fixed-point `dot` may declare a precondition on its second operand, the
+coefficients: `gain_bound=G` states that their absolute values sum to strictly
+less than `G` full-scale units, which is the filter's gain, `G` in
+`[1, 65536]`. It is spelled before the numeric policy it leaves alone, and it is
+a declaration, not a policy: the result is unchanged wherever it holds, and the
+compiler may rely on it only where it holds. A `constexpr` table is checked at
+compile time and refused if it breaks the bound. A runtime buffer is trusted by
+default, with the standing of the entry ABI's declared non-overlap
+precondition; `--checked-entries` sums the buffer on entry to the reduction
+and aborts with `ondrix_<kernel>: coefficients exceed the declared gain_bound`
+if it does not. What it buys is target-side: at `G = 2` every partial sum of
+the reduction, or of any subset of its terms, stays within a signed 32-bit
+word, which is the certificate that lets a single reduction split across a
+dual-lane MAC. No host schedule reads it.
+
+```python
+def q15_fir_sample(delay: buffer[q15, 64], taps: buffer[q15, 64]) -> q15:
+  return dot(delay, taps, gain_bound=2)
+```
+
 Ordered f32 dot and FIR-sample kernels name their contraction policy instead
 of a fixed-point accumulator and export policy:
 
@@ -1051,7 +1071,9 @@ The frontend should communicate facts through ordinary source semantics:
 Properties such as zero taps, sparsity, symmetry, antisymmetry, repeated
 coefficients, powers of two, and trivial twiddles are inferred from immutable
 values. A user-authored promise must not enable a rewrite unless it is verified
-or represented by an explicit checked assumption.
+or represented by an explicit checked assumption. `dot`'s `gain_bound=` is the
+first such assumption: `ondsp.assume_l1_bound` in the IR, checked at compile
+time for a constant table and at run time under `--checked-entries`.
 
 ### Optimization Contract
 

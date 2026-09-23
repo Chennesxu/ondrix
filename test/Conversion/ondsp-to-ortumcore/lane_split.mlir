@@ -313,3 +313,66 @@ func.func @odd_start(%x: memref<6xi16>) -> i16 {
   %r = ondsp.acc_export %acc4 {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<nearest_ties_positive>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
   return %r : i16
 }
+
+// -----
+
+// Runtime taps under a declared bound of 2^16: every sum is at most
+// 2^15 * (2^16 - 1), inside a word, and both pointers are tested.
+// CHECK-LABEL: func.func @declared_bound_splits
+// CHECK: %[[P0:.*]] = memref.extract_aligned_pointer_as_index %arg0
+// CHECK: %[[P1:.*]] = memref.extract_aligned_pointer_as_index %[[T:.*]] :
+// CHECK: arith.ori %[[P0]], %[[P1]]
+// CHECK: memref.assume_alignment %arg0, 4
+// CHECK: memref.assume_alignment %[[T]], 4
+// CHECK-COUNT-2: ortumcore.dmac
+func.func @declared_bound_splits(%x: memref<4xi16>, %taps: memref<4xi16>) -> i16 {
+  %bounded = ondsp.assume_l1_bound %taps {bound = 65536 : i64} : memref<4xi16>
+  %acc0 = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %i0 = arith.constant 0 : index
+  %x0 = memref.load %x[%i0] : memref<4xi16>
+  %c0 = memref.load %bounded[%i0] : memref<4xi16>
+  %acc1 = ondsp.mac %acc0, %x0, %c0 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %i1 = arith.constant 1 : index
+  %x1 = memref.load %x[%i1] : memref<4xi16>
+  %c1 = memref.load %bounded[%i1] : memref<4xi16>
+  %acc2 = ondsp.mac %acc1, %x1, %c1 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %i2 = arith.constant 2 : index
+  %x2 = memref.load %x[%i2] : memref<4xi16>
+  %c2 = memref.load %bounded[%i2] : memref<4xi16>
+  %acc3 = ondsp.mac %acc2, %x2, %c2 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %i3 = arith.constant 3 : index
+  %x3 = memref.load %x[%i3] : memref<4xi16>
+  %c3 = memref.load %bounded[%i3] : memref<4xi16>
+  %acc4 = ondsp.mac %acc3, %x3, %c3 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %r = ondsp.acc_export %acc4 {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<nearest_ties_positive>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %r : i16
+}
+
+// -----
+
+// One raw unit more and the bound admits 2^15 * 2^16 = 2^31, one past a word.
+// CHECK-LABEL: func.func @declared_bound_past_a_word
+// CHECK-NOT: ortumcore.dmac
+// CHECK: return
+func.func @declared_bound_past_a_word(%x: memref<4xi16>, %taps: memref<4xi16>) -> i16 {
+  %bounded = ondsp.assume_l1_bound %taps {bound = 65537 : i64} : memref<4xi16>
+  %acc0 = ondsp.acc_zero : !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %i0 = arith.constant 0 : index
+  %x0 = memref.load %x[%i0] : memref<4xi16>
+  %c0 = memref.load %bounded[%i0] : memref<4xi16>
+  %acc1 = ondsp.mac %acc0, %x0, %c0 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %i1 = arith.constant 1 : index
+  %x1 = memref.load %x[%i1] : memref<4xi16>
+  %c1 = memref.load %bounded[%i1] : memref<4xi16>
+  %acc2 = ondsp.mac %acc1, %x1, %c1 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %i2 = arith.constant 2 : index
+  %x2 = memref.load %x[%i2] : memref<4xi16>
+  %c2 = memref.load %bounded[%i2] : memref<4xi16>
+  %acc3 = ondsp.mac %acc2, %x2, %c2 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %i3 = arith.constant 3 : index
+  %x3 = memref.load %x[%i3] : memref<4xi16>
+  %c3 = memref.load %bounded[%i3] : memref<4xi16>
+  %acc4 = ondsp.mac %acc3, %x3, %c3 {numeric = #ondsp.fixed<signed, storage = i16, frac = 15>, product = #ondsp.product<full>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>, i16, i16) -> !ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>
+  %r = ondsp.acc_export %acc4 {dst = #ondsp.fixed<signed, storage = i16, frac = 15>, overflow = #ondsp.overflow<saturate>, rounding = #ondsp.rounding<nearest_ties_positive>} : (!ondsp.acc<storage = i40, frac = 30, signed, update_overflow = saturate>) -> i16
+  return %r : i16
+}

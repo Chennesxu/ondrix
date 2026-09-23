@@ -255,6 +255,28 @@ def Ondsp_AccZeroOp : Ondsp_Op<"acc_zero", [Pure]> {
   let assemblyFormat = "attr-dict `:` type($acc)";
 }
 
+def Ondsp_AssumeL1BoundOp
+    : Ondsp_Op<"assume_l1_bound", [Pure, AllTypesMatch<["source", "result"]>]> {
+  let summary = "A declared precondition bounding a buffer's l1 norm";
+  let description = [{
+    Returns `source` unchanged and states a precondition the caller DECLARED,
+    not one the compiler proved: the absolute raw values of the buffer's
+    elements sum to strictly less than `bound`. It is the one channel through
+    which a promise about runtime data may reach an analysis, and it is an
+    operation so that the promise stays explicit and checkable:
+    `lower-ondsp-assumptions` erases it, trusting the declaration, or with
+    `checked` replaces it by a run-time sum that aborts on a violation.
+    The bound speaks only for reads through the result, and a program that
+    breaks it has no defined result where an analysis relied on it -- the
+    same standing as the entry ABI's declared non-overlap precondition.
+  }];
+  let arguments = (ins MemRefRankOf<[AnySignlessInteger], [1]>:$source,
+                   I64Attr:$bound);
+  let results = (outs MemRefRankOf<[AnySignlessInteger], [1]>:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "$source attr-dict `:` type($source)";
+}
+
 def Ondsp_AccImportOp : Ondsp_Op<"acc_import", [Pure]> {
   let summary = "Import a fixed-point value into an accumulator exactly";
   let description = [{

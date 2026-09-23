@@ -690,8 +690,16 @@ public:
     }
 
     Value initial = createReductionZero(op.getLoc(), op.getResult().getType(), rewriter);
+    // The declared gain rides the coefficient value as a precondition in raw
+    // units, so every read through it carries the promise and no other does.
+    Value coefficients = adaptor.getRhs();
+    if (std::optional<int64_t> gain = op.getGainBound()) {
+      int64_t frac = cast<ondrix::ondsp::FixedAttr>(op.getNumeric()).getFrac();
+      coefficients = rewriter.create<ondrix::ondsp::AssumeL1BoundOp>(
+          op.getLoc(), coefficients.getType(), coefficients, *gain << frac);
+    }
     auto replacement = rewriter.create<ondrix::ondsp::ReduceMacOp>(
-        op.getLoc(), op.getResult().getType(), initial, adaptor.getLhs(), adaptor.getRhs(),
+        op.getLoc(), op.getResult().getType(), initial, adaptor.getLhs(), coefficients,
         op.getNumeric(), op.getProduct().value_or(ondrix::ondsp::ProductAttr()));
     rewriter.replaceOp(op, replacement);
     return success();

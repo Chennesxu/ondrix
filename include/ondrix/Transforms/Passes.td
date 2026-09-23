@@ -651,6 +651,31 @@ def ScalarizeOndspCertifiedConstantReduce
   ];
 }
 
+def LowerOndspAssumptions : Pass<"lower-ondsp-assumptions", "::mlir::ModuleOp"> {
+  let summary = "Discharge declared preconditions: trust them, or test them at run time";
+  let description = [{
+    Removes every `ondsp.assume_l1_bound`, forwarding its source. By default
+    the declaration is trusted and costs nothing, like the entry ABI's other
+    declared preconditions. With `checked`, each one first becomes a run-time
+    sum of the buffer's absolute raw values and a `cf.assert` that aborts with
+    `ondrix_<kernel>: coefficients exceed the declared gain_bound` unless the
+    sum is below the bound -- what `--checked-entries` selects. Run it after
+    every pass that reads the bound; a declaration left in place fails closed
+    in the scalar lowering.
+  }];
+  let options = [
+    Option<"checked", "checked", "bool", /*default=*/"false",
+           "Test each declared bound at run time and abort on a violation">,
+  ];
+  let constructor = "ondrix::createLowerOndspAssumptionsPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+  ];
+}
+
 def UnrollOndspFixedMacLoops
     : Pass<"unroll-ondsp-fixed-mac-loops", "::mlir::ModuleOp"> {
   let summary = "Unroll short static accumulator-carried mac loops into straight-line chains";

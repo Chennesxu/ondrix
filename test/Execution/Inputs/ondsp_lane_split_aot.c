@@ -12,6 +12,7 @@ typedef struct {
 int16_t _mlir_ciface_split_word_sum(MemRef1D *x);
 int32_t _mlir_ciface_split_by_halves(MemRef1D *x);
 int16_t _mlir_ciface_split_odd_tail(MemRef1D *x);
+int16_t _mlir_ciface_split_declared(MemRef1D *x, MemRef1D *taps);
 
 static const int16_t kWordSum[8] = {-1200, 2500, 6000, 9100, 9100, 6000, 2500, -1200};
 static const int16_t kHalves[8] = {16383, 16381, 16383, 16379, 16383, 16381, 16383, 16379};
@@ -40,6 +41,22 @@ static int64_t reference(const int16_t *x, const int16_t *taps, int count, int s
 }
 
 static int16_t storage[2][10] __attribute__((aligned(8)));
+static int16_t tapStorage[2][10] __attribute__((aligned(8)));
+// Runtime taps whose absolute sum stays below 2 << 15: the edge of the
+// declared bound, and random tables scaled under it.
+static int16_t declared[8];
+
+static void drawDeclared(int trial) {
+  static const int16_t edge[8] = {32767, 32767, 1, 0, 0, 0, 0, 0};
+  int64_t sum = 0;
+  for (int i = 0; i < 8; ++i) {
+    declared[i] = trial % 5 == 0 ? edge[i] : (int16_t)((int32_t)next() % 8191);
+    sum += declared[i] < 0 ? -declared[i] : declared[i];
+  }
+  if (sum >= 65536)
+    for (int i = 0; i < 8; ++i)
+      declared[i] /= 2;
+}
 
 static int16_t *place(int misaligned, const int16_t *values, int count) {
   int16_t *base = &storage[misaligned][misaligned];
@@ -75,6 +92,18 @@ int main(void) {
       int64_t want16 = reference(x, kWordSum, 8, 15, 1 << 14, INT16_MIN, INT16_MAX);
       int64_t want32 = reference(x, kHalves, 8, 1, 0, INT32_MIN, INT32_MAX);
       int64_t wantOdd = reference(x, kOddTail, 5, 15, 1 << 14, INT16_MIN, INT16_MAX);
+      for (int tapSkew = 0; tapSkew < 2; ++tapSkew) {
+        drawDeclared(trial);
+        int16_t *taps = &tapStorage[tapSkew][tapSkew];
+        for (int i = 0; i < 8; ++i)
+          taps[i] = declared[i];
+        MemRef1D stream = {0, 0, 0, 8, 1};
+        stream.allocated = stream.aligned = place(misaligned, x, 8);
+        MemRef1D table = {taps, taps, 0, 8, 1};
+        if (_mlir_ciface_split_declared(&stream, &table) !=
+            reference(x, declared, 8, 15, 1 << 14, INT16_MIN, INT16_MAX))
+          ++failures;
+      }
       if (got16 != want16 || got32 != want32 || gotOdd != wantOdd) {
         if (failures < 8)
           printf("trial %d misaligned %d: %lld/%lld %lld/%lld %lld/%lld\n", trial, misaligned,

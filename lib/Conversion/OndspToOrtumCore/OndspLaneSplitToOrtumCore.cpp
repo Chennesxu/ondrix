@@ -18,6 +18,8 @@
 #include "mlir/IR/Matchers.h"
 #include "mlir/Pass/Pass.h"
 
+#include <limits>
+
 namespace ondrix {
 #define GEN_PASS_DEF_CONVERTONDSPLANESPLITTOORTUMCORE
 #include "ondrix/Conversion/Passes.h.inc"
@@ -51,6 +53,24 @@ std::optional<APInt> getConstantTerm(Value value) {
   return table->getSequence().getValues()[*index];
 }
 
+/// A runtime coefficient read at a constant index through a declared l1 bound.
+struct BoundedRead {
+  Value table;
+  int64_t bound;
+  int64_t index;
+};
+
+std::optional<BoundedRead> getBoundedRead(Value value) {
+  auto load = value.getDefiningOp<memref::LoadOp>();
+  if (!load || load.getIndices().size() != 1)
+    return std::nullopt;
+  auto declared = load.getMemRef().getDefiningOp<ondrix::ondsp::AssumeL1BoundOp>();
+  std::optional<int64_t> index = getConstantIntValue(load.getIndices().front());
+  if (!declared || !index)
+    return std::nullopt;
+  return BoundedRead{load.getMemRef(), declared.getBound(), *index};
+}
+
 /// The runtime stream's element index when `value` reads it at a constant one.
 std::optional<int64_t> getStreamIndex(Value value, Value stream) {
   auto load = value.getDefiningOp<memref::LoadOp>();
@@ -67,6 +87,9 @@ struct LaneSplit {
   SmallVector<Value> signals;
   SmallVector<Value> coefficients;
   Value stream;
+  // Set when the coefficients are a runtime table under a declared bound; it
+  // is then word-read too, so it shares the stream's alignment test.
+  Value table;
   bool sumFitsWord = false;
 };
 
@@ -110,15 +133,33 @@ std::optional<LaneSplit> matchLaneSplit(ondrix::ondsp::AccZeroOp seed) {
 
   ondrix::ondsp::FixedAttr numeric = split.chain.front().getNumeric();
   std::optional<FixedPointRawInterval> lanes[2];
+  std::optional<BoundedRead> firstBounded;
+  bool anyConstant = false;
   for (auto [position, mac] : llvm::enumerate(split.chain)) {
     Value signal = mac.getLhs();
     Value term = mac.getRhs();
     std::optional<APInt> coefficient = getConstantTerm(term);
-    if (!coefficient) {
+    std::optional<BoundedRead> bounded = coefficient ? std::nullopt : getBoundedRead(term);
+    if (!coefficient && !bounded) {
       std::swap(signal, term);
       coefficient = getConstantTerm(term);
+      bounded = coefficient ? std::nullopt : getBoundedRead(term);
     }
-    if (!coefficient || coefficient->getBitWidth() != 16)
+    // One certificate per chain: every term constant, or every term read in
+    // order from one table whose declared bound covers the whole sum.
+    if (bounded) {
+      if (anyConstant || !mac.getLhs().getType().isInteger(16) ||
+          (firstBounded && (firstBounded->table != bounded->table ||
+                            bounded->index != firstBounded->index + int64_t(position))) ||
+          (!firstBounded && bounded->index % 2 != 0))
+        return std::nullopt;
+      if (!firstBounded)
+        firstBounded = bounded;
+    } else if (firstBounded) {
+      return std::nullopt;
+    }
+    anyConstant |= coefficient.has_value();
+    if (!bounded && (!coefficient || coefficient->getBitWidth() != 16))
       return std::nullopt;
     if (!split.stream)
       if (auto load = signal.getDefiningOp<memref::LoadOp>())
@@ -130,6 +171,10 @@ std::optional<LaneSplit> matchLaneSplit(ondrix::ondsp::AccZeroOp seed) {
     // dual step packs its halves and the split buys nothing.
     if (!index || !first || *first % 2 != 0 || *index != *first + int64_t(position))
       return std::nullopt;
+    split.signals.push_back(signal);
+    split.coefficients.push_back(term);
+    if (bounded)
+      continue;
     FailureOr<FixedPointRawInterval> product =
         ondrix::analysis::computeSignedFullProductInterval(numeric, *coefficient);
     if (failed(product))
@@ -144,14 +189,23 @@ std::optional<LaneSplit> matchLaneSplit(ondrix::ondsp::AccZeroOp seed) {
         return std::nullopt;
       lane = *sum;
     }
-    split.signals.push_back(signal);
-    split.coefficients.push_back(term);
   }
 
   auto stream = dyn_cast<MemRefType>(split.stream.getType());
   if (!stream || stream.getRank() != 1 || !stream.hasStaticShape() ||
       !stream.getLayout().isIdentity() || !stream.getElementType().isInteger(16))
     return std::nullopt;
+  // Under a declared bound B every partial sum of either lane, and of the
+  // whole chain, is at most 2^15 * (B - 1) in magnitude, the terms being
+  // distinct elements of the bounded table.
+  if (firstBounded) {
+    split.table = firstBounded->table;
+    int64_t magnitude = (int64_t{1} << 15) * (firstBounded->bound - 1);
+    split.sumFitsWord = magnitude <= std::numeric_limits<int32_t>::max();
+    if (!split.sumFitsWord)
+      return std::nullopt;
+    return split;
+  }
   // Every partial sum of a lane lies inside the lane's interval, since each
   // product interval contains zero, so a lane that fits one word at its end
   // never reaches the accumulator rail and reads out exactly at shift 0.
@@ -240,6 +294,9 @@ void rewriteLaneSplit(LaneSplit &split) {
   Location loc = split.exported.getLoc();
   OpBuilder builder(split.exported);
   Value pointer = builder.create<memref::ExtractAlignedPointerAsIndexOp>(loc, split.stream);
+  if (split.table)
+    pointer = builder.create<arith::OrIOp>(
+        loc, pointer, builder.create<memref::ExtractAlignedPointerAsIndexOp>(loc, split.table));
   Value mask = builder.create<arith::ConstantIndexOp>(loc, 3);
   Value misalignment = builder.create<arith::AndIOp>(loc, pointer, mask);
   Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
@@ -248,6 +305,8 @@ void rewriteLaneSplit(LaneSplit &split) {
       loc, aligned,
       [&](OpBuilder &then, Location thenLoc) {
         then.create<memref::AssumeAlignmentOp>(thenLoc, split.stream, 4);
+        if (split.table)
+          then.create<memref::AssumeAlignmentOp>(thenLoc, split.table, 4);
         then.create<scf::YieldOp>(thenLoc, emitSplitChain(then, thenLoc, split));
       },
       [&](OpBuilder &otherwise, Location elseLoc) {

@@ -54,6 +54,7 @@ add_ondrix_library(OndrixSupport
   OndrixCEntryPoints
   OndrixScalarizeFixedReduceMac
   OndrixUnrollFixedMacLoops
+  OndrixLowerOndspAssumptions
   OndrixUnrollFpOrderedReduce
   OndrixRelaxUnreachableSaturation
   OndrixUnfuseSharedFpProducts

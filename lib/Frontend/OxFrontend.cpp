@@ -431,6 +431,7 @@ struct BuiltinCallAst {
   bool conjugate = false;
   bool normalized = false;
   int64_t epsilon = 0;
+  int64_t gainBound = 0;
   SourceType target = SourceType::Q15;
   bool literal = false;
   SourcePosition position;
@@ -1617,6 +1618,32 @@ public:
       applyDefaultFixedPolicy(call);
     } else if (!expect(TokenKind::Comma, "expected ',' before numeric policy")) {
       return std::nullopt;
+    }
+    // A declared precondition on the coefficients, spelled before the numeric
+    // policy it does not change; left alone, the policy keeps its default.
+    if (call.kind == ReductionKind::Dot && isIdentifier("gain_bound")) {
+      if (isFpPolicyType(policyType)) {
+        diagnostics.error(current.position,
+                          "gain_bound is a fixed-point coefficient precondition; an f32 dot "
+                          "has no accumulator range for it to bound");
+        return std::nullopt;
+      }
+      advance();
+      if (!expect(TokenKind::Equal, "expected '=' after gain_bound"))
+        return std::nullopt;
+      SourcePosition position = current.position;
+      auto bound = parseSignedInteger("expected a gain_bound in full-scale units");
+      if (!bound)
+        return std::nullopt;
+      if (*bound < 1 || *bound > 65536) {
+        diagnostics.error(position, "gain_bound must lie in [1, 65536]");
+        return std::nullopt;
+      }
+      call.gainBound = *bound;
+      if (current.kind == TokenKind::RightParen)
+        applyDefaultFixedPolicy(call);
+      else if (!expect(TokenKind::Comma, "expected ',' before numeric policy"))
+        return std::nullopt;
     }
 
     if (!isFpPolicyType(policyType)) {
@@ -4352,6 +4379,28 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     }
   }
 
+  if (int64_t gain = ast.result.gainBound) {
+    if (!rhsParameter->isBuffer() && !rhsParameter->isConstexpr()) {
+      diagnostics.error(rhsParameter->position,
+                        "gain_bound declares a precondition on a buffer or constexpr coefficient "
+                        "operand");
+      return std::nullopt;
+    }
+    // A constant table's gain is known here, so the promise is checked now.
+    if (rhsParameter->isConstexpr()) {
+      int64_t frac = ast.primaryResult().type == SourceType::Q31 ? 31 : 15;
+      int64_t sum = 0;
+      for (int64_t value : rhsParameter->constantValues)
+        sum += value < 0 ? -value : value;
+      if (sum >= (gain << frac)) {
+        diagnostics.error(rhsParameter->position,
+                          llvm::Twine("the constexpr coefficients' absolute sum ") +
+                              llvm::Twine(sum) + " is not below gain_bound=" + llvm::Twine(gain));
+        return std::nullopt;
+      }
+    }
+  }
+
   if (ast.result.accumulatorAuto) {
     bool isScalarReduction =
         ast.result.kind == ReductionKind::Dot || ast.result.kind == ReductionKind::Fir;
@@ -4874,7 +4923,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     // the dot route; the division and the root are single IEEE events.
     auto numeric = ondsp::FpAttr::get(&context, elementType, *kernel.fpContract);
     Value sumOfSquares = builder.create<ir::DotOp>(expressionLocation, elementType, lhs, lhs,
-                                                   numeric, ondsp::ProductAttr());
+                                                   numeric, ondsp::ProductAttr(), IntegerAttr());
     int64_t extent = cast<MemRefType>(lhs.getType()).getDimSize(0);
     Value count = builder.create<arith::ConstantOp>(
         expressionLocation, builder.getF32FloatAttr(static_cast<float>(extent)));
@@ -5303,11 +5352,15 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                                                accumulatorFractionalBits, ondsp::Signedness::Signed,
                                                *kernel.updateOverflow);
     Value accumulator;
-    if (kernel.ast.result.kind == ReductionKind::Dot)
-      accumulator =
-          builder.create<ir::DotOp>(expressionLocation, accumulatorType, lhs, rhs, numeric, product)
-              .getResult();
-    else
+    if (kernel.ast.result.kind == ReductionKind::Dot) {
+      IntegerAttr gain = kernel.ast.result.gainBound
+                             ? builder.getI64IntegerAttr(kernel.ast.result.gainBound)
+                             : IntegerAttr();
+      accumulator = builder
+                        .create<ir::DotOp>(expressionLocation, accumulatorType, lhs, rhs, numeric,
+                                           product, gain)
+                        .getResult();
+    } else
       accumulator =
           builder.create<ir::FirOp>(expressionLocation, accumulatorType, lhs, rhs, numeric, product)
               .getResult();
@@ -5339,7 +5392,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     Value result;
     if (kernel.ast.result.kind == ReductionKind::Dot)
       result = builder.create<ir::DotOp>(expressionLocation, elementType, lhs, rhs, numeric,
-                                         ondsp::ProductAttr());
+                                         ondsp::ProductAttr(), IntegerAttr());
     else
       result = builder.create<ir::FirOp>(expressionLocation, elementType, lhs, rhs, numeric,
                                          ondsp::ProductAttr());

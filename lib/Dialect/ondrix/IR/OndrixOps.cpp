@@ -1249,6 +1249,12 @@ FailureOr<TilingResult> FirFilterOp::generateResultTileValue(OpBuilder &builder,
 LogicalResult DotOp::verify() {
   if (failed(ondrix::ondsp::verifyProductPolicy(*this, getNumeric(), getProduct())))
     return failure();
+  if (std::optional<int64_t> bound = getGainBound()) {
+    if (!isa<ondrix::ondsp::FixedAttr>(getNumeric()) || !isa<MemRefType>(getRhs().getType()))
+      return emitOpError("gain_bound requires a fixed-point memref coefficient operand");
+    if (*bound < 1 || *bound > 65536)
+      return emitOpError("gain_bound must lie in [1, 65536]");
+  }
   return verifyDotDomain(*this);
 }
 

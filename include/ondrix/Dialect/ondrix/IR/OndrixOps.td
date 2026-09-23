@@ -555,9 +555,18 @@ def Ondrix_DotOp
     rounding and overflow are modeled by a subsequent `ondsp.acc_export`.
     Ranked tensors are reserved for output-producing algorithm operations;
     current shaped dot consumers accept memrefs or fixed-point vectors.
+
+    `gain_bound = G` is a caller-declared precondition on the second operand,
+    the one the source calls the coefficients: its elements' absolute values
+    sum to strictly less than `G` in full-scale units, which is a filter's
+    gain. The compiler does not prove it; the lowering carries it as
+    `ondsp.assume_l1_bound`, where a certificate may read it and where
+    `--checked-entries` turns it into a run-time test. Fixed-point memref
+    operands only; `G` in `[1, 65536]`.
   }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, Ondsp_NumericAttr:$numeric,
-                   OptionalAttr<Ondsp_ProductAttr>:$product);
+                   OptionalAttr<Ondsp_ProductAttr>:$product,
+                   OptionalAttr<I64Attr>:$gain_bound);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

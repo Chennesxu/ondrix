@@ -377,6 +377,12 @@ LogicalResult SubShiftOp::verify() {
   return verifyBinaryShiftValueDomain(*this, getLhs(), getRhs(), getResult(), getScale());
 }
 
+LogicalResult AssumeL1BoundOp::verify() {
+  if (getBound() < 1)
+    return emitOpError("bound must be positive");
+  return success();
+}
+
 LogicalResult AccImportOp::verify() {
   FixedAttr source = getSrc();
   AccType accumulator = getAcc().getType();
