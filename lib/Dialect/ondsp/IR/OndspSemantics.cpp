@@ -31,6 +31,15 @@ llvm::StringRef getFastPermissionAttrName() { return "ondsp.fast_used"; }
 
 llvm::StringRef getDeclaredNumericAttrName() { return "ondsp.numeric"; }
 
+llvm::StringRef getPairingRemainderAttrName() { return "ondsp.pairing_remainder"; }
+
+bool isInPairingRemainder(Operation *op) {
+  for (Operation *parent = op->getParentOp(); parent; parent = parent->getParentOp())
+    if (parent->hasAttr(getPairingRemainderAttrName()))
+      return true;
+  return false;
+}
+
 static StringRef getFastPermissionSpelling(FastPermission permission) {
   switch (permission) {
   case FastPermission::RebuildReductionTree:

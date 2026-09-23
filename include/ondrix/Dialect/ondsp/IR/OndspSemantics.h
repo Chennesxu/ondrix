@@ -56,6 +56,15 @@ llvm::StringRef getFastPermissionAttrName();
 /// Absence always reads as the exact contract, so dropping it fails closed.
 llvm::StringRef getDeclaredNumericAttrName();
 
+/// Name of the discardable unit attribute output pairing stamps on the loop it
+/// leaves an odd last output on. A shape hint, not a contract: the unrolling
+/// passes keep that loop, and dropping the mark only lets them straight-line
+/// it, which is exact either way.
+llvm::StringRef getPairingRemainderAttrName();
+
+/// Whether `op` sits inside a loop output pairing marked as its remainder.
+bool isInPairingRemainder(mlir::Operation *op);
+
 /// Whether `op` records having spent `permission`. Membership, not presence: a
 /// record naming only the other permission must not read as this one. A later
 /// pass reading a record back is deciding whether it may re-select the member,

@@ -34,6 +34,7 @@
 // CHECK: scf.for %[[N:.*]] = %c8{{[_0-9]*}} to %c9 step
 // CHECK: memref.subview %arg0[%[[N]]] [4] [1]
 // CHECK: ondsp.reduce_mac
+// CHECK: } {ondsp.pairing_remainder}
 func.func @pair_window_loop_odd(%arg0: memref<12xi16>, %arg1: memref<4xi16>) -> memref<9xi16> {
   %c9 = arith.constant 9 : index
   %c1 = arith.constant 1 : index

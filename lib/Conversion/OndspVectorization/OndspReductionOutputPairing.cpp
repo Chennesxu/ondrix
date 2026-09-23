@@ -965,6 +965,7 @@ void rewriteWindowLoop(WindowLoop match) {
   }
   match.loop.getLowerBoundMutable().assign(
       builder.create<arith::ConstantIndexOp>(loc, match.lower + kLanes * pairs));
+  match.loop->setAttr(ondrix::ondsp::getPairingRemainderAttrName(), builder.getUnitAttr());
 }
 
 /// Pairs every window loop the pass can prove. The coefficient pair buffer is a

@@ -84,8 +84,6 @@ std::optional<int64_t> getStraightLineTerms(ReduceMacOp reduce) {
 llvm::DenseSet<Operation *> collectOverBudgetFunctions(ModuleOp module, int64_t maxUnrolledTerms,
                                                        int64_t maxCarriedWindow) {
   llvm::DenseSet<Operation *> overBudget;
-  if (maxUnrolledTerms <= 0 && maxCarriedWindow <= 0)
-    return overBudget;
   llvm::DenseMap<Operation *, int64_t> totals;
   module.walk([&](ReduceMacOp op) {
     auto function = op->getParentOfType<func::FuncOp>();
@@ -93,6 +91,11 @@ llvm::DenseSet<Operation *> collectOverBudgetFunctions(ModuleOp module, int64_t 
       return;
     if (!isStraightLineCandidate(op))
       return;
+    // Straight-lined here, pairing's remainder shares its reads with the paired
+    // body before the backend's load reuse runs, and pins them across it; kept
+    // a loop, the backend unrolls it after that reuse (pass description).
+    if (ondrix::ondsp::isInPairingRemainder(op))
+      overBudget.insert(function);
     if (maxCarriedWindow > 0) {
       // A window this analysis cannot read declines the straight-line form
       // rather than being assumed to carry nothing.

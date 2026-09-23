@@ -136,14 +136,15 @@ struct UnrollOndspFixedMacLoops final
 
     // Over-budget functions keep every loop, so one function never mixes the
     // two shapes and this pass never re-expands what the reduction scalarizer
-    // declined for the same budget.
-    // Over-budget functions keep every loop, so one function never mixes the
-    // two shapes and this pass never re-expands what the reduction scalarizer
     // declined for the same budget. Every accumulator loop is charged, not
     // only the ones this pass could unroll: one it cannot price is what the
     // scalarizer's own refusal emits, and skipping it is how the two passes
     // once disagreed about the same function.
     llvm::DenseSet<Operation *> overBudget;
+    getOperation()->walk([&](scf::ForOp loop) {
+      if (isSingleLaneAccLoop(loop) && ondrix::ondsp::isInPairingRemainder(loop))
+        overBudget.insert(loop->getParentOfType<func::FuncOp>());
+    });
     if (maxUnrolledTerms > 0 || maxCarriedWindow > 0) {
       llvm::DenseMap<Operation *, int64_t> totals;
       getOperation()->walk([&](scf::ForOp loop) {

@@ -1032,7 +1032,8 @@ def PairOndspFixedReductionOutputs
     identity step interposed, and the pairing stays exact. The pair buffer is
     packed once before the loop, so the coefficient stream must be provably
     distinct from the destination; an odd last output stays on the original
-    single-lane loop.
+    single-lane loop, marked `ondsp.pairing_remainder` so the unrolling passes
+    keep it a loop.
 
     Both interleaved buffers carry `alignment = 4`, which is what lets the
     backend merge each lane pair's two 16-bit loads into one aligned 32-bit

@@ -536,6 +536,15 @@ def ScalarizeOndspFixedReduceMac
     32 terms a filter tap chain runs 1.9x faster for 2.7x its bytes, while
     the DCT's per-row replication reaches 4096 terms and 15x its bytes to run
     slower.
+
+    A loop `pair-ondsp-fixed-reduction-outputs` marks as its odd remainder
+    keeps the loop form whatever the budgets, and so does the rest of its
+    function. The remainder reads the samples the paired body just read;
+    straight-lined here, the backend's load reuse binds it to those reads and
+    keeps them live across the body, while as a one-trip loop it is unrolled
+    by the backend after that reuse has run and costs nothing. Measured on
+    one target: 16-tap filters 1.5-1.9% fewer instructions, 32-tap ones two
+    instructions more.
   }];
   let options = [
     Option<"maxUnrolledTerms", "max-unrolled-terms", "int64_t", /*default=*/"0",
@@ -670,7 +679,8 @@ def UnrollOndspFixedMacLoops
     `scalarize-ondsp-fixed-reduce-mac`: a lowering that already replicated
     its loops multiplies a per-loop bound by that replication. The two
     budgets must agree, or this pass re-expands what the other declined.
-    Zero disables the budget.
+    Zero disables the budget. Output pairing's marked remainder keeps its
+    loop here too, for the reason `scalarize-ondsp-fixed-reduce-mac` gives.
   }];
   let options = [
     Option<"maxUnrolledTerms", "max-unrolled-terms", "int64_t", /*default=*/"0",
