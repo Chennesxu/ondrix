@@ -1,6 +1,7 @@
 add_ondrix_library(OndspToOrtumCore
   OndspCxButterflyToOrtumCore.cpp
   OndspLanePairsToOrtumCore.cpp
+  OndspLaneSplitToOrtumCore.cpp
   OndspToOrtumCore.cpp
   OrtumCoreLoweringSupport.cpp
 
@@ -11,12 +12,15 @@ add_ondrix_library(OndspToOrtumCore
   MLIRFuncDialect
   MLIRFuncTransforms
   MLIRIR
+  MLIRMemRefDialect
   MLIRPass
   MLIRSCFTransforms
   MLIRSupport
   MLIRTransformUtils
   MLIRVectorDialect
+  OndrixConstantSequenceAnalysis
   OndrixConversionUtils
+  OndrixFixedPointPrefixRangeAnalysis
   OndspIR
   OrtumCoreIR
   OrtumCoreTargetProfile

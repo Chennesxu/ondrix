@@ -49,43 +49,58 @@ std::optional<OrtumCoreExportPolicy> classifyOrtumCoreExport(ondsp::AccExportOp 
   return OrtumCoreExportPolicy{shift, storage, op.getRounding()};
 }
 
-Value emitOrtumCoreReadout(OpBuilder &builder, Location loc, Value acc,
-                           const OrtumCoreExportPolicy &policy) {
-  constexpr int64_t kMaxCapabilityShift = 15;
+namespace {
+constexpr int64_t kMaxCapabilityShift = 15;
+} // namespace
+
+int64_t getOrtumCoreReadoutShift(const OrtumCoreExportPolicy &policy) {
   int64_t tail = std::max<int64_t>(0, policy.shift - kMaxCapabilityShift);
-  Value out;
+  if (policy.rounding == ondsp::RoundingMode::NearestTiesPositive && policy.shift > 0)
+    return tail == 0 ? policy.shift - 1 : kMaxCapabilityShift;
+  return policy.shift - tail;
+}
+
+Value emitOrtumCoreReadout(OpBuilder &builder, Location loc,
+                           llvm::function_ref<Value(int64_t)> readout,
+                           const OrtumCoreExportPolicy &policy) {
+  int64_t tail = std::max<int64_t>(0, policy.shift - kMaxCapabilityShift);
+  Value out = readout(getOrtumCoreReadoutShift(policy));
   if (policy.rounding == ondsp::RoundingMode::NearestTiesPositive && policy.shift > 0 &&
       tail == 0) {
     // floor((acc + 2^(s-1)) / 2^s) == (r >> 1) + (r & 1) for r = acc >> (s-1),
     // total in i32 (no widening), and in the admitted range the narrower
     // readout cannot clip (Passes.td carries the argument), so it is exact.
-    Value narrower =
-        builder.create<ortumcore::AccOutOp>(loc, builder.getI32Type(), acc, policy.shift - 1);
     Value one = builder.create<arith::ConstantIntOp>(loc, 1, 32);
-    Value halved = builder.create<arith::ShRSIOp>(loc, narrower, one);
-    Value roundBit = builder.create<arith::AndIOp>(loc, narrower, one);
+    Value halved = builder.create<arith::ShRSIOp>(loc, out, one);
+    Value roundBit = builder.create<arith::AndIOp>(loc, out, one);
     out = builder.create<arith::AddIOp>(loc, halved, roundBit);
   } else if (policy.rounding == ondsp::RoundingMode::NearestTiesPositive && tail > 0) {
     // Past the capability range the half-add commutes over the always-exact
     // max-shift readout (2^15 divides 2^(s-1)), landing as one base add on
     // the 25-bit value before the exact nested tail shift.
-    out = builder.create<ortumcore::AccOutOp>(loc, builder.getI32Type(), acc, kMaxCapabilityShift);
     Value half = builder.create<arith::ConstantIntOp>(loc, int64_t(1) << (tail - 1), 32);
     Value sum = builder.create<arith::AddIOp>(loc, out, half);
     Value amount = builder.create<arith::ConstantIntOp>(loc, tail, 32);
     out = builder.create<arith::ShRSIOp>(loc, sum, amount);
-  } else {
-    out = builder.create<ortumcore::AccOutOp>(loc, builder.getI32Type(), acc, policy.shift - tail);
-    if (tail > 0) {
-      // floor nests exactly over the base tail shift.
-      Value amount = builder.create<arith::ConstantIntOp>(loc, tail, 32);
-      out = builder.create<arith::ShRSIOp>(loc, out, amount);
-    }
+  } else if (tail > 0) {
+    // floor nests exactly over the base tail shift.
+    Value amount = builder.create<arith::ConstantIntOp>(loc, tail, 32);
+    out = builder.create<arith::ShRSIOp>(loc, out, amount);
   }
   // The i16 destination clamp composes exactly: the readout's wider i32
   // saturation cannot change a subsequent narrower clamp (Passes.td carries
   // the argument).
   return emitSignedSaturatingNarrow(builder, loc, out, policy.storage);
+}
+
+Value emitOrtumCoreReadout(OpBuilder &builder, Location loc, Value acc,
+                           const OrtumCoreExportPolicy &policy) {
+  return emitOrtumCoreReadout(
+      builder, loc,
+      [&](int64_t shift) -> Value {
+        return builder.create<ortumcore::AccOutOp>(loc, builder.getI32Type(), acc, shift);
+      },
+      policy);
 }
 
 std::optional<ortumcore::CxRounding> selectPackedComplexRounding(ondsp::RoundingMode mode) {

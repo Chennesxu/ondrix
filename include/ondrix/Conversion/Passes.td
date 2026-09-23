@@ -187,6 +187,50 @@ def ConvertOndspLanePairsToOrtumCore
   ];
 }
 
+def ConvertOndspLaneSplitToOrtumCore
+    : Pass<"convert-ondsp-lane-split-to-ortumcore", "::mlir::ModuleOp"> {
+  let summary = "Split a certified single-lane Q15 reduction across the dual-lane MAC";
+  let description = [{
+    Rewrite a zero-seeded, single-lane, straight-line Q15 full-product chain
+    ending in one admitted export onto two target accumulators advanced by
+    `ortumcore.dmac`: lane 0 takes the even-position terms and lane 1 the odd
+    ones, an odd last term pairing with an exact zero product.
+
+    The split reassociates, so it is authorized only by a certificate: every
+    term multiplies a runtime value by a constant the analysis reads (a
+    literal or an element of a constant global), and the prefix-range
+    interval of each lane's terms fits a signed 32-bit word. Every partial
+    sum of a lane lies inside that interval, because each product interval
+    contains zero, so neither lane reaches the 40-bit rail, each reads out
+    exactly at shift 0, and the original chain, whose prefixes are sums of
+    the two lanes' prefixes, never saturates either: both compute the exact
+    sum. Where the whole sum's interval also fits a word the merge is one
+    add; otherwise it stays in one word through halves: `floor((a + b) / 2)` is
+    `(a >> 1) + (b >> 1) + (a & b & 1)`, exact whenever both lanes fit, and
+    the export composition of `convert-ondsp-to-ortumcore` runs on it with
+    that value standing in for the readout at shift one, and shifted further
+    for larger readout shifts, none of which can reach the readout's 32-bit
+    saturation. A readout at shift 0 is admitted only when the whole sum's
+    interval also fits one word.
+
+    A dual step reads each lane pair as one word, so the runtime terms must
+    read consecutive elements of one rank-1 static stream starting at an
+    even index; the element contract only promises the stream is aligned to
+    its element, so the rewrite tests the pointer at run time and keeps the
+    ordered chain for a misaligned stream, stating the alignment it proved
+    with `memref.assume_alignment` on the split path. Anything else is left
+    unchanged for `convert-ondsp-to-ortumcore`.
+  }];
+  let constructor = "ondrix::createConvertOndspLaneSplitToOrtumCorePass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "ondrix::ondsp::OndspDialect",
+    "ondrix::ortumcore::OrtumCoreDialect",
+  ];
+}
+
 def ConvertOndspCxButterflyToOrtumCore
     : Pass<"convert-ondsp-cx-butterfly-to-ortumcore", "::mlir::ModuleOp"> {
   let summary = "Select packed-target butterflies onto the ortumcore complex pair";

@@ -38,10 +38,19 @@ struct OrtumCoreExportPolicy {
 /// caller. Silent on every rejection.
 std::optional<OrtumCoreExportPolicy> classifyOrtumCoreExport(ondsp::AccExportOp op);
 
+/// The one capability readout shift the composition for `policy` reads.
+int64_t getOrtumCoreReadoutShift(const OrtumCoreExportPolicy &policy);
+
 /// Emits the proven readout composition for one converted accumulator value
 /// and returns the exported lane in the destination storage type. The
 /// exactness argument lives on the ConvertOndspToOrtumCore description.
 mlir::Value emitOrtumCoreReadout(mlir::OpBuilder &builder, mlir::Location loc, mlir::Value acc,
+                                 const OrtumCoreExportPolicy &policy);
+
+/// The same composition over any source whose `readout(shift)` equals the
+/// capability readout `sat32(acc >> shift)` at the shift the policy reads.
+mlir::Value emitOrtumCoreReadout(mlir::OpBuilder &builder, mlir::Location loc,
+                                 llvm::function_ref<mlir::Value(int64_t)> readout,
                                  const OrtumCoreExportPolicy &policy);
 
 /// The packed target rounding inventory. nearest_even and toward_zero
