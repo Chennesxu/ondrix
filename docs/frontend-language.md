@@ -838,6 +838,33 @@ section count is static and at least one. Denominator feedback is added, so a
 subtractive source convention supplies negated `a1`/`a2`. Empty input returns
 an empty output and the unchanged state.
 
+### Channel Decoding
+
+`viterbi_decode(symbols, constraint_length=, polynomials=[...])` decodes a
+zero-terminated frame of a rate-1/2 or rate-1/3 feed-forward convolutional
+code, the maximum-correlation path under the operation contract's exact
+integer metrics and its fixed tie rule (the odd predecessor):
+
+```python
+def viterbi_k7(symbols: tensor[q15, 512]) -> tensor[u8, 32]:
+  return viterbi_decode(symbols, constraint_length=7, polynomials=[0o171, 0o133])
+```
+
+The operand is one Q15 soft symbol per coded bit, positive for a coded 0,
+read as a plain integer: only the ordering of path metrics matters, so the
+fractional reading plays no part. `constraint_length` is in `[3, 7]`, there
+are two or three generators, each in `[1, 2^constraint_length)`; bit
+`K - 1 - j` of a generator taps the input `j` steps back, so `0o171, 0o133`
+is the familiar NASA code. For `N` decoded bits the operand has `N * R`
+elements, `N` is a multiple of 8 and `N * R <= 16384`, and the result is the
+bits packed most significant first into `N / 8` elements of `u8`. The frame
+must end in `K - 1` zero bits for the decode to mean anything; those bits
+come back as zeros. `u8` is the result type of this builtin only: it is not a
+parameter type and no builtin consumes it.
+
+Integer literals may be written in octal with a `0o` prefix anywhere a
+decimal one is accepted.
+
 ### Named Functions
 
 A file may declare several functions. The last one is the kernel the module

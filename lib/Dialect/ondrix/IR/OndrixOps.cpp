@@ -1882,6 +1882,41 @@ LogicalResult GainOp::verify() {
   return success();
 }
 
+LogicalResult ViterbiDecodeOp::verify() {
+  int64_t constraint = getConstraintLength();
+  if (constraint < 3 || constraint > 7)
+    return emitOpError("constraint_length must be in [3, 7]");
+  ArrayRef<int64_t> polynomials = getPolynomials();
+  if (polynomials.size() != 2 && polynomials.size() != 3)
+    return emitOpError("requires two or three generator polynomials (rate 1/2 or 1/3)");
+  for (int64_t polynomial : polynomials)
+    if (polynomial < 1 || polynomial >= (int64_t{1} << constraint))
+      return emitOpError() << "generator polynomial " << polynomial << " is not in [1, 2^"
+                           << constraint << ")";
+  RankedTensorType symbolsType = getSymbols().getType();
+  RankedTensorType bitsType = getBits().getType();
+  if (failed(verifyUnencodedTensorTypes(getOperation(), {symbolsType, bitsType})))
+    return failure();
+  int64_t rate = static_cast<int64_t>(polynomials.size());
+  if (symbolsType.getRank() != 1 || !symbolsType.hasStaticShape() ||
+      !symbolsType.getElementType().isInteger(16) || bitsType.getRank() != 1 ||
+      !bitsType.hasStaticShape() || !bitsType.getElementType().isInteger(8))
+    return emitOpError("requires a static tensor<(N*R)xi16> of symbols and tensor<(N/8)xi8> of "
+                       "packed bits");
+  int64_t symbols = symbolsType.getDimSize(0);
+  int64_t frame = symbols / rate;
+  // Metrics grow by at most R * 2^15 per stage; this bound keeps every
+  // reachable one within 2^29, where i32 carries them exactly.
+  if (symbols % rate != 0 || frame == 0 || frame % 8 != 0 || symbols > 16384)
+    return emitOpError() << "requires N * R symbols with N a positive multiple of 8 and "
+                            "N * R <= 16384; got "
+                         << symbols << " symbols at rate 1/" << rate;
+  if (bitsType.getDimSize(0) != frame / 8)
+    return emitOpError() << "packs " << frame << " decoded bits into " << frame / 8
+                         << " bytes, not " << bitsType.getDimSize(0);
+  return success();
+}
+
 LogicalResult LmsOp::verify() {
   auto fp = dyn_cast<ondrix::ondsp::FpAttr>(getNumeric());
   std::optional<unsigned> storageWidth;

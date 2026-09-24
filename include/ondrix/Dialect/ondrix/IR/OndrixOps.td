@@ -1884,6 +1884,48 @@ def Ondrix_LmsOp : Ondrix_Op<"lms", [Pure]> {
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def Ondrix_ViterbiDecodeOp : Ondrix_Op<"viterbi_decode", [Pure]> {
+  let summary = "Maximum-correlation decoding of a zero-terminated convolutional code";
+  let description = [{
+    `ondrix.viterbi_decode` decodes a frame of `N` bits encoded by the
+    rate-1/R feed-forward convolutional code of constraint length `K` and
+    generator polynomials `g_0 .. g_{R-1}`, from `N * R` signed 16-bit soft
+    symbols, positive meaning a coded 0. The frame is zero-terminated: the
+    encoder starts in state 0 and its last `K - 1` input bits are 0, so the
+    decoded path is the best one that starts and ends in state 0. With
+    `S = 2^(K-1)` states:
+
+    ```text
+    state after input u[n]:  s' = (s >> 1) | (u[n] << (K-2))
+    coded bit r:             c_r = parity(g_r & ((u[n] << (K-1)) | s))
+    branch metric:           b = sum_r (c_r == 0 ? y[n*R + r] : -y[n*R + r])
+    path metric:             M_0(0) = 0, M_0(s != 0) = -infinity
+                             M_{n+1}(t) = max over the two predecessors p
+                                          of M_n(p) + b(p -> t)
+    ```
+
+    Everything is exact integer arithmetic. A tie takes the odd predecessor
+    `2j + 1` of the two, `2j` and `2j + 1`, that feed state `j` and
+    `j + S/2`, so the decoded bits are a function of the symbols alone. The
+    bits are read back along the path into state 0 at `n = N` and returned
+    packed: byte `i` holds `u[8i] .. u[8i+7]`, most significant bit first.
+    The last `K - 1` decoded bits are the termination's zeros.
+
+    A metric's magnitude grows by at most `R * 2^15` per stage, so the frame
+    is bounded by `N * R <= 16384`: every reachable metric then stays within
+    `2^29` and the lowering carries them exactly in i32, with a finite
+    `-(2^30 + 1)` standing for `-infinity` that no reachable path can meet.
+    `K` is in `[3, 7]`, `R` in `{2, 3}`, every generator in `[1, 2^K)`, and
+    `N` is a positive multiple of 8 no smaller than `K - 1`.
+  }];
+  let arguments = (ins AnyRankedTensor:$symbols,
+                   I64Attr:$constraint_length,
+                   DenseI64ArrayAttr:$polynomials);
+  let results = (outs AnyRankedTensor:$bits);
+  let hasVerifier = 1;
+  let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
 def Ondrix_CxMagnitudeOp : Ondrix_Op<"cx_magnitude", [Pure]> {
   let summary = "Magnitude of a packed fixed-point or interleaved f32 complex tensor";
   let description = [{

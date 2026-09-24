@@ -14,6 +14,8 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include "llvm/ADT/bit.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -744,9 +746,166 @@ private:
   using SampleBody = llvm::function_ref<void(OpBuilder &, Location, Value, ValueRange, TapFetch)>;
 };
 
+/// `ondrix.viterbi_decode` as the recursion its description states: a stage
+/// loop over one [current | next] metric tensor, whose halves swap roles each
+/// stage so the update stays in place, and a traceback packing one byte per
+/// iteration. Decision word u of a stage holds state j + u * S/2 at bit j.
+class ViterbiDecodeOpLowering final : public OpConversionPattern<ondrix::ir::ViterbiDecodeOp> {
+public:
+  using OpConversionPattern<ondrix::ir::ViterbiDecodeOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ir::ViterbiDecodeOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    int64_t constraint = op.getConstraintLength();
+    ArrayRef<int64_t> polynomials = op.getPolynomials();
+    int64_t rate = static_cast<int64_t>(polynomials.size());
+    int64_t states = int64_t{1} << (constraint - 1);
+    int64_t half = states / 2;
+    int64_t frame = op.getSymbols().getType().getDimSize(0) / rate;
+    IntegerType i32 = rewriter.getI32Type();
+    IntegerType i8 = rewriter.getI8Type();
+
+    // The coded bits of predecessor p under input u, bit r being c_r.
+    SmallVector<int32_t> patterns;
+    for (int64_t predecessor = 0; predecessor < states; ++predecessor)
+      for (int64_t input = 0; input < 2; ++input) {
+        int64_t reg = (input << (constraint - 1)) | predecessor;
+        int32_t pattern = 0;
+        for (auto [r, generator] : llvm::enumerate(polynomials))
+          pattern |= (llvm::popcount(static_cast<uint64_t>(generator & reg)) & 1) << r;
+        patterns.push_back(pattern);
+      }
+    auto patternType = RankedTensorType::get({2 * states}, i32);
+    Value patternTable = rewriter.create<arith::ConstantOp>(
+        loc, DenseIntElementsAttr::get(patternType, ArrayRef<int32_t>(patterns)));
+    // -(2^30 + 1) loses to every reachable metric, which stays within 2^29.
+    SmallVector<int32_t> initial(2 * states, 0);
+    for (int64_t state = 1; state < states; ++state)
+      initial[state] = -(int32_t{1} << 30) - 1;
+    auto metricType = RankedTensorType::get({2 * states}, i32);
+    Value metrics = rewriter.create<arith::ConstantOp>(
+        loc, DenseIntElementsAttr::get(metricType, ArrayRef<int32_t>(initial)));
+    Value decisions = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{frame, 2}, i32);
+
+    auto index = [&](OpBuilder &b, int64_t value) -> Value {
+      return b.create<arith::ConstantIndexOp>(loc, value);
+    };
+    auto i32Const = [&](OpBuilder &b, int64_t value) -> Value {
+      return b.create<arith::ConstantIntOp>(loc, value, 32);
+    };
+    auto stages = rewriter.create<scf::ForOp>(
+        loc, index(rewriter, 0), index(rewriter, frame), index(rewriter, 1),
+        ValueRange{metrics, decisions},
+        [&](OpBuilder &b, Location loc, Value stage, ValueRange carried) {
+          Value parity = b.create<arith::AndIOp>(loc, stage, index(b, 1));
+          Value current = b.create<arith::MulIOp>(loc, parity, index(b, states));
+          Value next = b.create<arith::SubIOp>(loc, index(b, states), current);
+          SmallVector<Value> symbols;
+          for (int64_t r = 0; r < rate; ++r) {
+            Value position = b.create<arith::AddIOp>(
+                loc, b.create<arith::MulIOp>(loc, stage, index(b, rate)), index(b, r));
+            Value symbol = b.create<tensor::ExtractOp>(loc, adaptor.getSymbols(), position);
+            symbols.push_back(b.create<arith::ExtSIOp>(loc, i32, symbol));
+          }
+          // The branch metric of every coded pattern: + y_r for a 0, - y_r for a 1.
+          SmallVector<Value> metricsByPattern;
+          for (int64_t pattern = 0; pattern < (int64_t{1} << rate); ++pattern) {
+            Value sum = i32Const(b, 0);
+            for (int64_t r = 0; r < rate; ++r)
+              sum = (pattern >> r) & 1 ? b.create<arith::SubIOp>(loc, sum, symbols[r]).getResult()
+                                       : b.create<arith::AddIOp>(loc, sum, symbols[r]).getResult();
+            metricsByPattern.push_back(sum);
+          }
+          Value branch = b.create<tensor::FromElementsOp>(loc, metricsByPattern);
+          auto butterflies = b.create<scf::ForOp>(
+              loc, index(b, 0), index(b, half), index(b, 1),
+              ValueRange{carried[0], i32Const(b, 0), i32Const(b, 0)},
+              [&](OpBuilder &b, Location loc, Value j, ValueRange inner) {
+                Value even = b.create<arith::MulIOp>(loc, j, index(b, 2));
+                Value odd = b.create<arith::AddIOp>(loc, even, index(b, 1));
+                Value metric0 = b.create<tensor::ExtractOp>(
+                    loc, inner[0], ValueRange{b.create<arith::AddIOp>(loc, current, even)});
+                Value metric1 = b.create<tensor::ExtractOp>(
+                    loc, inner[0], ValueRange{b.create<arith::AddIOp>(loc, current, odd)});
+                Value bit = b.create<arith::IndexCastOp>(loc, i32, j);
+                Value updated = inner[0];
+                SmallVector<Value> words{inner[1], inner[2]};
+                for (int64_t input = 0; input < 2; ++input) {
+                  auto candidate = [&](Value predecessor, Value metric) -> Value {
+                    Value slot = b.create<arith::AddIOp>(
+                        loc, b.create<arith::MulIOp>(loc, predecessor, index(b, 2)),
+                        index(b, input));
+                    Value pattern = b.create<arith::IndexCastOp>(
+                        loc, b.getIndexType(),
+                        b.create<tensor::ExtractOp>(loc, patternTable, slot));
+                    Value gain = b.create<tensor::ExtractOp>(loc, branch, pattern);
+                    return b.create<arith::AddIOp>(loc, metric, gain);
+                  };
+                  Value from0 = candidate(even, metric0);
+                  Value from1 = candidate(odd, metric1);
+                  // Strictly greater keeps the even predecessor; a tie takes the odd one.
+                  Value keepEven =
+                      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, from0, from1);
+                  Value best = b.create<arith::SelectOp>(loc, keepEven, from0, from1);
+                  Value decision =
+                      b.create<arith::SelectOp>(loc, keepEven, i32Const(b, 0), i32Const(b, 1));
+                  words[input] = b.create<arith::OrIOp>(
+                      loc, words[input], b.create<arith::ShLIOp>(loc, decision, bit));
+                  Value target = b.create<arith::AddIOp>(
+                      loc, next, b.create<arith::AddIOp>(loc, j, index(b, input * half)));
+                  updated = b.create<tensor::InsertOp>(loc, best, updated, target);
+                }
+                b.create<scf::YieldOp>(loc, ValueRange{updated, words[0], words[1]});
+              });
+          Value recorded = carried[1];
+          for (int64_t input = 0; input < 2; ++input)
+            recorded = b.create<tensor::InsertOp>(loc, butterflies.getResult(1 + input), recorded,
+                                                  ValueRange{stage, index(b, input)});
+          b.create<scf::YieldOp>(loc, ValueRange{butterflies.getResult(0), recorded});
+        });
+
+    // Traceback from state 0: u = the state's top bit, then the recorded
+    // decision picks the predecessor 2j + d. Eight steps fill one byte.
+    int64_t bytes = frame / 8;
+    Value packed = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{bytes}, i8);
+    Value history = stages.getResult(1);
+    auto traceback = rewriter.create<scf::ForOp>(
+        loc, index(rewriter, 0), index(rewriter, bytes), index(rewriter, 1),
+        ValueRange{i32Const(rewriter, 0), packed},
+        [&](OpBuilder &b, Location loc, Value step, ValueRange carried) {
+          Value byteIndex = b.create<arith::SubIOp>(loc, index(b, bytes - 1), step);
+          Value state = carried[0];
+          Value byte = i32Const(b, 0);
+          for (int64_t bit = 7; bit >= 0; --bit) {
+            Value stage = b.create<arith::AddIOp>(
+                loc, b.create<arith::MulIOp>(loc, byteIndex, index(b, 8)), index(b, bit));
+            Value input = b.create<arith::AndIOp>(
+                loc, b.create<arith::ShRUIOp>(loc, state, i32Const(b, constraint - 2)),
+                i32Const(b, 1));
+            Value j = b.create<arith::AndIOp>(loc, state, i32Const(b, half - 1));
+            Value word = b.create<tensor::ExtractOp>(
+                loc, history,
+                ValueRange{stage, b.create<arith::IndexCastOp>(loc, b.getIndexType(), input)});
+            Value decision = b.create<arith::AndIOp>(loc, b.create<arith::ShRUIOp>(loc, word, j),
+                                                     i32Const(b, 1));
+            byte = b.create<arith::OrIOp>(
+                loc, byte, b.create<arith::ShLIOp>(loc, input, i32Const(b, 7 - bit)));
+            state = b.create<arith::OrIOp>(loc, b.create<arith::ShLIOp>(loc, j, i32Const(b, 1)),
+                                           decision);
+          }
+          Value narrowed = b.create<arith::TruncIOp>(loc, i8, byte);
+          Value written = b.create<tensor::InsertOp>(loc, narrowed, carried[1], byteIndex);
+          b.create<scf::YieldOp>(loc, ValueRange{state, written});
+        });
+    rewriter.replaceOp(op, traceback.getResult(1));
+    return success();
+  }
+};
+
 } // namespace
 
 void ondrix::conversion::populateOndrixStatefulLoweringPatterns(RewritePatternSet &patterns) {
   patterns.add<SosFilterTdf2OpLowering, SosFilterDf2FixedOpLowering, CicDecimateOpLowering,
-               GoertzelOpLowering, LmsOpLowering>(patterns.getContext());
+               GoertzelOpLowering, LmsOpLowering, ViterbiDecodeOpLowering>(patterns.getContext());
 }

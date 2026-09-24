@@ -126,6 +126,16 @@ public:
     }
     if (std::isdigit(static_cast<unsigned char>(current))) {
       size_t begin = offset;
+      // `0o` then octal digits, the notation generator polynomials are read in.
+      auto isOctal = [](char c) { return c >= '0' && c <= '7'; };
+      if (current == '0' && offset + 2 < source.size() && source[offset + 1] == 'o' &&
+          isOctal(source[offset + 2])) {
+        advance();
+        advance();
+        while (offset < source.size() && isOctal(source[offset]))
+          advance();
+        return {TokenKind::Integer, source.slice(begin, offset), start};
+      }
       do {
         advance();
       } while (offset < source.size() && std::isdigit(static_cast<unsigned char>(source[offset])));
@@ -209,7 +219,15 @@ private:
   unsigned column = 1;
 };
 
-enum class SourceType { Q15, Q31, F32, ComplexQ15, ComplexQ31, ComplexF32 };
+enum class SourceType { Q15, Q31, F32, ComplexQ15, ComplexQ31, ComplexF32, U8 };
+
+// The value of an integer token, decimal or `0o` octal; true on failure, as
+// StringRef::getAsInteger.
+static bool getIntegerTokenValue(llvm::StringRef spelling, uint64_t &value) {
+  if (spelling.consume_front("0o"))
+    return spelling.getAsInteger(8, value);
+  return spelling.getAsInteger(10, value);
+}
 
 enum class ContainerKind { Scalar, Buffer, Tensor, Constexpr };
 
@@ -263,7 +281,8 @@ enum class ReductionKind {
   Quantize,
   Dequantize,
   Log2,
-  Exp2
+  Exp2,
+  ViterbiDecode
 };
 
 // The elementwise family: every member is one exact integer expression plus
@@ -332,11 +351,16 @@ static bool isFftComposableKind(ReductionKind kind) {
          kind == ReductionKind::Phase;
 }
 
+// One operand whose result shape follows from it and the call's attributes.
+static bool isUnaryComposableKind(ReductionKind kind) {
+  return isFftComposableKind(kind) || kind == ReductionKind::ViterbiDecode;
+}
+
 // The set whose members may hold one another as operands. Its checker
 // carries an element type and extent from operand to result, so a member has
 // to have a statically derivable result shape.
 static bool isComposableKind(ReductionKind kind) {
-  return isFftComposableKind(kind) || isElementwiseKind(kind) || isConversionKind(kind);
+  return isUnaryComposableKind(kind) || isElementwiseKind(kind) || isConversionKind(kind);
 }
 
 // A fixed gain is one requantization with a static shape, so it nests and
@@ -354,7 +378,7 @@ static bool isUnaryTensorKind(ReductionKind kind) {
 }
 
 static bool isUnaryKind(ReductionKind kind) {
-  return isFftComposableKind(kind) || isUnaryTensorKind(kind) || isConversionKind(kind) ||
+  return isUnaryComposableKind(kind) || isUnaryTensorKind(kind) || isConversionKind(kind) ||
          (isElementwiseKind(kind) && !isBinaryElementwiseKind(kind));
 }
 
@@ -432,6 +456,8 @@ struct BuiltinCallAst {
   bool normalized = false;
   int64_t epsilon = 0;
   int64_t gainBound = 0;
+  int64_t constraintLength = 0;
+  std::vector<int64_t> polynomials;
   SourceType target = SourceType::Q15;
   bool literal = false;
   SourcePosition position;
@@ -780,7 +806,8 @@ public:
         !isIdentifier("offset") && !isIdentifier("shift") && !isIdentifier("div") &&
         !isIdentifier("ratio") && !isIdentifier("widen") && !isIdentifier("narrow") &&
         !isIdentifier("quantize") && !isIdentifier("dequantize") && !isIdentifier("log2") &&
-        !isIdentifier("exp2") && !isIdentifier("cx_dot") && !isIdentifier("cx_fir_filter")) {
+        !isIdentifier("exp2") && !isIdentifier("cx_dot") && !isIdentifier("cx_fir_filter") &&
+        !isIdentifier("viterbi_decode")) {
       diagnostics.error(
           current.position,
           "expected dot(...), cx_dot(...), fir(...), fir_filter(...), "
@@ -790,7 +817,8 @@ public:
           "convolution(...), correlation(...), butterfly(...), cfft(...), or "
           "icfft(...), rfft(...), irfft(...), magnitude(...), phase(...), dct(...), "
           "moving_average(...), gain(...), rms(...), power(...), sine(...), cosine(...), "
-          "matmul(...), lms(...), nlms(...), cic_decimate(...), a lowpass/hamming/hann/"
+          "matmul(...), lms(...), nlms(...), cic_decimate(...), viterbi_decode(...), "
+          "a lowpass/hamming/hann/"
           "blackman/kaiser design, or an "
           "elementwise add/sub/mult/abs/negate/offset/shift/div/ratio builtin "
           "expression, or a widen/narrow/quantize/dequantize conversion");
@@ -818,6 +846,8 @@ public:
       call.kind = ReductionKind::SosTdf2;
     else if (isIdentifier("goertzel"))
       call.kind = ReductionKind::Goertzel;
+    else if (isIdentifier("viterbi_decode"))
+      call.kind = ReductionKind::ViterbiDecode;
     else if (isIdentifier("hamming"))
       call.kind = ReductionKind::Hamming;
     else if (isIdentifier("hann"))
@@ -983,6 +1013,31 @@ public:
         call.destinationOverflow = overflow->spelling.str();
       }
       if (!expect(TokenKind::RightParen, "expected ')' after FFT operand"))
+        return std::nullopt;
+      return call;
+    }
+    if (call.kind == ReductionKind::ViterbiDecode) {
+      std::optional<ExpressionAst> operand = parseExpression(std::nullopt);
+      if (!operand)
+        return std::nullopt;
+      call.operands.push_back(std::move(*operand));
+      if (!parseNamedInteger("constraint_length", call.constraintLength) ||
+          !expect(TokenKind::Comma, "expected ',' before polynomials") ||
+          !expectIdentifier("polynomials", "expected polynomials") ||
+          !expect(TokenKind::Equal, "expected '=' after polynomials") ||
+          !expect(TokenKind::LeftBracket, "expected '[' before the generator polynomials"))
+        return std::nullopt;
+      while (true) {
+        std::optional<int64_t> polynomial = parseSignedInteger("expected a generator polynomial");
+        if (!polynomial)
+          return std::nullopt;
+        call.polynomials.push_back(*polynomial);
+        if (current.kind != TokenKind::Comma)
+          break;
+        advance();
+      }
+      if (!expect(TokenKind::RightBracket, "expected ']' after the generator polynomials") ||
+          !expect(TokenKind::RightParen, "expected ')' after viterbi_decode expression"))
         return std::nullopt;
       return call;
     }
@@ -1838,7 +1893,7 @@ private:
                            isIdentifier("offset") || isIdentifier("shift") || isIdentifier("div") ||
                            isIdentifier("ratio") || isIdentifier("gain") || isIdentifier("widen") ||
                            isIdentifier("narrow") || isIdentifier("quantize") ||
-                           isIdentifier("dequantize");
+                           isIdentifier("dequantize") || isIdentifier("viterbi_decode");
     if (isCall && (rootPolicy || isNestedBuiltin)) {
       std::optional<BuiltinCallAst> call = parseBuiltinCall(rootPolicy.value_or(SourceType::Q15));
       if (!call)
@@ -1924,6 +1979,10 @@ private:
       advance();
       return SourceType::ComplexF32;
     }
+    if (isIdentifier("u8")) {
+      advance();
+      return SourceType::U8;
+    }
     diagnostics.error(current.position, message);
     return std::nullopt;
   }
@@ -1956,7 +2015,7 @@ private:
       return std::nullopt;
 
     uint64_t magnitude = 0;
-    if (value->spelling.getAsInteger(10, magnitude) ||
+    if (getIntegerTokenValue(value->spelling, magnitude) ||
         magnitude > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + negative) {
       diagnostics.error(value->position, "integer literal is out of range");
       return std::nullopt;
@@ -1985,7 +2044,7 @@ private:
         uint64_t value = 0;
         if (!parsedExtent)
           return false;
-        if (parsedExtent->spelling.getAsInteger(10, value) ||
+        if (getIntegerTokenValue(parsedExtent->spelling, value) ||
             value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
           diagnostics.error(parsedExtent->position,
                             llvm::Twine(containerName) + " extent is out of range");
@@ -2240,7 +2299,7 @@ private:
     auto width = parseInteger("expected exact accumulator width");
     if (!width || !expect(TokenKind::Comma, "expected ',' after accumulator width"))
       return false;
-    if (width->spelling.getAsInteger(10, result.accumulatorWidth)) {
+    if (getIntegerTokenValue(width->spelling, result.accumulatorWidth)) {
       diagnostics.error(width->position, "accumulator width is out of range");
       return false;
     }
@@ -2487,6 +2546,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   std::optional<llvm::StringRef> rhsName = getParameterOperand(ast.result, 1);
   std::optional<llvm::StringRef> thirdName = getParameterOperand(ast.result, 2);
   std::optional<llvm::StringRef> fourthName = getParameterOperand(ast.result, 3);
+  if (ast.primaryResult().type == SourceType::U8 &&
+      ast.result.kind != ReductionKind::ViterbiDecode) {
+    diagnostics.error(ast.result.position, "u8 is currently only the result of viterbi_decode");
+    return std::nullopt;
+  }
   for (const ParameterAst &parameter : ast.parameters) {
     if (!parameterNames.insert(parameter.name).second) {
       diagnostics.error(parameter.position,
@@ -2501,6 +2565,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     }
     if (!verifyPositiveShape(parameter.shape, "parameter", parameter.position))
       return std::nullopt;
+    if (parameter.type == SourceType::U8) {
+      diagnostics.error(parameter.position, "u8 is currently only the result of viterbi_decode");
+      return std::nullopt;
+    }
     parametersByName.insert({parameter.name, &parameter});
     if (lhsName && parameter.name == *lhsName)
       lhsParameter = &parameter;
@@ -3159,7 +3227,13 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return ComposedType{value->type, *extent};
       }
 
-      return checkComposedCall(*expression.call);
+      std::optional<ComposedType> nested = checkComposedCall(*expression.call);
+      // Decoded bits carry no numeric reading any builtin consumes.
+      if (nested && nested->elementType == SourceType::U8) {
+        diagnostics.error(expression.position, "u8 decoded bits can only be returned");
+        return std::nullopt;
+      }
+      return nested;
     };
     // A fir_filter stage may feed the FFT chain: static Q15 or Q31 tensors,
     // the valid boundary, and the executable export profile of that width.
@@ -3481,7 +3555,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return checkConversion(call);
       if (call.kind == ReductionKind::Gain)
         return checkComposedGain(call);
-      if (!isFftComposableKind(call.kind) || call.operands.size() != 1) {
+      if (!isUnaryComposableKind(call.kind) || call.operands.size() != 1) {
         diagnostics.error(call.position,
                           "nested calls are currently supported only by unary FFT-family builtins "
                           "and a fir_filter input stage");
@@ -3491,6 +3565,38 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       if (!input)
         return std::nullopt;
 
+      if (call.kind == ReductionKind::ViterbiDecode) {
+        if (input->elementType != SourceType::Q15) {
+          diagnostics.error(call.position, "viterbi_decode requires q15 soft symbols");
+          return std::nullopt;
+        }
+        int64_t constraint = call.constraintLength;
+        int64_t rate = static_cast<int64_t>(call.polynomials.size());
+        if (constraint < 3 || constraint > 7) {
+          diagnostics.error(call.position, "viterbi_decode constraint_length must be in [3, 7]");
+          return std::nullopt;
+        }
+        if (rate != 2 && rate != 3) {
+          diagnostics.error(call.position,
+                            "viterbi_decode requires two or three generator polynomials");
+          return std::nullopt;
+        }
+        if (llvm::any_of(call.polynomials, [&](int64_t polynomial) {
+              return polynomial < 1 || polynomial >= (int64_t{1} << constraint);
+            })) {
+          diagnostics.error(call.position, llvm::Twine("every generator polynomial must lie in [1, "
+                                                       "2^constraint_length) = [1, ") +
+                                               llvm::Twine(int64_t{1} << constraint) + ")");
+          return std::nullopt;
+        }
+        if (input->extent % rate != 0 || (input->extent / rate) % 8 != 0 || input->extent > 16384) {
+          diagnostics.error(call.position,
+                            "viterbi_decode requires N * R symbols with N a positive multiple "
+                            "of 8 and N * R <= 16384");
+          return std::nullopt;
+        }
+        return ComposedType{SourceType::U8, input->extent / rate / 8};
+      }
       if (call.kind == ReductionKind::Phase) {
         bool interleavedFp = input->elementType == SourceType::ComplexF32;
         if (input->elementType != SourceType::ComplexQ15 &&
@@ -4522,6 +4628,8 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       return builder.getI32Type();
     if (type == SourceType::ComplexQ31)
       return builder.getI64Type();
+    if (type == SourceType::U8)
+      return builder.getI8Type();
     return builder.getF32Type();
   };
   Type elementType = getStorageType(kernel.ast.primaryResult().type);
@@ -4697,6 +4805,15 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       Value input = operand.isParameterReference() ? arguments.lookup(operand.parameter)
                                                    : emitComposedCall(*operand.call);
       auto inputType = cast<RankedTensorType>(input.getType());
+      if (call.kind == ReductionKind::ViterbiDecode) {
+        int64_t rate = static_cast<int64_t>(call.polynomials.size());
+        auto bitsType =
+            RankedTensorType::get({inputType.getDimSize(0) / rate / 8}, builder.getI8Type());
+        return builder.create<ir::ViterbiDecodeOp>(getLocation(context, sourceName, call.position),
+                                                   bitsType, input,
+                                                   builder.getI64IntegerAttr(call.constraintLength),
+                                                   builder.getDenseI64ArrayAttr(call.polynomials));
+      }
       if (isConversionKind(call.kind)) {
         // Sema pinned the direction, so the operand's element type and the
         // spelled target name the two formats.
