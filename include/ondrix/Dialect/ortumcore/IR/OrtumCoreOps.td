@@ -168,6 +168,40 @@ def OrtumCore_CxReduceMacOp
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def OrtumCore_ViterbiDecodeOp
+    : OrtumCore_Op<"viterbi_decode",
+                   [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Viterbi decoding on the 64-state trellis unit";
+  let description = [{
+    Decodes as `ondsp.viterbi_decode` does at 16-bit metrics and constraint
+    length 7, on the target's trellis unit: 64 states, the branch metrics of
+    one symbol pair per stage, and butterflies whose four branches carry one
+    metric and its negation -- the shape of a rate-1/2 code exactly when both
+    generators tap both ends of the register. Metrics wrap in 16 bits and a
+    tie takes the odd predecessor, so the realization's certificate, checked
+    here as there, makes the decode exact.
+
+    The decode stays one operation down to the target adapter, as
+    `cx_reduce_mac` does: the metrics and decisions are the unit's own fixed
+    state, which an adapter can serialize only if it sees every stage,
+    renormalization and traceback step together.
+  }];
+  let arguments = (ins MemRefRankOf<[I16], [1]>:$symbols,
+                   MemRefRankOf<[I8], [1]>:$bits,
+                   DenseI64ArrayAttr:$polynomials,
+                   I64Attr:$symbol_bound,
+                   I64Attr:$unreachable_metric,
+                   I64Attr:$renormalization_period);
+  let extraClassDeclaration = [{
+    static constexpr int64_t kConstraintLength = 7;
+    static constexpr int64_t kMetricBits = 16;
+    /// Whether the unit's butterflies decode this code.
+    static bool isTrellisCode(int64_t constraintLength, ::llvm::ArrayRef<int64_t> polynomials);
+  }];
+  let hasVerifier = 1;
+  let assemblyFormat = "$symbols `,` $bits attr-dict `:` type($symbols) `,` type($bits)";
+}
+
 def OrtumCore_CxMulConjOp : OrtumCore_Op<"cx_mul_conj", [Pure]> {
   let summary = "Packed complex multiply by the conjugated twiddle";
   let description = [{

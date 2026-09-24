@@ -456,6 +456,7 @@ struct BuiltinCallAst {
   bool normalized = false;
   int64_t epsilon = 0;
   int64_t gainBound = 0;
+  int64_t symbolBound = 0;
   int64_t constraintLength = 0;
   std::vector<int64_t> polynomials;
   SourceType target = SourceType::Q15;
@@ -1036,8 +1037,26 @@ public:
           break;
         advance();
       }
-      if (!expect(TokenKind::RightBracket, "expected ']' after the generator polynomials") ||
-          !expect(TokenKind::RightParen, "expected ')' after viterbi_decode expression"))
+      if (!expect(TokenKind::RightBracket, "expected ']' after the generator polynomials"))
+        return std::nullopt;
+      // A declared precondition on the symbols, which the decoding does not
+      // depend on and a narrower metric certificate may read.
+      if (current.kind == TokenKind::Comma) {
+        advance();
+        if (!expectIdentifier("symbol_bound", "expected symbol_bound") ||
+            !expect(TokenKind::Equal, "expected '=' after symbol_bound"))
+          return std::nullopt;
+        SourcePosition position = current.position;
+        auto bound = parseSignedInteger("expected a symbol_bound in raw symbol units");
+        if (!bound)
+          return std::nullopt;
+        if (*bound < 1 || *bound > 32767) {
+          diagnostics.error(position, "symbol_bound must lie in [1, 32767]");
+          return std::nullopt;
+        }
+        call.symbolBound = *bound;
+      }
+      if (!expect(TokenKind::RightParen, "expected ')' after viterbi_decode expression"))
         return std::nullopt;
       return call;
     }
@@ -4809,10 +4828,11 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         int64_t rate = static_cast<int64_t>(call.polynomials.size());
         auto bitsType =
             RankedTensorType::get({inputType.getDimSize(0) / rate / 8}, builder.getI8Type());
-        return builder.create<ir::ViterbiDecodeOp>(getLocation(context, sourceName, call.position),
-                                                   bitsType, input,
-                                                   builder.getI64IntegerAttr(call.constraintLength),
-                                                   builder.getDenseI64ArrayAttr(call.polynomials));
+        return builder.create<ir::ViterbiDecodeOp>(
+            getLocation(context, sourceName, call.position), bitsType, input,
+            builder.getI64IntegerAttr(call.constraintLength),
+            builder.getDenseI64ArrayAttr(call.polynomials),
+            call.symbolBound ? builder.getI64IntegerAttr(call.symbolBound) : IntegerAttr());
       }
       if (isConversionKind(call.kind)) {
         // Sema pinned the direction, so the operand's element type and the

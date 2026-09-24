@@ -464,6 +464,22 @@ public:
 using BitrevAddOpLowering = BitrevLikeOpLowering<ondrix::ortumcore::BitrevAddOp, false>;
 using BitrevSubOpLowering = BitrevLikeOpLowering<ondrix::ortumcore::BitrevSubOp, true>;
 
+class ViterbiDecodeOpLowering final
+    : public OpConversionPattern<ondrix::ortumcore::ViterbiDecodeOp> {
+public:
+  using OpConversionPattern<ondrix::ortumcore::ViterbiDecodeOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ortumcore::ViterbiDecodeOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    using Unit = ondrix::ortumcore::ViterbiDecodeOp;
+    rewriter.replaceOpWithNewOp<ondrix::ondsp::ViterbiDecodeOp>(
+        op, adaptor.getSymbols(), adaptor.getBits(), Unit::kConstraintLength, op.getPolynomials(),
+        Unit::kMetricBits, op.getSymbolBound(), op.getUnreachableMetric(),
+        op.getRenormalizationPeriod());
+    return success();
+  }
+};
+
 class ConvertOrtumCoreToOndspEmulationPass final
     : public ondrix::impl::ConvertOrtumCoreToOndspEmulationBase<
           ConvertOrtumCoreToOndspEmulationPass> {
@@ -488,7 +504,8 @@ public:
     patterns.add<AccInitOpLowering, MacAddOpLowering, MacSubOpLowering, Q31MacAddOpLowering,
                  Q31MacSubOpLowering, DmacOpLowering, AccOutOpLowering, SatShiftAddOpLowering,
                  SatShiftSubOpLowering, CxMulConjOpLowering, CxBflyOpLowering, CxPowerOpLowering,
-                 BitrevAddOpLowering, BitrevSubOpLowering>(typeConverter, &getContext());
+                 BitrevAddOpLowering, BitrevSubOpLowering, ViterbiDecodeOpLowering>(typeConverter,
+                                                                                    &getContext());
     ondrix::conversion::populateValueTypeConversionPatterns(typeConverter, patterns);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);

@@ -18,6 +18,7 @@ namespace ondrix {
 
 using namespace mlir;
 using ondrix::ondsp::AssumeL1BoundOp;
+using ondrix::ondsp::AssumeMagnitudeBoundOp;
 
 namespace {
 
@@ -52,17 +53,52 @@ void emitBoundCheck(AssumeL1BoundOp assume) {
   builder.create<cf::AssertOp>(loc, holds, message);
 }
 
+/// Aborts, with the same convention, on the first element whose magnitude
+/// exceeds the declared bound.
+void emitBoundCheck(AssumeMagnitudeBoundOp assume) {
+  OpBuilder builder(assume);
+  Location loc = assume.getLoc();
+  Value source = assume.getSource();
+  Type wide = builder.getI64Type();
+  Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+  Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
+  Value length = builder.create<memref::DimOp>(loc, source, 0);
+  Value bound = builder.create<arith::ConstantIntOp>(loc, assume.getBound(), 64);
+  auto function = assume->getParentOfType<func::FuncOp>();
+  std::string message = "ondrix_" + (function ? function.getSymName().str() : std::string()) +
+                        ": symbols exceed the declared symbol_bound";
+  builder.create<scf::ForOp>(
+      loc, zero, length, one, ValueRange{},
+      [&](OpBuilder &body, Location bodyLoc, Value index, ValueRange) {
+        Value value = body.create<arith::ExtSIOp>(
+            bodyLoc, wide, body.create<memref::LoadOp>(bodyLoc, source, index));
+        Value negated = body.create<arith::SubIOp>(
+            bodyLoc, body.create<arith::ConstantIntOp>(bodyLoc, 0, 64), value);
+        Value magnitude = body.create<arith::MaxSIOp>(bodyLoc, value, negated);
+        body.create<cf::AssertOp>(
+            bodyLoc,
+            body.create<arith::CmpIOp>(bodyLoc, arith::CmpIPredicate::sle, magnitude, bound),
+            message);
+        body.create<scf::YieldOp>(bodyLoc);
+      });
+}
+
+template <typename AssumeOp> void discharge(Operation *root, bool checked) {
+  SmallVector<AssumeOp> assumptions;
+  root->walk([&](AssumeOp op) { assumptions.push_back(op); });
+  for (AssumeOp assume : assumptions) {
+    if (checked)
+      emitBoundCheck(assume);
+    assume.getResult().replaceAllUsesWith(assume.getSource());
+    assume.erase();
+  }
+}
+
 struct LowerOndspAssumptions final
     : ondrix::impl::LowerOndspAssumptionsBase<LowerOndspAssumptions> {
   void runOnOperation() override {
-    SmallVector<AssumeL1BoundOp> assumptions;
-    getOperation()->walk([&](AssumeL1BoundOp op) { assumptions.push_back(op); });
-    for (AssumeL1BoundOp assume : assumptions) {
-      if (checked)
-        emitBoundCheck(assume);
-      assume.getResult().replaceAllUsesWith(assume.getSource());
-      assume.erase();
-    }
+    discharge<AssumeL1BoundOp>(getOperation(), checked);
+    discharge<AssumeMagnitudeBoundOp>(getOperation(), checked);
   }
 };
 

@@ -25,10 +25,6 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
                       "output-batch-vector-width={0} fft-loops={1}},",
                       options.vectorBits >= 64 ? options.vectorBits / 32 : 1,
                       options.fftLoops ? "true" : "false");
-  // No host schedule reads a declared coefficient bound, so it is discharged
-  // at once: trusted, or tested at run time under the checked entries.
-  os << llvm::formatv("lower-ondsp-assumptions{{checked={0}},",
-                      options.checkedEntries ? "true" : "false");
   // Forwarding must precede bufferization so a forwarded intermediate is
   // never materialized as a buffer.
   os << "canonicalize,cse,forward-ondrix-insert-extract,canonicalize,cse,";
@@ -40,6 +36,11 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   os << "one-shot-bufferize{bufferize-function-boundaries=true allow-return-allocs=true "
         "function-boundary-type-conversion=identity-layout-map create-deallocs=false},";
   os << "cse,canonicalize,";
+  // No host schedule reads a declared bound, so each is discharged once
+  // bufferization has placed the last of them on its buffer: trusted, or
+  // tested at run time under the checked entries.
+  os << llvm::formatv("lower-ondsp-assumptions{{checked={0}},",
+                      options.checkedEntries ? "true" : "false");
   // The C entry is recorded here, while the reductions that pair equal-length
   // windows are still `reduce_mac`; it is built once the descriptors expand.
   os << "declare-ondrix-c-entry-points,";

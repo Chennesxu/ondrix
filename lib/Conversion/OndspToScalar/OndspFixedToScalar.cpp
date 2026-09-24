@@ -27,6 +27,8 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include "llvm/ADT/bit.h"
+
 #include <cmath>
 #include <optional>
 #include <utility>
@@ -804,6 +806,164 @@ public:
   }
 };
 
+/// `ondsp.viterbi_decode` as the recursion its description states. Every
+/// butterfly of a stage is unrolled, so each reads the branch metric of its own
+/// coded pattern; the metrics live in one [current | next] buffer whose halves
+/// swap roles each stage, decision word u of a stage holds state j + u * S/2 at
+/// bit j, and the traceback packs one byte per iteration.
+class ViterbiDecodeOpLowering final : public OpConversionPattern<ondrix::ondsp::ViterbiDecodeOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::ViterbiDecodeOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::ViterbiDecodeOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    int64_t constraint = op.getConstraintLength();
+    ArrayRef<int64_t> polynomials = op.getPolynomials();
+    int64_t rate = static_cast<int64_t>(polynomials.size());
+    int64_t states = int64_t{1} << (constraint - 1);
+    int64_t half = states / 2;
+    int64_t frame = op.getSymbols().getType().getDimSize(0) / rate;
+    int64_t period = op.getRenormalizationPeriod();
+    IntegerType metric = rewriter.getIntegerType(op.getMetricBits());
+    IntegerType i32 = rewriter.getI32Type();
+    Value symbols = adaptor.getSymbols();
+
+    auto index = [&](OpBuilder &b, int64_t value) -> Value {
+      return b.create<arith::ConstantIndexOp>(loc, value);
+    };
+    auto integer = [&](OpBuilder &b, Type type, int64_t value) -> Value {
+      return b.create<arith::ConstantOp>(loc, b.getIntegerAttr(type, value));
+    };
+    auto at = [&](OpBuilder &b, Value base, int64_t offset) -> Value {
+      return b.create<arith::AddIOp>(loc, base, index(b, offset));
+    };
+    // Bit r of a pattern is c_r for predecessor p under input u.
+    auto pattern = [&](int64_t predecessor, int64_t input) {
+      int64_t reg = (input << (constraint - 1)) | predecessor;
+      int64_t bitsOfPattern = 0;
+      for (auto [r, generator] : llvm::enumerate(polynomials))
+        bitsOfPattern |= (llvm::popcount(static_cast<uint64_t>(generator & reg)) & 1) << r;
+      return bitsOfPattern;
+    };
+
+    Value metrics = rewriter.create<memref::AllocOp>(loc, MemRefType::get({2 * states}, metric));
+    Value decisions = rewriter.create<memref::AllocOp>(loc, MemRefType::get({frame, 2}, i32));
+    rewriter.create<scf::ForOp>(
+        loc, index(rewriter, 1), index(rewriter, states), index(rewriter, 1), ValueRange{},
+        [&](OpBuilder &b, Location loc, Value state, ValueRange) {
+          b.create<memref::StoreOp>(loc, integer(b, metric, op.getUnreachableMetric()), metrics,
+                                    state);
+          b.create<scf::YieldOp>(loc);
+        });
+    rewriter.create<memref::StoreOp>(loc, integer(rewriter, metric, 0), metrics,
+                                     index(rewriter, 0));
+
+    // After stage n (n % P == 0, n < N) every metric drops by state 0's.
+    auto renormalizeIfDue = [&](OpBuilder &b, Location loc, Value completed, Value next) {
+      Value due = b.create<arith::AndIOp>(
+          loc,
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                  b.create<arith::RemUIOp>(loc, completed, index(b, period)),
+                                  index(b, 0)),
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, completed, index(b, frame)));
+      b.create<scf::IfOp>(loc, due, [&](OpBuilder &b, Location loc) {
+        Value offset = b.create<memref::LoadOp>(loc, metrics, next);
+        for (int64_t state = 0; state < states; ++state) {
+          Value position = at(b, next, state);
+          Value value = b.create<memref::LoadOp>(loc, metrics, position);
+          b.create<memref::StoreOp>(loc, b.create<arith::SubIOp>(loc, value, offset), metrics,
+                                    position);
+        }
+        b.create<scf::YieldOp>(loc);
+      });
+    };
+    rewriter.create<scf::ForOp>(
+        loc, index(rewriter, 0), index(rewriter, frame), index(rewriter, 1), ValueRange{},
+        [&](OpBuilder &b, Location loc, Value stage, ValueRange) {
+          Value parity = b.create<arith::AndIOp>(loc, stage, index(b, 1));
+          Value current = b.create<arith::MulIOp>(loc, parity, index(b, states));
+          Value next = b.create<arith::SubIOp>(loc, index(b, states), current);
+          SmallVector<Value> ys;
+          for (int64_t r = 0; r < rate; ++r) {
+            Value position = at(b, b.create<arith::MulIOp>(loc, stage, index(b, rate)), r);
+            Value symbol = b.create<memref::LoadOp>(loc, symbols, position);
+            ys.push_back(metric.getWidth() > 16
+                             ? b.create<arith::ExtSIOp>(loc, metric, symbol).getResult()
+                             : symbol);
+          }
+          // + y_r for a coded 0, - y_r for a 1; the certificate bounds each sum.
+          SmallVector<Value> branch;
+          for (int64_t coded = 0; coded < (int64_t{1} << rate); ++coded) {
+            Value sum = integer(b, metric, 0);
+            for (int64_t r = 0; r < rate; ++r)
+              sum = (coded >> r) & 1 ? b.create<arith::SubIOp>(loc, sum, ys[r]).getResult()
+                                     : b.create<arith::AddIOp>(loc, sum, ys[r]).getResult();
+            branch.push_back(sum);
+          }
+          Value words[2] = {integer(b, i32, 0), integer(b, i32, 0)};
+          for (int64_t j = 0; j < half; ++j) {
+            Value even = b.create<memref::LoadOp>(loc, metrics, at(b, current, 2 * j));
+            Value odd = b.create<memref::LoadOp>(loc, metrics, at(b, current, 2 * j + 1));
+            for (int64_t input = 0; input < 2; ++input) {
+              Value fromEven = b.create<arith::AddIOp>(loc, even, branch[pattern(2 * j, input)]);
+              Value fromOdd = b.create<arith::AddIOp>(loc, odd, branch[pattern(2 * j + 1, input)]);
+              // Strictly greater keeps the even predecessor; a tie takes the odd one.
+              Value keepEven =
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, fromEven, fromOdd);
+              b.create<memref::StoreOp>(loc,
+                                        b.create<arith::SelectOp>(loc, keepEven, fromEven, fromOdd),
+                                        metrics, at(b, next, j + input * half));
+              Value decision = b.create<arith::SelectOp>(loc, keepEven, integer(b, i32, 0),
+                                                         integer(b, i32, int64_t{1} << j));
+              words[input] = b.create<arith::OrIOp>(loc, words[input], decision);
+            }
+          }
+          for (int64_t input = 0; input < 2; ++input)
+            b.create<memref::StoreOp>(loc, words[input], decisions,
+                                      ValueRange{stage, index(b, input)});
+          if (period > 0)
+            renormalizeIfDue(b, loc, at(b, stage, 1), next);
+          b.create<scf::YieldOp>(loc);
+        });
+
+    // Traceback from state 0: u = the state's top bit, then the recorded
+    // decision picks the predecessor 2j + d. Eight steps fill one byte.
+    int64_t bytes = frame / 8;
+    IntegerType i8 = rewriter.getI8Type();
+    rewriter.create<scf::ForOp>(
+        loc, index(rewriter, 0), index(rewriter, bytes), index(rewriter, 1),
+        ValueRange{integer(rewriter, i32, 0)},
+        [&](OpBuilder &b, Location loc, Value step, ValueRange carried) {
+          Value byteIndex = b.create<arith::SubIOp>(loc, index(b, bytes - 1), step);
+          Value state = carried[0];
+          Value byte = integer(b, i32, 0);
+          for (int64_t bit = 7; bit >= 0; --bit) {
+            Value stage = b.create<arith::AddIOp>(
+                loc, b.create<arith::MulIOp>(loc, byteIndex, index(b, 8)), index(b, bit));
+            Value input = b.create<arith::AndIOp>(
+                loc, b.create<arith::ShRUIOp>(loc, state, integer(b, i32, constraint - 2)),
+                integer(b, i32, 1));
+            Value j = b.create<arith::AndIOp>(loc, state, integer(b, i32, half - 1));
+            Value word = b.create<memref::LoadOp>(
+                loc, decisions,
+                ValueRange{stage, b.create<arith::IndexCastOp>(loc, b.getIndexType(), input)});
+            Value decision = b.create<arith::AndIOp>(loc, b.create<arith::ShRUIOp>(loc, word, j),
+                                                     integer(b, i32, 1));
+            byte = b.create<arith::OrIOp>(
+                loc, byte, b.create<arith::ShLIOp>(loc, input, integer(b, i32, 7 - bit)));
+            state = b.create<arith::OrIOp>(loc, b.create<arith::ShLIOp>(loc, j, integer(b, i32, 1)),
+                                           decision);
+          }
+          b.create<memref::StoreOp>(loc, b.create<arith::TruncIOp>(loc, i8, byte),
+                                    adaptor.getBits(), byteIndex);
+          b.create<scf::YieldOp>(loc, state);
+        });
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 class CxReduceMacOpLowering final : public OpConversionPattern<ondrix::ondsp::CxReduceMacOp> {
 public:
   using OpConversionPattern<ondrix::ondsp::CxReduceMacOp>::OpConversionPattern;
@@ -1456,8 +1616,8 @@ public:
         .add<AccAddTermOpLowering, AccExportOpLowering, AccImportOpLowering, AccZeroOpLowering,
              AddShiftOpLowering, BitrevAddOpLowering, ConvertOpLowering, ReduceMacOpLowering,
              CxReduceMacOpLowering, CxPowerOpLowering, RoundDivOpLowering, RoundQuotientOpLowering,
-             RoundShiftOpLowering, SatCastOpLowering, SubShiftOpLowering>(typeConverter,
-                                                                          &getContext());
+             RoundShiftOpLowering, SatCastOpLowering, SubShiftOpLowering, ViterbiDecodeOpLowering>(
+            typeConverter, &getContext());
     patterns.add<MacOpLowering, MacSubOpLowering>(typeConverter, &getContext(),
                                                   wideningMultiplyLowHalves);
     patterns.add<SqrtFixedOpLowering>(typeConverter, &getContext(), sqrtEstimate);

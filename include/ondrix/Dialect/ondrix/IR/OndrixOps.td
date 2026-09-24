@@ -1917,10 +1917,17 @@ def Ondrix_ViterbiDecodeOp : Ondrix_Op<"viterbi_decode", [Pure]> {
     `-(2^30 + 1)` standing for `-infinity` that no reachable path can meet.
     `K` is in `[3, 7]`, `R` in `{2, 3}`, every generator in `[1, 2^K)`, and
     `N` is a positive multiple of 8 no smaller than `K - 1`.
+
+    `symbol_bound = B` is a caller-declared precondition that no symbol
+    exceeds `B` in magnitude. It changes nothing above; it reaches the
+    buffers as `ondsp.assume_magnitude_bound`, where a certificate may read it
+    to carry the metrics narrower (`ondsp.viterbi_decode`), and a checked
+    entry tests it.
   }];
   let arguments = (ins AnyRankedTensor:$symbols,
                    I64Attr:$constraint_length,
-                   DenseI64ArrayAttr:$polynomials);
+                   DenseI64ArrayAttr:$polynomials,
+                   OptionalAttr<I64Attr>:$symbol_bound);
   let results = (outs AnyRankedTensor:$bits);
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";

@@ -144,6 +144,12 @@ def ConvertOndspToOrtumCore
     (2^15 divides 2^(s-1) whenever s > 15) and lands as one base add on
     the 25-bit readout before the same tail. Every other export policy
     fails closed.
+
+    A 16-bit `ondsp.viterbi_decode` (as `narrow-ondsp-viterbi-metrics`
+    certifies it) of a rate-1/2, constraint-length-7 code whose two
+    generators tap both ends of the register becomes the trellis unit's
+    `ortumcore.viterbi_decode`: those are exactly the codes whose butterflies
+    carry one branch metric and its negation. Every other decode fails closed.
   }];
   let constructor = "ondrix::createConvertOndspToOrtumCorePass()";
   let dependentDialects = [
@@ -294,14 +300,17 @@ def ConvertOrtumCoreToOndspEmulation
     : Pass<"convert-ortumcore-to-ondsp-emulation", "::mlir::ModuleOp"> {
   let summary = "Expand supported OrtumCore capabilities to public Ondsp semantics";
   let description = [{
-    Fully expand the public OrtumCore accumulator subset to equivalent Ondsp
-    operations. The supported subset is the signed i40/frac30 saturating
-    accumulator, zero initialization, signed Q15 full-product MAC add/sub,
+    Fully expand the public OrtumCore capabilities to equivalent Ondsp
+    operations: the signed i40/frac30 saturating accumulator, zero
+    initialization, signed Q15 full-product and Q31 raw-high MAC add/sub,
     the dual-lane step (two independent mac_add updates, expanded to
-    exactly two ondsp.mac operations), and the shifted saturating readout
-    (one acc_export at the i32 storage with toward_negative rounding).
-    Other OrtumCore operations fail closed. Run `convert-ondsp-fixed-to-scalar`
-    afterwards to obtain generic executable scalar IR.
+    exactly two ondsp.mac operations), the shifted saturating readout (one
+    acc_export at the i32 storage with toward_negative rounding), the scaled
+    saturating add/sub, the packed complex multiply, butterfly and squared
+    magnitude, the bit-reversed address steps, and the trellis decode (the
+    16-bit `ondsp.viterbi_decode` at constraint length 7). Other OrtumCore
+    operations fail closed. Run `convert-ondsp-fixed-to-scalar` afterwards to
+    obtain generic executable scalar IR.
   }];
   let constructor = "ondrix::createConvertOrtumCoreToOndspEmulationPass()";
   let dependentDialects = [
@@ -387,7 +396,9 @@ def ConvertOndspFixedToScalar
     Fully lower supported signed fixed-point accumulator lifecycles to generic
     scalar integer operations. The current domains are Q15 full product with
     i40/frac30 accumulation, Q31 full product with i64/frac62 accumulation,
-    and Q31 signed raw-high product with i40/frac30 accumulation. The pass
+    and Q31 signed raw-high product with i40/frac30 accumulation; beside them
+    it lowers `ondsp.viterbi_decode` at the width its realization declares,
+    butterflies unrolled. The pass
     converts accumulator types structurally across functions and control flow
     and fails if any unsupported ondsp operation or accumulator domain remains.
     Ondrix intent operations must be lowered first. Supported fixed-point

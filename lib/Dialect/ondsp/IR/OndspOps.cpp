@@ -1,6 +1,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Dialect/ondsp/IR/OndspSemantics.h"
 #include "ondrix/Support/DSPTypeUtils.h"
+#include "ondrix/Support/ViterbiDecoding.h"
 
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
@@ -381,6 +382,39 @@ LogicalResult AssumeL1BoundOp::verify() {
   if (getBound() < 1)
     return emitOpError("bound must be positive");
   return success();
+}
+
+LogicalResult AssumeMagnitudeBoundOp::verify() {
+  if (getBound() < 1)
+    return emitOpError("bound must be positive");
+  return success();
+}
+
+LogicalResult ViterbiDecodeOp::verify() {
+  auto symbols = getSymbols().getType();
+  auto bits = getBits().getType();
+  if (!symbols.hasStaticShape() || !bits.hasStaticShape())
+    return emitOpError("requires static symbol and bit buffers");
+  if (std::optional<std::string> broken = ondrix::checkViterbiFrame(
+          getConstraintLength(), getPolynomials(), symbols.getDimSize(0), bits.getDimSize(0)))
+    return emitOpError(*broken);
+  int64_t rate = static_cast<int64_t>(getPolynomials().size());
+  ondrix::ViterbiMetricRealization realization{static_cast<int64_t>(getMetricBits()),
+                                               static_cast<int64_t>(getSymbolBound()),
+                                               static_cast<int64_t>(getUnreachableMetric()),
+                                               static_cast<int64_t>(getRenormalizationPeriod())};
+  if (!ondrix::isExactViterbiRealization(getConstraintLength(), rate, symbols.getDimSize(0) / rate,
+                                         realization))
+    return emitOpError() << "is not an exact realization: " << realization.metricBits
+                         << "-bit metrics, symbols within " << realization.symbolBound
+                         << ", unreachable seed " << realization.unreachableMetric
+                         << ", renormalization period " << realization.renormalizationPeriod;
+  return success();
+}
+
+void ViterbiDecodeOp::getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  addMemRefReadEffect(getSymbols(), effects);
+  effects.emplace_back(MemoryEffects::Write::get(), getBits(), SideEffects::DefaultResource::get());
 }
 
 LogicalResult AccImportOp::verify() {

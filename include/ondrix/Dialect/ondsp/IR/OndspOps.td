@@ -277,6 +277,60 @@ def Ondsp_AssumeL1BoundOp
   let assemblyFormat = "$source attr-dict `:` type($source)";
 }
 
+def Ondsp_AssumeMagnitudeBoundOp
+    : Ondsp_Op<"assume_magnitude_bound", [Pure, AllTypesMatch<["source", "result"]>]> {
+  let summary = "A declared precondition bounding every element's magnitude";
+  let description = [{
+    Returns `source` unchanged and states a precondition the caller DECLARED:
+    every element's absolute raw value is at most `bound`. It has the standing
+    of `ondsp.assume_l1_bound` -- erased by `lower-ondsp-assumptions`, or
+    under `checked` replaced by a run-time scan that aborts on a violation --
+    and speaks only for reads through the result.
+  }];
+  let arguments = (ins MemRefRankOf<[AnySignlessInteger], [1]>:$source,
+                   I64Attr:$bound);
+  let results = (outs MemRefRankOf<[AnySignlessInteger], [1]>:$result);
+  let hasVerifier = 1;
+  let assemblyFormat = "$source attr-dict `:` type($source)";
+}
+
+def Ondsp_ViterbiDecodeOp
+    : Ondsp_Op<"viterbi_decode", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "A finite-width realization of zero-terminated Viterbi decoding";
+  let description = [{
+    Writes to `bits` the decoding `ondrix.viterbi_decode` defines for the
+    symbols in `symbols`, computing the path metrics in `metric_bits`-bit
+    two's complement. The states the start cannot reach begin at
+    `unreachable_metric`, and after every stage `n < N` with
+    `n % renormalization_period == 0` every metric drops by the metric of
+    state 0 (a period of 0 never renormalizes). Symbols must lie within
+    `symbol_bound` in magnitude, a precondition like the entry ABI's.
+
+    The verifier admits only realizations that decode exactly. With branch
+    metrics bounded by `D = R * symbol_bound` and `W = metric_bits`:
+    `D` fits; until stage `K - 1` an unreachable metric stays within
+    `(K - 1) D` of the seed, so a seed below `-2 (K - 1) D` loses to every
+    reachable candidate and one no lower than `-2^(W-1) + (K - 1) D` never
+    wraps; after it every state is reachable and the metrics span at most
+    `2 (K - 1) D`, so a renormalization leaves each within `2 (K - 1) D` of
+    0, and a period `P >= K - 1` with `2 (K - 1) D + P D < 2^(W-1)` keeps
+    every metric and candidate in range, as does no renormalization with
+    `N D < 2^(W-1)`. A common offset changes no comparison, and in range each
+    comparison is the exact one, so every decision, and the traceback, is the
+    exact recursion's.
+  }];
+  let arguments = (ins MemRefRankOf<[I16], [1]>:$symbols,
+                   MemRefRankOf<[I8], [1]>:$bits,
+                   I64Attr:$constraint_length,
+                   DenseI64ArrayAttr:$polynomials,
+                   I64Attr:$metric_bits,
+                   I64Attr:$symbol_bound,
+                   I64Attr:$unreachable_metric,
+                   I64Attr:$renormalization_period);
+  let hasVerifier = 1;
+  let assemblyFormat = "$symbols `,` $bits attr-dict `:` type($symbols) `,` type($bits)";
+}
+
 def Ondsp_AccImportOp : Ondsp_Op<"acc_import", [Pure]> {
   let summary = "Import a fixed-point value into an accumulator exactly";
   let description = [{

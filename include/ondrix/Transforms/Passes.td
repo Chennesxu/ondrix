@@ -654,14 +654,16 @@ def ScalarizeOndspCertifiedConstantReduce
 def LowerOndspAssumptions : Pass<"lower-ondsp-assumptions", "::mlir::ModuleOp"> {
   let summary = "Discharge declared preconditions: trust them, or test them at run time";
   let description = [{
-    Removes every `ondsp.assume_l1_bound`, forwarding its source. By default
-    the declaration is trusted and costs nothing, like the entry ABI's other
-    declared preconditions. With `checked`, each one first becomes a run-time
-    sum of the buffer's absolute raw values and a `cf.assert` that aborts with
-    `ondrix_<kernel>: coefficients exceed the declared gain_bound` unless the
-    sum is below the bound -- what `--checked-entries` selects. Run it after
-    every pass that reads the bound; a declaration left in place fails closed
-    in the scalar lowering.
+    Removes every `ondsp.assume_l1_bound` and `ondsp.assume_magnitude_bound`,
+    forwarding its source. By default the declaration is trusted and costs
+    nothing, like the entry ABI's other declared preconditions. With `checked`,
+    each one first becomes a run-time test that aborts -- a sum of the
+    buffer's absolute raw values that must stay below the bound
+    (`ondrix_<kernel>: coefficients exceed the declared gain_bound`), or a scan
+    whose every magnitude must stay within it (`ondrix_<kernel>: symbols exceed
+    the declared symbol_bound`) -- what `--checked-entries` selects. Run it
+    after every pass that reads a bound; a declaration left in place fails
+    closed in the scalar lowering.
   }];
   let options = [
     Option<"checked", "checked", "bool", /*default=*/"false",
@@ -674,6 +676,26 @@ def LowerOndspAssumptions : Pass<"lower-ondsp-assumptions", "::mlir::ModuleOp"> 
     "mlir::memref::MemRefDialect",
     "mlir::scf::SCFDialect",
   ];
+}
+
+def NarrowOndspViterbiMetrics : Pass<"narrow-ondsp-viterbi-metrics", "::mlir::ModuleOp"> {
+  let summary = "Carry Viterbi path metrics in the width a declared symbol bound certifies";
+  let description = [{
+    Rewrites an `ondsp.viterbi_decode` whose symbols it reads through an
+    `ondsp.assume_magnitude_bound` to `metric-bits`-bit metrics when that bound
+    certifies an exact realization (the argument is the operation's
+    description, and its verifier checks it): the lowest unreachable seed that
+    cannot wrap, and no renormalization when the frame's whole growth fits,
+    else the longest period that keeps every metric in range. A decoder with no
+    declared bound, one too loose to certify, or one already as narrow keeps
+    its realization, so no decoded bit changes. It reads the bound, so it runs
+    before `lower-ondsp-assumptions`.
+  }];
+  let options = [
+    Option<"metricBits", "metric-bits", "int64_t", /*default=*/"16",
+           "The path-metric width the consumer carries">,
+  ];
+  let constructor = "ondrix::createNarrowOndspViterbiMetricsPass()";
 }
 
 def UnrollOndspFixedMacLoops

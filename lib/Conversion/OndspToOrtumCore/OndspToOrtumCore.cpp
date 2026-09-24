@@ -376,6 +376,26 @@ public:
   }
 };
 
+class ViterbiDecodeOpLowering final : public OpConversionPattern<ondrix::ondsp::ViterbiDecodeOp> {
+public:
+  using OpConversionPattern<ondrix::ondsp::ViterbiDecodeOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ondrix::ondsp::ViterbiDecodeOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    using Unit = ondrix::ortumcore::ViterbiDecodeOp;
+    if (op.getMetricBits() != Unit::kMetricBits)
+      return op.emitOpError("the target trellis carries 16-bit metrics, which a declared "
+                            "symbol_bound must certify first");
+    if (!Unit::isTrellisCode(op.getConstraintLength(), op.getPolynomials()))
+      return op.emitOpError("the target trellis decodes constraint length 7 at rate 1/2, both "
+                            "generators tapping both ends of the register");
+    rewriter.replaceOpWithNewOp<Unit>(op, adaptor.getSymbols(), adaptor.getBits(),
+                                      op.getPolynomials(), op.getSymbolBound(),
+                                      op.getUnreachableMetric(), op.getRenormalizationPeriod());
+    return success();
+  }
+};
+
 class ConvertOndspToOrtumCorePass final
     : public ondrix::impl::ConvertOndspToOrtumCoreBase<ConvertOndspToOrtumCorePass> {
 public:
@@ -391,8 +411,8 @@ public:
     OndspToOrtumCoreTypeConverter typeConverter(&getContext());
     RewritePatternSet patterns(&getContext());
     patterns.add<AccZeroOpLowering, AccImportOpLowering, AccExportOpLowering, MacOpLowering,
-                 MacSubOpLowering, ReduceMacOpLowering, CxReduceMacOpLowering, CxPowerOpLowering>(
-        typeConverter, &getContext());
+                 MacSubOpLowering, ReduceMacOpLowering, CxReduceMacOpLowering, CxPowerOpLowering,
+                 ViterbiDecodeOpLowering>(typeConverter, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
     populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);

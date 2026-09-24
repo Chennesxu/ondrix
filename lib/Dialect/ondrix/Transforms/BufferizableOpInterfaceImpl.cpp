@@ -7,6 +7,7 @@
 #include "ondrix/Dialect/ondsp/IR/OndspOps.h"
 #include "ondrix/Support/DctCoefficients.h"
 #include "ondrix/Support/FpAccumulatorUpdate.h"
+#include "ondrix/Support/ViterbiDecoding.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
@@ -1235,6 +1236,49 @@ struct MovingAverageOpInterface
   }
 };
 
+/// The decoder at its exact wide realization over buffers; a declared symbol
+/// bound reaches the symbol buffer as the assumption a narrowing certificate
+/// reads.
+struct ViterbiDecodeOpInterface
+    : public BufferizableOpInterface::ExternalModel<ViterbiDecodeOpInterface, ViterbiDecodeOp> {
+  bool bufferizesToAllocation(Operation *, OpResult) const { return true; }
+
+  bool bufferizesToMemoryRead(Operation *, OpOperand &, const AnalysisState &) const {
+    return true;
+  }
+
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &, const AnalysisState &) const {
+    return false;
+  }
+
+  AliasingOpResultList getAliasingOpResults(Operation *, OpOperand &, const AnalysisState &) const {
+    return {};
+  }
+
+  LogicalResult bufferize(Operation *operation, RewriterBase &rewriter,
+                          const BufferizationOptions &options) const {
+    auto op = cast<ViterbiDecodeOp>(operation);
+    FailureOr<Value> symbols = getBuffer(rewriter, op.getSymbols(), options);
+    if (failed(symbols))
+      return failure();
+    rewriter.setInsertionPoint(op);
+    Location loc = op.getLoc();
+    FailureOr<Value> bits = createProducedResultBuffer(rewriter, op.getBits(), options);
+    if (failed(bits))
+      return failure();
+    Value source = *symbols;
+    if (std::optional<uint64_t> bound = op.getSymbolBound())
+      source = rewriter.create<ondrix::ondsp::AssumeMagnitudeBoundOp>(loc, source.getType(), source,
+                                                                      *bound);
+    ondrix::ViterbiMetricRealization wide = ondrix::getWideViterbiRealization();
+    rewriter.create<ondrix::ondsp::ViterbiDecodeOp>(
+        loc, source, *bits, op.getConstraintLength(), op.getPolynomials(), wide.metricBits,
+        wide.symbolBound, wide.unreachableMetric, wide.renormalizationPeriod);
+    replaceOpWithBufferizedValues(rewriter, op, *bits);
+    return success();
+  }
+};
+
 struct LmsOpInterface : public BufferizableOpInterface::ExternalModel<LmsOpInterface, LmsOp> {
   bool bufferizesToAllocation(Operation *, OpResult) const { return true; }
 
@@ -1483,6 +1527,7 @@ void registerBufferizableOpInterfaceExternalModels(DialectRegistry &registry) {
     RmsOp::attachInterface<RmsOpInterface>(*context);
     DctOp::attachInterface<DctOpInterface>(*context);
     LmsOp::attachInterface<LmsOpInterface>(*context);
+    ViterbiDecodeOp::attachInterface<ViterbiDecodeOpInterface>(*context);
 
     // Bufferization materializes these dialects even when the input module
     // contains only tensor-form Ondrix operations.

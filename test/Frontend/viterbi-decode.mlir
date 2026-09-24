@@ -1,6 +1,8 @@
 // RUN: ondrix-compile %S/Inputs/q15_viterbi_decode.ox | FileCheck %s --check-prefix=SOURCE
 // RUN: ondrix-compile %S/Inputs/q15_viterbi_decode.ox --emit=c-header | FileCheck %s --check-prefix=HEADER
 // RUN: ondrix-compile %S/Inputs/q15_viterbi_decode_r3.ox | FileCheck %s --check-prefix=RATE3
+// RUN: ondrix-compile %S/Inputs/q15_viterbi_decode_bounded.ox | FileCheck %s --check-prefix=BOUNDED
+// RUN: not ondrix-compile %S/Inputs/invalid_viterbi_symbol_bound.ox 2>&1 | FileCheck %s --check-prefix=BOUND
 // RUN: not ondrix-compile %S/Inputs/invalid_viterbi_constraint.ox 2>&1 | FileCheck %s --check-prefix=CONSTRAINT
 // RUN: not ondrix-compile %S/Inputs/invalid_viterbi_polynomial.ox 2>&1 | FileCheck %s --check-prefix=POLYNOMIAL
 // RUN: not ondrix-compile %S/Inputs/invalid_viterbi_frame.ox 2>&1 | FileCheck %s --check-prefix=FRAME
@@ -14,8 +16,10 @@
 // SOURCE: ondrix.viterbi_decode %arg0 {constraint_length = 7 : i64, polynomials = array<i64: 121, 91>} : (tensor<512xi16>) -> tensor<32xi8>
 // HEADER: void ondrix_viterbi_k7(const int16_t *symbols, int8_t *output);
 // RATE3: polynomials = array<i64: 21, 27, 31>} : (tensor<192xi16>) -> tensor<8xi8>
+// BOUNDED: polynomials = array<i64: 121, 91>, symbol_bound = 127 : i64}
 
 // CONSTRAINT: error: viterbi_decode constraint_length must be in [3, 7]
+// BOUND: error: symbol_bound must lie in [1, 32767]
 // POLYNOMIAL: error: every generator polynomial must lie in [1, 2^constraint_length) = [1, 128)
 // FRAME: error: viterbi_decode requires N * R symbols with N a positive multiple of 8 and N * R <= 16384
 // WIDTH: error: viterbi_decode requires q15 soft symbols

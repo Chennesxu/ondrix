@@ -21,3 +21,20 @@ func.func @q15_kernel(%taps: memref<?xi16>) -> i16 {
   %first = memref.load %bounded[%c0] : memref<?xi16>
   return %first : i16
 }
+
+// Trusted, the symbol bound costs nothing; checked, every magnitude is tested.
+// TRUST-LABEL: func.func @q15_decoder
+// TRUST-NOT: cf.assert
+// CHECK-LABEL: func.func @q15_decoder
+// CHECK: %[[BOUND:.*]] = arith.constant 127 : i64
+// CHECK: scf.for
+// CHECK: arith.maxsi
+// CHECK: %[[HOLDS:.*]] = arith.cmpi sle, %{{.*}}, %[[BOUND]] : i64
+// CHECK: cf.assert %[[HOLDS]], "ondrix_q15_decoder: symbols exceed the declared symbol_bound"
+// CHECK-NOT: ondsp.assume_magnitude_bound
+func.func @q15_decoder(%symbols: memref<?xi16>) -> i16 {
+  %c0 = arith.constant 0 : index
+  %bounded = ondsp.assume_magnitude_bound %symbols {bound = 127 : i64} : memref<?xi16>
+  %first = memref.load %bounded[%c0] : memref<?xi16>
+  return %first : i16
+}

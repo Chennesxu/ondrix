@@ -862,6 +862,18 @@ must end in `K - 1` zero bits for the decode to mean anything; those bits
 come back as zeros. `u8` is the result type of this builtin only: it is not a
 parameter type and no builtin consumes it.
 
+An optional `symbol_bound=B`, in `[1, 32767]`, declares that no symbol exceeds
+`B` in magnitude. It does not change what is decoded; it is a precondition a
+certificate may read to carry the path metrics in 16 bits, and under
+`--checked-entries` the entry tests it and aborts with `ondrix_<kernel>:
+symbols exceed the declared symbol_bound`:
+
+```python
+def viterbi_k7(symbols: tensor[q15, 512]) -> tensor[u8, 32]:
+  return viterbi_decode(symbols, constraint_length=7, polynomials=[0o171, 0o133],
+                        symbol_bound=127)
+```
+
 Integer literals may be written in octal with a `0o` prefix anywhere a
 decimal one is accepted.
 
