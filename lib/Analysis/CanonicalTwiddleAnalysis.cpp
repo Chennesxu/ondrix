@@ -137,6 +137,11 @@ bool packedQ15ProductFitsNarrowCarrier(ondsp::CxButterflyOp butterfly) {
   auto constant = butterfly.getTwiddle().getDefiningOp<arith::ConstantOp>();
   if (!constant)
     return everyTwiddleTableEntryFitsNarrowCarrier(butterfly.getTwiddle());
+  if (auto elements = dyn_cast<DenseIntElementsAttr>(constant.getValue())) {
+    auto vector = dyn_cast<VectorType>(elements.getType());
+    return vector && !vector.isScalable() && vector.getElementType().isSignlessInteger(32) &&
+           llvm::all_of(elements.getValues<llvm::APInt>(), packedQ15WordFitsNarrowCarrier);
+  }
   auto integer = dyn_cast<IntegerAttr>(constant.getValue());
   auto integerType = integer ? dyn_cast<IntegerType>(integer.getType()) : IntegerType();
   if (!integerType || integerType.getWidth() != 32)

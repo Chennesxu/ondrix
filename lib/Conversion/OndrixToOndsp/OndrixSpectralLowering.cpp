@@ -209,18 +209,19 @@ lowerPackedCfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirection 
       return outputs;
     }
     if (vectorizeStaticCfft && !inventoryPaired && even.size() > 1) {
-      SmallVector<Value> twiddles;
+      SmallVector<llvm::APInt> twiddles;
       twiddles.reserve(even.size());
       for (int64_t index = 0, end = even.size(); index < end; ++index) {
         std::optional<uint64_t> twiddleBits =
             getPackedTwiddleBits(profile.storageWidth, direction, values.size(), index);
         assert(twiddleBits && "verified CFFT extent must have a static twiddle table");
-        twiddles.push_back(createPackedTwiddle(*twiddleBits));
+        twiddles.emplace_back(profile.containerWidth, *twiddleBits);
       }
       Value evenVector = buildVector(even);
       Value oddVector = buildVector(odd);
-      Value twiddleVector = buildVector(twiddles);
       auto vectorType = cast<VectorType>(evenVector.getType());
+      Value twiddleVector = rewriter.create<arith::ConstantOp>(
+          loc, vectorType, DenseIntElementsAttr::get(vectorType, twiddles));
       auto butterfly = rewriter.create<ondrix::ondsp::CxButterflyOp>(
           loc, vectorType, vectorType, evenVector, oddVector, twiddleVector, layout, numeric,
           product, productScale, outputScale, ondrix::ondsp::CxButterflyVariantAttr());

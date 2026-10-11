@@ -100,6 +100,64 @@ struct Case {
   struct Complex twiddle;
 };
 
+#ifdef TEST_VECTOR_CONSTANT_TWIDDLES
+struct MemRefI32 {
+  int32_t *allocated;
+  int32_t *aligned;
+  int64_t offset;
+  int64_t size;
+  int64_t stride;
+};
+
+typedef void (*VectorButterflyFn)(struct MemRefI32 *, struct MemRefI32 *, struct MemRefI32 *,
+                                  struct MemRefI32 *);
+extern void _mlir_ciface_bounded_vector_twiddles(struct MemRefI32 *, struct MemRefI32 *,
+                                                 struct MemRefI32 *, struct MemRefI32 *);
+extern void _mlir_ciface_unbounded_vector_twiddles(struct MemRefI32 *, struct MemRefI32 *,
+                                                   struct MemRefI32 *, struct MemRefI32 *);
+
+static int test_vector_constants(void) {
+  static const int32_t twiddles[2][4] = {{-1518445950, -2147450881, 2147450880, INT32_MIN},
+                                         {-1518445950, -2147450881, 2147450880, -2147450880}};
+  static const VectorButterflyFn functions[] = {_mlir_ciface_bounded_vector_twiddles,
+                                                _mlir_ciface_unbounded_vector_twiddles};
+  static const int16_t edges[] = {INT16_MIN, INT16_MAX, -23170, -3, -1, 0, 1, 3, 16384};
+  const unsigned edge_count = sizeof(edges) / sizeof(edges[0]);
+  uint32_t random = 0x13579BDF;
+  for (unsigned trial = 0; trial < 1024; ++trial) {
+    int32_t a[4], b[4], out0[4], out1[4];
+    for (unsigned lane = 0; lane < 4; ++lane) {
+      if (trial < edge_count) {
+        a[lane] = pack((struct Complex){edges[trial], edges[(trial + lane) % edge_count]});
+        b[lane] = pack((struct Complex){edges[trial], edges[trial]});
+      } else {
+        random = random * 1664525U + 1013904223U;
+        a[lane] = (int32_t)random;
+        random = random * 1664525U + 1013904223U;
+        b[lane] = (int32_t)random;
+      }
+    }
+    struct MemRefI32 ma = {a, a, 0, 4, 1}, mb = {b, b, 0, 4, 1};
+    struct MemRefI32 mo0 = {out0, out0, 0, 4, 1}, mo1 = {out1, out1, 0, 4, 1};
+    for (unsigned variant = 0; variant < 2; ++variant) {
+      functions[variant](&ma, &mb, &mo0, &mo1);
+      for (unsigned lane = 0; lane < 4; ++lane) {
+        int32_t expected0, expected1, scalar0, scalar1;
+        butterfly_reference(a[lane], b[lane], twiddles[variant][lane], &expected0, &expected1);
+        execute_butterfly(a[lane], b[lane], twiddles[variant][lane], &scalar0, &scalar1);
+        if (out0[lane] != expected0 || out1[lane] != expected1 || scalar0 != expected0 ||
+            scalar1 != expected1) {
+          fprintf(stderr, "vector butterfly mismatch: trial %u, variant %u, lane %u\n", trial,
+                  variant, lane);
+          return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+#endif
+
 int main(void) {
   static const struct Case cases[] = {
       {"zero", {0, 0}, {0, 0}, {0, 0}},
@@ -128,5 +186,9 @@ int main(void) {
       return 1;
     }
   }
+#ifdef TEST_VECTOR_CONSTANT_TWIDDLES
+  return test_vector_constants();
+#else
   return 0;
+#endif
 }

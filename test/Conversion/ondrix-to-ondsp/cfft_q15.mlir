@@ -1,6 +1,7 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s --check-prefix=STRUCTURE
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp | FileCheck %s --check-prefix=TWIDDLE
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp="vectorize-static-cfft" | FileCheck %s --check-prefix=VECTOR
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="vectorize-static-cfft" --convert-ondsp-fixed-to-scalar | FileCheck %s --check-prefix=NARROW --implicit-check-not=i33
 
 func.func @cfft4_q15(%input: tensor<4xi32>) -> tensor<4xi32> {
   %result = ondrix.cfft %input {
@@ -67,3 +68,10 @@ func.func @icfft8_q15(%input: tensor<8xi32>) -> tensor<8xi32> {
 // TWIDDLE-DAG: arith.constant 1518511486 : i32
 // VECTOR-LABEL: func.func @icfft8_q15
 // VECTOR: ondsp.cx_butterfly {{.*}} : (vector<4xi32>, vector<4xi32>, vector<4xi32>) -> (vector<4xi32>, vector<4xi32>)
+
+// NARROW-LABEL: func.func @cfft4_q15
+// NARROW: arith.muli {{.*}} : vector<2xi32>
+// NARROW-LABEL: func.func @cfft8_q15
+// NARROW: arith.muli {{.*}} : vector<4xi32>
+// NARROW-LABEL: func.func @icfft8_q15
+// NARROW: arith.muli {{.*}} : vector<4xi32>
