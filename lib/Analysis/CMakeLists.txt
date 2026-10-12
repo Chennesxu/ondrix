@@ -32,6 +32,7 @@ add_ondrix_library(OndrixCanonicalTwiddleAnalysis
   MLIRMemRefDialect
   MLIRSupport
   MLIRTensorDialect
+  MLIRVectorDialect
   OndrixConstantSequenceAnalysis
   OndspIR
 )

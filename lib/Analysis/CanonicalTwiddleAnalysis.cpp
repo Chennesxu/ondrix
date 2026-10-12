@@ -6,7 +6,11 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
+
+#include <algorithm>
 
 using namespace mlir;
 
@@ -32,20 +36,53 @@ bool packedQ15WordFitsNarrowCarrier(const llvm::APInt &word) {
   return magnitudeSum <= 65535;
 }
 
+bool isVectorLoadWindowInBounds(vector::LoadOp load, int64_t tableEntries) {
+  auto type = cast<MemRefType>(load.getBase().getType());
+  if (type.getRank() != 1 || type.isDynamicDim(0))
+    return false;
+  std::optional<int64_t> start = getConstantIntValue(load.getIndices().front());
+  if (!start || *start < 0)
+    return false;
+  int64_t lanes = load.getVectorType().getDimSize(0);
+  int64_t extent = std::min(type.getDimSize(0), tableEntries);
+  return lanes <= extent && *start <= extent - lanes;
+}
+
 /// A twiddle read from a compile-time table at a runtime index: the bound is
 /// owed by every entry, since any of them can be the one selected. The
-/// bufferized form is a load from a constant global, the pre-bufferization
-/// form an extract from a constant tensor; both resolve fail-closed.
+/// source is an immutable tensor or global. Vector transfers must not admit
+/// padding or masked-out lanes, whose values do not come from the table.
 bool everyTwiddleTableEntryFitsNarrowCarrier(Value twiddle) {
-  if (auto load = twiddle.getDefiningOp<memref::LoadOp>()) {
+  auto vector = dyn_cast<VectorType>(twiddle.getType());
+  if (vector && (vector.isScalable() || vector.getRank() != 1 ||
+                 !vector.getElementType().isSignlessInteger(32)))
+    return false;
+
+  Value source;
+  if (auto load = twiddle.getDefiningOp<memref::LoadOp>())
+    source = load.getMemRef();
+  else if (auto extract = twiddle.getDefiningOp<tensor::ExtractOp>())
+    source = extract.getTensor();
+  else if (auto read = twiddle.getDefiningOp<vector::TransferReadOp>()) {
+    if (read.getMask() || read.hasOutOfBoundsDim() || !read.getPermutationMap().isIdentity())
+      return false;
+    source = read.getSource();
+  } else if (auto load = twiddle.getDefiningOp<vector::LoadOp>())
+    source = load.getBase();
+  else
+    return false;
+
+  if (isa<MemRefType>(source.getType())) {
     FailureOr<ConstantIntegerMemRefFacts> facts =
-        analyzeConstantIntegerMemRef(load.getMemRef(), kMaxTwiddleTableEntries);
+        analyzeConstantIntegerMemRef(source, kMaxTwiddleTableEntries);
     if (failed(facts))
       return false;
+    if (auto load = twiddle.getDefiningOp<vector::LoadOp>())
+      if (!isVectorLoadWindowInBounds(load, facts->getSequence().getElementCount()))
+        return false;
     return llvm::all_of(facts->getSequence().getValues(), packedQ15WordFitsNarrowCarrier);
   }
-  auto extract = twiddle.getDefiningOp<tensor::ExtractOp>();
-  auto table = extract ? extract.getTensor().getDefiningOp<arith::ConstantOp>() : nullptr;
+  auto table = source.getDefiningOp<arith::ConstantOp>();
   auto elements = table ? dyn_cast<DenseIntElementsAttr>(table.getValue()) : DenseIntElementsAttr();
   if (!elements)
     return false;

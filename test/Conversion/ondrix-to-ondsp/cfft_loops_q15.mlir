@@ -1,5 +1,7 @@
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp="fft-loops" | FileCheck %s
 // RUN: ondrix-opt %s --convert-ondrix-to-ondsp="fft-loops" | FileCheck %s --check-prefix=PAIRED
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="fft-loops fft-loops-vector-width=4" --convert-ondsp-fixed-to-scalar | FileCheck %s --check-prefix=NARROW --implicit-check-not="vector<4xi33>"
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="fft-loops fft-loops-vector-width=4" --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --convert-ondsp-fixed-to-scalar | FileCheck %s --check-prefix=NARROW --implicit-check-not="vector<4xi33>"
 
 // The opt-in loop-form FFT lowering: one bit-reversal permutation loop over
 // a constant index table, then a stage loop with an inner butterfly loop
@@ -104,3 +106,10 @@ func.func @cfft8_paired_floor(%input: tensor<8xi32>) -> tensor<8xi32> {
   } : (tensor<8xi32>) -> tensor<8xi32>
   return %result : tensor<8xi32>
 }
+
+// NARROW-LABEL: func.func @cfft8_forward_q15
+// NARROW: arith.muli {{.*}} : vector<4xi32>
+// NARROW-LABEL: func.func @rfft16_q15
+// NARROW: arith.muli {{.*}} : vector<4xi32>
+// NARROW-LABEL: func.func @irfft16_q15
+// NARROW: arith.muli {{.*}} : vector<4xi32>

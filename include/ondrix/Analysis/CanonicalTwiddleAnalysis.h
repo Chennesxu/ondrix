@@ -46,9 +46,9 @@ classifyCanonicalPackedQ15Twiddle(ondsp::CxButterflyOp butterfly);
 /// Whether the packed-Q15 cross sums fit i32 instead of requiring i33.
 /// Both are bounded by `32768 * (|wr| + |wi|)`, so a constant twiddle
 /// with `|wr| + |wi| <= 65535` suffices; `(-32768, -32768)` reaches 2^31.
-/// Fixed Vector constants must satisfy the bound in every lane, and runtime
-/// reads from a constant table must satisfy it in every entry.
-/// Anything else fails closed.
+/// Constant vectors must satisfy the bound in every lane and immutable tables
+/// in every entry. Transfers must be unmasked and in-bounds; plain vector loads
+/// also need a proven complete window. Anything else fails closed.
 bool packedQ15ProductFitsNarrowCarrier(ondsp::CxButterflyOp butterfly);
 
 using CanonicalPackedQ15TwiddleConsumer =

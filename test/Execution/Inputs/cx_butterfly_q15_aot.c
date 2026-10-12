@@ -100,7 +100,7 @@ struct Case {
   struct Complex twiddle;
 };
 
-#ifdef TEST_VECTOR_CONSTANT_TWIDDLES
+#if defined(TEST_VECTOR_CONSTANT_TWIDDLES) || defined(TEST_VECTOR_TABLE_TWIDDLES)
 struct MemRefI32 {
   int32_t *allocated;
   int32_t *aligned;
@@ -108,7 +108,9 @@ struct MemRefI32 {
   int64_t size;
   int64_t stride;
 };
+#endif
 
+#ifdef TEST_VECTOR_CONSTANT_TWIDDLES
 typedef void (*VectorButterflyFn)(struct MemRefI32 *, struct MemRefI32 *, struct MemRefI32 *,
                                   struct MemRefI32 *);
 extern void _mlir_ciface_bounded_vector_twiddles(struct MemRefI32 *, struct MemRefI32 *,
@@ -158,6 +160,63 @@ static int test_vector_constants(void) {
 }
 #endif
 
+#ifdef TEST_VECTOR_TABLE_TWIDDLES
+typedef void (*TableButterflyFn)(struct MemRefI32 *, struct MemRefI32 *, struct MemRefI32 *,
+                                 struct MemRefI32 *, int64_t);
+extern void _mlir_ciface_safe_table_vector(struct MemRefI32 *, struct MemRefI32 *,
+                                           struct MemRefI32 *, struct MemRefI32 *, int64_t);
+extern void _mlir_ciface_unsafe_table_vector(struct MemRefI32 *, struct MemRefI32 *,
+                                             struct MemRefI32 *, struct MemRefI32 *, int64_t);
+extern void _mlir_ciface_masked_table_vector(struct MemRefI32 *, struct MemRefI32 *,
+                                             struct MemRefI32 *, struct MemRefI32 *, int64_t);
+extern void _mlir_ciface_padded_table_vector(struct MemRefI32 *, struct MemRefI32 *,
+                                             struct MemRefI32 *, struct MemRefI32 *, int64_t);
+extern void _mlir_ciface_safe_table_load_vector(struct MemRefI32 *, struct MemRefI32 *,
+                                                struct MemRefI32 *, struct MemRefI32 *, int64_t);
+
+static int test_vector_tables(void) {
+  static const int32_t table[] = {32767,      -1518445950, INT32_MIN, -2147450881,
+                                  2147450880, 32767,       0,         32767};
+  static const TableButterflyFn functions[] = {
+      _mlir_ciface_safe_table_vector, _mlir_ciface_unsafe_table_vector,
+      _mlir_ciface_masked_table_vector, _mlir_ciface_padded_table_vector,
+      _mlir_ciface_safe_table_load_vector};
+  const int32_t unsafe_word = -2147450880;
+  uint32_t random = 0x2468ACE1;
+  for (unsigned trial = 0; trial < 1024; ++trial) {
+    int32_t a[4], b[4], out0[4], out1[4];
+    for (unsigned lane = 0; lane < 4; ++lane) {
+      random = random * 1664525U + 1013904223U;
+      a[lane] = trial < 2 ? 0 : (int32_t)random;
+      random = random * 1664525U + 1013904223U;
+      b[lane] = trial < 2 ? unsafe_word : (int32_t)random;
+    }
+    struct MemRefI32 ma = {a, a, 0, 4, 1}, mb = {b, b, 0, 4, 1};
+    struct MemRefI32 mo0 = {out0, out0, 0, 4, 1}, mo1 = {out1, out1, 0, 4, 1};
+    for (unsigned variant = 0; variant < sizeof(functions) / sizeof(functions[0]); ++variant) {
+      int64_t index = variant == 3 ? 6 : variant == 4 ? 4 : (trial & 1) * 4;
+      functions[variant](&ma, &mb, &mo0, &mo1, index);
+      for (unsigned lane = 0; lane < 4; ++lane) {
+        int64_t position = index + lane;
+        int32_t twiddle = position < 8 ? table[position] : unsafe_word;
+        if ((variant == 1 && position == 7) || (variant == 2 && lane == 3))
+          twiddle = unsafe_word;
+        int32_t expected0, expected1, scalar0, scalar1;
+        butterfly_reference(a[lane], b[lane], twiddle, &expected0, &expected1);
+        execute_butterfly(a[lane], b[lane], twiddle, &scalar0, &scalar1);
+        if (out0[lane] != expected0 || out1[lane] != expected1 || scalar0 != expected0 ||
+            scalar1 != expected1) {
+          fprintf(stderr, "table butterfly mismatch: trial %u, variant %u, lane %u\n", trial,
+                  variant, lane);
+          return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+#endif
+
 int main(void) {
   static const struct Case cases[] = {
       {"zero", {0, 0}, {0, 0}, {0, 0}},
@@ -187,7 +246,11 @@ int main(void) {
     }
   }
 #ifdef TEST_VECTOR_CONSTANT_TWIDDLES
-  return test_vector_constants();
+  if (test_vector_constants())
+    return 1;
+#endif
+#ifdef TEST_VECTOR_TABLE_TWIDDLES
+  return test_vector_tables();
 #else
   return 0;
 #endif

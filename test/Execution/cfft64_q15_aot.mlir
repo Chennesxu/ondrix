@@ -10,6 +10,12 @@
 // RUN: cc %S/Inputs/cfft64_q15_aot.c %t.loops.o -o %t.loops
 // RUN: %t.loops
 
+// RUN: ondrix-opt %s --convert-ondrix-to-ondsp="fft-loops fft-loops-vector-width=4" --convert-ondsp-fixed-to-scalar --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map allow-return-allocs" --convert-vector-to-scf --expand-strided-metadata --lower-affine --convert-scf-to-cf --convert-vector-to-llvm --finalize-memref-to-llvm --convert-arith-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts > %t.vector.mlir
+// RUN: ondrix-translate %t.vector.mlir --mlir-to-llvmir > %t.vector.ll
+// RUN: llc -relocation-model=pic -filetype=obj %t.vector.ll -o %t.vector.o
+// RUN: cc %S/Inputs/cfft64_q15_aot.c %t.vector.o -o %t.vector
+// RUN: %t.vector
+
 // The .loops pipeline exercises the opt-in fft-loops lowering (bit-reversal
 // and stage loops over in-memory twiddle tables) against the SAME
 // independent reference: the loop form must be bit-identical to the
