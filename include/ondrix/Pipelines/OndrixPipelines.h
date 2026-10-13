@@ -128,9 +128,10 @@ struct OndrixDefaultPipelineOptions
   /// contains, so no global value is right for a module holding both a
   /// size-8 transform (4128 bytes unrolled, and 2.47x faster that way) and a
   /// size-64 one (69352 bytes). It is also not a profitability question the
-  /// pipeline could settle: measured on the host class the packed loop form
-  /// costs about 2.5x the cycles at extents 8 and 64, while the unrolled form
-  /// does not compile at all at extent 1024. Deriving it would need a real
+  /// pipeline could settle: the measured scalar packed loop form costs about
+  /// 2.5x the cycles at extents 8 and 64, while the unrolled form does not
+  /// compile at all at extent 1024. Declared vector bits can accelerate an
+  /// explicitly selected loop form. Deriving the schedule would need a real
   /// capacity budget and a per-operation decision, which is the cost model
   /// this project refuses.
   Option<bool> fftLoops{*this, "fft-loops",

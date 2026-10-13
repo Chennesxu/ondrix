@@ -1,6 +1,7 @@
 // RUN: ondrix-compile %S/Inputs/f32_cfft16.ox --emit=llvm --fft-loops | FileCheck %s --check-prefix=LOOPS
 // RUN: ondrix-compile %S/Inputs/f32_cfft16.ox --emit=llvm | FileCheck %s --check-prefix=UNROLLED
 // RUN: ondrix-compile %S/Inputs/f32_cfft16.ox --emit=manifest --fft-loops | FileCheck %s --check-prefix=MANIFEST
+// RUN: ondrix-compile %S/Inputs/f32_cfft16.ox --emit=manifest --fft-loops --vector-bits=256 | FileCheck %s --check-prefix=MANIFEST-VEC
 // RUN: ondrix-compile %S/Inputs/f32_cfft16.ox --emit=manifest | FileCheck %s --check-prefix=DEFAULT
 
 // The code shape is an explicit schedule choice, not a target fact, so the
@@ -20,6 +21,7 @@
 // MANIFEST-NEXT: "fft_lowering": "loops"
 // MANIFEST: "declared_target_facts"
 // MANIFEST-NOT: fft
-// MANIFEST: convert-ondrix-to-ondsp{preserve-bufferizable-reductions=true output-batch-vector-width={{[0-9]+}} fft-loops=true}
+// MANIFEST: convert-ondrix-to-ondsp{preserve-bufferizable-reductions=true output-batch-vector-width={{[0-9]+}} fft-loops=true fft-loops-vector-register-bits=0}
+// MANIFEST-VEC: convert-ondrix-to-ondsp{preserve-bufferizable-reductions=true output-batch-vector-width=8 fft-loops=true fft-loops-vector-register-bits=256}
 // DEFAULT: "fft_lowering": "unrolled"
-// DEFAULT: convert-ondrix-to-ondsp{preserve-bufferizable-reductions=true output-batch-vector-width={{[0-9]+}} fft-loops=false}
+// DEFAULT: convert-ondrix-to-ondsp{preserve-bufferizable-reductions=true output-batch-vector-width={{[0-9]+}} fft-loops=false fft-loops-vector-register-bits=0}

@@ -204,13 +204,21 @@ static int compare(const char *label, unsigned extent, const MemRefI64 *output,
 static int check(void (*kernel)(MemRefI64 *, MemRefI64 *), unsigned extent, bool inverse,
                  const int64_t *input, const char *label) {
   MemRefI64 inputRef = {(int64_t *)input, (int64_t *)input, 0, {(int64_t)extent}, {1}};
+#ifdef TEST_CANONICAL_OUT_PARAMS
+  int64_t outputStorage[kMaxExtent];
+  MemRefI64 output = {outputStorage, outputStorage, 0, {(int64_t)extent}, {1}};
+  kernel(&inputRef, &output);
+#else
   MemRefI64 output;
   kernel(&output, &inputRef);
+#endif
 
   int64_t expected[kMaxExtent];
   cfftRecursive(input, 1, 0, extent, inverse ? kInverseTwiddles64 : kForwardTwiddles64, expected);
   int failed = compare(label, extent, &output, expected);
+#ifndef TEST_CANONICAL_OUT_PARAMS
   free(output.allocated);
+#endif
   return failed;
 }
 
@@ -310,8 +318,14 @@ static int checkRoundTrip(void) {
     }
 
     MemRefI64 inputRef = {input, input, 0, {kExtent}, {1}};
+#ifdef TEST_CANONICAL_OUT_PARAMS
+    int64_t outputStorage[kExtent];
+    MemRefI64 output = {outputStorage, outputStorage, 0, {kExtent}, {1}};
+    _mlir_ciface_cfft8_round_trip_q31(&inputRef, &output);
+#else
     MemRefI64 output;
     _mlir_ciface_cfft8_round_trip_q31(&output, &inputRef);
+#endif
 
     int64_t spectrum[kExtent];
     int64_t expected[kExtent];
@@ -341,7 +355,9 @@ static int checkRoundTrip(void) {
         failed = 1;
       }
     }
+#ifndef TEST_CANONICAL_OUT_PARAMS
     free(output.allocated);
+#endif
   }
   return failed;
 }

@@ -45,8 +45,12 @@ public:
       module.emitError("fft-loops-vector-width must be zero or a power of two");
       return signalPassFailure();
     }
-    ondrix::conversion::populateOndrixSpectralLoweringPatterns(patterns, vectorizeStaticCfft,
-                                                               fftLoops, fftLoopsVectorWidth);
+    if (fftLoopsVectorRegisterBits < 0) {
+      module.emitError("fft-loops-vector-register-bits must be nonnegative");
+      return signalPassFailure();
+    }
+    ondrix::conversion::populateOndrixSpectralLoweringPatterns(
+        patterns, vectorizeStaticCfft, fftLoops, fftLoopsVectorWidth, fftLoopsVectorRegisterBits);
     ondrix::conversion::populateOndrixElementwiseLoweringPatterns(patterns);
     ConversionTarget target(getContext());
     target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, math::MathDialect,

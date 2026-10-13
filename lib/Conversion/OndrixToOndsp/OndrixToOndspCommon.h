@@ -30,7 +30,8 @@ void populateOndrixFirFamilyLoweringPatterns(mlir::RewritePatternSet &patterns,
 void populateOndrixStatefulLoweringPatterns(mlir::RewritePatternSet &patterns);
 void populateOndrixSpectralLoweringPatterns(mlir::RewritePatternSet &patterns,
                                             bool vectorizeStaticCfft, bool fftLoops,
-                                            int64_t fftLoopsVectorWidth);
+                                            int64_t fftLoopsVectorWidth,
+                                            int64_t fftLoopsVectorRegisterBits);
 void populateOndrixElementwiseLoweringPatterns(mlir::RewritePatternSet &patterns);
 
 } // namespace ondrix::conversion

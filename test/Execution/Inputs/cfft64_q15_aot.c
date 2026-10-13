@@ -119,8 +119,14 @@ static uint32_t nextState(uint32_t state) {
 static int check(void (*kernel)(MemRefI32 *, MemRefI32 *), const struct Complex *twiddles,
                  const int32_t *input, const char *label) {
   MemRefI32 inputRef = {(int32_t *)input, (int32_t *)input, 0, {kExtent}, {1}};
+#ifdef TEST_CANONICAL_OUT_PARAMS
+  int32_t outputStorage[kExtent];
+  MemRefI32 output = {outputStorage, outputStorage, 0, {kExtent}, {1}};
+  kernel(&inputRef, &output);
+#else
   MemRefI32 output;
   kernel(&output, &inputRef);
+#endif
 
   int32_t expected[kExtent];
   cfftRecursive(input, 1, 0, kExtent, twiddles, expected);
@@ -135,7 +141,9 @@ static int check(void (*kernel)(MemRefI32 *, MemRefI32 *), const struct Complex 
       failed = 1;
     }
   }
+#ifndef TEST_CANONICAL_OUT_PARAMS
   free(output.allocated);
+#endif
   return failed;
 }
 

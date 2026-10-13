@@ -91,9 +91,16 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
            "int64_t", /*default=*/"0",
            "With fft-loops, the number of consecutive butterflies of a stage "
            "computed as one fixed-length vector once the stage's half length "
-           "reaches it (a power of two; 0 keeps every stage scalar). The "
+           "reaches it (a power of two; 0 derives from declared register bits "
+           "when provided, otherwise keeps every stage scalar). The "
            "butterflies of a stage are independent, so the lanes change no "
            "update order">,
+    Option<"fftLoopsVectorRegisterBits", "fft-loops-vector-register-bits",
+           "int64_t", /*default=*/"0",
+           "With fft-loops, derive the lane count from this declared target "
+           "register width and each packed profile's container width. An "
+           "explicit positive fft-loops-vector-width takes precedence; with "
+           "both values zero the existing scalar loop schedule remains">,
   ];
 }
 

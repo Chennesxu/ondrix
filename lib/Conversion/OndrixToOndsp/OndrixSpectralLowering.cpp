@@ -265,7 +265,12 @@ static Value lowerPackedCfftLoops(Location loc, Value input, int64_t extent,
                                   ondrix::ondsp::ProductAttr product,
                                   ondrix::ondsp::ScaleAttr productScale,
                                   ondrix::ondsp::ScaleAttr outputScale, int64_t vectorWidth,
-                                  ConversionPatternRewriter &rewriter) {
+                                  int64_t vectorRegisterBits, ConversionPatternRewriter &rewriter) {
+  if (!vectorWidth && vectorRegisterBits >= 2 * profile.containerWidth) {
+    int64_t lanes = vectorRegisterBits / profile.containerWidth;
+    if (vectorRegisterBits % profile.containerWidth == 0 && (lanes & (lanes - 1)) == 0)
+      vectorWidth = lanes;
+  }
   IntegerType container = rewriter.getIntegerType(profile.containerWidth);
   IntegerType i64 = rewriter.getI64Type();
   int64_t stageCount = llvm::Log2_64(extent);
@@ -926,9 +931,10 @@ static Value scaleFpTensorByInverseExtent(Location loc, Value tensor, int64_t el
 class CfftOpLowering final : public OpConversionPattern<ondrix::ir::CfftOp> {
 public:
   CfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops,
-                 int64_t fftLoopsVectorWidth)
+                 int64_t fftLoopsVectorWidth, int64_t fftLoopsVectorRegisterBits)
       : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft), fftLoops(fftLoops),
-        fftLoopsVectorWidth(fftLoopsVectorWidth) {}
+        fftLoopsVectorWidth(fftLoopsVectorWidth),
+        fftLoopsVectorRegisterBits(fftLoopsVectorRegisterBits) {}
 
   LogicalResult matchAndRewrite(ondrix::ir::CfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -970,10 +976,10 @@ public:
     if (!hasAdmissiblePackedTwiddleTables(profile->storageWidth, op.getDirection(), extent))
       return rewriter.notifyMatchFailure(op, "the stage twiddle table is unavailable");
     if (fftLoops) {
-      Value result =
-          lowerPackedCfftLoops(loc, adaptor.getInput(), extent, op.getDirection(), *profile, layout,
-                               op.getNumeric(), *op.getProduct(), *op.getProductScale(),
-                               *op.getOutputScale(), fftLoopsVectorWidth, rewriter);
+      Value result = lowerPackedCfftLoops(
+          loc, adaptor.getInput(), extent, op.getDirection(), *profile, layout, op.getNumeric(),
+          *op.getProduct(), *op.getProductScale(), *op.getOutputScale(), fftLoopsVectorWidth,
+          fftLoopsVectorRegisterBits, rewriter);
       rewriter.replaceOp(op, result);
       return success();
     }
@@ -1002,14 +1008,16 @@ private:
   bool vectorizeStaticCfft;
   bool fftLoops;
   int64_t fftLoopsVectorWidth;
+  int64_t fftLoopsVectorRegisterBits;
 };
 
 class RfftOpLowering final : public OpConversionPattern<ondrix::ir::RfftOp> {
 public:
   RfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops,
-                 int64_t fftLoopsVectorWidth)
+                 int64_t fftLoopsVectorWidth, int64_t fftLoopsVectorRegisterBits)
       : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft), fftLoops(fftLoops),
-        fftLoopsVectorWidth(fftLoopsVectorWidth) {}
+        fftLoopsVectorWidth(fftLoopsVectorWidth),
+        fftLoopsVectorRegisterBits(fftLoopsVectorRegisterBits) {}
 
   LogicalResult matchAndRewrite(ondrix::ir::RfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -1089,7 +1097,7 @@ public:
       Value spectrum = lowerPackedCfftLoops(
           loc, packLoop.getResult(0), extent, ondrix::ir::CfftDirection::Forward, profile,
           op.getLayout(), op.getNumeric(), *op.getProduct(), *op.getProductScale(),
-          *op.getOutputScale(), fftLoopsVectorWidth, rewriter);
+          *op.getOutputScale(), fftLoopsVectorWidth, fftLoopsVectorRegisterBits, rewriter);
       RankedTensorType resultType = op.getResult().getType();
       int64_t binCount = resultType.getDimSize(0);
       Value compact = rewriter.create<tensor::ExtractSliceOp>(
@@ -1136,14 +1144,16 @@ private:
   bool vectorizeStaticCfft;
   bool fftLoops;
   int64_t fftLoopsVectorWidth;
+  int64_t fftLoopsVectorRegisterBits;
 };
 
 class IrfftOpLowering final : public OpConversionPattern<ondrix::ir::IrfftOp> {
 public:
   IrfftOpLowering(MLIRContext *context, bool vectorizeStaticCfft, bool fftLoops,
-                  int64_t fftLoopsVectorWidth)
+                  int64_t fftLoopsVectorWidth, int64_t fftLoopsVectorRegisterBits)
       : OpConversionPattern(context), vectorizeStaticCfft(vectorizeStaticCfft), fftLoops(fftLoops),
-        fftLoopsVectorWidth(fftLoopsVectorWidth) {}
+        fftLoopsVectorWidth(fftLoopsVectorWidth),
+        fftLoopsVectorRegisterBits(fftLoopsVectorRegisterBits) {}
 
   LogicalResult matchAndRewrite(ondrix::ir::IrfftOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
@@ -1264,7 +1274,7 @@ public:
       Value outputs = lowerPackedCfftLoops(
           loc, mirrorLoop.getResult(0), extent, ondrix::ir::CfftDirection::Inverse, profile,
           op.getLayout(), op.getNumeric(), *op.getProduct(), *op.getProductScale(),
-          *op.getOutputScale(), fftLoopsVectorWidth, rewriter);
+          *op.getOutputScale(), fftLoopsVectorWidth, fftLoopsVectorRegisterBits, rewriter);
       RankedTensorType resultType = op.getResult().getType();
       Value resultEmpty =
           rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
@@ -1315,6 +1325,7 @@ private:
   bool vectorizeStaticCfft;
   bool fftLoops;
   int64_t fftLoopsVectorWidth;
+  int64_t fftLoopsVectorRegisterBits;
 };
 
 // One complex value of a half-size split schedule, carried as two i32 SSA
@@ -1876,13 +1887,12 @@ public:
 
 } // namespace
 
-void ondrix::conversion::populateOndrixSpectralLoweringPatterns(RewritePatternSet &patterns,
-                                                                bool vectorizeStaticCfft,
-                                                                bool fftLoops,
-                                                                int64_t fftLoopsVectorWidth) {
+void ondrix::conversion::populateOndrixSpectralLoweringPatterns(
+    RewritePatternSet &patterns, bool vectorizeStaticCfft, bool fftLoops,
+    int64_t fftLoopsVectorWidth, int64_t fftLoopsVectorRegisterBits) {
   MLIRContext *context = patterns.getContext();
   patterns.add<ButterflyOpLowering, RfftRadix4SplitOpLowering, RfftSplitOpLowering, DctOpLowering,
                CxMagnitudeOpLowering, CxPowerOpLowering>(context);
-  patterns.add<CfftOpLowering, RfftOpLowering, IrfftOpLowering>(context, vectorizeStaticCfft,
-                                                                fftLoops, fftLoopsVectorWidth);
+  patterns.add<CfftOpLowering, RfftOpLowering, IrfftOpLowering>(
+      context, vectorizeStaticCfft, fftLoops, fftLoopsVectorWidth, fftLoopsVectorRegisterBits);
 }
