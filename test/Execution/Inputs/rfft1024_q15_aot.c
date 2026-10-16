@@ -18,7 +18,11 @@ typedef struct {
   int64_t strides[1];
 } MemRefI32;
 
+#ifdef TEST_CANONICAL_OUT_PARAMS
+extern void _mlir_ciface_rfft1024_q15(MemRefI16 *, MemRefI32 *);
+#else
 extern void _mlir_ciface_rfft1024_q15(MemRefI32 *, MemRefI16 *);
+#endif
 
 enum { kExtent = 1024, kBinCount = 513, kTrialCount = 4 };
 
@@ -223,8 +227,14 @@ static int16_t toSigned16(uint32_t bits) {
 
 static int check(const int16_t *input, const char *label) {
   MemRefI16 inputRef = {(int16_t *)input, (int16_t *)input, 0, {kExtent}, {1}};
+#ifdef TEST_CANONICAL_OUT_PARAMS
+  int32_t outputStorage[kBinCount];
+  MemRefI32 output = {outputStorage, outputStorage, 0, {kBinCount}, {1}};
+  _mlir_ciface_rfft1024_q15(&inputRef, &output);
+#else
   MemRefI32 output;
   _mlir_ciface_rfft1024_q15(&output, &inputRef);
+#endif
 
   int32_t spectrum[kExtent];
   int32_t packedInput[kExtent];
@@ -244,7 +254,9 @@ static int check(const int16_t *input, const char *label) {
       failed = 1;
     }
   }
+#ifndef TEST_CANONICAL_OUT_PARAMS
   free(output.allocated);
+#endif
   return failed;
 }
 

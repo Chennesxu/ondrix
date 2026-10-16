@@ -249,7 +249,7 @@ lowerPackedCfft(Location loc, ArrayRef<Value> inputs, ondrix::ir::CfftDirection 
 // computes exactly the butterflies of the iterative algorithm applied to
 // bit-reversed input: stage half-sizes H = 1, 2, ..., N/2, butterfly j of
 // group g pairing positions g*2H + j and g*2H + j + H under twiddle
-// W(2H, j). Every butterfly is the same scalar ondsp.cx_butterfly with the
+// W(2H, j). Every butterfly keeps the same ondsp.cx_butterfly contract with the
 // same requantization attributes, so each output element passes through the
 // identical sequence of quantization boundaries in an equivalent order and
 // the two lowerings are bit-identical per element; only the code shape
@@ -486,13 +486,82 @@ static Value lowerPackedCfftLoops(Location loc, Value input, int64_t extent,
     return stageLoop.getResult(0);
   };
 
+  // All dependencies of a stage with half < lanes stay inside a block of
+  // 2*lanes values. Shuffle independent groups into one butterfly vector,
+  // then restore their order before the next stage. Each butterfly retains
+  // its own product and output requantization; even the +1 word still takes
+  // the full product path. Only the intermediate memory round trips disappear.
+  auto buildEarlyVectorStages = [&](int64_t lanes) -> Value {
+    auto vectorType = VectorType::get({lanes}, container);
+    auto blockType = VectorType::get({2 * lanes}, container);
+    SmallVector<Value> stageTwiddles;
+    for (int64_t half = 1; half < lanes; half *= 2) {
+      SmallVector<APInt> words;
+      for (int64_t lane = 0; lane < lanes; ++lane)
+        words.push_back(twiddleWords[half + lane % half]);
+      stageTwiddles.push_back(rewriter.create<arith::ConstantOp>(
+          loc, vectorType, DenseIntElementsAttr::get(vectorType, words)));
+    }
+    Value step = rewriter.create<arith::ConstantIndexOp>(loc, 2 * lanes);
+    auto blocks = rewriter.create<scf::ForOp>(
+        loc, zero, extentValue, step, ValueRange{current},
+        [&](OpBuilder &builder, Location loc, Value base, ValueRange args) {
+          SmallVector<bool> inBounds{true};
+          Value values = builder.create<vector::TransferReadOp>(
+              loc, blockType, args.front(), ValueRange{base}, ArrayRef<bool>(inBounds));
+          unsigned stage = 0;
+          for (int64_t half = 1; half < lanes; half *= 2, ++stage) {
+            SmallVector<int64_t> upper, lower, interleave;
+            for (int64_t lane = 0; lane < lanes; ++lane) {
+              int64_t index = (lane / half) * (2 * half) + lane % half;
+              upper.push_back(index);
+              lower.push_back(index + half);
+            }
+            for (int64_t index = 0; index < 2 * lanes; ++index)
+              interleave.push_back((index / (2 * half)) * half + index % half +
+                                   ((index / half) % 2 ? lanes : 0));
+            Value a = builder.create<vector::ShuffleOp>(loc, values, values, upper);
+            Value b = builder.create<vector::ShuffleOp>(loc, values, values, lower);
+            auto butterfly = builder.create<ondrix::ondsp::CxButterflyOp>(
+                loc, vectorType, vectorType, a, b, stageTwiddles[stage], layout, numeric, product,
+                productScale, outputScale, ondrix::ondsp::CxButterflyVariantAttr());
+            values = builder.create<vector::ShuffleOp>(loc, butterfly.getOut0(),
+                                                       butterfly.getOut1(), interleave);
+          }
+          Value written =
+              builder
+                  .create<vector::TransferWriteOp>(loc, values, args.front(), ValueRange{base},
+                                                   ArrayRef<bool>(inBounds))
+                  .getResult();
+          builder.create<scf::YieldOp>(loc, written);
+        });
+    return blocks.getResult(0);
+  };
+
   if (!inventoryPaired) {
     int64_t lanes = vectorWidth > 1 && vectorWidth <= extent / 2 ? vectorWidth : 1;
     if (lanes == 1)
       return buildPlainStages(rewriter, loc, lowerStage, stages, current, 1);
     Value vectorStage = rewriter.create<arith::ConstantIndexOp>(loc, llvm::Log2_64(lanes));
-    Value scalarStages = buildPlainStages(rewriter, loc, lowerStage, vectorStage, current, 1);
-    return buildPlainStages(rewriter, loc, vectorStage, stages, scalarStages, lanes);
+    auto fixed = dyn_cast<ondrix::ondsp::FixedAttr>(numeric);
+    auto matchesScale = [&](ondrix::ondsp::ScaleAttr scale, unsigned shift) {
+      auto destination = dyn_cast<IntegerType>(scale.getSaturateTo());
+      return scale.getPreShiftLeft() == 0 && scale.getPostShiftRight() == shift &&
+             scale.getRounding() == ondrix::ondsp::RoundingMode::NearestEven &&
+             scale.getOverflow() == ondrix::ondsp::OverflowMode::Saturate && destination &&
+             destination.isSignlessInteger(16);
+    };
+    // The measured 128-/256-bit Q15 schedules have complete blocks. Keep all
+    // other widths and numeric profiles on their existing early-stage path.
+    bool fuseEarly = (lanes == 4 || lanes == 8) && extent % (2 * lanes) == 0 &&
+                     layout.getLayout() == ondrix::ondsp::ComplexLayout::PackedI16ImagHiRealLo &&
+                     fixed && ondrix::ondsp::isSignedQ15(fixed) &&
+                     ondrix::ondsp::isFullProduct(product) && matchesScale(productScale, 15) &&
+                     matchesScale(outputScale, 1);
+    Value earlyStages = fuseEarly
+                            ? buildEarlyVectorStages(lanes)
+                            : buildPlainStages(rewriter, loc, lowerStage, vectorStage, current, 1);
+    return buildPlainStages(rewriter, loc, vectorStage, stages, earlyStages, lanes);
   }
 
   // Paired form as static stages: the pair of stages (H, 2H) is one group

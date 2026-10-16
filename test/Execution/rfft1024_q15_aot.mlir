@@ -4,6 +4,16 @@
 // RUN: cc %S/Inputs/rfft1024_q15_aot.c %t.o -o %t
 // RUN: %t
 
+// RUN: ondrix-opt %s --ondrix-default-pipeline="vector-bits=256 fft-loops=true" > %t.vector.mlir
+// RUN: FileCheck %s --input-file=%t.vector.mlir --check-prefix=VECTOR --implicit-check-not="vector<8xi33>"
+// RUN: ondrix-translate %t.vector.mlir --mlir-to-llvmir > %t.vector.ll
+// RUN: opt -O3 -vectorize-loops=false -vectorize-slp=false %t.vector.ll -o %t.vector.bc
+// RUN: llc -O2 -mtriple=x86_64-unknown-linux-gnu -mattr=+avx2 -relocation-model=pic -filetype=obj %t.vector.bc -o %t.vector.o
+// RUN: cc -DTEST_CANONICAL_OUT_PARAMS %S/Inputs/rfft1024_q15_aot.c %t.vector.o -o %t.vector
+// RUN: %t.vector
+
+// VECTOR: llvm.load {{.*}} : !llvm.ptr -> vector<16xi32>
+
 // The maximum supported RFFT extent as a CI object gate. The fully
 // unrolled lowering makes 1024 points a compile-budget problem (one-off
 // local evidence: ~15 minutes and a 2 MB object), which is why only the

@@ -23,7 +23,7 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
     The opt-in fft-loops mode lowers static CFFT/RFFT/IRFFT through a
     bit-reversal permutation and stage/butterfly loops over in-memory
     twiddle tables instead of fully unrolled SSA butterflies. A packed
-    profile's butterfly stays the same scalar `ondsp.cx_butterfly` with the
+    profile's butterfly keeps the same `ondsp.cx_butterfly` contract with the
     same requantization attributes; the interleaved f32 profile has no
     requantization boundary and emits arith/math directly in both shapes.
     Either way every element passes the identical expression in an
@@ -33,6 +33,12 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
     peels the exact unit and quarter-turn phases into their own loops,
     because those legs carry no product event by contract. It is mutually
     exclusive with vectorize-static-cfft.
+
+    At four or eight lanes, the Q15/full nearest-even saturating profile
+    fuses the first log2(lanes) stages across independent groups inside a
+    complete block of 2*lanes values. Shuffles restore the layout between
+    stages; every product and output requantization remains observable.
+    Other widths, profiles and incomplete blocks keep their existing path.
 
     A fixed DF-II SOS cascade emits its sections straight-line inside the
     sample loop, instead of as an inner `scf.for`, when the coefficient,
@@ -94,7 +100,8 @@ def ConvertOndrixToOndsp : Pass<"convert-ondrix-to-ondsp", "::mlir::ModuleOp"> {
            "reaches it (a power of two; 0 derives from declared register bits "
            "when provided, otherwise keeps every stage scalar). The "
            "butterflies of a stage are independent, so the lanes change no "
-           "update order">,
+           "update order. Eligible four-/eight-lane Q15/full schedules also "
+           "fuse the earlier stages across groups within complete blocks">,
     Option<"fftLoopsVectorRegisterBits", "fft-loops-vector-register-bits",
            "int64_t", /*default=*/"0",
            "With fft-loops, derive the lane count from this declared target "
