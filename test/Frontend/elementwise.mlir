@@ -2,7 +2,7 @@
 // RUN: ondrix-compile %S/Inputs/q15_elementwise_square.ox | FileCheck %s --check-prefix=SQUARE
 // RUN: not ondrix-compile %S/Inputs/invalid_elementwise_extent.ox 2>&1 | FileCheck %s --check-prefix=EXTENT
 // RUN: not ondrix-compile %S/Inputs/invalid_elementwise_amount.ox 2>&1 | FileCheck %s --check-prefix=AMOUNT
-// RUN: not ondrix-compile %S/Inputs/invalid_elementwise_f32.ox 2>&1 | FileCheck %s --check-prefix=FLOAT
+// RUN: ondrix-compile %S/Inputs/f32_elementwise.ox | FileCheck %s --check-prefix=FLOAT
 // RUN: ondrix-compile %S/Inputs/q31_elementwise_chain.ox | FileCheck %s --check-prefix=CHAIN31
 // RUN: not ondrix-compile %S/Inputs/invalid_elementwise_mixed_width.ox 2>&1 | FileCheck %s --check-prefix=MIXED
 // RUN: not ondrix-compile %S/Inputs/invalid_elementwise_q31_amount.ox 2>&1 | FileCheck %s --check-prefix=AMOUNT31
@@ -34,7 +34,7 @@
 
 // An elementwise IEEE operation has no boundary to declare, so the family is
 // fixed point only rather than carrying an f32 profile with no contract.
-// FLOAT: error: elementwise builtins require q15 or q31 operand elements
+// FLOAT: arith.addf
 
 // The same seven at the wider width, where the two raw attributes take the
 // range the format actually has: amount=-31 and bias=2^30 are legal here and

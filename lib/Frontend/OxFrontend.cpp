@@ -11,9 +11,11 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Verifier.h"
@@ -24,6 +26,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
@@ -84,6 +87,13 @@ enum class TokenKind {
   Eof,
   Identifier,
   Integer,
+  Float,
+  EqualEqual,
+  NotEqual,
+  Less,
+  LessEqual,
+  Greater,
+  GreaterEqual,
   LeftParen,
   RightParen,
   LeftBracket,
@@ -139,7 +149,37 @@ public:
       do {
         advance();
       } while (offset < source.size() && std::isdigit(static_cast<unsigned char>(source[offset])));
-      return {TokenKind::Integer, source.slice(begin, offset), start};
+      bool floating = false;
+      if (offset < source.size() && source[offset] == '.') {
+        floating = true;
+        advance();
+        while (offset < source.size() && std::isdigit(static_cast<unsigned char>(source[offset])))
+          advance();
+      }
+      if (offset < source.size() && (source[offset] == 'e' || source[offset] == 'E')) {
+        floating = true;
+        advance();
+        if (offset < source.size() && (source[offset] == '+' || source[offset] == '-'))
+          advance();
+        size_t exponentStart = offset;
+        while (offset < source.size() && std::isdigit(static_cast<unsigned char>(source[offset])))
+          advance();
+        if (offset == exponentStart)
+          diagnostics.error(start, "invalid f32 literal: exponent requires digits");
+      }
+      return {floating ? TokenKind::Float : TokenKind::Integer, source.slice(begin, offset), start};
+    }
+    if (current == '=' || current == '!' || current == '<' || current == '>') {
+      size_t begin = offset;
+      advance();
+      bool equal = offset < source.size() && source[offset] == '=';
+      if (equal)
+        advance();
+      TokenKind kind = current == '='   ? (equal ? TokenKind::EqualEqual : TokenKind::Equal)
+                       : current == '!' ? (equal ? TokenKind::NotEqual : TokenKind::Invalid)
+                       : current == '<' ? (equal ? TokenKind::LessEqual : TokenKind::Less)
+                                        : (equal ? TokenKind::GreaterEqual : TokenKind::Greater);
+      return {kind, source.slice(begin, offset), start};
     }
     if (current == '-') {
       advance();
@@ -219,7 +259,7 @@ private:
   unsigned column = 1;
 };
 
-enum class SourceType { Q15, Q31, F32, ComplexQ15, ComplexQ31, ComplexF32, U8 };
+enum class SourceType { Q15, Q31, F32, ComplexQ15, ComplexQ31, ComplexF32, U8, I32, I64, Bool };
 
 // The value of an integer token, decimal or `0o` octal; true on failure, as
 // StringRef::getAsInteger.
@@ -232,6 +272,7 @@ static bool getIntegerTokenValue(llvm::StringRef spelling, uint64_t &value) {
 enum class ContainerKind { Scalar, Buffer, Tensor, Constexpr };
 
 enum class ReductionKind {
+  Primitive,
   Dot,
   CxDot,
   CxFirFilter,
@@ -366,7 +407,8 @@ static bool isComposableKind(ReductionKind kind) {
 // A fixed gain is one requantization with a static shape, so it nests and
 // leads a kernel like the elementwise family; the f32 gain keeps its own path.
 static bool isComposableKernel(ReductionKind kind, SourceType resultType) {
-  return isComposableKind(kind) || (kind == ReductionKind::Gain && resultType != SourceType::F32);
+  return kind == ReductionKind::Primitive || isComposableKind(kind) ||
+         (kind == ReductionKind::Gain && resultType != SourceType::F32);
 }
 
 static bool isUnaryTensorKind(ReductionKind kind) {
@@ -418,8 +460,70 @@ struct ExpressionAst {
   bool isParameterReference() const { return !call; }
 };
 
+enum class PrimitiveKind {
+  Identity,
+  Literal,
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Pos,
+  Neg,
+  Eq,
+  Ne,
+  Lt,
+  Le,
+  Gt,
+  Ge,
+  Not,
+  And,
+  Or,
+  Scope,
+  Typed
+};
+
+// Operators parse as primitives and map back to the same-spelled builtin on
+// fixed operands; infix `/` is `ratio`.
+static constexpr std::pair<ReductionKind, PrimitiveKind> kOperatorKinds[] = {
+    {ReductionKind::Add, PrimitiveKind::Add},    {ReductionKind::Sub, PrimitiveKind::Sub},
+    {ReductionKind::Mult, PrimitiveKind::Mul},   {ReductionKind::Ratio, PrimitiveKind::Div},
+    {ReductionKind::Negate, PrimitiveKind::Neg},
+};
+
+static std::optional<PrimitiveKind> getOperatorPrimitive(ReductionKind kind) {
+  for (auto [builtin, primitive] : kOperatorKinds)
+    if (builtin == kind)
+      return primitive;
+  return std::nullopt;
+}
+
+static std::optional<ReductionKind> getOperatorBuiltin(PrimitiveKind kind) {
+  for (auto [builtin, primitive] : kOperatorKinds)
+    if (primitive == kind)
+      return builtin;
+  return std::nullopt;
+}
+
+// The builtin call spellings that also accept ordinary operands.
+static std::optional<PrimitiveKind> getOrdinaryArithmetic(ReductionKind kind) {
+  return kind == ReductionKind::Ratio ? std::nullopt : getOperatorPrimitive(kind);
+}
+
+static bool isComparison(PrimitiveKind kind) {
+  return llvm::is_contained({PrimitiveKind::Eq, PrimitiveKind::Ne, PrimitiveKind::Lt,
+                             PrimitiveKind::Le, PrimitiveKind::Gt, PrimitiveKind::Ge},
+                            kind);
+}
+
 struct BuiltinCallAst {
   ReductionKind kind;
+  PrimitiveKind primitive = PrimitiveKind::Identity;
+  std::string spelling;
+  std::vector<std::string> bindingNames;
+  SourceType expressionType = SourceType::I32;
+  int64_t expressionExtent = 0;
+  int64_t declaredExtent = 0;
+  std::optional<llvm::APInt> integerConstant;
   std::vector<ExpressionAst> operands;
   uint64_t accumulatorWidth = 0;
   bool accumulatorAuto = false;
@@ -560,6 +664,58 @@ ExpressionAst::ExpressionAst(const ExpressionAst &other)
       position(other.position) {}
 ExpressionAst &ExpressionAst::operator=(ExpressionAst &&) noexcept = default;
 
+struct Operand {
+  std::optional<ExpressionAst> expression;
+  int64_t literal = 0;
+  SourcePosition position;
+};
+
+static std::optional<BuiltinCallAst> buildFixedBinary(ReductionKind kind, Operand lhs, Operand rhs,
+                                                      SourcePosition position,
+                                                      Diagnostics &diagnostics) {
+  if (kind == ReductionKind::Ratio && !lhs.expression) {
+    diagnostics.error(position, "a constant dividend is not an operation; a tensor divides "
+                                "by a constant or by a tensor");
+    return std::nullopt;
+  }
+  BuiltinCallAst call;
+  call.kind = kind;
+  call.position = position;
+  if (lhs.expression && rhs.expression) {
+    call.operands.push_back(std::move(*lhs.expression));
+    call.operands.push_back(std::move(*rhs.expression));
+    return call;
+  }
+  if (!lhs.expression && !rhs.expression) {
+    diagnostics.error(position, "an operator needs a tensor operand on at least one side");
+    return std::nullopt;
+  }
+  bool literalOnLeft = !lhs.expression;
+  int64_t literal = literalOnLeft ? lhs.literal : rhs.literal;
+  if (kind == ReductionKind::Sub) {
+    if (literalOnLeft) {
+      diagnostics.error(position, "a constant minus a tensor is negate then offset, two "
+                                  "boundaries; spell offset(negate(x), bias=c)");
+      return std::nullopt;
+    }
+    if (literal == std::numeric_limits<int64_t>::min()) {
+      diagnostics.error(position, "integer literal is out of range");
+      return std::nullopt;
+    }
+    literal = -literal;
+  }
+  call.operands.push_back(std::move(*(literalOnLeft ? rhs.expression : lhs.expression)));
+  if (kind == ReductionKind::Ratio) {
+    call.kind = ReductionKind::Div;
+    call.divisor = literal;
+  } else {
+    call.kind = kind == ReductionKind::Mult ? ReductionKind::Gain : ReductionKind::Offset;
+    (kind == ReductionKind::Mult ? call.gain : call.bias) = literal;
+    call.literal = true;
+  }
+  return call;
+}
+
 // Instantiating a named function substitutes the caller's argument
 // expressions for the callee's parameter references. Everything else — every
 // declared contract in the callee's body — is copied unchanged, which is what
@@ -671,7 +827,7 @@ public:
 
     if (!expect(TokenKind::LeftParen, "expected '(' after function name"))
       return std::nullopt;
-    do {
+    while (current.kind != TokenKind::RightParen) {
       std::optional<ParameterAst> parameter = parseParameter();
       if (!parameter)
         return std::nullopt;
@@ -679,7 +835,7 @@ public:
       if (current.kind != TokenKind::Comma)
         break;
       advance();
-    } while (true);
+    }
 
     if (!expect(TokenKind::RightParen, "expected ')' after parameters") ||
         !expect(TokenKind::Arrow, "expected '->' after parameters"))
@@ -734,6 +890,8 @@ public:
     // expression tree direct nesting would produce.
     SourceType policyType = kernel.primaryResult().type;
     caller = &kernel;
+    genericExpressions = policyType == SourceType::F32 || policyType == SourceType::I32 ||
+                         policyType == SourceType::I64 || policyType == SourceType::Bool;
     while (current.kind == TokenKind::Identifier && current.spelling != "return" &&
            next.kind == TokenKind::Equal) {
       Token name = current;
@@ -752,8 +910,9 @@ public:
       if (!bound)
         return std::nullopt;
       bindingsByName[name.spelling] = bindings.size();
-      bindings.push_back(
-          Binding{name.spelling.str(), ExpressionAst(std::move(*bound)), name.position, false});
+      bindings.push_back(Binding{
+          genericExpressions ? ("$local" + std::to_string(nextLocal++)) : name.spelling.str(),
+          ExpressionAst(std::move(*bound)), name.position, false, name.spelling.str()});
     }
     if (!expectIdentifier("return", "expected a single return statement"))
       return std::nullopt;
@@ -761,6 +920,8 @@ public:
     if (!result)
       return std::nullopt;
     kernel.result = std::move(*result);
+    if (genericExpressions && !bindings.empty())
+      kernel.result = bindLocals(std::move(kernel.result));
     caller = nullptr;
     if (current.kind != TokenKind::Eof && !isIdentifier("def")) {
       diagnostics.error(current.position,
@@ -770,7 +931,7 @@ public:
     }
     for (const Binding &binding : bindings) {
       if (!binding.consumed) {
-        diagnostics.error(binding.position, llvm::Twine("local '") + binding.name +
+        diagnostics.error(binding.position, llvm::Twine("local '") + binding.sourceName +
                                                 "' is never consumed by a later statement");
         return std::nullopt;
       }
@@ -1743,9 +1904,12 @@ private:
   // A statement is a builtin call or an infix expression over them; a bare
   // parameter name would be an alias, which the language does not have.
   std::optional<BuiltinCallAst> parseStatementExpression(SourceType policyType) {
-    std::optional<Operand> operand = parseSum(policyType);
+    std::optional<Operand> operand =
+        genericExpressions ? parseLogicalOr(policyType) : parseSum(policyType);
     if (!operand)
       return std::nullopt;
+    if (genericExpressions && operand->expression && operand->expression->isParameterReference())
+      return makePrimitive(PrimitiveKind::Identity, {&*operand->expression}, operand->position);
     if (!operand->expression || operand->expression->isParameterReference()) {
       diagnostics.error(operand->position, "expected a builtin call or an infix expression, not "
                                            "a bare name or literal");
@@ -1757,7 +1921,8 @@ private:
   // An operand of a composable builtin: a whole infix expression, never a
   // literal on its own, which only an operator with a tensor beside it reads.
   std::optional<ExpressionAst> parseExpression(std::optional<SourceType> rootPolicy) {
-    std::optional<Operand> operand = parseSum(rootPolicy);
+    std::optional<Operand> operand =
+        genericExpressions ? parseLogicalOr(rootPolicy) : parseSum(rootPolicy);
     if (!operand)
       return std::nullopt;
     if (!operand->expression) {
@@ -1767,13 +1932,90 @@ private:
     return std::move(operand->expression);
   }
 
-  // An operand as parsed: an expression, or a raw integer literal in the
-  // declared format that the operator beside it turns into offset or gain.
-  struct Operand {
-    std::optional<ExpressionAst> expression;
-    int64_t literal = 0;
-    SourcePosition position;
-  };
+  static BuiltinCallAst makePrimitive(PrimitiveKind kind,
+                                      std::initializer_list<ExpressionAst *> operands,
+                                      SourcePosition position) {
+    BuiltinCallAst call;
+    call.kind = ReductionKind::Primitive;
+    call.primitive = kind;
+    call.position = position;
+    for (ExpressionAst *operand : operands)
+      call.operands.push_back(std::move(*operand));
+    return call;
+  }
+
+  std::optional<Operand> parseLogicalOr(std::optional<SourceType> rootPolicy = std::nullopt) {
+    auto lhs = parseLogicalAnd(rootPolicy);
+    while (lhs && isIdentifier("or")) {
+      SourcePosition position = current.position;
+      advance();
+      auto rhs = parseLogicalAnd();
+      if (!rhs)
+        return std::nullopt;
+      lhs = Operand{ExpressionAst(makePrimitive(PrimitiveKind::Or,
+                                                {&*lhs->expression, &*rhs->expression}, position)),
+                    0, position};
+    }
+    return lhs;
+  }
+  std::optional<Operand> parseLogicalAnd(std::optional<SourceType> rootPolicy = std::nullopt) {
+    auto lhs = parseLogicalNot(rootPolicy);
+    while (lhs && isIdentifier("and")) {
+      SourcePosition position = current.position;
+      advance();
+      auto rhs = parseLogicalNot();
+      if (!rhs)
+        return std::nullopt;
+      lhs = Operand{ExpressionAst(makePrimitive(PrimitiveKind::And,
+                                                {&*lhs->expression, &*rhs->expression}, position)),
+                    0, position};
+    }
+    return lhs;
+  }
+  std::optional<Operand> parseLogicalNot(std::optional<SourceType> rootPolicy = std::nullopt) {
+    if (isIdentifier("not")) {
+      SourcePosition position = current.position;
+      advance();
+      auto value = parseLogicalNot();
+      if (!value)
+        return std::nullopt;
+      return Operand{
+          ExpressionAst(makePrimitive(PrimitiveKind::Not, {&*value->expression}, position)), 0,
+          position};
+    }
+    auto lhs = parseSum(rootPolicy);
+    PrimitiveKind op;
+    switch (current.kind) {
+    case TokenKind::EqualEqual:
+      op = PrimitiveKind::Eq;
+      break;
+    case TokenKind::NotEqual:
+      op = PrimitiveKind::Ne;
+      break;
+    case TokenKind::Less:
+      op = PrimitiveKind::Lt;
+      break;
+    case TokenKind::LessEqual:
+      op = PrimitiveKind::Le;
+      break;
+    case TokenKind::Greater:
+      op = PrimitiveKind::Gt;
+      break;
+    case TokenKind::GreaterEqual:
+      op = PrimitiveKind::Ge;
+      break;
+    default:
+      return lhs;
+    }
+    SourcePosition position = current.position;
+    advance();
+    auto rhs = parseSum(std::nullopt);
+    if (!lhs || !rhs)
+      return std::nullopt;
+    return Operand{
+        ExpressionAst(makePrimitive(op, {&*lhs->expression, &*rhs->expression}, position)), 0,
+        position};
+  }
 
   // Infix `+`, `-`, `*` and `/` are `add`, `sub`, `mult` and `div` under the
   // language defaults: `*` and `/` bind tighter, all associate to the left,
@@ -1793,82 +2035,32 @@ private:
     return lhs;
   }
 
-  // `/` by a literal is `div`, by a tensor `ratio`; a constant dividend has
-  // no operation, since no constant is a tensor.
   std::optional<Operand> parseTerm(std::optional<SourceType> rootPolicy) {
-    std::optional<Operand> lhs = parsePrimary(rootPolicy);
+    auto lhs = parsePrimary(rootPolicy);
     while (lhs && (current.kind == TokenKind::Star || current.kind == TokenKind::Slash)) {
-      bool multiply = current.kind == TokenKind::Star;
+      ReductionKind kind =
+          current.kind == TokenKind::Star ? ReductionKind::Mult : ReductionKind::Ratio;
       SourcePosition position = current.position;
       advance();
-      if (multiply) {
-        std::optional<Operand> rhs = parsePrimary(std::nullopt);
-        if (!rhs)
-          return std::nullopt;
-        lhs = combine(ReductionKind::Mult, std::move(*lhs), std::move(*rhs), position);
-        continue;
-      }
-      std::optional<Operand> rhs = parsePrimary(std::nullopt);
+      auto rhs = parsePrimary(std::nullopt);
       if (!rhs)
         return std::nullopt;
-      if (!lhs->expression) {
-        diagnostics.error(position, "a constant dividend is not an operation; a tensor divides "
-                                    "by a constant or by a tensor");
-        return std::nullopt;
-      }
-      if (rhs->expression) {
-        lhs = combine(ReductionKind::Ratio, std::move(*lhs), std::move(*rhs), position);
-        continue;
-      }
-      BuiltinCallAst call;
-      call.kind = ReductionKind::Div;
-      call.operands.push_back(std::move(*lhs->expression));
-      call.position = position;
-      call.divisor = rhs->literal;
-      lhs = Operand{ExpressionAst(std::move(call)), 0, position};
+      lhs = combine(kind, std::move(*lhs), std::move(*rhs), position);
     }
     return lhs;
   }
 
-  // A literal beside a tensor is the constant form of the operation: `+` and
-  // `-` are offset, `*` is gain, each reading the literal as a raw value in
-  // the declared format. `c - x` would be two boundaries, so it is spelled.
   std::optional<Operand> combine(ReductionKind kind, Operand lhs, Operand rhs,
                                  SourcePosition position) {
-    if (lhs.expression && rhs.expression) {
-      BuiltinCallAst call;
-      call.kind = kind;
-      call.operands.push_back(std::move(*lhs.expression));
-      call.operands.push_back(std::move(*rhs.expression));
-      call.position = position;
-      return Operand{ExpressionAst(std::move(call)), 0, position};
+    if (genericExpressions) {
+      return Operand{ExpressionAst(makePrimitive(*getOperatorPrimitive(kind),
+                                                 {&*lhs.expression, &*rhs.expression}, position)),
+                     0, position};
     }
-    if (!lhs.expression && !rhs.expression) {
-      diagnostics.error(position, "an operator needs a tensor operand on at least one side");
+    auto call = buildFixedBinary(kind, std::move(lhs), std::move(rhs), position, diagnostics);
+    if (!call)
       return std::nullopt;
-    }
-    bool literalOnLeft = !lhs.expression;
-    Operand &tensor = literalOnLeft ? rhs : lhs;
-    int64_t literal = literalOnLeft ? lhs.literal : rhs.literal;
-    if (kind == ReductionKind::Sub) {
-      if (literalOnLeft) {
-        diagnostics.error(position, "a constant minus a tensor is negate then offset, two "
-                                    "boundaries; spell offset(negate(x), bias=c)");
-        return std::nullopt;
-      }
-      if (literal == std::numeric_limits<int64_t>::min()) {
-        diagnostics.error(position, "integer literal is out of range");
-        return std::nullopt;
-      }
-      literal = -literal;
-    }
-    BuiltinCallAst call;
-    call.kind = kind == ReductionKind::Mult ? ReductionKind::Gain : ReductionKind::Offset;
-    call.operands.push_back(std::move(*tensor.expression));
-    call.position = position;
-    (kind == ReductionKind::Mult ? call.gain : call.bias) = literal;
-    call.literal = true;
-    return Operand{ExpressionAst(std::move(call)), 0, position};
+    return Operand{ExpressionAst(std::move(*call)), 0, position};
   }
 
   // A primary is a parenthesized expression, a callee instantiation, a builtin
@@ -1879,11 +2071,52 @@ private:
     SourcePosition position = current.position;
     if (current.kind == TokenKind::LeftParen) {
       advance();
-      std::optional<Operand> inner = parseSum(std::nullopt);
+      std::optional<Operand> inner = genericExpressions ? parseLogicalOr() : parseSum(std::nullopt);
       if (!inner ||
           !expect(TokenKind::RightParen, "expected ')' to close the parenthesized expression"))
         return std::nullopt;
       return inner;
+    }
+    if (genericExpressions &&
+        (current.kind == TokenKind::Integer || current.kind == TokenKind::Float ||
+         isIdentifier("True") || isIdentifier("False") ||
+         (current.kind == TokenKind::Minus &&
+          (next.kind == TokenKind::Integer || next.kind == TokenKind::Float)))) {
+      BuiltinCallAst literal;
+      literal.kind = ReductionKind::Primitive;
+      literal.primitive = PrimitiveKind::Literal;
+      literal.position = position;
+      if (current.kind == TokenKind::Minus) {
+        literal.spelling = "-";
+        advance();
+      }
+      literal.spelling += current.spelling.str();
+      advance();
+      return Operand{ExpressionAst(std::move(literal)), 0, position};
+    }
+    if (current.kind == TokenKind::Plus ||
+        (current.kind == TokenKind::Minus && next.kind != TokenKind::Integer)) {
+      bool negative = current.kind == TokenKind::Minus;
+      advance();
+      auto value = parsePrimary(rootPolicy);
+      if (!value)
+        return std::nullopt;
+      if (genericExpressions)
+        return Operand{
+            ExpressionAst(makePrimitive(negative ? PrimitiveKind::Neg : PrimitiveKind::Pos,
+                                        {&*value->expression}, position)),
+            0, position};
+      if (!value->expression) {
+        diagnostics.error(position, "unary operator requires a tensor expression");
+        return std::nullopt;
+      }
+      if (!negative)
+        return value;
+      BuiltinCallAst call;
+      call.kind = ReductionKind::Negate;
+      call.position = position;
+      call.operands.push_back(std::move(*value->expression));
+      return Operand{ExpressionAst(std::move(call)), 0, position};
     }
     if (current.kind == TokenKind::Integer ||
         (current.kind == TokenKind::Minus && next.kind == TokenKind::Integer)) {
@@ -1892,15 +2125,12 @@ private:
         return std::nullopt;
       return Operand{std::nullopt, *literal, position};
     }
-    if (current.kind == TokenKind::Minus) {
-      diagnostics.error(position, "unary minus is not an operator; spell negate(...)");
-      return std::nullopt;
-    }
     bool isCall = current.kind == TokenKind::Identifier && next.kind == TokenKind::LeftParen;
     if (isCall && calleesByName.contains(current.spelling)) {
       // Inside a chain the composition checker establishes element types, so
       // the call is not additionally tied to the function's result type.
-      std::optional<BuiltinCallAst> instantiated = parseCalleeInstantiation(rootPolicy);
+      std::optional<BuiltinCallAst> instantiated =
+          parseCalleeInstantiation(genericExpressions ? std::nullopt : rootPolicy);
       if (!instantiated)
         return std::nullopt;
       return Operand{ExpressionAst(std::move(*instantiated)), 0, position};
@@ -1913,7 +2143,7 @@ private:
                            isIdentifier("ratio") || isIdentifier("gain") || isIdentifier("widen") ||
                            isIdentifier("narrow") || isIdentifier("quantize") ||
                            isIdentifier("dequantize") || isIdentifier("viterbi_decode");
-    if (isCall && (rootPolicy || isNestedBuiltin)) {
+    if (isCall && (rootPolicy || isNestedBuiltin || genericExpressions)) {
       std::optional<BuiltinCallAst> call = parseBuiltinCall(rootPolicy.value_or(SourceType::Q15));
       if (!call)
         return std::nullopt;
@@ -1974,6 +2204,14 @@ private:
   }
 
   std::optional<SourceType> parseSourceType(const llvm::Twine &message) {
+    for (auto entry :
+         {std::make_pair("i32", SourceType::I32), std::make_pair("i64", SourceType::I64),
+          std::make_pair("bool", SourceType::Bool)}) {
+      if (isIdentifier(entry.first)) {
+        advance();
+        return entry.second;
+      }
+    }
     if (isIdentifier("q15")) {
       advance();
       return SourceType::Q15;
@@ -2099,6 +2337,11 @@ private:
       return parameter;
     }
 
+    if (isIdentifier("i32") || isIdentifier("i64") || isIdentifier("bool") || isIdentifier("f32")) {
+      parameter.container = ContainerKind::Scalar;
+      parameter.type = *parseSourceType("expected scalar type");
+      return parameter;
+    }
     if (isIdentifier("complex_q15")) {
       parameter.container = ContainerKind::Scalar;
       parameter.type = SourceType::ComplexQ15;
@@ -2182,6 +2425,29 @@ private:
                                            "function's result");
       return std::nullopt;
     }
+    bool typedCallee =
+        callee.result.kind == ReductionKind::Primitive ||
+        callee.primaryResult().type == SourceType::I32 ||
+        callee.primaryResult().type == SourceType::I64 ||
+        callee.primaryResult().type == SourceType::Bool ||
+        (callee.primaryResult().type == SourceType::F32 && isElementwiseKind(callee.result.kind)) ||
+        llvm::any_of(callee.parameters, [](const ParameterAst &parameter) {
+          return parameter.isScalar() && parameter.type == SourceType::F32;
+        });
+    if (typedCallee) {
+      for (size_t index = 0; index < arguments.size(); ++index) {
+        const ParameterAst &declared = callee.parameters[index];
+        BuiltinCallAst checked;
+        checked.kind = ReductionKind::Primitive;
+        checked.primitive = PrimitiveKind::Typed;
+        checked.target = declared.type;
+        checked.declaredExtent =
+            declared.isTensor() && declared.shape.size() == 1 ? declared.shape[0].value_or(-1) : 0;
+        checked.position = name.position;
+        checked.operands.push_back(std::move(arguments[index]));
+        arguments[index] = ExpressionAst(std::move(checked));
+      }
+    }
     llvm::StringMap<const ExpressionAst *> substitution;
     for (size_t index = 0; index < arguments.size(); ++index) {
       const ParameterAst &declared = callee.parameters[index];
@@ -2206,7 +2472,20 @@ private:
         return std::nullopt;
       }
     }
-    return instantiateCall(callee.result, substitution, name.position);
+    BuiltinCallAst body = instantiateCall(callee.result, substitution, name.position);
+    if (!typedCallee)
+      return body;
+    BuiltinCallAst checked;
+    checked.kind = ReductionKind::Primitive;
+    checked.primitive = PrimitiveKind::Typed;
+    checked.target = callee.primaryResult().type;
+    checked.declaredExtent =
+        callee.primaryResult().tensor && callee.primaryResult().shape.size() == 1
+            ? callee.primaryResult().shape[0].value_or(-1)
+            : 0;
+    checked.position = name.position;
+    checked.operands.push_back(ExpressionAst(std::move(body)));
+    return checked;
   }
 
   // The optional `rounding=` then `overflow=` pair of a one-boundary member;
@@ -2368,7 +2647,53 @@ private:
     ExpressionAst expression;
     SourcePosition position;
     bool consumed = false;
+    std::string sourceName;
   };
+
+  BuiltinCallAst bindLocals(BuiltinCallAst result) {
+    std::function<bool(const BuiltinCallAst &)> isLegacyTree = [&](const BuiltinCallAst &call) {
+      if (call.kind == ReductionKind::Primitive && call.primitive != PrimitiveKind::Identity)
+        return false;
+      return llvm::all_of(call.operands, [&](const ExpressionAst &operand) {
+        return operand.isParameterReference() || isLegacyTree(*operand.call);
+      });
+    };
+    bool legacy = isLegacyTree(result) && llvm::all_of(bindings, [&](const Binding &binding) {
+                    return isLegacyTree(*binding.expression.call);
+                  });
+    if (legacy) {
+      std::vector<ExpressionAst> values;
+      values.reserve(bindings.size());
+      llvm::StringMap<const ExpressionAst *> names;
+      for (const Binding &binding : bindings) {
+        ExpressionAst value = instantiateExpression(binding.expression, names, std::nullopt);
+        if (value.call && value.call->kind == ReductionKind::Primitive &&
+            value.call->primitive == PrimitiveKind::Identity) {
+          ExpressionAst operand = std::move(value.call->operands.front());
+          value = std::move(operand);
+        }
+        values.push_back(std::move(value));
+        names[binding.name] = &values.back();
+      }
+      result = instantiateCall(result, names, std::nullopt);
+      if (result.kind == ReductionKind::Primitive && result.primitive == PrimitiveKind::Identity &&
+          result.operands.front().call) {
+        BuiltinCallAst nested = std::move(*result.operands.front().call);
+        result = std::move(nested);
+      }
+      return result;
+    }
+    BuiltinCallAst scope;
+    scope.kind = ReductionKind::Primitive;
+    scope.primitive = PrimitiveKind::Scope;
+    scope.position = result.position;
+    for (const Binding &binding : bindings) {
+      scope.bindingNames.push_back(binding.name);
+      scope.operands.push_back(ExpressionAst(binding.expression));
+    }
+    scope.operands.push_back(ExpressionAst(std::move(result)));
+    return scope;
+  }
 
   // Every reference to a local instantiates a fresh deep copy of the bound
   // call tree. The Ondrix tensor operations the copies produce are Pure, so
@@ -2379,9 +2704,13 @@ private:
       return ExpressionAst(token.spelling.str(), token.position);
     Binding &bound = bindings[binding->second];
     bound.consumed = true;
+    if (genericExpressions)
+      return ExpressionAst(bound.name, token.position);
     return ExpressionAst(bound.expression);
   }
 
+  bool genericExpressions = false;
+  unsigned nextLocal = 0;
   Lexer &lexer;
   Diagnostics &diagnostics;
   Token current;
@@ -2511,7 +2840,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                                 : hasFourOperands            ? 4
                                 : hasThreeOperands           ? 3
                                                              : 2;
-  if (ast.result.operands.size() != expectedOperandCount) {
+  if (ast.result.kind != ReductionKind::Primitive &&
+      ast.result.operands.size() != expectedOperandCount) {
     diagnostics.error(ast.result.position, "builtin operand count does not match its contract");
     return std::nullopt;
   }
@@ -2586,6 +2916,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       return std::nullopt;
     if (parameter.type == SourceType::U8) {
       diagnostics.error(parameter.position, "u8 is currently only the result of viterbi_decode");
+      return std::nullopt;
+    }
+    if ((parameter.type == SourceType::I32 || parameter.type == SourceType::I64 ||
+         parameter.type == SourceType::Bool) &&
+        !parameter.isScalar()) {
+      diagnostics.error(parameter.position, "i32, i64 and bool parameters must be scalar");
       return std::nullopt;
     }
     parametersByName.insert({parameter.name, &parameter});
@@ -3220,10 +3556,16 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       int64_t extent;
     };
     llvm::StringMap<unsigned> parameterUses;
+    llvm::StringMap<ComposedType> localTypes;
+    llvm::StringMap<APInt> localConstants;
+    std::optional<SourceType> literalHint;
     std::function<std::optional<ComposedType>(ExpressionAst &)> checkComposedExpression;
     std::function<std::optional<ComposedType>(BuiltinCallAst &)> checkComposedCall;
     checkComposedExpression = [&](ExpressionAst &expression) -> std::optional<ComposedType> {
       if (expression.isParameterReference()) {
+        auto local = localTypes.find(expression.parameter);
+        if (local != localTypes.end())
+          return local->second;
         auto parameter = parametersByName.find(expression.parameter);
         if (parameter == parametersByName.end()) {
           diagnostics.error(expression.position,
@@ -3232,6 +3574,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         }
         ++parameterUses[expression.parameter];
         const ParameterAst *value = parameter->second;
+        if (value->isScalar() &&
+            (value->type == SourceType::I32 || value->type == SourceType::I64 ||
+             value->type == SourceType::Bool || value->type == SourceType::F32))
+          return ComposedType{value->type, 0};
         if (!value->isTensor() || !hasRank(value->shape, 1)) {
           diagnostics.error(expression.position,
                             "composable builtins currently require rank-1 tensor operands");
@@ -3254,6 +3600,233 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       return nested;
     };
+    std::function<bool(const ExpressionAst &)> needsLiteralContext;
+    needsLiteralContext = [&](const ExpressionAst &expression) {
+      if (expression.isParameterReference())
+        return false;
+      const auto &call = *expression.call;
+      if (call.kind != ReductionKind::Primitive)
+        return getOrdinaryArithmetic(call.kind) && llvm::all_of(call.operands, needsLiteralContext);
+      if (call.primitive == PrimitiveKind::Literal)
+        return call.spelling != "True" && call.spelling != "False" &&
+               call.spelling.find_first_of(".eE") == std::string::npos;
+      if (call.primitive != PrimitiveKind::Identity && call.primitive != PrimitiveKind::Pos &&
+          !getOperatorBuiltin(call.primitive))
+        return false;
+      return llvm::all_of(call.operands, needsLiteralContext);
+    };
+    auto constant = [&](const ExpressionAst &expression) -> std::optional<APInt> {
+      if (expression.call)
+        return expression.call->integerConstant;
+      auto found = localConstants.find(expression.parameter);
+      return found == localConstants.end() ? std::nullopt : std::optional<APInt>(found->second);
+    };
+    auto checkPrimitive = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
+      auto reject = [&](const Twine &message) -> std::optional<ComposedType> {
+        diagnostics.error(call.position, message);
+        return std::nullopt;
+      };
+      auto finish = [&](ComposedType type) -> std::optional<ComposedType> {
+        call.expressionType = type.elementType;
+        call.expressionExtent = type.extent;
+        return type;
+      };
+      auto op = call.primitive;
+      if (op == PrimitiveKind::Scope) {
+        auto saved = localTypes;
+        auto savedConstants = localConstants;
+        for (size_t i = 0; i < call.bindingNames.size(); ++i) {
+          auto type = checkComposedExpression(call.operands[i]);
+          if (!type)
+            return std::nullopt;
+          localTypes[call.bindingNames[i]] = *type;
+          if (auto value = constant(call.operands[i]))
+            localConstants.insert_or_assign(call.bindingNames[i], *value);
+        }
+        auto result = checkComposedExpression(call.operands.back());
+        call.integerConstant = constant(call.operands.back());
+        localTypes = std::move(saved);
+        localConstants = std::move(savedConstants);
+        return result ? finish(*result) : std::nullopt;
+      }
+      if (op == PrimitiveKind::Literal) {
+        SourceType type = literalHint.value_or(ast.primaryResult().type);
+        if (call.spelling == "True" || call.spelling == "False") {
+          call.integerConstant = APInt(1, call.spelling == "True");
+          return finish({SourceType::Bool, 0});
+        }
+        bool floating = call.spelling.find_first_of(".eE") != std::string::npos;
+        if (floating)
+          type = SourceType::F32;
+        if (type == SourceType::Bool)
+          type = SourceType::I32;
+        if (type == SourceType::F32) {
+          llvm::APFloat value(llvm::APFloat::IEEEsingle());
+          auto status = value.convertFromString(call.spelling, llvm::APFloat::rmNearestTiesToEven);
+          if (!status) {
+            llvm::consumeError(status.takeError());
+            return reject("invalid f32 literal");
+          }
+          if (*status & llvm::APFloat::opOverflow)
+            return reject("f32 literal is out of range");
+          call.fpConstant = value.convertToFloat();
+          return finish({type, 0});
+        }
+        if (type != SourceType::I32 && type != SourceType::I64)
+          return reject("ordinary literal requires an integer or f32 context");
+        unsigned width = type == SourceType::I32 ? 32 : 64;
+        StringRef spelling(call.spelling);
+        bool negative = spelling.consume_front("-");
+        APInt magnitude(128, 0);
+        unsigned radix = spelling.consume_front("0o") ? 8 : 10;
+        if (spelling.getAsInteger(radix, magnitude) || magnitude.getActiveBits() > width)
+          return reject("integer literal is out of range");
+        magnitude = magnitude.zextOrTrunc(128);
+        APInt limit = APInt::getSignedMaxValue(width).zext(128);
+        if (negative)
+          ++limit;
+        if (magnitude.ugt(limit))
+          return reject("integer literal is out of range");
+        call.integerConstant = negative ? -magnitude.trunc(width) : magnitude.trunc(width);
+        return finish({type, 0});
+      }
+      if (op == PrimitiveKind::Typed) {
+        auto savedHint = literalHint;
+        literalHint = call.target;
+        auto actual = checkComposedExpression(call.operands.front());
+        literalHint = savedHint;
+        if (!actual)
+          return std::nullopt;
+        if (actual->elementType != call.target || actual->extent != call.declaredExtent)
+          return reject("call argument does not match the declared parameter type");
+        call.integerConstant = constant(call.operands.front());
+        return finish(*actual);
+      }
+      SmallVector<std::optional<ComposedType>, 2> operandTypes(call.operands.size());
+      std::optional<SourceType> domain;
+      for (auto [index, operand] : llvm::enumerate(call.operands)) {
+        if (needsLiteralContext(operand))
+          continue;
+        operandTypes[index] = checkComposedExpression(operand);
+        if (!operandTypes[index])
+          return std::nullopt;
+        domain = operandTypes[index]->elementType;
+        break;
+      }
+      std::optional<ReductionKind> fixedKind = getOperatorBuiltin(op);
+      if (domain && (*domain == SourceType::Q15 || *domain == SourceType::Q31) && fixedKind) {
+        if (op == PrimitiveKind::Neg) {
+          call.kind = *fixedKind;
+        } else {
+          SmallVector<Operand, 2> operands;
+          for (ExpressionAst &expression : call.operands) {
+            bool literal = expression.call && expression.call->kind == ReductionKind::Primitive &&
+                           expression.call->primitive == PrimitiveKind::Literal;
+            if (!literal) {
+              operands.push_back({std::move(expression), 0, call.position});
+              continue;
+            }
+            StringRef spelling(expression.call->spelling);
+            bool negative = spelling.consume_front("-");
+            uint64_t magnitude = 0;
+            if (getIntegerTokenValue(spelling, magnitude) || magnitude > uint64_t(INT64_MAX))
+              return reject("fixed tensor arithmetic requires a raw integer literal");
+            operands.push_back({std::nullopt, negative ? -int64_t(magnitude) : int64_t(magnitude),
+                                expression.position});
+          }
+          auto fixed = buildFixedBinary(*fixedKind, std::move(operands[0]), std::move(operands[1]),
+                                        call.position, diagnostics);
+          if (!fixed)
+            return std::nullopt;
+          call = std::move(*fixed);
+        }
+        return checkComposedCall(call);
+      }
+      auto savedHint = literalHint;
+      if (domain)
+        literalHint = domain;
+      auto lhs = operandTypes[0] ? operandTypes[0] : checkComposedExpression(call.operands.front());
+      if (!lhs) {
+        literalHint = savedHint;
+        return std::nullopt;
+      }
+      bool logical =
+          op == PrimitiveKind::And || op == PrimitiveKind::Or || op == PrimitiveKind::Not;
+      bool comparison = isComparison(op);
+      std::optional<ComposedType> rhs;
+      if (call.operands.size() == 2)
+        rhs = operandTypes[1] ? operandTypes[1] : checkComposedExpression(call.operands[1]);
+      literalHint = savedHint;
+      if (call.operands.size() == 2 && !rhs)
+        return std::nullopt;
+      if (op == PrimitiveKind::Identity) {
+        call.integerConstant = constant(call.operands.front());
+        return finish(*lhs);
+      }
+      if (logical) {
+        if (lhs->elementType != SourceType::Bool || lhs->extent ||
+            (rhs && (rhs->elementType != SourceType::Bool || rhs->extent)))
+          return reject("logical operators require scalar bool operands");
+        return finish({SourceType::Bool, 0});
+      }
+      bool floating = lhs->elementType == SourceType::F32;
+      bool integer = lhs->elementType == SourceType::I32 || lhs->elementType == SourceType::I64;
+      if (!floating && !integer && !(comparison && lhs->elementType == SourceType::Bool))
+        return reject("ordinary arithmetic requires i32, i64 or f32 operands");
+      int64_t extent = lhs->extent;
+      if (rhs) {
+        if (rhs->elementType != lhs->elementType)
+          return reject(
+              "arithmetic operands must have the same element type; no implicit conversion");
+        if (rhs->extent && lhs->extent && rhs->extent != lhs->extent)
+          return reject("arithmetic tensor operands must have matching extents");
+        extent = std::max(extent, rhs->extent);
+      }
+      if (extent > 4096)
+        return reject("f32 arithmetic requires static rank-1 extents in [1, 4096]");
+      if (comparison) {
+        if (extent)
+          return reject("comparisons require scalar operands");
+        if (lhs->elementType == SourceType::Bool && op != PrimitiveKind::Eq &&
+            op != PrimitiveKind::Ne)
+          return reject("bool only supports equality and inequality comparisons");
+        return finish({SourceType::Bool, 0});
+      }
+      auto a = constant(call.operands.front());
+      auto b = rhs ? constant(call.operands[1]) : std::nullopt;
+      if (integer && op == PrimitiveKind::Div) {
+        if (b && b->isZero())
+          return reject("integer division by zero");
+        if (a && b && a->isMinSignedValue() && b->isAllOnes())
+          return reject("integer division overflows: MIN / -1");
+      }
+      if (integer && a && (!rhs || b)) {
+        switch (op) {
+        case PrimitiveKind::Pos:
+          call.integerConstant = *a;
+          break;
+        case PrimitiveKind::Neg:
+          call.integerConstant = -*a;
+          break;
+        case PrimitiveKind::Add:
+          call.integerConstant = *a + *b;
+          break;
+        case PrimitiveKind::Sub:
+          call.integerConstant = *a - *b;
+          break;
+        case PrimitiveKind::Mul:
+          call.integerConstant = *a * *b;
+          break;
+        case PrimitiveKind::Div:
+          call.integerConstant = a->sdiv(*b);
+          break;
+        default:
+          break;
+        }
+      }
+      return finish({lhs->elementType, extent});
+    };
+
     // A fir_filter stage may feed the FFT chain: static Q15 or Q31 tensors,
     // the valid boundary, and the executable export profile of that width.
     // Its coefficients are a tensor parameter or a design builtin.
@@ -3421,6 +3994,19 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       std::optional<ComposedType> lhs = checkComposedExpression(call.operands.front());
       if (!lhs)
         return std::nullopt;
+      auto primitive = getOrdinaryArithmetic(call.kind);
+      if (primitive &&
+          (lhs->elementType == SourceType::F32 || lhs->elementType == SourceType::I32 ||
+           lhs->elementType == SourceType::I64)) {
+        if (!call.rounding.empty() || !call.destinationOverflow.empty()) {
+          diagnostics.error(call.position,
+                            "ordinary arithmetic does not accept fixed-point policies");
+          return std::nullopt;
+        }
+        call.primitive = *primitive;
+        call.kind = ReductionKind::Primitive;
+        return checkPrimitive(call);
+      }
       if (lhs->elementType != SourceType::Q15 && lhs->elementType != SourceType::Q31) {
         diagnostics.error(call.position, "elementwise builtins require q15 or q31 operand "
                                          "elements");
@@ -3566,6 +4152,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       return *input;
     };
     checkComposedCall = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
+      if (call.kind == ReductionKind::Primitive)
+        return checkPrimitive(call);
       if (call.kind == ReductionKind::FirFilter)
         return checkNestedFirFilter(call);
       if (isElementwiseKind(call.kind))
@@ -3893,6 +4481,14 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                                                   "' is never consumed by the kernel expression");
         return std::nullopt;
       }
+    }
+    if (!ast.primaryResult().tensor && ast.result.kind == ReductionKind::Primitive) {
+      if (inferred->extent != 0 || ast.primaryResult().type != inferred->elementType) {
+        diagnostics.error(ast.result.position,
+                          "declared result type does not match the expression");
+        return std::nullopt;
+      }
+      return CheckedKernel{std::move(ast)};
     }
     if (!ast.primaryResult().tensor || !hasRank(ast.primaryResult().shape, 1)) {
       diagnostics.error(ast.result.position,
@@ -4633,14 +5229,21 @@ static Location getLocation(MLIRContext &context, llvm::StringRef sourceName,
 
 static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::StringRef sourceName,
                                             MLIRContext &context) {
-  context.loadDialect<arith::ArithDialect, bufferization::BufferizationDialect, func::FuncDialect,
-                      math::MathDialect, memref::MemRefDialect, tensor::TensorDialect,
-                      ir::OndrixDialect, ondsp::OndspDialect>();
+  context
+      .loadDialect<arith::ArithDialect, bufferization::BufferizationDialect, func::FuncDialect,
+                   math::MathDialect, memref::MemRefDialect, tensor::TensorDialect, scf::SCFDialect,
+                   cf::ControlFlowDialect, ir::OndrixDialect, ondsp::OndspDialect>();
   OpBuilder builder(&context);
   Location kernelLocation = getLocation(context, sourceName, kernel.ast.position);
   OwningOpRef<ModuleOp> module = ModuleOp::create(kernelLocation);
 
   auto getStorageType = [&](SourceType type) -> Type {
+    if (type == SourceType::I32)
+      return builder.getI32Type();
+    if (type == SourceType::I64)
+      return builder.getI64Type();
+    if (type == SourceType::Bool)
+      return builder.getI1Type();
     if (type == SourceType::Q15)
       return builder.getI16Type();
     if (type == SourceType::Q31 || type == SourceType::ComplexQ15)
@@ -4764,6 +5367,135 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     };
     std::function<Value(const BuiltinCallAst &)> emitComposedCall =
         [&](const BuiltinCallAst &call) -> Value {
+      if (call.kind == ReductionKind::Primitive) {
+        Location loc = getLocation(context, sourceName, call.position);
+        auto emitOperand = [&](const ExpressionAst &operand) -> Value {
+          return operand.isParameterReference() ? arguments.lookup(operand.parameter)
+                                                : emitComposedCall(*operand.call);
+        };
+        auto op = call.primitive;
+        Type type = getStorageType(call.expressionType);
+        if (op == PrimitiveKind::Literal) {
+          if (type.isF32())
+            return builder.create<arith::ConstantOp>(loc, builder.getF32FloatAttr(call.fpConstant));
+          return builder.create<arith::ConstantOp>(
+              loc, builder.getIntegerAttr(type, *call.integerConstant));
+        }
+        if (op == PrimitiveKind::Scope) {
+          auto saved = arguments;
+          for (size_t i = 0; i < call.bindingNames.size(); ++i)
+            arguments[call.bindingNames[i]] = emitOperand(call.operands[i]);
+          Value result = emitOperand(call.operands.back());
+          arguments = std::move(saved);
+          return result;
+        }
+        Value lhs = emitOperand(call.operands.front());
+        if (op == PrimitiveKind::Identity || op == PrimitiveKind::Pos || op == PrimitiveKind::Typed)
+          return lhs;
+        if (op == PrimitiveKind::And || op == PrimitiveKind::Or) {
+          auto branch = builder.create<scf::IfOp>(loc, TypeRange{builder.getI1Type()}, lhs, true);
+          OpBuilder::InsertionGuard guard(builder);
+          builder.setInsertionPointToStart(&branch.getThenRegion().front());
+          Value thenValue = op == PrimitiveKind::And
+                                ? emitOperand(call.operands[1])
+                                : builder.create<arith::ConstantIntOp>(loc, 1, 1);
+          builder.create<scf::YieldOp>(loc, thenValue);
+          builder.setInsertionPointToStart(&branch.getElseRegion().front());
+          Value elseValue = op == PrimitiveKind::Or
+                                ? emitOperand(call.operands[1])
+                                : builder.create<arith::ConstantIntOp>(loc, 0, 1);
+          builder.create<scf::YieldOp>(loc, elseValue);
+          return branch.getResult(0);
+        }
+        Value rhs = call.operands.size() == 2 ? emitOperand(call.operands[1]) : Value();
+        auto scalar = [&](OpBuilder &b, Value a, Value c) -> Value {
+          bool fp = a.getType().isF32();
+          if (op == PrimitiveKind::Not) {
+            Value one = b.create<arith::ConstantIntOp>(loc, 1, 1);
+            return b.create<arith::XOrIOp>(loc, a, one);
+          }
+          if (isComparison(op)) {
+            if (fp) {
+              auto pred = op == PrimitiveKind::Eq   ? arith::CmpFPredicate::OEQ
+                          : op == PrimitiveKind::Ne ? arith::CmpFPredicate::UNE
+                          : op == PrimitiveKind::Lt ? arith::CmpFPredicate::OLT
+                          : op == PrimitiveKind::Le ? arith::CmpFPredicate::OLE
+                          : op == PrimitiveKind::Gt ? arith::CmpFPredicate::OGT
+                                                    : arith::CmpFPredicate::OGE;
+              return b.create<arith::CmpFOp>(loc, pred, a, c);
+            }
+            auto pred = op == PrimitiveKind::Eq   ? arith::CmpIPredicate::eq
+                        : op == PrimitiveKind::Ne ? arith::CmpIPredicate::ne
+                        : op == PrimitiveKind::Lt ? arith::CmpIPredicate::slt
+                        : op == PrimitiveKind::Le ? arith::CmpIPredicate::sle
+                        : op == PrimitiveKind::Gt ? arith::CmpIPredicate::sgt
+                                                  : arith::CmpIPredicate::sge;
+            return b.create<arith::CmpIOp>(loc, pred, a, c);
+          }
+          if (fp) {
+            switch (op) {
+            case PrimitiveKind::Neg:
+              return b.create<arith::NegFOp>(loc, a);
+            case PrimitiveKind::Add:
+              return b.create<arith::AddFOp>(loc, a, c);
+            case PrimitiveKind::Sub:
+              return b.create<arith::SubFOp>(loc, a, c);
+            case PrimitiveKind::Mul:
+              return b.create<arith::MulFOp>(loc, a, c);
+            case PrimitiveKind::Div:
+              return b.create<arith::DivFOp>(loc, a, c);
+            default:
+              llvm_unreachable("checked floating expression");
+            }
+          }
+          if (op == PrimitiveKind::Neg) {
+            Value zero = b.create<arith::ConstantOp>(loc, b.getIntegerAttr(a.getType(), 0));
+            return b.create<arith::SubIOp>(loc, zero, a);
+          }
+          if (op == PrimitiveKind::Add)
+            return b.create<arith::AddIOp>(loc, a, c);
+          if (op == PrimitiveKind::Sub)
+            return b.create<arith::SubIOp>(loc, a, c);
+          if (op == PrimitiveKind::Mul)
+            return b.create<arith::MulIOp>(loc, a, c);
+          unsigned width = cast<IntegerType>(a.getType()).getWidth();
+          auto constant = [&](APInt value) -> Value {
+            return b.create<arith::ConstantOp>(loc, b.getIntegerAttr(a.getType(), value));
+          };
+          Value zero = constant(APInt(width, 0));
+          Value minimum = constant(APInt::getSignedMinValue(width));
+          Value minusOne = constant(APInt::getAllOnes(width));
+          Value nonzero = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, c, zero);
+          Value isMin = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, a, minimum);
+          Value isMinusOne = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, c, minusOne);
+          Value overflow = b.create<arith::AndIOp>(loc, isMin, isMinusOne);
+          Value one = b.create<arith::ConstantIntOp>(loc, 1, 1);
+          Value safe =
+              b.create<arith::AndIOp>(loc, nonzero, b.create<arith::XOrIOp>(loc, overflow, one));
+          b.create<cf::AssertOp>(loc, safe, "integer division by zero or overflow");
+          return b.create<arith::DivSIOp>(loc, a, c);
+        };
+        if (!call.expressionExtent)
+          return scalar(builder, lhs, rhs);
+        auto tensorType = RankedTensorType::get({call.expressionExtent}, type);
+        Value init = builder.create<tensor::EmptyOp>(loc, tensorType.getShape(), type);
+        Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+        Value end = builder.create<arith::ConstantIndexOp>(loc, call.expressionExtent);
+        Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
+        auto loop = builder.create<scf::ForOp>(
+            loc, zero, end, one, ValueRange{init},
+            [&](OpBuilder &b, Location loc, Value i, ValueRange args) {
+              auto element = [&](Value value) -> Value {
+                if (value && isa<RankedTensorType>(value.getType()))
+                  return b.create<tensor::ExtractOp>(loc, value, ValueRange{i});
+                return value;
+              };
+              Value result = scalar(b, element(lhs), element(rhs));
+              Value out = b.create<tensor::InsertOp>(loc, result, args.front(), ValueRange{i});
+              b.create<scf::YieldOp>(loc, out);
+            });
+        return loop.getResult(0);
+      }
       if (call.kind == ReductionKind::FirFilter) {
         // The composed filter stage: sema pinned one uniform width, the valid
         // boundary, static extents, and that width's exact accumulator profile.

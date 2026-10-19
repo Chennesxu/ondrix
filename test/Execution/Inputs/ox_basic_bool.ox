@@ -1,0 +1,2 @@
+def basic_bool(x: i64, y: i64, enabled: bool, other: bool, mode: i32) -> bool:
+  return (mode == 0 and enabled and x / y > 0) or (mode == 1 and (enabled or x / y > 0)) or (mode == 2 and (enabled == other)) or (mode == 3 and (enabled != other)) or (mode == 4 and not enabled) or (mode == 5 and x == y) or (mode == 6 and x != y) or (mode == 7 and x < y) or (mode == 8 and x <= y) or (mode == 9 and x > y) or (mode == 10 and x >= y) or (mode == 11 and True and not False)

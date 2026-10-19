@@ -10,7 +10,7 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_literal_gain_range.ox 2>&1 | FileCheck %s --check-prefix=GAIN
 // RUN: not ondrix-compile %S/Inputs/invalid_literal_call_operand.ox 2>&1 | FileCheck %s --check-prefix=OPERAND
 // RUN: not ondrix-compile %S/Inputs/invalid_literal_numerator.ox 2>&1 | FileCheck %s --check-prefix=NUMERATOR
-// RUN: not ondrix-compile %S/Inputs/invalid_literal_f32.ox 2>&1 | FileCheck %s --check-prefix=FLOAT
+// RUN: ondrix-compile %S/Inputs/f32_literal_gain.ox | FileCheck %s --check-prefix=FLOAT
 
 // A literal beside a tensor is the constant form of the operator, read as a
 // raw value in the declared format: `+`/`-` are offset, `*` is gain, and the
@@ -45,4 +45,5 @@
 // GAIN: error: gain constant must be a raw signed Q1.15 value in [-32768, 32767]
 // OPERAND: error: a literal needs a tensor operand beside it
 // NUMERATOR: error: a constant dividend is not an operation
-// FLOAT: error: an integer literal is a raw fixed-point value; scale f32 with gain(x, gain=[n, d], contract=...)
+// FLOAT: arith.constant 3.000000e+00 : f32
+// FLOAT: arith.mulf

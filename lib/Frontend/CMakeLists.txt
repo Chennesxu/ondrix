@@ -6,6 +6,8 @@ add_ondrix_library(OndrixFrontend
   LINK_LIBS PUBLIC
   MLIRArithDialect
   MLIRBufferizationDialect
+  MLIRControlFlowDialect
+  MLIRSCFDialect
   MLIRFuncDialect
   MLIRIR
   MLIRMathDialect

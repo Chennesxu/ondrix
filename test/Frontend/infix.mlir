@@ -4,9 +4,9 @@
 // RUN: diff %t.infix.mlir %t.calls.mlir
 // RUN: ondrix-compile %S/Inputs/q15_infix_grouping.ox | FileCheck %s --check-prefix=GROUPING
 // RUN: ondrix-compile %S/Inputs/q31_infix.ox | FileCheck %s --check-prefix=WIDE
-// RUN: not ondrix-compile %S/Inputs/invalid_infix_unary_minus.ox 2>&1 | FileCheck %s --check-prefix=MINUS
+// RUN: ondrix-compile %S/Inputs/q15_infix_unary_minus.ox | FileCheck %s --check-prefix=MINUS
 // RUN: not ondrix-compile %S/Inputs/invalid_infix_division.ox 2>&1 | FileCheck %s --check-prefix=DIVISION
-// RUN: not ondrix-compile %S/Inputs/invalid_infix_f32.ox 2>&1 | FileCheck %s --check-prefix=FLOAT
+// RUN: ondrix-compile %S/Inputs/f32_infix.ox | FileCheck %s --check-prefix=FLOAT
 // RUN: not ondrix-compile %S/Inputs/invalid_infix_extent.ox 2>&1 | FileCheck %s --check-prefix=EXTENT
 // RUN: not ondrix-compile %S/Inputs/invalid_infix_bare_return.ox 2>&1 | FileCheck %s --check-prefix=BARE
 // RUN: not ondrix-compile %S/Inputs/invalid_infix_unclosed.ox 2>&1 | FileCheck %s --check-prefix=UNCLOSED
@@ -42,9 +42,9 @@
 // WIDE-SAME: storage = i32, frac = 31
 // WIDE: ondrix.add
 
-// MINUS: error: unary minus is not an operator; spell negate(...)
+// MINUS: ondrix.negate
 // DIVISION: error: the divisor is not provably positive
-// FLOAT: error: elementwise builtins require q15 or q31 operand elements
+// FLOAT: arith.addf
 // EXTENT: error: binary elementwise builtins require operands of the same element type and extent
 // BARE: error: expected a builtin call or an infix expression, not a bare name
 // UNCLOSED: error: expected ')' to close the parenthesized expression

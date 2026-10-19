@@ -7,6 +7,47 @@ the fixed SOS slice also accepts the explicit rank-2 section layouts described
 below. A `def` declares a DSP kernel entry point; it is not a general Python
 function.
 
+## Basic Arithmetic and Predicates
+
+Scalar `i32`, `i64`, and `f32` support `+`, `-`, `*`, `/` and unary `+`/`-`.
+Same-type scalar comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`) produce `bool`.
+Booleans support `True`, `False`, equality, inequality, `not`, and short-circuit
+`and`/`or`; numeric values do not implicitly convert to bool. Precedence is
+unary signs, `* /`, `+ -`, comparison, `not`, `and`, `or`. Binary arithmetic
+associates left; parentheses group; comparison chaining is unsupported.
+
+```python
+def accept_ratio(x: i64, y: i64, enabled: bool) -> bool:
+  return enabled and (y > 0 and x / y > 2)
+
+def mix(x: tensor[f32,32], y: tensor[f32,32]) -> tensor[f32,32]:
+  scale = 0.5
+  return -(x * scale + y) / 2.0
+```
+
+Ordinary expression bodies accept local bindings and returns of names or
+literals. Locals evaluate once in source order: binding `q = x / y` before a
+logical expression makes the division unconditional. Declared numeric types
+never convert implicitly; ordinary integers have no fixed-point scale.
+
+| Domain | Arithmetic rules |
+| --- | --- |
+| `i32`, `i64` | Signed two's-complement values; add/subtract/multiply/negate wrap modulo the width. Division truncates toward zero. Zero divisors and `MIN/-1` abort before division; statically invalid divisions are diagnosed, including in a short-circuit RHS. |
+| `f32` | The `off` contract: one round-to-nearest-even binary32 result per operator, no reassociation or multiply/add contraction. The required FP environment preserves subnormals; exception flags are unobservable. Signed zeros, infinities and IEEE zero-division results are retained. NaN payloads are unspecified; `!=` is true for unordered operands and the other comparisons are false. |
+| f32 tensor | Static rank-one extent 1..4096, matching tensor shapes. f32 scalars and contextual constants broadcast. Arithmetic follows the scalar f32 rules. |
+
+Integer literals take context from a typed operand or the function's numeric
+result, defaulting to i32 in a boolean-result context, and must fit the signed
+width. Decimal f32 literals (`0.5`, `5e-1`) round once during compilation;
+overflow is diagnosed and underflow rounds to a subnormal or signed zero.
+The `add`, `sub`, `mult`, and `negate` call spellings also accept ordinary
+integer/f32 operands, without fixed-point rounding or overflow parameters.
+
+Q15/Q31 retain their raw-literal and quantization rules. Their tensor `-x`
+uses `negate(x)`, saturating by default. DSP builtin composition retains its
+existing restrictions. Plain integer/bool tensors, indexing, mutable
+assignment, and source `for`/`if`/`while` statements remain unsupported.
+
 For a statically bounded Q15 dot, FIR sample, FIR decimation, FIR
 interpolation, convolution, or correlation, omitting the accumulator policy
 requests target-independent exact mathematical accumulation:
@@ -472,13 +513,12 @@ intermediate stage-scaling and requantization boundaries remain observable;
 in particular, `irfft(rfft(input))` is not folded to an identity.
 
 A kernel body may also name intermediate stages with local bindings before
-its single return statement. Each local binds one builtin call or infix
-expression, and every later reference instantiates it, so a local may be read
-any number of times; a local no statement reads is a compile error, and a
-bare parameter name is not a statement. Reading a local twice
-is not a second evaluation: the duplicated subtrees are `Pure` Ondrix
-operations and the canonical pipeline's `canonicalize`/`cse` collapses them,
-which is what lets an intermediate be reused, as in `add(mult(t, t), t)`.
+its single return statement. A local may be read any number of times; a
+local no statement reads is a compile error. The fixed-point DSP expression
+slice still requires a call or infix expression as its result. Ordinary scalar
+and f32 expression bodies also accept names and literals. Reusing a local
+reuses its value, as in `add(mult(t, t), t)`; it does not request reassociation
+or remove any quantization boundary.
 Within this slice a `fir_filter` stage may feed the FFT chain — static Q15
 or Q31 tensors, the `valid` boundary, and the explicit executable accumulator
 profile of that width (i40 at Q15, i64 at Q31, where the policy is
@@ -754,13 +794,14 @@ it is read as a raw value in the declared format, exactly as `offset`'s
 and `3 * x` are `gain(x, gain=3)`, which at Q15 scales by `3 / 2^15`; the
 literal that halves is `x * 16384`. The literal's range is the width's raw
 range, so the same digits name a different real number at `q15` and `q31`,
-and an f32 tensor takes no literal at all (its gain is the rational
-`gain=[n, d]`). `1024 - x` is negate then offset, two boundaries, so it is
-spelled out; a literal with no tensor beside it, alone as a statement, or as
-a call argument is a diagnostic. The fixed `gain` is a composable member:
-it nests inside expressions and takes one, with its own `rounding=`.
+while f32 arithmetic reads literals as ordinary numeric values. The explicit
+f32 `gain` builtin retains its rational `gain=[n, d]` spelling. `1024 - x` is
+negate then offset, two boundaries, so it is spelled out; a literal with no
+tensor beside it, alone as a statement, or as a call argument is a diagnostic.
+The fixed `gain` is a composable member: it nests inside expressions and takes
+one, with its own `rounding=`.
 Operands are otherwise tensor names, locals, calls and parenthesized
-expressions; there is no unary minus on a tensor (spell `negate`) and no
+expressions; unary minus is `negate` on fixed tensors, and there is no
 implicit promotion between widths: `x + y` with a `q15` and a `q31` operand
 is a diagnostic, and the width changes only where the program spells it.
 
@@ -931,16 +972,21 @@ on exactly this contract for function entry arguments — everything else they
 prove or refuse statically — so the precondition is part of the language and
 ABI surface, never a hidden assumption of one pass.
 
-A kernel whose parameters are buffers of any extent or tensors of static
-shape, and whose results are one scalar or tensors of static shape, also gets
-a plain C entry point, `ondrix_<kernel>`, built by the canonical pipeline once
-the descriptors have expanded: one `const T *` per parameter, one `T *` per
-tensor result (`output`, or `output0`, `output1`, ... for several), and, for
-each group of parameters whose windows a reduction pairs at equal length (the
-two operands of `dot` and `fir`), one `uintN_t length` in the target's index
-width, placed after the group's last pointer; a static extent needs no
-length, and parameter names carry over from the source. The kernel writes a
-static result straight into the caller's array (`forward-ondrix-result-buffers`
+A kernel whose parameters are supported scalars, buffers of any extent, or
+tensors of static shape, and whose results are one scalar or tensors of static
+shape, also gets a plain C entry point, `ondrix_<kernel>`, built by the
+canonical pipeline once the descriptors have expanded: scalar parameters
+remain values in source order, with one `const T *` per buffer/tensor
+parameter and one `T *` per tensor result (`output`, or `output0`, `output1`,
+... for several), and, for each group of parameters whose windows a reduction
+pairs at equal length (the two operands of `dot` and `fir`), one
+`uintN_t length` in the target's index width, placed after the group's last
+pointer; a static extent needs no length, and parameter names carry over from
+the source.
+Scalars `i32`, `i64`, and `f32` use `int32_t`, `int64_t`, and `float`. A
+boolean uses `uint8_t` in the plain C interface: every nonzero input byte
+means true, and a boolean result is exactly 0 or 1. The kernel writes a static
+result straight into the caller's array (`forward-ondrix-result-buffers`
 removes the local copy) and allocates nothing. An input is `const` in fact as
 well as in the header: every tensor argument is declared read-only before
 bufferization, so a kernel that carries state, the recursive and adaptive

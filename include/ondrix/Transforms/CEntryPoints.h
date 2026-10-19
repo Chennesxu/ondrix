@@ -11,8 +11,8 @@ namespace ondrix {
 /// Function attribute, a dictionary `{signature, names, groups}`: the
 /// bufferized signature a C entry point is built from, one name per
 /// parameter, and per parameter the extent group whose one length it shares
-/// (-1 for a static extent). `declare-ondrix-c-entry-points` writes it on the
-/// kernel; `emit-ondrix-c-entry-points` moves it to the wrapper it builds.
+/// (-1 for a static extent or scalar). `declare-ondrix-c-entry-points` writes
+/// it on the kernel; `emit-ondrix-c-entry-points` moves it to the wrapper it builds.
 constexpr llvm::StringLiteral kCEntryAttr = "ondrix.c_entry";
 
 /// The symbol every generated C entry point is named under.
