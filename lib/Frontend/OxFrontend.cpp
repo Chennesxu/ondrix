@@ -18,6 +18,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Verifier.h"
 
 #include "llvm/ADT/APInt.h"
@@ -431,6 +432,11 @@ static bool isUnaryTensorKind(ReductionKind kind) {
          kind == ReductionKind::Goertzel;
 }
 
+// The reductions with a scalar result, which an ordinary expression can hold.
+static bool isScalarReductionKind(ReductionKind kind) {
+  return kind == ReductionKind::Dot || kind == ReductionKind::Fir || kind == ReductionKind::Rms;
+}
+
 static bool isUnaryKind(ReductionKind kind) {
   return isUnaryComposableKind(kind) || isUnaryTensorKind(kind) || isConversionKind(kind) ||
          (isElementwiseKind(kind) && !isBinaryElementwiseKind(kind));
@@ -451,6 +457,7 @@ struct ParameterAst {
 };
 
 struct BuiltinCallAst;
+struct CheckedKernel;
 
 struct ExpressionAst {
   std::string parameter;
@@ -587,6 +594,8 @@ struct BuiltinCallAst {
   int64_t step = 1;
   std::vector<std::string> carriedNames;
   bool inBounds = false;
+  // A reduction inside an ordinary expression, checked as a kernel of its own.
+  std::shared_ptr<const CheckedKernel> library;
   SourcePosition position;
 };
 
@@ -955,10 +964,12 @@ public:
     return kernel;
   }
 
-  std::optional<BuiltinCallAst> parseBuiltinCall(SourceType policyType) {
+  // Without a requested policy type the call takes its first operand's, which
+  // is how a call inside an ordinary expression spells its policies.
+  std::optional<BuiltinCallAst> parseBuiltinCall(std::optional<SourceType> requestedPolicy) {
     if (current.kind == TokenKind::Identifier && next.kind == TokenKind::LeftParen &&
         calleesByName.contains(current.spelling))
-      return parseCalleeInstantiation(policyType);
+      return parseCalleeInstantiation(requestedPolicy);
     if (caller && current.kind == TokenKind::Identifier && next.kind == TokenKind::LeftParen &&
         current.spelling == caller->name) {
       diagnostics.error(current.position,
@@ -1111,6 +1122,9 @@ public:
     advance();
     if (!expect(TokenKind::LeftParen, "expected '(' after builtin"))
       return std::nullopt;
+    const ParameterAst *firstOperand = findParameter(current.spelling);
+    SourceType policyType =
+        requestedPolicy.value_or(firstOperand ? firstOperand->type : SourceType::F32);
     if (call.kind == ReductionKind::Lowpass) {
       // The design is fully named by its attributes; the tap count also
       // names the coefficient extent, which no result type spells here.
@@ -2184,7 +2198,10 @@ private:
                            isIdentifier("narrow") || isIdentifier("quantize") ||
                            isIdentifier("dequantize") || isIdentifier("viterbi_decode");
     if (isCall && (rootPolicy || isNestedBuiltin || genericExpressions)) {
-      std::optional<BuiltinCallAst> call = parseBuiltinCall(rootPolicy.value_or(SourceType::Q15));
+      std::optional<SourceType> policy = rootPolicy.value_or(SourceType::Q15);
+      if (genericExpressions && !isNestedBuiltin)
+        policy = std::nullopt;
+      std::optional<BuiltinCallAst> call = parseBuiltinCall(policy);
       if (!call)
         return std::nullopt;
       return Operand{ExpressionAst(std::move(*call)), 0, position};
@@ -2696,9 +2713,10 @@ private:
     return current.kind == TokenKind::Identifier &&
            (next.kind == TokenKind::Equal || (genericExpressions && isLoopStart()));
   }
-  bool isParameterName(StringRef name) const {
-    return llvm::any_of(caller->parameters,
-                        [&](const ParameterAst &parameter) { return parameter.name == name; });
+  const ParameterAst *findParameter(StringRef name) const {
+    auto found = llvm::find_if(
+        caller->parameters, [&](const ParameterAst &parameter) { return parameter.name == name; });
+    return found == caller->parameters.end() ? nullptr : &*found;
   }
 
   // One assignment or loop appended to `owner`. A reassigned local keeps its
@@ -2713,7 +2731,7 @@ private:
                         llvm::Twine("loop variable '") + name.spelling + "' is read-only");
       return false;
     }
-    if (isParameterName(name.spelling) || (found != bindingsByName.end() && !genericExpressions)) {
+    if (findParameter(name.spelling) || (found != bindingsByName.end() && !genericExpressions)) {
       diagnostics.error(name.position, llvm::Twine("local '") + name.spelling +
                                            "' collides with an existing name");
       return false;
@@ -2743,7 +2761,7 @@ private:
     advance();
     Token variable = current;
     advance();
-    if (bindingsByName.contains(variable.spelling) || isParameterName(variable.spelling)) {
+    if (bindingsByName.contains(variable.spelling) || findParameter(variable.spelling)) {
       diagnostics.error(variable.position, llvm::Twine("loop variable '") + variable.spelling +
                                                "' collides with an existing name");
       return false;
@@ -4461,9 +4479,41 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       return *input;
     };
+    // The kernel signature the call would have on its own, over its operand
+    // parameters; a parameter in several slots gets one renamed copy per slot.
+    auto checkLibraryValue = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
+      KernelAst library;
+      library.name = ast.name;
+      library.position = call.position;
+      library.results.push_back(ResultTypeAst{SourceType::F32, false, {}});
+      library.result = BuiltinCallAst(call);
+      for (ExpressionAst &operand : library.result.operands) {
+        const ParameterAst *parameter =
+            operand.isParameterReference() ? parametersByName.lookup(operand.parameter) : nullptr;
+        if (!parameter || parameter->type != SourceType::F32) {
+          diagnostics.error(operand.position,
+                            "a reduction inside an expression currently reads f32 parameters");
+          return std::nullopt;
+        }
+        ++parameterUses[operand.parameter];
+        ParameterAst copy = *parameter;
+        if (llvm::any_of(library.parameters,
+                         [&](const ParameterAst &other) { return other.name == copy.name; }))
+          copy.name += "$" + std::to_string(library.parameters.size());
+        operand.parameter = copy.name;
+        library.parameters.push_back(std::move(copy));
+      }
+      std::optional<CheckedKernel> checked = checkKernel(std::move(library), diagnostics);
+      if (!checked)
+        return std::nullopt;
+      call.library = std::make_shared<const CheckedKernel>(std::move(*checked));
+      return ComposedType{SourceType::F32, 0};
+    };
     checkComposedCall = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       if (call.kind == ReductionKind::Primitive)
         return checkPrimitive(call);
+      if (isScalarReductionKind(call.kind))
+        return checkLibraryValue(call);
       if (call.kind == ReductionKind::FirFilter)
         return checkNestedFirFilter(call);
       if (isElementwiseKind(call.kind))
@@ -4474,8 +4524,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return checkComposedGain(call);
       if (!isUnaryComposableKind(call.kind) || call.operands.size() != 1) {
         diagnostics.error(call.position,
-                          "nested calls are currently supported only by unary FFT-family builtins "
-                          "and a fir_filter input stage");
+                          "nested calls are currently supported only by unary FFT-family builtins, "
+                          "a fir_filter input stage, and scalar dot/fir/rms");
         return std::nullopt;
       }
       std::optional<ComposedType> input = checkComposedExpression(call.operands.front());
@@ -5679,6 +5729,17 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     };
     std::function<Value(const BuiltinCallAst &)> emitComposedCall =
         [&](const BuiltinCallAst &call) -> Value {
+      if (call.library) {
+        // The checked kernel's body, cloned with its arguments bound here.
+        OwningOpRef<ModuleOp> library = generateModule(*call.library, sourceName, context);
+        Block &body = (*library->getOps<func::FuncOp>().begin()).getBody().front();
+        IRMapping mapping;
+        for (auto [argument, operand] : llvm::zip_equal(body.getArguments(), call.operands))
+          mapping.map(argument, arguments.lookup(operand.parameter));
+        for (Operation &op : body.without_terminator())
+          builder.clone(op, mapping);
+        return mapping.lookup(body.getTerminator()->getOperand(0));
+      }
       if (call.kind == ReductionKind::Primitive) {
         Location loc = getLocation(context, sourceName, call.position);
         auto emitOperand = [&](const ExpressionAst &operand) -> Value {

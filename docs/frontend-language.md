@@ -87,6 +87,27 @@ nonnegative literal. Each iteration runs its statements in order, so an f32
 recurrence keeps its written operation order under the `off` contract,
 including its initial value: `energy` of an empty buffer is `+0.0`.
 
+## Reductions Inside Expressions
+
+In an ordinary expression body, f32 `dot`, `fir` and scalar `rms` calls are
+f32 scalar values: they may be bound, read in a loop body, or used as
+operands. Their operands are the function's f32 parameters, and one parameter
+may fill several operand slots; a named function whose body is such a call
+works the same way. The call keeps its whole-kernel contract, checks and
+result, and its policies follow its operands, so `contract=` is spelled in an
+`i32` or `bool` function too. It runs each time its statement runs:
+
+```python
+def blend(x: buffer[f32], w: buffer[f32], n: i32) -> f32:
+  s = 0.0
+  for i in range(n):
+    s = s * 0.5 + dot(x, w, contract=off)
+  return s
+```
+
+Fixed-point operands, tensor-valued calls and local or sliced operands are
+not yet accepted.
+
 For a statically bounded Q15 dot, FIR sample, FIR decimation, FIR
 interpolation, convolution, or correlation, omitting the accumulator policy
 requests target-independent exact mathematical accumulation:
