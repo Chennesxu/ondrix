@@ -153,7 +153,8 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   os << "func.func(promote-buffers-to-stack,buffer-deallocation),";
   os << "convert-vector-to-scf,expand-strided-metadata,lower-affine,convert-scf-to-cf,"
         "convert-vector-to-llvm,"
-        "finalize-memref-to-llvm,convert-math-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,"
+        "finalize-memref-to-llvm,convert-math-to-llvm,convert-arith-to-llvm,convert-index-to-llvm,"
+        "convert-cf-to-llvm,"
         "convert-func-to-llvm,apply-ondrix-llvm-argument-attributes,reconcile-unrealized-casts,"
         "emit-ondrix-c-entry-points";
   if (options.checkedEntries)

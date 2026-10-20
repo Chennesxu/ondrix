@@ -45,7 +45,7 @@ int main(void) {
     int16_t y = 0;
     float s = 0.0f;
     for (unsigned i = 0; i < n; ++i) {
-      int64_t product = round_up(((int64_t)x[i] << 16) * ((int64_t)h[i] << 16), 31);
+      int64_t product = round_up(((int64_t)x[i] * 65536) * ((int64_t)h[i] * 65536), 31);
       acc = saturate(acc + saturate(product, 32), 32);
       y = (int16_t)saturate((int64_t)mult15(y, 29491) + mult15(x[i], 3277), 16);
       s = s + (float)wide[i] * 0x1p-31f;

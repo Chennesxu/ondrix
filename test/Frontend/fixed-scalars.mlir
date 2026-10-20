@@ -3,6 +3,8 @@
 // RUN: ondrix-compile %t/literal.ox | FileCheck %s --check-prefix=LITERAL
 // RUN: ondrix-compile %t/table.ox | FileCheck %s --check-prefix=TABLE
 // RUN: ondrix-compile %t/compare.ox | FileCheck %s --check-prefix=COMPARE
+// RUN: ondrix-compile %t/divide.ox | FileCheck %s --check-prefix=DIVIDE
+// RUN: ondrix-compile %t/call.ox | FileCheck %s --check-prefix=CALL
 // RUN: not ondrix-compile %t/mixed.ox 2>&1 | FileCheck %s --check-prefix=MIXED
 // RUN: not ondrix-compile %t/broadcast.ox 2>&1 | FileCheck %s --check-prefix=BROADCAST
 // RUN: not ondrix-compile %t/gain.ox 2>&1 | FileCheck %s --check-prefix=GAIN
@@ -22,6 +24,11 @@
 // MIXED: error: binary elementwise builtins require operands of the same element type and extent
 // BROADCAST: error: binary elementwise builtins require operands of the same element type and extent
 // GAIN: error: gain currently requires an input extent in [1, 4096]
+// DIVIDE: ondrix.div %arg0 {divisor = 2 : i64
+// CALL: arith.constant 2 : i16
+// CALL: ondrix.mult %arg0, %{{.*}} {{.*}} : (i16, i16) -> i16
+// CALL: arith.constant 3 : i16
+// CALL: ondrix.mult %{{.*}}, %arg0 {{.*}} : (i16, i16) -> i16
 // SPECTRUM: error: this builtin requires a tensor operand
 //--- mac.ox
 def mac(x: buffer[q15], h: buffer[q15]) -> q31:
@@ -57,3 +64,11 @@ def scaled(x: buffer[q15]) -> q15:
 //--- spectrum.ox
 def spectrum(x: buffer[q15]) -> q15:
   return rfft(x[0])
+
+//--- divide.ox
+def halve(x: q15) -> q15:
+  return x / 2
+
+//--- call.ox
+def doubled(x: q15) -> q31:
+  return widen(mult(x, 2), to=q31) + widen(mult(3, x), to=q31)

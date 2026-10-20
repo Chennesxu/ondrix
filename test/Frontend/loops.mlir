@@ -7,6 +7,9 @@
 // RUN: ondrix-compile %t/nested.ox | FileCheck %s --check-prefix=NESTED
 // RUN: ondrix-compile %t/other.ox | FileCheck %s --check-prefix=CHECKED
 // RUN: ondrix-compile %t/negative.ox | FileCheck %s --check-prefix=CHECKED
+// RUN: ondrix-compile %t/static.ox | ondrix-opt --canonicalize | FileCheck %s --check-prefix=STATIC
+// RUN: ondrix-compile %t/helper.ox | FileCheck %s --check-prefix=HELPER
+// RUN: ondrix-compile %t/octal.ox | FileCheck %s --check-prefix=OCTAL
 // ENERGY-LABEL: func.func @energy(%arg0: memref<?xf32>) -> f32
 // ENERGY: %[[ZERO:.*]] = arith.constant 0.000000e+00 : f32
 // ENERGY: %[[LEN:.*]] = memref.dim %arg0
@@ -31,6 +34,15 @@
 // NESTED: scf.for {{.*}} iter_args(%[[OUTER:.*]] = {{.*}}) -> (f32)
 // CHECKED: cf.assert {{.*}}, "index out of bounds"
 // NESTED: scf.for {{.*}} iter_args(%{{.*}} = %[[OUTER]]) -> (f32)
+// Static len folds at 64 bits; only a width-agreeing index.cmp keeps the 32-bit trap.
+// STATIC: index.cmp sge
+// STATIC-NEXT: cf.assert {{.*}}, "index arithmetic overflow"
+// HELPER: cf.assert {{.*}}, "index out of bounds"
+// HELPER: tensor.extract %arg0
+// HELPER: scf.for {{.*}} to %{{.*}} step
+// HELPER: memref.load %arg1
+// OCTAL: %[[STEP:.*]] = arith.constant 2 : i32
+// OCTAL: arith.divui %{{.*}}, %[[STEP]]
 //--- energy.ox
 def energy(x: buffer[f32]) -> f32:
   total = 0.0
@@ -83,4 +95,26 @@ def negative(x: buffer[f32]) -> f32:
   s = 0.0
   for i in range(-1, len(x)):
     s = s + x[i]
+  return s
+
+//--- static.ox
+def probe(x: tensor[f32,4]) -> f32:
+  return x[(len(x) + 2147483647) - 2147483647 - 1]
+
+//--- helper.ox
+def at(x: tensor[f32,4], k: i32) -> f32:
+  return x[k]
+def energy(x: buffer[f32]) -> f32:
+  total = 0.0
+  for i in range(len(x)):
+    total = total + x[i] * x[i]
+  return total
+def f(x: tensor[f32,4], y: buffer[f32], k: i32) -> f32:
+  return at(x, k) + energy(y)
+
+//--- octal.ox
+def steps(n: i32) -> i32:
+  s = 0
+  for i in range(0, n, 0o2):
+    s = s + i
   return s

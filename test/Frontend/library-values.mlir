@@ -2,6 +2,7 @@
 // RUN: ondrix-compile %t/loop.ox | FileCheck %s --check-prefix=LOOP
 // RUN: ondrix-compile %t/repeat.ox | FileCheck %s --check-prefix=REPEAT
 // RUN: ondrix-compile %t/callee.ox | FileCheck %s --check-prefix=CALLEE
+// RUN: ondrix-compile %t/helper.ox | FileCheck %s --check-prefix=HELPER
 // RUN: not ondrix-compile %t/local.ox 2>&1 | FileCheck %s --check-prefix=OPERAND
 // RUN: not ondrix-compile %t/integer.ox 2>&1 | FileCheck %s --check-prefix=OPERAND
 // RUN: not ondrix-compile %t/tensor.ox 2>&1 | FileCheck %s --check-prefix=TENSOR
@@ -16,6 +17,8 @@
 // CALLEE: ondrix.dot %arg0, %arg0
 // CALLEE: math.sqrt
 // CALLEE: arith.subf %[[FIR]]
+// HELPER: %[[DOT:.*]] = ondrix.dot %arg0, %arg0
+// HELPER: arith.addf %[[DOT]]
 // OPERAND: error: a reduction inside an expression currently reads f32, q15 or q31 parameters
 // TENSOR: error: scalar dot and fir currently require buffer operands
 // NESTED: error: nested calls are currently supported only by unary FFT-family builtins, a fir_filter input stage, and scalar dot/fir/rms
@@ -53,3 +56,10 @@ def f(x: tensor[f32,4]) -> f32:
 //--- goertzel.ox
 def f(x: tensor[f32,8]) -> f32:
   return goertzel(x, bin=1, contract=off) + 1.0
+
+//--- helper.ox
+def shifted(x: buffer[f32]) -> f32:
+  a = dot(x, x, contract=off)
+  return a + 1.0
+def f(x: buffer[f32]) -> f32:
+  return shifted(x)

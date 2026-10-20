@@ -13,6 +13,8 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Index/IR/IndexDialect.h"
+#include "mlir/Dialect/Index/IR/IndexOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -2498,8 +2500,21 @@ private:
         llvm::any_of(callee.parameters, [](const ParameterAst &parameter) {
           return parameter.isScalar() && parameter.type == SourceType::F32;
         });
+    // An argument that names one of the caller's own parameters is checked
+    // against the declaration and stays a reference, which subscripts, `len`
+    // and reductions read; any other argument has its shape checked instead.
+    auto callerParameter = [&](const ExpressionAst &argument) -> const ParameterAst * {
+      if (!argument.isParameterReference() || !caller)
+        return nullptr;
+      for (const ParameterAst &parameter : caller->parameters)
+        if (parameter.name == argument.parameter)
+          return &parameter;
+      return nullptr;
+    };
     if (typedCallee) {
       for (size_t index = 0; index < arguments.size(); ++index) {
+        if (callerParameter(arguments[index]))
+          continue;
         const ParameterAst &declared = callee.parameters[index];
         BuiltinCallAst checked;
         checked.kind = ReductionKind::Primitive;
@@ -2516,15 +2531,7 @@ private:
     for (size_t index = 0; index < arguments.size(); ++index) {
       const ParameterAst &declared = callee.parameters[index];
       substitution[declared.name] = &arguments[index];
-      // An argument that names one of the caller's own parameters is checked
-      // against the declaration; a local binding carries an expression whose
-      // shape the instantiated tree establishes instead.
-      if (!arguments[index].isParameterReference() || !caller)
-        continue;
-      const ParameterAst *actual = nullptr;
-      for (const ParameterAst &parameter : caller->parameters)
-        if (parameter.name == arguments[index].parameter)
-          actual = &parameter;
+      const ParameterAst *actual = callerParameter(arguments[index]);
       if (!actual)
         continue;
       if (actual->type != declared.type || actual->container != declared.container ||
@@ -2793,15 +2800,17 @@ private:
     BuiltinCallAst loop = makePrimitive(PrimitiveKind::Loop, {}, keyword.position);
     if (bounds.size() == 3) {
       const BuiltinCallAst *step = bounds.back().call.get();
-      int64_t value = 0;
       bool literal = step && step->kind == ReductionKind::Primitive &&
-                     step->primitive == PrimitiveKind::Literal &&
-                     !StringRef(step->spelling).getAsInteger(10, value);
-      if (!literal || value == 0) {
+                     step->primitive == PrimitiveKind::Literal;
+      StringRef spelling = literal ? StringRef(step->spelling) : StringRef();
+      bool negative = spelling.consume_front("-");
+      uint64_t magnitude = 0;
+      if (!literal || getIntegerTokenValue(spelling, magnitude) || magnitude == 0 ||
+          magnitude > uint64_t(INT64_MAX) + negative) {
         diagnostics.error(bounds.back().position, "range step must be a nonzero integer literal");
         return false;
       }
-      loop.step = value;
+      loop.step = int64_t(negative ? 0 - magnitude : magnitude);
       bounds.pop_back();
     }
     if (bounds.size() == 1) {
@@ -4049,9 +4058,13 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       if (domain && isRealFixed(*domain) && fixedKind) {
         bool scalar =
             llvm::any_of(operandTypes, [](const auto &type) { return type && !type->extent; });
-        if (op == PrimitiveKind::Neg || scalar) {
+        bool literalDivisor = *fixedKind == ReductionKind::Ratio && call.operands[1].call &&
+                              call.operands[1].call->kind == ReductionKind::Primitive &&
+                              call.operands[1].call->primitive == PrimitiveKind::Literal;
+        if (op == PrimitiveKind::Neg || (scalar && !literalDivisor)) {
           // A scalar keeps its literal operands, which read as raw constants of
-          // the domain; only tensor operators rewrite them into gain or offset.
+          // the domain; only tensor operators rewrite them into gain or offset,
+          // and a literal divisor becomes div's integer divisor for both.
           call.kind = *fixedKind;
           auto savedHint = literalHint;
           literalHint = domain;
@@ -4340,7 +4353,18 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       return true;
     };
     auto checkElementwise = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
+      // A literal operand is a raw constant of the other operand's format.
+      bool binary = isBinaryElementwiseKind(call.kind);
+      auto savedHint = literalHint;
+      if (binary && needsLiteralContext(call.operands.front()) &&
+          !needsLiteralContext(call.operands[1])) {
+        std::optional<ComposedType> rhs = checkComposedExpression(call.operands[1]);
+        if (!rhs)
+          return std::nullopt;
+        literalHint = rhs->elementType;
+      }
       std::optional<ComposedType> lhs = checkComposedExpression(call.operands.front());
+      literalHint = savedHint;
       if (!lhs)
         return std::nullopt;
       auto primitive = getOrdinaryArithmetic(call.kind);
@@ -4367,8 +4391,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       }
       int64_t fractionalBits = lhs->elementType == SourceType::Q31 ? 31 : 15;
-      if (isBinaryElementwiseKind(call.kind)) {
+      if (binary) {
+        literalHint = lhs->elementType;
         std::optional<ComposedType> rhs = checkComposedExpression(call.operands[1]);
+        literalHint = savedHint;
         if (!rhs)
           return std::nullopt;
         if (rhs->elementType != lhs->elementType || rhs->extent != lhs->extent) {
@@ -5615,10 +5641,10 @@ static Location getLocation(MLIRContext &context, llvm::StringRef sourceName,
 
 static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::StringRef sourceName,
                                             MLIRContext &context) {
-  context
-      .loadDialect<arith::ArithDialect, bufferization::BufferizationDialect, func::FuncDialect,
-                   math::MathDialect, memref::MemRefDialect, tensor::TensorDialect, scf::SCFDialect,
-                   cf::ControlFlowDialect, ir::OndrixDialect, ondsp::OndspDialect>();
+  context.loadDialect<arith::ArithDialect, bufferization::BufferizationDialect, func::FuncDialect,
+                      math::MathDialect, memref::MemRefDialect, tensor::TensorDialect,
+                      scf::SCFDialect, cf::ControlFlowDialect, index::IndexDialect,
+                      ir::OndrixDialect, ondsp::OndspDialect>();
   OpBuilder builder(&context);
   Location kernelLocation = getLocation(context, sourceName, kernel.ast.position);
   OwningOpRef<ModuleOp> module = ModuleOp::create(kernelLocation);
@@ -5966,6 +5992,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
           }
           if (a.getType().isIndex()) {
             // Index +/- traps on signed overflow of the target's index width.
+            // index.cmp folds only where 32 and 64 bits agree; arith folds at 64.
             Value zero = b.create<arith::ConstantIndexOp>(loc, 0);
             Value lhs = op == PrimitiveKind::Neg ? zero : a;
             Value rhs = op == PrimitiveKind::Neg ? a : c;
@@ -5977,7 +6004,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                 add ? b.create<arith::AndIOp>(loc, differ(lhs, result), differ(rhs, result))
                     : b.create<arith::AndIOp>(loc, differ(lhs, rhs), differ(lhs, result));
             b.create<cf::AssertOp>(
-                loc, b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, overflow, zero),
+                loc, b.create<index::CmpOp>(loc, index::IndexCmpPredicate::SGE, overflow, zero),
                 "index arithmetic overflow");
             return result;
           }

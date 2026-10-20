@@ -9,6 +9,7 @@ add_ondrix_library(OndrixFrontend
   MLIRControlFlowDialect
   MLIRSCFDialect
   MLIRFuncDialect
+  MLIRIndexDialect
   MLIRIR
   MLIRMathDialect
   MLIRMemRefDialect
