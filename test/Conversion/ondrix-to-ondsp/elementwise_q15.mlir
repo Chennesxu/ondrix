@@ -113,3 +113,20 @@ func.func @ratio(%a: tensor<8xi16>, %b: tensor<8xi16>) -> tensor<8xi16> {
   } : (tensor<8xi16>, tensor<8xi16>) -> tensor<8xi16>
   return %0 : tensor<8xi16>
 }
+
+// -----
+
+// A scalar is the tensor's single element: the same body, without the loop.
+// CHECK-LABEL: func.func @scalar_mult
+// CHECK-NOT: scf.for
+// CHECK: arith.extsi %arg0 : i16 to i32
+// CHECK: arith.muli
+// CHECK: ondsp.round_shift {{.*}}post_shift_right = 15, rounding = nearest_ties_positive, overflow = saturate, saturate_to = i16
+func.func @scalar_mult(%a: i16, %b: i16) -> i16 {
+  %0 = ondrix.mult %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    rounding = #ondsp.rounding<nearest_ties_positive>,
+    overflow = #ondsp.overflow<saturate>
+  } : (i16, i16) -> i16
+  return %0 : i16
+}

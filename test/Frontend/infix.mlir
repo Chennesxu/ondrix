@@ -8,7 +8,7 @@
 // RUN: not ondrix-compile %S/Inputs/invalid_infix_division.ox 2>&1 | FileCheck %s --check-prefix=DIVISION
 // RUN: ondrix-compile %S/Inputs/f32_infix.ox | FileCheck %s --check-prefix=FLOAT
 // RUN: not ondrix-compile %S/Inputs/invalid_infix_extent.ox 2>&1 | FileCheck %s --check-prefix=EXTENT
-// RUN: not ondrix-compile %S/Inputs/invalid_infix_bare_return.ox 2>&1 | FileCheck %s --check-prefix=BARE
+// RUN: ondrix-compile %S/Inputs/infix_bare_return.ox | FileCheck %s --check-prefix=BARE
 // RUN: not ondrix-compile %S/Inputs/invalid_infix_unclosed.ox 2>&1 | FileCheck %s --check-prefix=UNCLOSED
 // RUN: not ondrix-compile %S/Inputs/invalid_infix_buffer.ox 2>&1 | FileCheck %s --check-prefix=BUFFER
 
@@ -46,6 +46,6 @@
 // DIVISION: error: the divisor is not provably positive
 // FLOAT: arith.addf
 // EXTENT: error: binary elementwise builtins require operands of the same element type and extent
-// BARE: error: expected a builtin call or an infix expression, not a bare name
+// BARE: return %arg0 : tensor<16xi16>
 // UNCLOSED: error: expected ')' to close the parenthesized expression
 // BUFFER: error: composable builtins currently require rank-1 tensor operands

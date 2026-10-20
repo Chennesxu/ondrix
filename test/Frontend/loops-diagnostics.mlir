@@ -28,13 +28,13 @@
 // STEPRANGE: error: range step is out of range for the bound type
 // BOUNDS: error: range bounds must share one index, i32 or i64 type
 // SUBSCRIPT: error: an index must be an index, i32 or i64 scalar
-// LEN: error: len and indexing currently require a rank-one f32 buffer or tensor parameter
+// LEN: error: len and indexing currently require a rank-one f32, q15 or q31 buffer or tensor parameter
 // INDEXMUL: error: index arithmetic supports only + and -
 // INDEXMIX: error: arithmetic operands must have the same element type
 // INDEXCONST: error: constant index expression leaves the signed 32-bit range
 // INDENT: error: inconsistent indentation in the loop body
 // BODY: error: expected an indented loop body
-// FIXED: error: loops require an ordinary i32, i64, bool or f32 function result
+// FIXED: error: loops require an i32, i64, bool, f32, q15 or q31 function result
 //--- readonly.ox
 def f(n: i32) -> i32:
   s = 0
@@ -98,7 +98,7 @@ def f(n: f32) -> f32:
   return s
 
 //--- element.ox
-def f(x: buffer[q15]) -> f32:
+def f(x: buffer[complex_q15]) -> f32:
   s = 0.0
   for i in range(len(x)):
     s = s + x[i]
@@ -161,7 +161,7 @@ def f(n: i32) -> i32:
   return s
 
 //--- fixed.ox
-def f(x: tensor[q15,4]) -> tensor[q15,4]:
+def f(x: tensor[complex_q15,4]) -> tensor[complex_q15,4]:
   for i in range(4):
     y = x
   return x

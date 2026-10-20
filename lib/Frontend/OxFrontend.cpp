@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/Verifier.h"
 
 #include "llvm/ADT/APInt.h"
@@ -273,6 +274,10 @@ enum class SourceType {
   Bool,
   Index
 };
+
+static bool isRealFixed(SourceType type) {
+  return type == SourceType::Q15 || type == SourceType::Q31;
+}
 
 // The value of an integer token, decimal or `0o` octal; true on failure, as
 // StringRef::getAsInteger.
@@ -924,14 +929,15 @@ public:
     SourceType policyType = kernel.primaryResult().type;
     caller = &kernel;
     genericExpressions = policyType == SourceType::F32 || policyType == SourceType::I32 ||
-                         policyType == SourceType::I64 || policyType == SourceType::Bool;
+                         policyType == SourceType::I64 || policyType == SourceType::Bool ||
+                         policyType == SourceType::Q15 || policyType == SourceType::Q31;
     BuiltinCallAst body = makePrimitive(PrimitiveKind::Scope, {}, current.position);
     while (isStatementStart())
       if (!parseStatement(body, policyType))
         return std::nullopt;
     if (isLoopStart()) {
       diagnostics.error(current.position,
-                        "loops require an ordinary i32, i64, bool or f32 function result");
+                        "loops require an i32, i64, bool, f32, q15 or q31 function result");
       return std::nullopt;
     }
     if (!expectIdentifier("return", "expected a single return statement"))
@@ -2394,7 +2400,8 @@ private:
       return parameter;
     }
 
-    if (isIdentifier("i32") || isIdentifier("i64") || isIdentifier("bool") || isIdentifier("f32")) {
+    if (isIdentifier("i32") || isIdentifier("i64") || isIdentifier("bool") || isIdentifier("f32") ||
+        isIdentifier("q15") || isIdentifier("q31")) {
       parameter.container = ContainerKind::Scalar;
       parameter.type = *parseSourceType("expected scalar type");
       return parameter;
@@ -3765,7 +3772,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         const ParameterAst *value = parameter->second;
         if (value->isScalar() &&
             (value->type == SourceType::I32 || value->type == SourceType::I64 ||
-             value->type == SourceType::Bool || value->type == SourceType::F32))
+             value->type == SourceType::Bool || value->type == SourceType::F32 ||
+             isRealFixed(value->type)))
           return ComposedType{value->type, 0};
         if (!value->isTensor() || !hasRank(value->shape, 1)) {
           diagnostics.error(expression.position,
@@ -3913,9 +3921,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     auto getIndexedParameter = [&](const ExpressionAst &base) -> const ParameterAst * {
       auto parameter = parametersByName.find(base.parameter);
       if (parameter == parametersByName.end() || !hasRank(parameter->second->shape, 1) ||
-          parameter->second->type != SourceType::F32) {
-        diagnostics.error(base.position, "len and indexing currently require a rank-one f32 "
-                                         "buffer or tensor parameter");
+          (parameter->second->type != SourceType::F32 && !isRealFixed(parameter->second->type))) {
+        diagnostics.error(base.position, "len and indexing currently require a rank-one f32, q15 "
+                                         "or q31 buffer or tensor parameter");
         return nullptr;
       }
       ++parameterUses[base.parameter];
@@ -3967,7 +3975,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         const ExpressionAst &position = call.operands[1];
         call.inBounds = position.isParameterReference() &&
                         provenIndices.lookup(position.parameter) == parameter->name;
-        return finish({SourceType::F32, 0});
+        return finish({parameter->type, 0});
       }
       if (op == PrimitiveKind::Literal) {
         SourceType type = literalHint.value_or(ast.primaryResult().type);
@@ -3992,10 +4000,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           call.fpConstant = value.convertToFloat();
           return finish({type, 0});
         }
-        if (type != SourceType::I32 && type != SourceType::I64 && type != SourceType::Index)
-          return reject("ordinary literal requires an integer or f32 context");
-        // An index literal must mean the same value at every target index width.
-        unsigned width = type == SourceType::I64 ? 64 : 32;
+        if (type != SourceType::I32 && type != SourceType::I64 && type != SourceType::Index &&
+            !isRealFixed(type))
+          return reject("ordinary literal requires an integer, q15, q31 or f32 context");
+        // An index literal must mean the same value at every target index width;
+        // a q15 or q31 literal is a raw value of the format.
+        unsigned width = type == SourceType::I64 ? 64 : type == SourceType::Q15 ? 16 : 32;
         StringRef spelling(call.spelling);
         bool negative = spelling.consume_front("-");
         APInt magnitude(128, 0);
@@ -4036,32 +4046,40 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         break;
       }
       std::optional<ReductionKind> fixedKind = getOperatorBuiltin(op);
-      if (domain && (*domain == SourceType::Q15 || *domain == SourceType::Q31) && fixedKind) {
-        if (op == PrimitiveKind::Neg) {
+      if (domain && isRealFixed(*domain) && fixedKind) {
+        bool scalar =
+            llvm::any_of(operandTypes, [](const auto &type) { return type && !type->extent; });
+        if (op == PrimitiveKind::Neg || scalar) {
+          // A scalar keeps its literal operands, which read as raw constants of
+          // the domain; only tensor operators rewrite them into gain or offset.
           call.kind = *fixedKind;
-        } else {
-          SmallVector<Operand, 2> operands;
-          for (ExpressionAst &expression : call.operands) {
-            bool literal = expression.call && expression.call->kind == ReductionKind::Primitive &&
-                           expression.call->primitive == PrimitiveKind::Literal;
-            if (!literal) {
-              operands.push_back({std::move(expression), 0, call.position});
-              continue;
-            }
-            StringRef spelling(expression.call->spelling);
-            bool negative = spelling.consume_front("-");
-            uint64_t magnitude = 0;
-            if (getIntegerTokenValue(spelling, magnitude) || magnitude > uint64_t(INT64_MAX))
-              return reject("fixed tensor arithmetic requires a raw integer literal");
-            operands.push_back({std::nullopt, negative ? -int64_t(magnitude) : int64_t(magnitude),
-                                expression.position});
-          }
-          auto fixed = buildFixedBinary(*fixedKind, std::move(operands[0]), std::move(operands[1]),
-                                        call.position, diagnostics);
-          if (!fixed)
-            return std::nullopt;
-          call = std::move(*fixed);
+          auto savedHint = literalHint;
+          literalHint = domain;
+          std::optional<ComposedType> result = checkComposedCall(call);
+          literalHint = savedHint;
+          return result;
         }
+        SmallVector<Operand, 2> operands;
+        for (ExpressionAst &expression : call.operands) {
+          bool literal = expression.call && expression.call->kind == ReductionKind::Primitive &&
+                         expression.call->primitive == PrimitiveKind::Literal;
+          if (!literal) {
+            operands.push_back({std::move(expression), 0, call.position});
+            continue;
+          }
+          StringRef spelling(expression.call->spelling);
+          bool negative = spelling.consume_front("-");
+          uint64_t magnitude = 0;
+          if (getIntegerTokenValue(spelling, magnitude) || magnitude > uint64_t(INT64_MAX))
+            return reject("fixed tensor arithmetic requires a raw integer literal");
+          operands.push_back({std::nullopt, negative ? -int64_t(magnitude) : int64_t(magnitude),
+                              expression.position});
+        }
+        auto fixed = buildFixedBinary(*fixedKind, std::move(operands[0]), std::move(operands[1]),
+                                      call.position, diagnostics);
+        if (!fixed)
+          return std::nullopt;
+        call = std::move(*fixed);
         return checkComposedCall(call);
       }
       auto savedHint = literalHint;
@@ -4095,7 +4113,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       bool index = lhs->elementType == SourceType::Index;
       bool integer =
           index || lhs->elementType == SourceType::I32 || lhs->elementType == SourceType::I64;
-      if (!floating && !integer && !(comparison && lhs->elementType == SourceType::Bool))
+      if (!domain && !comparison && isRealFixed(lhs->elementType))
+        return reject("a fixed-point operator needs an operand other than a literal");
+      if (!floating && !integer &&
+          !(comparison && (lhs->elementType == SourceType::Bool || isRealFixed(lhs->elementType))))
         return reject("ordinary arithmetic requires i32, i64 or f32 operands");
       int64_t extent = lhs->extent;
       if (rhs) {
@@ -4340,7 +4361,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                                          "elements");
         return std::nullopt;
       }
-      if (lhs->extent < 1 || lhs->extent > 4096) {
+      if (lhs->extent > 4096) {
         diagnostics.error(call.position,
                           "elementwise builtins currently require an extent in [1, 4096]");
         return std::nullopt;
@@ -4432,7 +4453,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         diagnostics.error(call.position, contract);
         return std::nullopt;
       }
-      if (input->extent < 1 || input->extent > 4096) {
+      if (input->extent > 4096) {
         diagnostics.error(call.position, "conversions currently require an extent in [1, 4096]");
         return std::nullopt;
       }
@@ -4455,7 +4476,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         diagnostics.error(call.position, "gain requires q15 or q31 operand elements");
         return std::nullopt;
       }
-      if (input->extent > 4096) {
+      if (input->extent < 1 || input->extent > 4096) {
         diagnostics.error(call.position, "gain currently requires an input extent in [1, 4096]");
         return std::nullopt;
       }
@@ -4485,14 +4506,13 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       KernelAst library;
       library.name = ast.name;
       library.position = call.position;
-      library.results.push_back(ResultTypeAst{SourceType::F32, false, {}});
       library.result = BuiltinCallAst(call);
       for (ExpressionAst &operand : library.result.operands) {
         const ParameterAst *parameter =
             operand.isParameterReference() ? parametersByName.lookup(operand.parameter) : nullptr;
-        if (!parameter || parameter->type != SourceType::F32) {
-          diagnostics.error(operand.position,
-                            "a reduction inside an expression currently reads f32 parameters");
+        if (!parameter || (parameter->type != SourceType::F32 && !isRealFixed(parameter->type))) {
+          diagnostics.error(operand.position, "a reduction inside an expression currently reads "
+                                              "f32, q15 or q31 parameters");
           return std::nullopt;
         }
         ++parameterUses[operand.parameter];
@@ -4503,11 +4523,13 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         operand.parameter = copy.name;
         library.parameters.push_back(std::move(copy));
       }
+      SourceType type = library.parameters.front().type;
+      library.results.push_back(ResultTypeAst{type, false, {}});
       std::optional<CheckedKernel> checked = checkKernel(std::move(library), diagnostics);
       if (!checked)
         return std::nullopt;
       call.library = std::make_shared<const CheckedKernel>(std::move(*checked));
-      return ComposedType{SourceType::F32, 0};
+      return ComposedType{type, 0};
     };
     checkComposedCall = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       if (call.kind == ReductionKind::Primitive)
@@ -4531,6 +4553,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       std::optional<ComposedType> input = checkComposedExpression(call.operands.front());
       if (!input)
         return std::nullopt;
+      if (!input->extent) {
+        diagnostics.error(call.position, "this builtin requires a tensor operand");
+        return std::nullopt;
+      }
 
       if (call.kind == ReductionKind::ViterbiDecode) {
         if (input->elementType != SourceType::Q15) {
@@ -4842,7 +4868,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return std::nullopt;
       }
     }
-    if (!ast.primaryResult().tensor && ast.result.kind == ReductionKind::Primitive) {
+    if (!ast.primaryResult().tensor) {
       if (inferred->extent != 0 || ast.primaryResult().type != inferred->elementType) {
         diagnostics.error(ast.result.position,
                           "declared result type does not match the expression");
@@ -4850,7 +4876,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       return CheckedKernel{std::move(ast)};
     }
-    if (!ast.primaryResult().tensor || !hasRank(ast.primaryResult().shape, 1)) {
+    if (!hasRank(ast.primaryResult().shape, 1)) {
       diagnostics.error(ast.result.position,
                         "composable builtins currently require a rank-1 tensor result");
       return std::nullopt;
@@ -5730,12 +5756,20 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     std::function<Value(const BuiltinCallAst &)> emitComposedCall =
         [&](const BuiltinCallAst &call) -> Value {
       if (call.library) {
-        // The checked kernel's body, cloned with its arguments bound here.
+        // The checked kernel's body, cloned with its arguments bound here. Its
+        // constexpr tables are globals named by kernel and parameter, so one
+        // already present holds the same values.
         OwningOpRef<ModuleOp> library = generateModule(*call.library, sourceName, context);
+        for (auto global : llvm::make_early_inc_range(library->getOps<memref::GlobalOp>()))
+          if (!module->lookupSymbol(global.getSymName()))
+            global->moveBefore(module->getBody(), module->getBody()->begin());
         Block &body = (*library->getOps<func::FuncOp>().begin()).getBody().front();
         IRMapping mapping;
-        for (auto [argument, operand] : llvm::zip_equal(body.getArguments(), call.operands))
-          mapping.map(argument, arguments.lookup(operand.parameter));
+        unsigned index = 0;
+        for (auto [parameter, operand] :
+             llvm::zip_equal(call.library->ast.parameters, call.operands))
+          if (!parameter.isConstexpr())
+            mapping.map(body.getArgument(index++), arguments.lookup(operand.parameter));
         for (Operation &op : body.without_terminator())
           builder.clone(op, mapping);
         return mapping.lookup(body.getTerminator()->getOperand(0));
@@ -6054,11 +6088,13 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       const ExpressionAst &operand = call.operands.front();
       Value input = operand.isParameterReference() ? arguments.lookup(operand.parameter)
                                                    : emitComposedCall(*operand.call);
-      auto inputType = cast<RankedTensorType>(input.getType());
+      // A scalar operand reaches only the conversion and elementwise members.
+      Type element = getElementTypeOrSelf(input.getType());
       if (call.kind == ReductionKind::ViterbiDecode) {
         int64_t rate = static_cast<int64_t>(call.polynomials.size());
-        auto bitsType =
-            RankedTensorType::get({inputType.getDimSize(0) / rate / 8}, builder.getI8Type());
+        auto bitsType = RankedTensorType::get(
+            {cast<RankedTensorType>(input.getType()).getDimSize(0) / rate / 8},
+            builder.getI8Type());
         return builder.create<ir::ViterbiDecodeOp>(
             getLocation(context, sourceName, call.position), bitsType, input,
             builder.getI64IntegerAttr(call.constraintLength),
@@ -6077,20 +6113,21 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                       : call.target == SourceType::Q31 ? Type(i32)
                                                        : Type(i16);
         bool lossy = isLossyConversionKind(call.kind);
-        auto resultType = RankedTensorType::get({inputType.getDimSize(0)}, target);
+        Type resultType = target;
+        if (auto tensor = dyn_cast<RankedTensorType>(input.getType()))
+          resultType = RankedTensorType::get(tensor.getShape(), target);
         return builder.create<ir::QuantizeOp>(
-            getLocation(context, sourceName, call.position), resultType, input,
-            formatOf(inputType.getElementType()), formatOf(target),
+            getLocation(context, sourceName, call.position), resultType, input, formatOf(element),
+            formatOf(target),
             lossy ? ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding))
                   : ondsp::RoundingModeAttr(),
             lossy ? ondsp::OverflowModeAttr::get(&context, *parseOverflow(call.destinationOverflow))
                   : ondsp::OverflowModeAttr());
       }
       if (call.kind == ReductionKind::Gain) {
-        ondsp::FixedAttr gainNumeric =
-            inputType.getElementType().isSignlessInteger(32) ? q31Numeric : numeric;
+        ondsp::FixedAttr gainNumeric = element.isSignlessInteger(32) ? q31Numeric : numeric;
         return builder.create<ir::GainOp>(
-            getLocation(context, sourceName, call.position), inputType, input,
+            getLocation(context, sourceName, call.position), input.getType(), input,
             builder.getI64IntegerAttr(call.gain), FloatAttr(), Attribute(gainNumeric),
             ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding)));
       }
@@ -6101,8 +6138,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
             ondsp::OverflowModeAttr::get(&context, *parseOverflow(call.destinationOverflow));
         // Sema proved every operand carries the same declared width, so the
         // operand storage is what selects the profile.
-        ondsp::FixedAttr elementwise =
-            inputType.getElementType().isSignlessInteger(32) ? q31Numeric : numeric;
+        ondsp::FixedAttr elementwise = element.isSignlessInteger(32) ? q31Numeric : numeric;
         if (isBinaryElementwiseKind(call.kind)) {
           const ExpressionAst &second = call.operands[1];
           Value rhs = second.isParameterReference() ? arguments.lookup(second.parameter)
@@ -6111,35 +6147,37 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
             auto policy = call.nonpositive == "saturate" ? ondsp::NonpositiveDivisor::Saturate
                                                          : ondsp::NonpositiveDivisor::Trap;
             return builder.create<ir::RatioOp>(
-                callLocation, inputType, input, rhs, elementwise, rounding, overflow,
+                callLocation, input.getType(), input, rhs, elementwise, rounding, overflow,
                 ondsp::NonpositiveDivisorAttr::get(&context, policy));
           }
           if (call.kind == ReductionKind::Add)
-            return builder.create<ir::AddOp>(callLocation, inputType, input, rhs, elementwise,
+            return builder.create<ir::AddOp>(callLocation, input.getType(), input, rhs, elementwise,
                                              overflow);
           if (call.kind == ReductionKind::Sub)
-            return builder.create<ir::SubOp>(callLocation, inputType, input, rhs, elementwise,
+            return builder.create<ir::SubOp>(callLocation, input.getType(), input, rhs, elementwise,
                                              overflow);
-          return builder.create<ir::MultOp>(callLocation, inputType, input, rhs, elementwise,
+          return builder.create<ir::MultOp>(callLocation, input.getType(), input, rhs, elementwise,
                                             rounding, overflow);
         }
         if (call.kind == ReductionKind::Abs)
-          return builder.create<ir::AbsOp>(callLocation, inputType, input, elementwise, overflow);
+          return builder.create<ir::AbsOp>(callLocation, input.getType(), input, elementwise,
+                                           overflow);
         if (call.kind == ReductionKind::Negate)
-          return builder.create<ir::NegateOp>(callLocation, inputType, input, elementwise,
+          return builder.create<ir::NegateOp>(callLocation, input.getType(), input, elementwise,
                                               overflow);
         if (call.kind == ReductionKind::Offset)
-          return builder.create<ir::OffsetOp>(callLocation, inputType, input,
+          return builder.create<ir::OffsetOp>(callLocation, input.getType(), input,
                                               builder.getI64IntegerAttr(call.bias), elementwise,
                                               overflow);
         if (call.kind == ReductionKind::Div)
-          return builder.create<ir::DivOp>(callLocation, inputType, input,
+          return builder.create<ir::DivOp>(callLocation, input.getType(), input,
                                            builder.getI64IntegerAttr(call.divisor), elementwise,
                                            rounding, overflow);
-        return builder.create<ir::ShiftOp>(callLocation, inputType, input,
+        return builder.create<ir::ShiftOp>(callLocation, input.getType(), input,
                                            builder.getI64IntegerAttr(call.amount), elementwise,
                                            rounding, overflow);
       }
+      auto inputType = cast<RankedTensorType>(input.getType());
       Location callLocation = getLocation(context, sourceName, call.position);
       if (call.kind == ReductionKind::Phase) {
         if (inputType.getElementType().isF32()) {

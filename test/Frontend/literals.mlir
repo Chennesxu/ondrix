@@ -4,7 +4,7 @@
 // RUN: diff %t.infix.mlir %t.calls.mlir
 // RUN: ondrix-compile %S/Inputs/q31_literals.ox | FileCheck %s --check-prefix=WIDE
 // RUN: not ondrix-compile %S/Inputs/invalid_literal_pair.ox 2>&1 | FileCheck %s --check-prefix=PAIR
-// RUN: not ondrix-compile %S/Inputs/invalid_literal_statement.ox 2>&1 | FileCheck %s --check-prefix=STATEMENT
+// RUN: not ondrix-compile %S/Inputs/invalid_literal_scalar_range.ox 2>&1 | FileCheck %s --check-prefix=SCALAR
 // RUN: not ondrix-compile %S/Inputs/invalid_literal_minus.ox 2>&1 | FileCheck %s --check-prefix=MINUS
 // RUN: not ondrix-compile %S/Inputs/invalid_literal_bias_range.ox 2>&1 | FileCheck %s --check-prefix=BIAS
 // RUN: not ondrix-compile %S/Inputs/invalid_literal_gain_range.ox 2>&1 | FileCheck %s --check-prefix=GAIN
@@ -38,12 +38,12 @@
 // WIDE: ondrix.gain
 // WIDE-SAME: gain = 1073741824
 
-// PAIR: error: an operator needs a tensor operand on at least one side
-// STATEMENT: error: expected a builtin call or an infix expression, not a bare name or literal
+// PAIR: error: a fixed-point operator needs an operand other than a literal
+// SCALAR: error: integer literal is out of range
 // MINUS: error: a constant minus a tensor is negate then offset, two boundaries; spell offset(negate(x), bias=c)
 // BIAS: error: offset bias must be a raw signed Q1.15 value in [-32768, 32767]
 // GAIN: error: gain constant must be a raw signed Q1.15 value in [-32768, 32767]
-// OPERAND: error: a literal needs a tensor operand beside it
+// OPERAND: error: binary elementwise builtins require operands of the same element type and extent
 // NUMERATOR: error: a constant dividend is not an operation
 // FLOAT: arith.constant 3.000000e+00 : f32
 // FLOAT: arith.mulf

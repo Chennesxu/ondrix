@@ -43,15 +43,17 @@ overflow is diagnosed and underflow rounds to a subnormal or signed zero.
 The `add`, `sub`, `mult`, and `negate` call spellings also accept ordinary
 integer/f32 operands, without fixed-point rounding or overflow parameters.
 
-Q15/Q31 retain their raw-literal and quantization rules. Their tensor `-x`
-uses `negate(x)`, saturating by default. DSP builtin composition retains its
+Q15/Q31 retain their raw-literal and quantization rules, for tensors and for
+the scalars described below. Their `-x` uses `negate(x)`, saturating by
+default. DSP builtin composition retains its
 existing restrictions. Plain integer/bool tensors, array writes, and source
 `if`/`while` statements remain unsupported.
 
 ## Counted Loops and Indexed Reads
 
 Ordinary expression bodies may contain `for` loops over `range`, reassign
-locals, and read rank-one f32 buffer or tensor parameters by index:
+locals, and read rank-one f32, q15 or q31 buffer or tensor parameters by
+index:
 
 ```python
 def energy(x: buffer[f32]) -> f32:
@@ -65,8 +67,8 @@ A loop body is the statements indented past its `for`; loops nest. A
 reassignment keeps the local's type. Parameters and loop variables are
 read-only, and a local first bound inside a loop body is visible only there.
 A local bound before a loop and reassigned in it carries its value from one
-iteration to the next; only scalar locals can be carried. Fixed-point bodies
-keep the single-expression form.
+iteration to the next; only scalar locals can be carried. Complex and `u8`
+results keep the single-expression form.
 
 `range(stop)`, `range(start, stop)` and `range(start, stop, step)` follow
 Python's exact semantics: the values `start + k*step` strictly before `stop`
@@ -89,9 +91,10 @@ including its initial value: `energy` of an empty buffer is `+0.0`.
 
 ## Reductions Inside Expressions
 
-In an ordinary expression body, f32 `dot`, `fir` and scalar `rms` calls are
-f32 scalar values: they may be bound, read in a loop body, or used as
-operands. Their operands are the function's f32 parameters, and one parameter
+In an ordinary expression body, `dot`, `fir` and scalar `rms` calls are
+scalar values of their operands' type: they may be bound, read in a loop
+body, or used as operands. Their operands are the function's f32, q15 or q31
+parameters, constexpr coefficients included, and one parameter
 may fill several operand slots; a named function whose body is such a call
 works the same way. The call keeps its whole-kernel contract, checks and
 result, and its policies follow its operands, so `contract=` is spelled in an
@@ -105,8 +108,31 @@ def blend(x: buffer[f32], w: buffer[f32], n: i32) -> f32:
   return s
 ```
 
-Fixed-point operands, tensor-valued calls and local or sliced operands are
-not yet accepted.
+Tensor-valued calls and local or sliced operands are not yet accepted.
+
+## Fixed-Point Scalars
+
+A real q15 or q31 scalar is an element read `x[i]`, a scalar parameter
+(`t: q15`), a local, or a reduction value. `+`, `-`, `*`, unary `-` and the
+elementwise call spellings apply to scalars exactly as to one tensor element:
+the exact integer result, then the one declared boundary, with the tensor
+defaults (`nearest_ties_positive`, `saturate`). An integer literal beside a
+fixed scalar, or bound in a q15/q31 function, is a raw value of the format, so
+`y * 29491` is `mult(y, 29491)`; `/` by a literal keeps the integer-divisor
+`div`. Same-format comparisons produce `bool`. Conversions take scalars too,
+and nothing converts implicitly; a scalar never broadcasts into a tensor.
+
+There is no accumulator type. A guarded multiply-accumulate is spelled in
+q31, where the product of two widened q15 values is exact and only the
+saturating addition can lose information, or with `dot`:
+
+```python
+def mac(x: buffer[q15], h: buffer[q15]) -> q31:
+  acc = 0
+  for i in range(len(x)):
+    acc = acc + widen(x[i], to=q31) * widen(h[i], to=q31)
+  return acc
+```
 
 For a statically bounded Q15 dot, FIR sample, FIR decimation, FIR
 interpolation, convolution, or correlation, omitting the accumulator policy
@@ -574,9 +600,8 @@ in particular, `irfft(rfft(input))` is not folded to an identity.
 
 A kernel body may also name intermediate stages with local bindings before
 its single return statement. A local may be read any number of times; a
-local no statement reads is a compile error. The fixed-point DSP expression
-slice still requires a call or infix expression as its result. Ordinary scalar
-and f32 expression bodies also accept names and literals. Reusing a local
+local no statement reads is a compile error. A return may also be a name or
+a literal. Reusing a local
 reuses its value, as in `add(mult(t, t), t)`; it does not request reassociation
 or remove any quantization boundary.
 Within this slice a `fir_filter` stage may feed the FFT chain — static Q15

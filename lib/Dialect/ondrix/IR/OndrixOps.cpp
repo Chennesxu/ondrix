@@ -961,21 +961,30 @@ LogicalResult FirDecimateOp::verify() {
   return verifyFirDecimateDomain(*this);
 }
 
-// One shape and format rule for the whole elementwise family: matching static
-// rank-1 uniform-Q tensors at the declared width. Passing every operand keeps
-// a binary member from checking only its left side.
+// One shape and format rule for the whole elementwise family: one scalar or
+// matching static rank-1 uniform-Q tensors at the declared width. Passing every
+// operand keeps a binary member from checking only its left side.
 static FailureOr<unsigned> verifyElementwiseDomain(Operation *op, Attribute numeric,
-                                                   llvm::ArrayRef<RankedTensorType> types) {
+                                                   llvm::ArrayRef<Type> types) {
   std::optional<unsigned> storageWidth = getUniformQStorageWidth(numeric);
   if (!storageWidth)
     return op->emitOpError("numeric requires #ondsp.fixed<signed, storage = i16, frac = 15> or "
                            "#ondsp.fixed<signed, storage = i32, frac = 31>");
-  if (failed(verifyUnencodedTensorTypes(op, types)))
+  if (llvm::all_of(types, [&](Type type) { return type.isSignlessInteger(*storageWidth); }))
+    return *storageWidth;
+  SmallVector<RankedTensorType> tensors;
+  for (Type type : types)
+    if (auto tensor = dyn_cast<RankedTensorType>(type))
+      tensors.push_back(tensor);
+  if (tensors.size() != types.size())
+    return op->emitOpError() << "elementwise operations require i" << *storageWidth
+                             << " scalars or tensors throughout";
+  if (failed(verifyUnencodedTensorTypes(op, tensors)))
     return failure();
   int64_t extent =
-      types.front().getRank() == 1 ? types.front().getDimSize(0) : ShapedType::kDynamic;
+      tensors.front().getRank() == 1 ? tensors.front().getDimSize(0) : ShapedType::kDynamic;
   bool ok = extent != ShapedType::kDynamic && extent >= 1 && extent <= 4096;
-  for (RankedTensorType type : types)
+  for (RankedTensorType type : tensors)
     ok &= type.getRank() == 1 && type.getDimSize(0) == extent &&
           type.getElementType().isSignlessInteger(*storageWidth);
   if (!ok)
@@ -986,7 +995,7 @@ static FailureOr<unsigned> verifyElementwiseDomain(Operation *op, Attribute nume
 }
 
 static LogicalResult verifyElementwiseDomainOnly(Operation *op, Attribute numeric,
-                                                 llvm::ArrayRef<RankedTensorType> types) {
+                                                 llvm::ArrayRef<Type> types) {
   return success(succeeded(verifyElementwiseDomain(op, numeric, types)));
 }
 

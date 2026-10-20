@@ -2352,8 +2352,9 @@ def Ondrix_FirDesignWindowedSincOp
 }
 
 // The elementwise family. Every member maps a static rank-1 uniform-Q
-// `tensor<NxiW>` (`W` of 16 or 32, `N` in [1, 4096]) elementwise and states
-// the same thing about itself: what the exact result of the operation is
+// `tensor<NxiW>` (`W` of 16 or 32, `N` in [1, 4096]) elementwise, or one `iW`
+// scalar as that tensor's single element, and states the same thing about
+// itself: what the exact result of the operation is
 // over the integers, and what the declared boundary does to it. The
 // exactness claim is what makes the boundary the only place a value can
 // change, so these operations compose without a rewrite having to
@@ -2363,7 +2364,7 @@ def Ondrix_FirDesignWindowedSincOp
 class Ondrix_ElementwiseOp<string mnemonic> : Ondrix_Op<mnemonic, [Pure]> {
   let hasVerifier = 1;
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
-  let results = (outs AnyRankedTensor:$result);
+  let results = (outs AnyType:$result);
 }
 
 class Ondrix_ExactCombineOp<string mnemonic, string noun, string symbol>
@@ -2380,8 +2381,8 @@ class Ondrix_ExactCombineOp<string mnemonic, string noun, string symbol>
     magnitude, which the declared `overflow` resolves: `saturate` clamps to
     the rail and `wrap` returns the exact value modulo `2^W`.
   }];
-  let arguments = (ins AnyRankedTensor:$lhs,
-                   AnyRankedTensor:$rhs,
+  let arguments = (ins AnyType:$lhs,
+                   AnyType:$rhs,
                    Ondsp_NumericAttr:$numeric,
                    Ondsp_OverflowModeAttr:$overflow);
 }
@@ -2410,8 +2411,8 @@ def Ondrix_MultOp : Ondrix_ElementwiseOp<"mult"> {
     to run, because neither operand is known, which is precisely why a
     cascade of two `mult` operations has no merged form at all.
   }];
-  let arguments = (ins AnyRankedTensor:$lhs,
-                   AnyRankedTensor:$rhs,
+  let arguments = (ins AnyType:$lhs,
+                   AnyType:$rhs,
                    Ondsp_NumericAttr:$numeric,
                    Ondsp_RoundingModeAttr:$rounding,
                    Ondsp_OverflowModeAttr:$overflow);
@@ -2436,8 +2437,8 @@ def Ondrix_RatioOp : Ondrix_ElementwiseOp<"ratio"> {
     source language leaves the policy unspelled only for a divisor it has
     proven positive from its structure, and then declares `trap`.
   }];
-  let arguments = (ins AnyRankedTensor:$lhs,
-                   AnyRankedTensor:$rhs,
+  let arguments = (ins AnyType:$lhs,
+                   AnyType:$rhs,
                    Ondsp_NumericAttr:$numeric,
                    Ondsp_RoundingModeAttr:$rounding,
                    Ondsp_OverflowModeAttr:$overflow,
@@ -2460,7 +2461,7 @@ class Ondrix_ExactUnaryOp<string mnemonic, string noun, string formula>
     says what happens there — `saturate` gives the maximum and `wrap` gives
     the minimum back — and every other input is unaffected by the choice.
   }];
-  let arguments = (ins AnyRankedTensor:$input,
+  let arguments = (ins AnyType:$input,
                    Ondsp_NumericAttr:$numeric,
                    Ondsp_OverflowModeAttr:$overflow);
 }
@@ -2480,7 +2481,7 @@ def Ondrix_OffsetOp : Ondrix_ElementwiseOp<"offset"> {
     `[-2^(W-1), 2^(W-1)-1]`; it is a raw value in the declared format, so
     the same integer names a different real number at the two widths.
   }];
-  let arguments = (ins AnyRankedTensor:$input,
+  let arguments = (ins AnyType:$input,
                    I64Attr:$bias,
                    Ondsp_NumericAttr:$numeric,
                    Ondsp_OverflowModeAttr:$overflow);
@@ -2509,7 +2510,7 @@ def Ondrix_ShiftOp : Ondrix_ElementwiseOp<"shift"> {
     `0, 1, -1, -2` under `toward_negative`. Those four values separate the
     rules completely, which no single positive input does.
   }];
-  let arguments = (ins AnyRankedTensor:$input,
+  let arguments = (ins AnyType:$input,
                    I64Attr:$amount,
                    Ondsp_NumericAttr:$numeric,
                    Ondsp_RoundingModeAttr:$rounding,
@@ -2534,7 +2535,7 @@ def Ondrix_DivOp : Ondrix_ElementwiseOp<"div"> {
     runtime divisor is a different operation that must declare its zero
     policy, and fails closed here by not existing.
   }];
-  let arguments = (ins AnyRankedTensor:$input,
+  let arguments = (ins AnyType:$input,
                    I64Attr:$divisor,
                    Ondsp_NumericAttr:$numeric,
                    Ondsp_RoundingModeAttr:$rounding,

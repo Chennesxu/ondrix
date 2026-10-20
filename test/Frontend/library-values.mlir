@@ -3,7 +3,7 @@
 // RUN: ondrix-compile %t/repeat.ox | FileCheck %s --check-prefix=REPEAT
 // RUN: ondrix-compile %t/callee.ox | FileCheck %s --check-prefix=CALLEE
 // RUN: not ondrix-compile %t/local.ox 2>&1 | FileCheck %s --check-prefix=OPERAND
-// RUN: not ondrix-compile %t/fixed.ox 2>&1 | FileCheck %s --check-prefix=OPERAND
+// RUN: not ondrix-compile %t/integer.ox 2>&1 | FileCheck %s --check-prefix=OPERAND
 // RUN: not ondrix-compile %t/tensor.ox 2>&1 | FileCheck %s --check-prefix=TENSOR
 // RUN: not ondrix-compile %t/goertzel.ox 2>&1 | FileCheck %s --check-prefix=NESTED
 // LOOP: scf.for {{.*}} iter_args(%[[S:.*]] = %{{.*}}) -> (f32)
@@ -16,7 +16,7 @@
 // CALLEE: ondrix.dot %arg0, %arg0
 // CALLEE: math.sqrt
 // CALLEE: arith.subf %[[FIR]]
-// OPERAND: error: a reduction inside an expression currently reads f32 parameters
+// OPERAND: error: a reduction inside an expression currently reads f32, q15 or q31 parameters
 // TENSOR: error: scalar dot and fir currently require buffer operands
 // NESTED: error: nested calls are currently supported only by unary FFT-family builtins, a fir_filter input stage, and scalar dot/fir/rms
 //--- loop.ox
@@ -42,9 +42,9 @@ def f(x: tensor[f32,4], w: buffer[f32]) -> f32:
   t = x * 2.0
   return dot(t, w, contract=off)
 
-//--- fixed.ox
-def f(q: buffer[q15]) -> f32:
-  return dot(q, q) * 1.0
+//--- integer.ox
+def f(n: i32) -> i32:
+  return dot(n, n) + 1
 
 //--- tensor.ox
 def f(x: tensor[f32,4]) -> f32:

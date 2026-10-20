@@ -73,7 +73,7 @@ func.func @abs_extent_out_of_range(%a: tensor<4097xi16>) -> tensor<4097xi16> {
 // -----
 
 func.func @negate_rejects_memref(%a: memref<8xi16>) -> tensor<8xi16> {
-  // expected-error @below {{operand #0 must be ranked tensor of any type values}}
+  // expected-error @below {{elementwise operations require i16 scalars or tensors throughout}}
   %0 = "ondrix.negate"(%a) {
     numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
     overflow = #ondsp.overflow<saturate>
@@ -182,4 +182,26 @@ func.func @ratio_mismatched_divisor(%a: tensor<8xi16>, %b: tensor<8xi32>) -> ten
     nonpositive = #ondsp.nonpositive_divisor<trap>
   } : (tensor<8xi16>, tensor<8xi32>) -> tensor<8xi16>
   return %0 : tensor<8xi16>
+}
+
+// -----
+
+func.func @add_scalar_with_tensor(%a: i16, %b: tensor<8xi16>) -> tensor<8xi16> {
+  // expected-error @below {{elementwise operations require i16 scalars or tensors throughout}}
+  %0 = ondrix.add %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>
+  } : (i16, tensor<8xi16>) -> tensor<8xi16>
+  return %0 : tensor<8xi16>
+}
+
+// -----
+
+func.func @negate_scalar_wrong_width(%a: i32) -> i32 {
+  // expected-error @below {{elementwise operations require i16 scalars or tensors throughout}}
+  %0 = ondrix.negate %a {
+    numeric = #ondsp.fixed<signed, storage = i16, frac = 15>,
+    overflow = #ondsp.overflow<saturate>
+  } : (i32) -> i32
+  return %0 : i32
 }

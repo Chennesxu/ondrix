@@ -122,3 +122,21 @@ func.func @ratio_declares_its_divisor_policy(%a: tensor<8xi32>, %b: tensor<8xi32
   } : (tensor<8xi32>, tensor<8xi32>) -> tensor<8xi32>
   return %0 : tensor<8xi32>
 }
+
+// CHECK-LABEL: func.func @scalar_members
+// CHECK: ondrix.mult {{.*}} : (i32, i32) -> i32
+// CHECK: ondrix.div {{.*}} : (i32) -> i32
+func.func @scalar_members(%a: i32, %b: i32) -> i32 {
+  %0 = ondrix.mult %a, %b {
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    rounding = #ondsp.rounding<nearest_even>,
+    overflow = #ondsp.overflow<saturate>
+  } : (i32, i32) -> i32
+  %1 = ondrix.div %0 {
+    divisor = 3 : i64,
+    numeric = #ondsp.fixed<signed, storage = i32, frac = 31>,
+    rounding = #ondsp.rounding<toward_zero>,
+    overflow = #ondsp.overflow<saturate>
+  } : (i32) -> i32
+  return %1 : i32
+}

@@ -14,6 +14,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/TypeUtilities.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 #include <algorithm>
@@ -115,14 +116,14 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     MLIRContext *context = rewriter.getContext();
-    RankedTensorType resultType = op.getResult().getType();
-    auto storage = cast<IntegerType>(resultType.getElementType());
+    auto storage = cast<IntegerType>(mlir::getElementTypeOrSelf(op.getResult().getType()));
     IntegerType wide = rewriter.getIntegerType(2 * storage.getWidth());
-
-    SmallVector<Value> sources;
-    for (Value operand : adaptor.getOperands())
-      if (isa<RankedTensorType>(operand.getType()))
-        sources.push_back(operand);
+    SmallVector<Value> sources(adaptor.getOperands());
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+    if (!resultType) {
+      rewriter.replaceOp(op, emitBody(op, sources, context, storage, wide, loc, rewriter));
+      return success();
+    }
 
     rewriter.replaceOp(op, emitElementwiseLoop(
                                loc, resultType, sources,
