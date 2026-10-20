@@ -259,7 +259,19 @@ private:
   unsigned column = 1;
 };
 
-enum class SourceType { Q15, Q31, F32, ComplexQ15, ComplexQ31, ComplexF32, U8, I32, I64, Bool };
+enum class SourceType {
+  Q15,
+  Q31,
+  F32,
+  ComplexQ15,
+  ComplexQ31,
+  ComplexF32,
+  U8,
+  I32,
+  I64,
+  Bool,
+  Index
+};
 
 // The value of an integer token, decimal or `0o` octal; true on failure, as
 // StringRef::getAsInteger.
@@ -478,7 +490,14 @@ enum class PrimitiveKind {
   Not,
   And,
   Or,
+  // Statement sequences: operand i is assigned to bindingNames[i], or is a
+  // nested Loop under an empty name. A Scope's last operand is its result. A
+  // Loop's operands are start, stop, then its body; bindingNames[0] names the
+  // induction variable.
   Scope,
+  Loop,
+  Length,
+  Element,
   Typed
 };
 
@@ -565,6 +584,9 @@ struct BuiltinCallAst {
   std::vector<int64_t> polynomials;
   SourceType target = SourceType::Q15;
   bool literal = false;
+  int64_t step = 1;
+  std::vector<std::string> carriedNames;
+  bool inBounds = false;
   SourcePosition position;
 };
 
@@ -790,6 +812,8 @@ public:
     while (true) {
       bindings.clear();
       bindingsByName.clear();
+      scopedOut.clear();
+      scopedOutUse.reset();
       std::optional<KernelAst> function = parseFunction();
       if (!function)
         return std::nullopt;
@@ -892,27 +916,14 @@ public:
     caller = &kernel;
     genericExpressions = policyType == SourceType::F32 || policyType == SourceType::I32 ||
                          policyType == SourceType::I64 || policyType == SourceType::Bool;
-    while (current.kind == TokenKind::Identifier && current.spelling != "return" &&
-           next.kind == TokenKind::Equal) {
-      Token name = current;
-      bool collides = bindingsByName.contains(name.spelling) ||
-                      llvm::any_of(kernel.parameters, [&](const ParameterAst &parameter) {
-                        return parameter.name == name.spelling;
-                      });
-      if (collides) {
-        diagnostics.error(name.position, llvm::Twine("local '") + name.spelling +
-                                             "' collides with an existing name");
+    BuiltinCallAst body = makePrimitive(PrimitiveKind::Scope, {}, current.position);
+    while (isStatementStart())
+      if (!parseStatement(body, policyType))
         return std::nullopt;
-      }
-      advance();
-      advance();
-      std::optional<BuiltinCallAst> bound = parseStatementExpression(policyType);
-      if (!bound)
-        return std::nullopt;
-      bindingsByName[name.spelling] = bindings.size();
-      bindings.push_back(Binding{
-          genericExpressions ? ("$local" + std::to_string(nextLocal++)) : name.spelling.str(),
-          ExpressionAst(std::move(*bound)), name.position, false, name.spelling.str()});
+    if (isLoopStart()) {
+      diagnostics.error(current.position,
+                        "loops require an ordinary i32, i64, bool or f32 function result");
+      return std::nullopt;
     }
     if (!expectIdentifier("return", "expected a single return statement"))
       return std::nullopt;
@@ -920,13 +931,18 @@ public:
     if (!result)
       return std::nullopt;
     kernel.result = std::move(*result);
-    if (genericExpressions && !bindings.empty())
-      kernel.result = bindLocals(std::move(kernel.result));
+    if (genericExpressions && !body.operands.empty())
+      kernel.result = bindLocals(std::move(body), std::move(kernel.result));
     caller = nullptr;
     if (current.kind != TokenKind::Eof && !isIdentifier("def")) {
       diagnostics.error(current.position,
                         "a function body is a single return statement; expected 'def' or "
                         "end of file");
+      return std::nullopt;
+    }
+    if (scopedOutUse) {
+      diagnostics.error(scopedOutUse->position, llvm::Twine("local '") + scopedOutUse->spelling +
+                                                    "' is only visible inside its loop body");
       return std::nullopt;
     }
     for (const Binding &binding : bindings) {
@@ -2125,6 +2141,30 @@ private:
         return std::nullopt;
       return Operand{std::nullopt, *literal, position};
     }
+    if (genericExpressions && current.kind == TokenKind::Identifier &&
+        next.kind == TokenKind::LeftBracket) {
+      Token base = current;
+      advance();
+      advance();
+      std::optional<Operand> index = parseLogicalOr();
+      if (!index || !expect(TokenKind::RightBracket, "expected ']' after the index"))
+        return std::nullopt;
+      ExpressionAst reference = resolveOperand(base);
+      return Operand{ExpressionAst(makePrimitive(PrimitiveKind::Element,
+                                                 {&reference, &*index->expression}, position)),
+                     0, position};
+    }
+    if (genericExpressions && isIdentifier("len") && next.kind == TokenKind::LeftParen &&
+        !calleesByName.contains("len")) {
+      advance();
+      advance();
+      std::optional<Token> base = parseIdentifier("expected a buffer or tensor parameter");
+      if (!base || !expect(TokenKind::RightParen, "expected ')' after the len operand"))
+        return std::nullopt;
+      ExpressionAst reference = resolveOperand(*base);
+      return Operand{ExpressionAst(makePrimitive(PrimitiveKind::Length, {&reference}, position)), 0,
+                     position};
+    }
     bool isCall = current.kind == TokenKind::Identifier && next.kind == TokenKind::LeftParen;
     if (isCall && calleesByName.contains(current.spelling)) {
       // Inside a chain the composition checker establishes element types, so
@@ -2648,9 +2688,138 @@ private:
     SourcePosition position;
     bool consumed = false;
     std::string sourceName;
+    bool readOnly = false;
   };
 
-  BuiltinCallAst bindLocals(BuiltinCallAst result) {
+  bool isLoopStart() const { return isIdentifier("for") && next.kind == TokenKind::Identifier; }
+  bool isStatementStart() const {
+    return current.kind == TokenKind::Identifier &&
+           (next.kind == TokenKind::Equal || (genericExpressions && isLoopStart()));
+  }
+  bool isParameterName(StringRef name) const {
+    return llvm::any_of(caller->parameters,
+                        [&](const ParameterAst &parameter) { return parameter.name == name; });
+  }
+
+  // One assignment or loop appended to `owner`. A reassigned local keeps its
+  // name; Sema requires it to keep its type.
+  bool parseStatement(BuiltinCallAst &owner, SourceType policyType) {
+    if (isLoopStart())
+      return parseLoop(owner, policyType);
+    Token name = current;
+    auto found = bindingsByName.find(name.spelling);
+    if (found != bindingsByName.end() && bindings[found->second].readOnly) {
+      diagnostics.error(name.position,
+                        llvm::Twine("loop variable '") + name.spelling + "' is read-only");
+      return false;
+    }
+    if (isParameterName(name.spelling) || (found != bindingsByName.end() && !genericExpressions)) {
+      diagnostics.error(name.position, llvm::Twine("local '") + name.spelling +
+                                           "' collides with an existing name");
+      return false;
+    }
+    advance();
+    advance();
+    std::optional<BuiltinCallAst> bound = parseStatementExpression(policyType);
+    if (!bound)
+      return false;
+    if (found == bindingsByName.end()) {
+      scopedOut.erase(name.spelling);
+      bindingsByName[name.spelling] = bindings.size();
+      bindings.push_back(Binding{genericExpressions ? ("$local" + std::to_string(nextLocal++))
+                                                    : name.spelling.str(),
+                                 ExpressionAst(*bound), name.position, false, name.spelling.str()});
+      found = bindingsByName.find(name.spelling);
+    }
+    owner.bindingNames.push_back(bindings[found->second].name);
+    owner.operands.push_back(ExpressionAst(std::move(*bound)));
+    return true;
+  }
+
+  // `for v in range([start,] stop[, step]):` then the statements indented
+  // past the `for`. Names first bound in the body do not outlive it.
+  bool parseLoop(BuiltinCallAst &owner, SourceType policyType) {
+    Token keyword = current;
+    advance();
+    Token variable = current;
+    advance();
+    if (bindingsByName.contains(variable.spelling) || isParameterName(variable.spelling)) {
+      diagnostics.error(variable.position, llvm::Twine("loop variable '") + variable.spelling +
+                                               "' collides with an existing name");
+      return false;
+    }
+    if (!expectIdentifier("in", "expected 'in' after the loop variable") ||
+        !expectIdentifier("range", "expected 'range(...)' after 'in'") ||
+        !expect(TokenKind::LeftParen, "expected '(' after 'range'"))
+      return false;
+    std::vector<ExpressionAst> bounds;
+    do {
+      if (!bounds.empty())
+        advance();
+      std::optional<Operand> bound = parseLogicalOr();
+      if (!bound)
+        return false;
+      bounds.push_back(std::move(*bound->expression));
+    } while (current.kind == TokenKind::Comma && bounds.size() < 3);
+    if (!expect(TokenKind::RightParen, "range takes at most three arguments; expected ')'") ||
+        !expect(TokenKind::Colon, "expected ':' after the range"))
+      return false;
+
+    BuiltinCallAst loop = makePrimitive(PrimitiveKind::Loop, {}, keyword.position);
+    if (bounds.size() == 3) {
+      const BuiltinCallAst *step = bounds.back().call.get();
+      int64_t value = 0;
+      bool literal = step && step->kind == ReductionKind::Primitive &&
+                     step->primitive == PrimitiveKind::Literal &&
+                     !StringRef(step->spelling).getAsInteger(10, value);
+      if (!literal || value == 0) {
+        diagnostics.error(bounds.back().position, "range step must be a nonzero integer literal");
+        return false;
+      }
+      loop.step = value;
+      bounds.pop_back();
+    }
+    if (bounds.size() == 1) {
+      BuiltinCallAst zero = makePrimitive(PrimitiveKind::Literal, {}, keyword.position);
+      zero.spelling = "0";
+      loop.operands.push_back(ExpressionAst(std::move(zero)));
+    }
+    for (ExpressionAst &bound : bounds)
+      loop.operands.push_back(std::move(bound));
+    std::string induction = "$local" + std::to_string(nextLocal++);
+    loop.bindingNames = {induction, ""};
+
+    llvm::StringMap<size_t> outer = bindingsByName;
+    bindingsByName[variable.spelling] = bindings.size();
+    bindings.push_back(Binding{induction, ExpressionAst(induction, variable.position),
+                               variable.position, true, variable.spelling.str(), true});
+    unsigned column = current.position.column;
+    if (current.kind == TokenKind::Eof || column <= keyword.position.column) {
+      diagnostics.error(current.position, "expected an indented loop body");
+      return false;
+    }
+    while (current.kind != TokenKind::Eof && current.position.column == column) {
+      if (!isStatementStart()) {
+        diagnostics.error(current.position, "expected an assignment or a nested loop");
+        return false;
+      }
+      if (!parseStatement(loop, policyType))
+        return false;
+    }
+    if (current.kind != TokenKind::Eof && current.position.column > keyword.position.column) {
+      diagnostics.error(current.position, "inconsistent indentation in the loop body");
+      return false;
+    }
+    for (const auto &entry : bindingsByName)
+      if (!outer.contains(entry.getKey()))
+        scopedOut.insert(entry.getKey());
+    bindingsByName = std::move(outer);
+    owner.bindingNames.push_back("");
+    owner.operands.push_back(ExpressionAst(std::move(loop)));
+    return true;
+  }
+
+  BuiltinCallAst bindLocals(BuiltinCallAst scope, BuiltinCallAst result) {
     std::function<bool(const BuiltinCallAst &)> isLegacyTree = [&](const BuiltinCallAst &call) {
       if (call.kind == ReductionKind::Primitive && call.primitive != PrimitiveKind::Identity)
         return false;
@@ -2658,22 +2827,25 @@ private:
         return operand.isParameterReference() || isLegacyTree(*operand.call);
       });
     };
-    bool legacy = isLegacyTree(result) && llvm::all_of(bindings, [&](const Binding &binding) {
-                    return isLegacyTree(*binding.expression.call);
+    llvm::StringSet<> assigned;
+    bool legacy = isLegacyTree(result) &&
+                  llvm::all_of(llvm::zip(scope.bindingNames, scope.operands), [&](auto statement) {
+                    return assigned.insert(std::get<0>(statement)).second &&
+                           isLegacyTree(*std::get<1>(statement).call);
                   });
     if (legacy) {
       std::vector<ExpressionAst> values;
-      values.reserve(bindings.size());
+      values.reserve(scope.operands.size());
       llvm::StringMap<const ExpressionAst *> names;
-      for (const Binding &binding : bindings) {
-        ExpressionAst value = instantiateExpression(binding.expression, names, std::nullopt);
+      for (auto [name, expression] : llvm::zip(scope.bindingNames, scope.operands)) {
+        ExpressionAst value = instantiateExpression(expression, names, std::nullopt);
         if (value.call && value.call->kind == ReductionKind::Primitive &&
             value.call->primitive == PrimitiveKind::Identity) {
           ExpressionAst operand = std::move(value.call->operands.front());
           value = std::move(operand);
         }
         values.push_back(std::move(value));
-        names[binding.name] = &values.back();
+        names[name] = &values.back();
       }
       result = instantiateCall(result, names, std::nullopt);
       if (result.kind == ReductionKind::Primitive && result.primitive == PrimitiveKind::Identity &&
@@ -2683,14 +2855,7 @@ private:
       }
       return result;
     }
-    BuiltinCallAst scope;
-    scope.kind = ReductionKind::Primitive;
-    scope.primitive = PrimitiveKind::Scope;
     scope.position = result.position;
-    for (const Binding &binding : bindings) {
-      scope.bindingNames.push_back(binding.name);
-      scope.operands.push_back(ExpressionAst(binding.expression));
-    }
     scope.operands.push_back(ExpressionAst(std::move(result)));
     return scope;
   }
@@ -2700,8 +2865,11 @@ private:
   // the pipeline's canonicalize/cse collapses them back to one evaluation.
   ExpressionAst resolveOperand(const Token &token) {
     auto binding = bindingsByName.find(token.spelling);
-    if (binding == bindingsByName.end())
+    if (binding == bindingsByName.end()) {
+      if (scopedOut.contains(token.spelling) && !scopedOutUse)
+        scopedOutUse = token;
       return ExpressionAst(token.spelling.str(), token.position);
+    }
     Binding &bound = bindings[binding->second];
     bound.consumed = true;
     if (genericExpressions)
@@ -2711,6 +2879,9 @@ private:
 
   bool genericExpressions = false;
   unsigned nextLocal = 0;
+  // Names bound only inside a finished loop body, and the first later read.
+  llvm::StringSet<> scopedOut;
+  std::optional<Token> scopedOutUse;
   Lexer &lexer;
   Diagnostics &diagnostics;
   Token current;
@@ -3621,6 +3792,118 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       auto found = localConstants.find(expression.parameter);
       return found == localConstants.end() ? std::nullopt : std::optional<APInt>(found->second);
     };
+    // Induction variables whose range proves `0 <= v < len(parameter)`.
+    llvm::StringMap<std::string> provenIndices;
+    auto sameType = [](ComposedType lhs, ComposedType rhs) {
+      return lhs.elementType == rhs.elementType && lhs.extent == rhs.extent;
+    };
+    std::function<void(const BuiltinCallAst &, size_t, SmallVector<std::string> &)>
+        collectAssigned =
+            [&](const BuiltinCallAst &owner, size_t begin, SmallVector<std::string> &names) {
+              for (size_t i = begin; i < owner.bindingNames.size(); ++i) {
+                if (owner.bindingNames[i].empty())
+                  collectAssigned(*owner.operands[i].call, 2, names);
+                else if (!llvm::is_contained(names, owner.bindingNames[i]))
+                  names.push_back(owner.bindingNames[i]);
+              }
+            };
+    std::function<bool(BuiltinCallAst &)> checkLoop;
+    auto checkStatements = [&](BuiltinCallAst &owner, size_t begin) {
+      for (size_t i = begin; i < owner.bindingNames.size(); ++i) {
+        ExpressionAst &statement = owner.operands[i];
+        const std::string &name = owner.bindingNames[i];
+        if (name.empty()) {
+          if (!checkLoop(*statement.call))
+            return false;
+          continue;
+        }
+        std::optional<ComposedType> type = checkComposedExpression(statement);
+        if (!type)
+          return false;
+        auto previous = localTypes.find(name);
+        if (previous != localTypes.end() && !sameType(previous->second, *type)) {
+          diagnostics.error(statement.position, "a reassignment must keep the local's type");
+          return false;
+        }
+        localTypes[name] = *type;
+        if (auto value = constant(statement))
+          localConstants.insert_or_assign(name, *value);
+        else
+          localConstants.erase(name);
+      }
+      return true;
+    };
+    checkLoop = [&](BuiltinCallAst &loop) {
+      SmallVector<std::optional<ComposedType>, 2> bounds(2);
+      std::optional<SourceType> domain;
+      for (size_t i = 0; i < 2; ++i) {
+        if (needsLiteralContext(loop.operands[i]))
+          continue;
+        bounds[i] = checkComposedExpression(loop.operands[i]);
+        if (!bounds[i])
+          return false;
+        domain = domain.value_or(bounds[i]->elementType);
+      }
+      auto savedHint = literalHint;
+      literalHint = domain.value_or(SourceType::I32);
+      for (size_t i = 0; i < 2; ++i)
+        if (!bounds[i] && !(bounds[i] = checkComposedExpression(loop.operands[i])))
+          return false;
+      literalHint = savedHint;
+      SourceType type = bounds[0]->elementType;
+      if (!sameType(*bounds[0], *bounds[1]) || bounds[0]->extent ||
+          (type != SourceType::Index && type != SourceType::I32 && type != SourceType::I64)) {
+        diagnostics.error(loop.position, "range bounds must share one index, i32 or i64 type");
+        return false;
+      }
+      if (!llvm::isIntN(type == SourceType::I64 ? 64 : 32, loop.step)) {
+        diagnostics.error(loop.position, "range step is out of range for the bound type");
+        return false;
+      }
+
+      SmallVector<std::string> assigned;
+      collectAssigned(loop, 2, assigned);
+      loop.carriedNames.clear();
+      for (const std::string &name : assigned) {
+        auto outer = localTypes.find(name);
+        if (outer == localTypes.end())
+          continue;
+        if (outer->second.extent) {
+          diagnostics.error(loop.position, "a loop can only carry scalar locals");
+          return false;
+        }
+        loop.carriedNames.push_back(name);
+        localConstants.erase(name);
+      }
+      auto outerTypes = localTypes;
+      auto outerConstants = localConstants;
+      const std::string &induction = loop.bindingNames[0];
+      localTypes[induction] = ComposedType{type, 0};
+      const BuiltinCallAst *stop = loop.operands[1].call.get();
+      std::optional<APInt> start = constant(loop.operands[0]);
+      if (loop.step > 0 && start && !start->isNegative() && stop &&
+          stop->kind == ReductionKind::Primitive && stop->primitive == PrimitiveKind::Length)
+        provenIndices[induction] = stop->operands.front().parameter;
+      bool checked = checkStatements(loop, 2);
+      provenIndices.erase(induction);
+      localTypes = std::move(outerTypes);
+      localConstants = std::move(outerConstants);
+      return checked;
+    };
+    // The parameter `len` and subscripts read; complex_f32 is excluded because
+    // its storage extent is not its element count.
+    auto getIndexedParameter = [&](const ExpressionAst &base) -> const ParameterAst * {
+      auto parameter = parametersByName.find(base.parameter);
+      if (parameter == parametersByName.end() || !hasRank(parameter->second->shape, 1) ||
+          parameter->second->type != SourceType::F32) {
+        diagnostics.error(base.position, "len and indexing currently require a rank-one f32 "
+                                         "buffer or tensor parameter");
+        return nullptr;
+      }
+      ++parameterUses[base.parameter];
+      return parameter->second;
+    };
+
     auto checkPrimitive = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       auto reject = [&](const Twine &message) -> std::optional<ComposedType> {
         diagnostics.error(call.position, message);
@@ -3635,19 +3918,38 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       if (op == PrimitiveKind::Scope) {
         auto saved = localTypes;
         auto savedConstants = localConstants;
-        for (size_t i = 0; i < call.bindingNames.size(); ++i) {
-          auto type = checkComposedExpression(call.operands[i]);
-          if (!type)
-            return std::nullopt;
-          localTypes[call.bindingNames[i]] = *type;
-          if (auto value = constant(call.operands[i]))
-            localConstants.insert_or_assign(call.bindingNames[i], *value);
+        std::optional<ComposedType> result;
+        if (checkStatements(call, 0)) {
+          result = checkComposedExpression(call.operands.back());
+          call.integerConstant = constant(call.operands.back());
         }
-        auto result = checkComposedExpression(call.operands.back());
-        call.integerConstant = constant(call.operands.back());
         localTypes = std::move(saved);
         localConstants = std::move(savedConstants);
         return result ? finish(*result) : std::nullopt;
+      }
+      if (op == PrimitiveKind::Length) {
+        if (!getIndexedParameter(call.operands.front()))
+          return std::nullopt;
+        return finish({SourceType::Index, 0});
+      }
+      if (op == PrimitiveKind::Element) {
+        const ParameterAst *parameter = getIndexedParameter(call.operands.front());
+        if (!parameter)
+          return std::nullopt;
+        auto savedHint = literalHint;
+        literalHint = SourceType::Index;
+        std::optional<ComposedType> index = checkComposedExpression(call.operands[1]);
+        literalHint = savedHint;
+        if (!index)
+          return std::nullopt;
+        if (index->extent ||
+            (index->elementType != SourceType::Index && index->elementType != SourceType::I32 &&
+             index->elementType != SourceType::I64))
+          return reject("an index must be an index, i32 or i64 scalar");
+        const ExpressionAst &position = call.operands[1];
+        call.inBounds = position.isParameterReference() &&
+                        provenIndices.lookup(position.parameter) == parameter->name;
+        return finish({SourceType::F32, 0});
       }
       if (op == PrimitiveKind::Literal) {
         SourceType type = literalHint.value_or(ast.primaryResult().type);
@@ -3672,9 +3974,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           call.fpConstant = value.convertToFloat();
           return finish({type, 0});
         }
-        if (type != SourceType::I32 && type != SourceType::I64)
+        if (type != SourceType::I32 && type != SourceType::I64 && type != SourceType::Index)
           return reject("ordinary literal requires an integer or f32 context");
-        unsigned width = type == SourceType::I32 ? 32 : 64;
+        // An index literal must mean the same value at every target index width.
+        unsigned width = type == SourceType::I64 ? 64 : 32;
         StringRef spelling(call.spelling);
         bool negative = spelling.consume_front("-");
         APInt magnitude(128, 0);
@@ -3687,7 +3990,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           ++limit;
         if (magnitude.ugt(limit))
           return reject("integer literal is out of range");
-        call.integerConstant = negative ? -magnitude.trunc(width) : magnitude.trunc(width);
+        APInt value = negative ? -magnitude.trunc(width) : magnitude.trunc(width);
+        call.integerConstant = type == SourceType::Index ? value.sext(64) : value;
         return finish({type, 0});
       }
       if (op == PrimitiveKind::Typed) {
@@ -3770,7 +4074,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return finish({SourceType::Bool, 0});
       }
       bool floating = lhs->elementType == SourceType::F32;
-      bool integer = lhs->elementType == SourceType::I32 || lhs->elementType == SourceType::I64;
+      bool index = lhs->elementType == SourceType::Index;
+      bool integer =
+          index || lhs->elementType == SourceType::I32 || lhs->elementType == SourceType::I64;
       if (!floating && !integer && !(comparison && lhs->elementType == SourceType::Bool))
         return reject("ordinary arithmetic requires i32, i64 or f32 operands");
       int64_t extent = lhs->extent;
@@ -3792,6 +4098,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           return reject("bool only supports equality and inequality comparisons");
         return finish({SourceType::Bool, 0});
       }
+      if (index && (op == PrimitiveKind::Mul || op == PrimitiveKind::Div))
+        return reject("index arithmetic supports only + and -");
       auto a = constant(call.operands.front());
       auto b = rhs ? constant(call.operands[1]) : std::nullopt;
       if (integer && op == PrimitiveKind::Div) {
@@ -3823,6 +4131,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         default:
           break;
         }
+        if (index && call.integerConstant && !call.integerConstant->isSignedIntN(32))
+          return reject("constant index expression leaves the signed 32-bit range");
       }
       return finish({lhs->elementType, extent});
     };
@@ -5244,6 +5554,8 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
       return builder.getI64Type();
     if (type == SourceType::Bool)
       return builder.getI1Type();
+    if (type == SourceType::Index)
+      return builder.getIndexType();
     if (type == SourceType::Q15)
       return builder.getI16Type();
     if (type == SourceType::Q31 || type == SourceType::ComplexQ15)
@@ -5381,13 +5693,122 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
           return builder.create<arith::ConstantOp>(
               loc, builder.getIntegerAttr(type, *call.integerConstant));
         }
+        auto lengthOf = [&](Value base) -> Value {
+          if (isa<MemRefType>(base.getType()))
+            return builder.create<memref::DimOp>(loc, base, 0);
+          return builder.create<tensor::DimOp>(loc, base, 0);
+        };
+        std::function<void(const BuiltinCallAst &, size_t)> emitStatements;
+        auto emitLoop = [&](const BuiltinCallAst &loop) {
+          Location loopLoc = getLocation(context, sourceName, loop.position);
+          Value start = emitOperand(loop.operands[0]);
+          Value stop = emitOperand(loop.operands[1]);
+          Type type = start.getType();
+          unsigned width = type.isIndex() ? 64 : type.getIntOrFloatBitWidth();
+          auto constantOf = [&](const APInt &value) -> Value {
+            return builder.create<arith::ConstantOp>(loopLoc, builder.getIntegerAttr(type, value));
+          };
+          Value zero = constantOf(APInt(width, 0));
+          Value one = constantOf(APInt(width, 1));
+          SmallVector<Value> initial;
+          for (const std::string &name : loop.carriedNames)
+            initial.push_back(arguments.lookup(name));
+          auto emitBody = [&](Value induction, ValueRange carried) {
+            auto saved = arguments;
+            arguments[loop.bindingNames[0]] = induction;
+            for (auto [name, value] : llvm::zip(loop.carriedNames, carried))
+              arguments[name] = value;
+            emitStatements(loop, 2);
+            SmallVector<Value> next;
+            for (const std::string &name : loop.carriedNames)
+              next.push_back(arguments.lookup(name));
+            arguments = std::move(saved);
+            return next;
+          };
+          SmallVector<Value> results;
+          if (loop.step == 1) {
+            auto forOp = builder.create<scf::ForOp>(
+                loopLoc, start, stop, one, initial,
+                [&](OpBuilder &, Location, Value induction, ValueRange carried) {
+                  builder.create<scf::YieldOp>(loopLoc, emitBody(induction, carried));
+                });
+            llvm::append_range(results, forOp.getResults());
+          } else {
+            // Count ceil(distance / |step|) exactly in unsigned arithmetic, so
+            // no induction value is ever computed past the range.
+            bool ascending = loop.step > 0;
+            Value nonempty = builder.create<arith::CmpIOp>(
+                loopLoc, ascending ? arith::CmpIPredicate::slt : arith::CmpIPredicate::sgt, start,
+                stop);
+            Value distance = ascending ? builder.create<arith::SubIOp>(loopLoc, stop, start)
+                                       : builder.create<arith::SubIOp>(loopLoc, start, stop);
+            Value magnitude = constantOf(APInt(width, loop.step, true).abs());
+            Value whole = builder.create<arith::DivUIOp>(
+                loopLoc, builder.create<arith::SubIOp>(loopLoc, distance, one), magnitude);
+            Value trips = builder.create<arith::SelectOp>(
+                loopLoc, nonempty, builder.create<arith::AddIOp>(loopLoc, whole, one), zero);
+            Value step = constantOf(APInt(width, loop.step, true));
+            SmallVector<Value> operands{zero};
+            llvm::append_range(operands, initial);
+            auto whileOp = builder.create<scf::WhileOp>(
+                loopLoc, ValueRange(operands).getTypes(), operands,
+                [&](OpBuilder &, Location, ValueRange args) {
+                  Value more = builder.create<arith::CmpIOp>(loopLoc, arith::CmpIPredicate::ne,
+                                                             args.front(), trips);
+                  builder.create<scf::ConditionOp>(loopLoc, more, args);
+                },
+                [&](OpBuilder &, Location, ValueRange args) {
+                  Value offset = builder.create<arith::MulIOp>(loopLoc, args.front(), step);
+                  Value induction = builder.create<arith::AddIOp>(loopLoc, start, offset);
+                  SmallVector<Value> next{
+                      builder.create<arith::AddIOp>(loopLoc, args.front(), one)};
+                  llvm::append_range(next, emitBody(induction, args.drop_front()));
+                  builder.create<scf::YieldOp>(loopLoc, next);
+                });
+            llvm::append_range(results, whileOp.getResults().drop_front());
+          }
+          for (auto [name, value] : llvm::zip(loop.carriedNames, results))
+            arguments[name] = value;
+        };
+        emitStatements = [&](const BuiltinCallAst &owner, size_t begin) {
+          for (size_t i = begin; i < owner.bindingNames.size(); ++i) {
+            if (owner.bindingNames[i].empty())
+              emitLoop(*owner.operands[i].call);
+            else
+              arguments[owner.bindingNames[i]] = emitOperand(owner.operands[i]);
+          }
+        };
         if (op == PrimitiveKind::Scope) {
           auto saved = arguments;
-          for (size_t i = 0; i < call.bindingNames.size(); ++i)
-            arguments[call.bindingNames[i]] = emitOperand(call.operands[i]);
+          emitStatements(call, 0);
           Value result = emitOperand(call.operands.back());
           arguments = std::move(saved);
           return result;
+        }
+        if (op == PrimitiveKind::Length)
+          return lengthOf(emitOperand(call.operands.front()));
+        if (op == PrimitiveKind::Element) {
+          Value base = emitOperand(call.operands.front());
+          Value index = emitOperand(call.operands[1]);
+          Value position =
+              index.getType().isIndex()
+                  ? index
+                  : builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), index);
+          if (!call.inBounds) {
+            // An i64 index is compared before narrowing to a 32-bit target index.
+            Value length = lengthOf(base);
+            Value inBounds =
+                index.getType().isInteger(64)
+                    ? builder.create<arith::CmpIOp>(
+                          loc, arith::CmpIPredicate::ult, index,
+                          builder.create<arith::IndexCastOp>(loc, builder.getI64Type(), length))
+                    : builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, position,
+                                                    length);
+            builder.create<cf::AssertOp>(loc, inBounds, "index out of bounds");
+          }
+          if (isa<MemRefType>(base.getType()))
+            return builder.create<memref::LoadOp>(loc, base, position);
+          return builder.create<tensor::ExtractOp>(loc, base, position);
         }
         Value lhs = emitOperand(call.operands.front());
         if (op == PrimitiveKind::Identity || op == PrimitiveKind::Pos || op == PrimitiveKind::Typed)
@@ -5447,6 +5868,23 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
             default:
               llvm_unreachable("checked floating expression");
             }
+          }
+          if (a.getType().isIndex()) {
+            // Index +/- traps on signed overflow of the target's index width.
+            Value zero = b.create<arith::ConstantIndexOp>(loc, 0);
+            Value lhs = op == PrimitiveKind::Neg ? zero : a;
+            Value rhs = op == PrimitiveKind::Neg ? a : c;
+            bool add = op == PrimitiveKind::Add;
+            Value result = add ? b.create<arith::AddIOp>(loc, lhs, rhs).getResult()
+                               : b.create<arith::SubIOp>(loc, lhs, rhs).getResult();
+            auto differ = [&](Value x, Value y) { return b.create<arith::XOrIOp>(loc, x, y); };
+            Value overflow =
+                add ? b.create<arith::AndIOp>(loc, differ(lhs, result), differ(rhs, result))
+                    : b.create<arith::AndIOp>(loc, differ(lhs, rhs), differ(lhs, result));
+            b.create<cf::AssertOp>(
+                loc, b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, overflow, zero),
+                "index arithmetic overflow");
+            return result;
           }
           if (op == PrimitiveKind::Neg) {
             Value zero = b.create<arith::ConstantOp>(loc, b.getIntegerAttr(a.getType(), 0));

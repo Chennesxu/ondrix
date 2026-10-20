@@ -45,8 +45,47 @@ integer/f32 operands, without fixed-point rounding or overflow parameters.
 
 Q15/Q31 retain their raw-literal and quantization rules. Their tensor `-x`
 uses `negate(x)`, saturating by default. DSP builtin composition retains its
-existing restrictions. Plain integer/bool tensors, indexing, mutable
-assignment, and source `for`/`if`/`while` statements remain unsupported.
+existing restrictions. Plain integer/bool tensors, array writes, and source
+`if`/`while` statements remain unsupported.
+
+## Counted Loops and Indexed Reads
+
+Ordinary expression bodies may contain `for` loops over `range`, reassign
+locals, and read rank-one f32 buffer or tensor parameters by index:
+
+```python
+def energy(x: buffer[f32]) -> f32:
+  total = 0.0
+  for i in range(len(x)):
+    total = total + x[i] * x[i]
+  return total
+```
+
+A loop body is the statements indented past its `for`; loops nest. A
+reassignment keeps the local's type. Parameters and loop variables are
+read-only, and a local first bound inside a loop body is visible only there.
+A local bound before a loop and reassigned in it carries its value from one
+iteration to the next; only scalar locals can be carried. Fixed-point bodies
+keep the single-expression form.
+
+`range(stop)`, `range(start, stop)` and `range(start, stop, step)` follow
+Python's exact semantics: the values `start + k*step` strictly before `stop`
+in the direction of `step`, with no wraparound at the type limits. `step` is
+a nonzero integer literal (default 1). The bounds share one type, `index`,
+`i32` or `i64`, which the loop variable takes; literal bounds take their type
+from the other bound and are `i32` when both are literals.
+
+`len(x)` has type `index`, the target's address width (32 bits on a 32-bit
+target). `index` has no source spelling and no implicit conversion: it
+supports unary and binary `+`/`-` and comparisons, traps if a result
+overflows the target width, and its literals and constant subexpressions must
+fit signed 32 bits so every target reads them alike. `x[e]` accepts an
+`index`, `i32` or `i64` index and traps unless `0 <= e < len(x)`. The check
+is omitted when `e` is the loop variable of a positive-step range whose stop
+is `len(x)` of the same parameter and whose start is omitted or a
+nonnegative literal. Each iteration runs its statements in order, so an f32
+recurrence keeps its written operation order under the `off` contract,
+including its initial value: `energy` of an empty buffer is `+0.0`.
 
 For a statically bounded Q15 dot, FIR sample, FIR decimation, FIR
 interpolation, convolution, or correlation, omitting the accumulator policy
@@ -1030,11 +1069,11 @@ runs. The checked mode is a debugging aid, a few compares per buffer pair,
 and off by default; the same header serves both builds.
 
 This is not a general Python parser. Imports, classes, heap objects, arbitrary
-expressions, and dynamic Python behavior are rejected. Scalar constants,
-indexing, loops, mutable output buffers, multiple exported kernels, and
-inferred accumulators outside the statically bounded Q15 real-reduction slice
-remain unimplemented. Textual MLIR remains an independent and more complete compiler
-entry point.
+expressions, and dynamic Python behavior are rejected. Array writes,
+`if`/`while` statements, mutable output buffers, multiple exported kernels,
+and inferred accumulators outside the statically bounded Q15 real-reduction
+slice remain unimplemented. Textual MLIR remains an independent and more
+complete compiler entry point.
 
 ## Semantic Boundary And Design Rules
 
