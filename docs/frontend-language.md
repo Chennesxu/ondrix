@@ -89,6 +89,34 @@ nonnegative literal. Each iteration runs its statements in order, so an f32
 recurrence keeps its written operation order under the `off` contract,
 including its initial value: `energy` of an empty buffer is `+0.0`.
 
+## Output Buffers
+
+A `mut buffer[T]` or `mut buffer[T, N]` parameter, with `T` one of f32, q15
+and q31, is rank-one storage the caller owns and the function reads and
+writes in place. `y[e] = v` stores `v`, which must have type `T` (a literal
+takes `T`), and traps unless `0 <= e < len(y)`, with the same omitted check as
+reads. Reads see the buffer's current contents: the caller's on entry, then
+every earlier write, in statement order. A function without `->` has no
+result and no `return`, and must take a mut buffer:
+
+```python
+def scale(x: buffer[f32], y: mut buffer[f32], g: f32):
+  for i in range(len(y)):
+    y[i] = g * x[i]
+
+def prefix(y: mut buffer[f32]):
+  for i in range(1, len(y)):
+    y[i] = y[i] + y[i - 1]
+```
+
+Only buffers are mutable: a tensor is a value, and other parameters and locals
+are never written through a subscript. A mut buffer is used only through
+subscripts and `len`: it cannot yet be a `dot`, `fir` or `rms` operand or be
+bound whole to a local, and the exported function is the only one that takes
+a mut buffer. The C entry
+passes it as `T *` (`const T *` if nothing writes it) with its own length,
+and the declared non-overlap precondition covers it like any other buffer.
+
 ## Reductions Inside Expressions
 
 In an ordinary expression body, `dot`, `fir` and scalar `rms` calls are
@@ -1095,7 +1123,7 @@ tensors of static shape, and whose results are one scalar or tensors of static
 shape, also gets a plain C entry point, `ondrix_<kernel>`, built by the
 canonical pipeline once the descriptors have expanded: scalar parameters
 remain values in source order, with one `const T *` per buffer/tensor
-parameter and one `T *` per tensor result (`output`, or `output0`, `output1`,
+parameter (`T *` for a buffer the kernel writes) and one `T *` per tensor result (`output`, or `output0`, `output1`,
 ... for several), and, for each group of parameters whose windows a reduction
 pairs at equal length (the two operands of `dot` and `fir`), one
 `uintN_t length` in the target's index width, placed after the group's last
@@ -1105,8 +1133,8 @@ Scalars `i32`, `i64`, and `f32` use `int32_t`, `int64_t`, and `float`. A
 boolean uses `uint8_t` in the plain C interface: every nonzero input byte
 means true, and a boolean result is exactly 0 or 1. The kernel writes a static
 result straight into the caller's array (`forward-ondrix-result-buffers`
-removes the local copy) and allocates nothing. An input is `const` in fact as
-well as in the header: every tensor argument is declared read-only before
+removes the local copy) and allocates nothing. A `const` input is `const` in
+fact as well as in the header: every tensor argument is declared read-only before
 bufferization, so a kernel that carries state, the recursive and adaptive
 filters, never writes an input but copies the state into a buffer of its own,
 which the forwarding makes the caller's output buffer; the copies the pipeline
@@ -1119,8 +1147,8 @@ the message-and-abort convention of the shape assertions. `ondrix-compile
 --emit=c-header`, or `ondrix-translate --mlir-to-ondrix-c-header` on the
 `--emit=llvm` module, prints the prototypes. A kernel with a result of
 dynamic shape, such as `fir_filter` on `tensor[q15]`, keeps the descriptor
-convention and gets no plain entry.
-An input is never written. A tensor argument is a value, so a kernel that
+convention and gets no plain entry; a mut buffer is the dynamic-length
+output that does. An input other than a mut buffer is never written. A tensor argument is a value, so a kernel that
 updates state in place, the recursive and adaptive filters, copies that state
 into the caller's output buffer before its first write; the `const` on every
 input pointer holds, and the copy is a loop, not a library call.
@@ -1148,8 +1176,8 @@ runs. The checked mode is a debugging aid, a few compares per buffer pair,
 and off by default; the same header serves both builds.
 
 This is not a general Python parser. Imports, classes, heap objects, arbitrary
-expressions, and dynamic Python behavior are rejected. Array writes,
-`if`/`while` statements, mutable output buffers, multiple exported kernels,
+expressions, and dynamic Python behavior are rejected. Writes to locals or
+slices, `if`/`while` statements, multiple exported kernels,
 and inferred accumulators outside the statically bounded Q15 real-reduction
 slice remain unimplemented. Textual MLIR remains an independent and more
 complete compiler entry point.

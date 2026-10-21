@@ -71,3 +71,18 @@ func.func @internal(%a: memref<?xi16>) -> i16 {
   %zero = arith.constant 0 : i16
   return %zero : i16
 }
+
+// -----
+
+// A buffer written through a view is recorded; one only read is not.
+// CHECK-LABEL: func.func @update(
+// CHECK-SAME: ondrix.c_entry = {groups = array<i64: 0, 1>, names = ["x", "y"], signature = (memref<?xf32>, memref<?xf32>) -> (), written = array<i64: 1>}
+func.func @update(%x: memref<?xf32> loc("x"), %y: memref<?xf32> loc("y"))
+    attributes {llvm.emit_c_interface} {
+  %c0 = arith.constant 0 : index
+  %v = memref.load %x[%c0] : memref<?xf32>
+  %head = memref.subview %y[1] [1] [1] : memref<?xf32> to memref<1xf32, strided<[1], offset: 1>>
+  %flat = memref.cast %head : memref<1xf32, strided<[1], offset: 1>> to memref<?xf32, strided<[1], offset: ?>>
+  memref.store %v, %flat[%c0] : memref<?xf32, strided<[1], offset: ?>>
+  return
+}

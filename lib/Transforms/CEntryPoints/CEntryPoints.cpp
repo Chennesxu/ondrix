@@ -10,8 +10,11 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/FormatVariadic.h"
 
@@ -76,11 +79,13 @@ SmallVector<Type> getEntryParameters(FunctionType type) {
 std::string getCEntryName(StringRef kernel) { return (ondrix::kCEntryPrefix + kernel).str(); }
 
 /// What the record carries: the bufferized signature, one name per parameter,
-/// and each buffer's shared extent group (-1 for static buffers and scalars).
+/// each buffer's shared extent group (-1 for static buffers and scalars), and
+/// the input buffers the kernel writes, ascending.
 struct EntryRecord {
   FunctionType signature;
   SmallVector<std::string> names;
   SmallVector<int64_t> groups;
+  SmallVector<int64_t> written;
 };
 
 /// Groups are the compact ids 0..k-1, exactly on the dynamic extents.
@@ -105,9 +110,11 @@ FailureOr<EntryRecord> readRecord(Operation *op) {
   auto names = dictionary ? dyn_cast_or_null<ArrayAttr>(dictionary.get("names")) : ArrayAttr();
   auto groups = dictionary ? dyn_cast_or_null<DenseI64ArrayAttr>(dictionary.get("groups"))
                            : DenseI64ArrayAttr();
+  Attribute writtenEntry = dictionary ? dictionary.get("written") : Attribute();
+  auto written = dyn_cast_or_null<DenseI64ArrayAttr>(writtenEntry);
   auto type = signature ? dyn_cast<FunctionType>(signature.getValue()) : FunctionType();
   auto malformed = [&] { return op->emitOpError("carries a malformed C entry record"); };
-  if (!type || !isSupportedEntrySignature(type) || !names || !groups)
+  if (!type || !isSupportedEntrySignature(type) || !names || !groups || (writtenEntry && !written))
     return malformed();
   int64_t numParameters = getEntryParameters(type).size();
   if (static_cast<int64_t>(names.size()) != numParameters || groups.size() != numParameters ||
@@ -117,6 +124,15 @@ FailureOr<EntryRecord> readRecord(Operation *op) {
   for (Attribute name : names)
     record.names.push_back(cast<StringAttr>(name).str());
   record.groups.assign(groups.asArrayRef().begin(), groups.asArrayRef().end());
+  if (written)
+    record.written.assign(written.asArrayRef().begin(), written.asArrayRef().end());
+  int64_t previous = -1;
+  for (int64_t index : record.written) {
+    if (index <= previous || index >= static_cast<int64_t>(type.getNumInputs()) ||
+        !isa<MemRefType>(type.getInput(index)))
+      return malformed();
+    previous = index;
+  }
   if (!hasWellFormedGroups(record))
     return malformed();
   return record;
@@ -127,10 +143,13 @@ DictionaryAttr writeRecord(MLIRContext *context, const EntryRecord &record) {
   SmallVector<Attribute> names;
   for (const std::string &name : record.names)
     names.push_back(builder.getStringAttr(name));
-  return builder.getDictionaryAttr(
-      {builder.getNamedAttr("groups", builder.getDenseI64ArrayAttr(record.groups)),
-       builder.getNamedAttr("names", builder.getArrayAttr(names)),
-       builder.getNamedAttr("signature", TypeAttr::get(record.signature))});
+  SmallVector<NamedAttribute> fields{
+      builder.getNamedAttr("groups", builder.getDenseI64ArrayAttr(record.groups)),
+      builder.getNamedAttr("names", builder.getArrayAttr(names)),
+      builder.getNamedAttr("signature", TypeAttr::get(record.signature))};
+  if (!record.written.empty())
+    fields.push_back(builder.getNamedAttr("written", builder.getDenseI64ArrayAttr(record.written)));
+  return builder.getDictionaryAttr(fields);
 }
 
 /// The entry-block argument a reduction operand reads, through memref casts.
@@ -174,6 +193,30 @@ SmallVector<int64_t> deriveExtentGroups(func::FuncOp function, unsigned numParam
     groups[index] = groups[root] >= 0 ? groups[root] : next++;
   }
   return groups;
+}
+
+/// The entry-block buffer arguments some operation declares a write to,
+/// through any view of them.
+SmallVector<int64_t> deriveWrittenArguments(func::FuncOp function) {
+  llvm::SmallBitVector written(function.getNumArguments());
+  function.walk([&](MemoryEffectOpInterface op) {
+    SmallVector<MemoryEffects::EffectInstance> effects;
+    op.getEffects(effects);
+    for (const MemoryEffects::EffectInstance &effect : effects) {
+      Value value = effect.getValue();
+      if (!isa<MemoryEffects::Write>(effect.getEffect()) || !value)
+        continue;
+      while (auto view = value.getDefiningOp<ViewLikeOpInterface>())
+        value = view.getViewSource();
+      auto argument = dyn_cast<BlockArgument>(value);
+      if (argument && argument.getOwner() == &function.getBody().front())
+        written.set(argument.getArgNumber());
+    }
+  });
+  SmallVector<int64_t> indices;
+  for (unsigned index : written.set_bits())
+    indices.push_back(index);
+  return indices;
 }
 
 int64_t getGroupCount(ArrayRef<int64_t> groups) {
@@ -231,6 +274,7 @@ public:
         record.names.push_back(name);
       }
       record.groups = deriveExtentGroups(function, numParameters);
+      record.written = deriveWrittenArguments(function);
       std::string entry = getCEntryName(function.getName());
       if (symbols.lookup(entry)) {
         function.emitOpError() << "C entry point '" << entry
@@ -510,10 +554,11 @@ ondrix::createEmitOndrixCEntryPointsPass(const EmitOndrixCEntryPointsOptions &op
 LogicalResult ondrix::printOndrixCEntryHeader(ModuleOp module, raw_ostream &os) {
   os << "// Plain-pointer entry points generated by Ondrix. Buffers are contiguous,\n"
         "// row-major, element-aligned and valid for the call, and no two may overlap;\n"
-        "// an input is read only, an output receives the whole result. A length counts\n"
-        "// elements and must fit the signed index range in bytes, or the call prints a\n"
-        "// message and aborts before touching memory. Built with --checked-entries, a\n"
-        "// null buffer with elements or an overlap is refused the same way.\n"
+        "// a const input is only read, another is updated in place, and an output\n"
+        "// receives the whole result. A length counts elements and must fit the\n"
+        "// signed index range in bytes, or the call prints a message and aborts\n"
+        "// before touching memory. Built with --checked-entries, a null buffer with\n"
+        "// elements or an overlap is refused the same way.\n"
         "// Boolean scalars use uint8_t: nonzero inputs are true, and results are 0 or 1.\n"
         "#include <stdint.h>\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n";
   for (auto entry : module.getOps<LLVM::LLVMFuncOp>()) {
@@ -536,10 +581,11 @@ LogicalResult ondrix::printOndrixCEntryHeader(ModuleOp module, raw_ostream &os) 
             llvm::formatv("{0} {1}", getCTypeName(parameter), record->names[index]);
         continue;
       }
-      bool input = index < record->signature.getNumInputs();
+      bool readOnly = index < record->signature.getNumInputs() &&
+                      !llvm::is_contained(record->written, static_cast<int64_t>(index));
       fields[layout.parameterPosition[index]] =
-          llvm::formatv("{0}{1} *{2}", input ? "const " : "", getCTypeName(buffer.getElementType()),
-                        record->names[index]);
+          llvm::formatv("{0}{1} *{2}", readOnly ? "const " : "",
+                        getCTypeName(buffer.getElementType()), record->names[index]);
       int64_t group = groups[index];
       if (group < 0 || !fields[layout.lengthPosition[group]].empty())
         continue;

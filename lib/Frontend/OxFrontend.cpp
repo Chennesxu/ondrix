@@ -276,7 +276,9 @@ enum class SourceType {
   Bool,
   Index,
   // Never spelled: the type of zero/import/mac/mac_sub, read by export.
-  Accumulator
+  Accumulator,
+  // The result of a function declared without `->`.
+  Void
 };
 
 static bool isRealFixed(SourceType type) {
@@ -468,6 +470,7 @@ struct ParameterAst {
   SourceType type;
   std::vector<std::optional<int64_t>> shape;
   ContainerKind container = ContainerKind::Buffer;
+  bool isMutable = false;
   std::vector<int64_t> constantValues;
   SourcePosition position;
 
@@ -519,13 +522,15 @@ enum class PrimitiveKind {
   And,
   Or,
   // Statement sequences: operand i is assigned to bindingNames[i], or is a
-  // nested Loop under an empty name. A Scope's last operand is its result. A
-  // Loop's operands are start, stop, then its body; bindingNames[0] names the
-  // induction variable.
+  // nested Loop or a Store under an empty name. A Scope's operand past its
+  // statements, if any, is its result. A Loop's operands are start, stop,
+  // then its body; bindingNames[0] names the induction variable.
   Scope,
   Loop,
   Length,
   Element,
+  // A write statement under an empty name: buffer, index, value.
+  Store,
   Typed
 };
 
@@ -891,10 +896,13 @@ public:
       advance();
     }
 
-    if (!expect(TokenKind::RightParen, "expected ')' after parameters") ||
-        !expect(TokenKind::Arrow, "expected '->' after parameters"))
+    if (!expect(TokenKind::RightParen, "expected ')' after parameters"))
       return std::nullopt;
-    if (current.kind == TokenKind::LeftParen) {
+    if (current.kind == TokenKind::Colon) {
+      kernel.results.push_back(ResultTypeAst{SourceType::Void, false, {}});
+    } else if (!expect(TokenKind::Arrow, "expected '->' or ':' after parameters")) {
+      return std::nullopt;
+    } else if (current.kind == TokenKind::LeftParen) {
       advance();
       auto parseResult = [&](ResultTypeAst &result, llvm::StringRef ordinal) {
         if (isIdentifier("tensor")) {
@@ -946,29 +954,42 @@ public:
     caller = &kernel;
     genericExpressions = policyType == SourceType::F32 || policyType == SourceType::I32 ||
                          policyType == SourceType::I64 || policyType == SourceType::Bool ||
-                         policyType == SourceType::Q15 || policyType == SourceType::Q31;
+                         policyType == SourceType::Q15 || policyType == SourceType::Q31 ||
+                         policyType == SourceType::Void;
     BuiltinCallAst body = makePrimitive(PrimitiveKind::Scope, {}, current.position);
     while (isStatementStart())
       if (!parseStatement(body, policyType))
         return std::nullopt;
-    if (isLoopStart()) {
-      diagnostics.error(current.position,
-                        "loops require an i32, i64, bool, f32, q15 or q31 function result");
-      return std::nullopt;
+    if (policyType == SourceType::Void) {
+      if (body.operands.empty() || isIdentifier("return")) {
+        diagnostics.error(current.position, body.operands.empty()
+                                                ? "expected a statement"
+                                                : "a function without a result has no return");
+        return std::nullopt;
+      }
+      kernel.result = std::move(body);
+    } else {
+      if (isLoopStart()) {
+        diagnostics.error(current.position,
+                          "loops require an i32, i64, bool, f32, q15 or q31 function result");
+        return std::nullopt;
+      }
+      if (!expectIdentifier("return", "expected a single return statement"))
+        return std::nullopt;
+      std::optional<BuiltinCallAst> result = parseStatementExpression(policyType);
+      if (!result)
+        return std::nullopt;
+      kernel.result = std::move(*result);
+      if (genericExpressions && !body.operands.empty())
+        kernel.result = bindLocals(std::move(body), std::move(kernel.result));
     }
-    if (!expectIdentifier("return", "expected a single return statement"))
-      return std::nullopt;
-    std::optional<BuiltinCallAst> result = parseStatementExpression(policyType);
-    if (!result)
-      return std::nullopt;
-    kernel.result = std::move(*result);
-    if (genericExpressions && !body.operands.empty())
-      kernel.result = bindLocals(std::move(body), std::move(kernel.result));
     caller = nullptr;
     if (current.kind != TokenKind::Eof && !isIdentifier("def")) {
       diagnostics.error(current.position,
-                        "a function body is a single return statement; expected 'def' or "
-                        "end of file");
+                        policyType == SourceType::Void
+                            ? "expected a statement, 'def' or end of file"
+                            : "a function body is a single return statement; expected 'def' or "
+                              "end of file");
       return std::nullopt;
     }
     if (scopedOutUse) {
@@ -2277,7 +2298,7 @@ private:
                            isIdentifier("dequantize") || isIdentifier("viterbi_decode");
     if (isCall && (rootPolicy || isNestedBuiltin || genericExpressions)) {
       std::optional<SourceType> policy = rootPolicy.value_or(SourceType::Q15);
-      if (genericExpressions && !isNestedBuiltin)
+      if (genericExpressions && (!isNestedBuiltin || policy == SourceType::Void))
         policy = std::nullopt;
       std::optional<BuiltinCallAst> call = parseBuiltinCall(policy);
       if (!call)
@@ -2462,6 +2483,16 @@ private:
     ParameterAst parameter;
     parameter.name = name->spelling.str();
     parameter.position = name->position;
+    if (isIdentifier("mut")) {
+      advance();
+      if (!isIdentifier("buffer")) {
+        diagnostics.error(current.position, isIdentifier("tensor")
+                                                ? "a tensor is a value; only a buffer can be mut"
+                                                : "expected 'buffer[...]' after 'mut'");
+        return std::nullopt;
+      }
+      parameter.isMutable = true;
+    }
     if (isIdentifier("buffer") || isIdentifier("tensor")) {
       bool isTensor = isIdentifier("tensor");
       llvm::StringRef containerName = isTensor ? "tensor" : "buffer";
@@ -2547,6 +2578,13 @@ private:
                                            llvm::Twine(callee.parameters.size()) +
                                            " arguments, but " + llvm::Twine(arguments.size()) +
                                            " were given");
+      return std::nullopt;
+    }
+    if (callee.primaryResult().type == SourceType::Void ||
+        llvm::any_of(callee.parameters, [](const ParameterAst &p) { return p.isMutable; })) {
+      diagnostics.error(name.position, llvm::Twine("'") + name.spelling +
+                                           "' writes a mut buffer; only the exported function "
+                                           "may");
       return std::nullopt;
     }
     if (callee.results.size() != 1) {
@@ -2795,7 +2833,8 @@ private:
   bool isLoopStart() const { return isIdentifier("for") && next.kind == TokenKind::Identifier; }
   bool isStatementStart() const {
     return current.kind == TokenKind::Identifier &&
-           (next.kind == TokenKind::Equal || (genericExpressions && isLoopStart()));
+           (next.kind == TokenKind::Equal ||
+            (genericExpressions && (isLoopStart() || next.kind == TokenKind::LeftBracket)));
   }
   const ParameterAst *findParameter(StringRef name) const {
     auto found = llvm::find_if(
@@ -2808,6 +2847,8 @@ private:
   bool parseStatement(BuiltinCallAst &owner, SourceType policyType) {
     if (isLoopStart())
       return parseLoop(owner, policyType);
+    if (next.kind == TokenKind::LeftBracket)
+      return parseStore(owner);
     Token name = current;
     auto found = bindingsByName.find(name.spelling);
     if (found != bindingsByName.end() && bindings[found->second].readOnly) {
@@ -2835,6 +2876,26 @@ private:
     }
     owner.bindingNames.push_back(bindings[found->second].name);
     owner.operands.push_back(ExpressionAst(std::move(*bound)));
+    return true;
+  }
+
+  // `y[e] = value`; Sema requires `y` to be a mut buffer parameter.
+  bool parseStore(BuiltinCallAst &owner) {
+    Token base = current;
+    advance();
+    advance();
+    std::optional<Operand> index = parseLogicalOr();
+    if (!index || !expect(TokenKind::RightBracket, "expected ']' after the index") ||
+        !expect(TokenKind::Equal, "expected '=' after the indexed target"))
+      return false;
+    std::optional<Operand> value = parseLogicalOr();
+    if (!value)
+      return false;
+    ExpressionAst reference = resolveOperand(base);
+    owner.bindingNames.push_back("");
+    owner.operands.push_back(ExpressionAst(
+        makePrimitive(PrimitiveKind::Store, {&reference, &*index->expression, &*value->expression},
+                      base.position)));
     return true;
   }
 
@@ -2904,7 +2965,7 @@ private:
     }
     while (current.kind != TokenKind::Eof && current.position.column == column) {
       if (!isStatementStart()) {
-        diagnostics.error(current.position, "expected an assignment or a nested loop");
+        diagnostics.error(current.position, "expected an assignment, a write or a nested loop");
         return false;
       }
       if (!parseStatement(loop, policyType))
@@ -3099,7 +3160,47 @@ static std::optional<llvm::StringRef> getParameterOperand(const BuiltinCallAst &
   return call.operands[index].parameter;
 }
 
+// The first mut buffer `call` uses other than as the buffer it indexes, writes
+// or measures with len.
+static const ExpressionAst *findWholeMutUse(const BuiltinCallAst &call, const KernelAst &kernel) {
+  bool indexed =
+      call.kind == ReductionKind::Primitive &&
+      (call.primitive == PrimitiveKind::Element || call.primitive == PrimitiveKind::Store ||
+       call.primitive == PrimitiveKind::Length);
+  for (const auto &[i, operand] : llvm::enumerate(call.operands)) {
+    if (operand.call) {
+      if (const ExpressionAst *use = findWholeMutUse(*operand.call, kernel))
+        return use;
+    } else if (!(indexed && i == 0) &&
+               llvm::any_of(kernel.parameters, [&](const ParameterAst &parameter) {
+                 return parameter.isMutable && parameter.name == operand.parameter;
+               })) {
+      return &operand;
+    }
+  }
+  return nullptr;
+}
+
 static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diagnostics) {
+  if (const ExpressionAst *use = findWholeMutUse(ast.result, ast)) {
+    diagnostics.error(use->position, "a mut buffer is only indexed, written or measured by len");
+    return std::nullopt;
+  }
+  for (const ParameterAst &parameter : ast.parameters) {
+    if (!parameter.isMutable)
+      continue;
+    if (!hasRank(parameter.shape, 1) ||
+        (parameter.type != SourceType::F32 && !isRealFixed(parameter.type))) {
+      diagnostics.error(parameter.position, "a mut buffer holds a rank-one f32, q15 or q31 "
+                                            "sequence");
+      return std::nullopt;
+    }
+  }
+  if (ast.primaryResult().type == SourceType::Void &&
+      llvm::none_of(ast.parameters, [](const ParameterAst &p) { return p.isMutable; })) {
+    diagnostics.error(ast.position, "a function without a result must take a mut buffer");
+    return std::nullopt;
+  }
   if (isDesignKind(ast.result.kind)) {
     diagnostics.error(ast.result.position,
                       llvm::Twine(describeDesignKind(ast.result.kind)) +
@@ -3911,9 +4012,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         collectAssigned =
             [&](const BuiltinCallAst &owner, size_t begin, SmallVector<std::string> &names) {
               for (size_t i = begin; i < owner.bindingNames.size(); ++i) {
-                if (owner.bindingNames[i].empty())
-                  collectAssigned(*owner.operands[i].call, 2, names);
-                else if (!llvm::is_contained(names, owner.bindingNames[i]))
+                if (owner.bindingNames[i].empty()) {
+                  if (owner.operands[i].call->primitive == PrimitiveKind::Loop)
+                    collectAssigned(*owner.operands[i].call, 2, names);
+                } else if (!llvm::is_contained(names, owner.bindingNames[i]))
                   names.push_back(owner.bindingNames[i]);
               }
             };
@@ -3923,7 +4025,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         ExpressionAst &statement = owner.operands[i];
         const std::string &name = owner.bindingNames[i];
         if (name.empty()) {
-          if (!checkLoop(*statement.call))
+          if (!(statement.call->primitive == PrimitiveKind::Loop
+                    ? checkLoop(*statement.call)
+                    : checkComposedExpression(statement).has_value()))
             return false;
           continue;
         }
@@ -4030,8 +4134,12 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         auto savedConstants = localConstants;
         std::optional<ComposedType> result;
         if (checkStatements(call, 0)) {
-          result = checkComposedExpression(call.operands.back());
-          call.integerConstant = constant(call.operands.back());
+          if (call.operands.size() == call.bindingNames.size()) {
+            result = ComposedType{SourceType::Void, 0};
+          } else {
+            result = checkComposedExpression(call.operands.back());
+            call.integerConstant = constant(call.operands.back());
+          }
         }
         localTypes = std::move(saved);
         localConstants = std::move(savedConstants);
@@ -4042,10 +4150,13 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           return std::nullopt;
         return finish({SourceType::Index, 0});
       }
-      if (op == PrimitiveKind::Element) {
+      if (op == PrimitiveKind::Element || op == PrimitiveKind::Store) {
         const ParameterAst *parameter = getIndexedParameter(call.operands.front());
         if (!parameter)
           return std::nullopt;
+        if (op == PrimitiveKind::Store && !parameter->isMutable)
+          return reject(llvm::Twine("parameter '") + parameter->name +
+                        "' is read-only; only a mut buffer is written");
         auto savedHint = literalHint;
         literalHint = SourceType::Index;
         std::optional<ComposedType> index = checkComposedExpression(call.operands[1]);
@@ -4059,7 +4170,16 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         const ExpressionAst &position = call.operands[1];
         call.inBounds = position.isParameterReference() &&
                         provenIndices.lookup(position.parameter) == parameter->name;
-        return finish({parameter->type, 0});
+        if (op == PrimitiveKind::Element)
+          return finish({parameter->type, 0});
+        literalHint = parameter->type;
+        std::optional<ComposedType> value = checkComposedExpression(call.operands[2]);
+        literalHint = savedHint;
+        if (!value)
+          return std::nullopt;
+        if (value->extent || value->elementType != parameter->type)
+          return reject("a write stores the buffer's element type");
+        return finish({SourceType::Void, 0});
       }
       if (op == PrimitiveKind::Literal) {
         SourceType type = literalHint.value_or(ast.primaryResult().type);
@@ -4070,7 +4190,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         bool floating = call.spelling.find_first_of(".eE") != std::string::npos;
         if (floating)
           type = SourceType::F32;
-        if (type == SourceType::Bool)
+        if (type == SourceType::Bool || type == SourceType::Void)
           type = SourceType::I32;
         if (type == SourceType::F32) {
           llvm::APFloat value(llvm::APFloat::IEEEsingle());
@@ -5830,13 +5950,15 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
   SmallVector<Type> resultTypes;
   resultTypes.reserve(kernel.ast.results.size());
   for (const ResultTypeAst &result : kernel.ast.results) {
+    if (result.type == SourceType::Void)
+      continue;
     Type resultElementType = getStorageType(result.type);
     resultTypes.push_back(result.tensor
                               ? Type(RankedTensorType::get(
                                     materializeShape(result.shape, result.type), resultElementType))
                               : resultElementType);
   }
-  Type resultType = resultTypes.front();
+  Type resultType = resultTypes.empty() ? Type() : resultTypes.front();
   FunctionType functionType = builder.getFunctionType(inputTypes, resultTypes);
   auto function = func::FuncOp::create(kernelLocation, kernel.ast.name, functionType);
   function->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
@@ -6024,8 +6146,11 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         };
         emitStatements = [&](const BuiltinCallAst &owner, size_t begin) {
           for (size_t i = begin; i < owner.bindingNames.size(); ++i) {
-            if (owner.bindingNames[i].empty())
+            if (owner.bindingNames[i].empty() &&
+                owner.operands[i].call->primitive == PrimitiveKind::Loop)
               emitLoop(*owner.operands[i].call);
+            else if (owner.bindingNames[i].empty())
+              emitOperand(owner.operands[i]);
             else
               arguments[owner.bindingNames[i]] = emitOperand(owner.operands[i]);
           }
@@ -6033,13 +6158,17 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         if (op == PrimitiveKind::Scope) {
           auto saved = arguments;
           emitStatements(call, 0);
-          Value result = emitOperand(call.operands.back());
+          Value result = call.operands.size() == call.bindingNames.size()
+                             ? Value()
+                             : emitOperand(call.operands.back());
           arguments = std::move(saved);
           return result;
         }
         if (op == PrimitiveKind::Length)
           return lengthOf(emitOperand(call.operands.front()));
-        if (op == PrimitiveKind::Element) {
+        if (op == PrimitiveKind::Element || op == PrimitiveKind::Store) {
+          // As in Python, a write evaluates its value before its target.
+          Value value = op == PrimitiveKind::Store ? emitOperand(call.operands[2]) : Value();
           Value base = emitOperand(call.operands.front());
           Value index = emitOperand(call.operands[1]);
           Value position =
@@ -6057,6 +6186,10 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                     : builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, position,
                                                     length);
             builder.create<cf::AssertOp>(loc, inBounds, "index out of bounds");
+          }
+          if (op == PrimitiveKind::Store) {
+            builder.create<memref::StoreOp>(loc, value, base, position);
+            return Value();
           }
           if (isa<MemRefType>(base.getType()))
             return builder.create<memref::LoadOp>(loc, base, position);
@@ -6507,7 +6640,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                                          productScale, outputScale);
     };
     Value result = emitComposedCall(kernel.ast.result);
-    builder.create<func::ReturnOp>(expressionLocation, result);
+    builder.create<func::ReturnOp>(expressionLocation, result ? ValueRange(result) : ValueRange());
     module->push_back(function);
     if (failed(verify(*module)))
       return {};

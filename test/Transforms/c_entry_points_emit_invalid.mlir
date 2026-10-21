@@ -17,3 +17,32 @@ llvm.func @returns(%a0: !llvm.ptr, %a1: !llvm.ptr, %a2: i64, %a3: i64, %a4: i64,
   %zero = llvm.mlir.constant(0 : i16) : i16
   llvm.return %zero : i16
 }
+
+// -----
+
+// Written positions name input buffers, ascending.
+// expected-error @+1 {{carries a malformed C entry record}}
+llvm.func @written_scalar(%a: i32) attributes {ondrix.c_entry = {groups = array<i64: -1>, names = ["a"], signature = (i32) -> (), written = array<i64: 0>}} {
+  llvm.return
+}
+
+// -----
+
+// expected-error @+1 {{carries a malformed C entry record}}
+llvm.func @written_unsorted(%a: !llvm.ptr, %b: !llvm.ptr) attributes {ondrix.c_entry = {groups = array<i64: -1, -1>, names = ["a", "b"], signature = (memref<4xf32>, memref<4xf32>) -> (), written = array<i64: 1, 0>}} {
+  llvm.return
+}
+
+// -----
+
+// expected-error @+1 {{carries a malformed C entry record}}
+llvm.func @written_range(%a: !llvm.ptr) attributes {ondrix.c_entry = {groups = array<i64: -1>, names = ["a"], signature = (memref<4xf32>) -> (), written = array<i64: 1>}} {
+  llvm.return
+}
+
+// -----
+
+// expected-error @+1 {{carries a malformed C entry record}}
+llvm.func @written_type(%a: !llvm.ptr) attributes {ondrix.c_entry = {groups = array<i64: -1>, names = ["a"], signature = (memref<4xf32>) -> (), written = [0]}} {
+  llvm.return
+}
