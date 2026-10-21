@@ -274,7 +274,9 @@ enum class SourceType {
   I32,
   I64,
   Bool,
-  Index
+  Index,
+  // Never spelled: the type of zero/import/mac/mac_sub, read by export.
+  Accumulator
 };
 
 static bool isRealFixed(SourceType type) {
@@ -343,7 +345,12 @@ enum class ReductionKind {
   Dequantize,
   Log2,
   Exp2,
-  ViterbiDecode
+  ViterbiDecode,
+  AccZero,
+  AccImport,
+  Mac,
+  MacSub,
+  AccExport
 };
 
 // The elementwise family: every member is one exact integer expression plus
@@ -437,6 +444,13 @@ static bool isUnaryTensorKind(ReductionKind kind) {
          kind == ReductionKind::Cosine || kind == ReductionKind::CicDecimate ||
          kind == ReductionKind::Log2 || kind == ReductionKind::Exp2 ||
          kind == ReductionKind::Goertzel;
+}
+
+// The scalar accumulator lifecycle, written in ordinary bodies only.
+static bool isAccumulatorKind(ReductionKind kind) {
+  return kind == ReductionKind::AccZero || kind == ReductionKind::AccImport ||
+         kind == ReductionKind::Mac || kind == ReductionKind::MacSub ||
+         kind == ReductionKind::AccExport;
 }
 
 // The reductions with a scalar result, which an ordinary expression can hold.
@@ -1004,7 +1018,8 @@ public:
         !isIdentifier("ratio") && !isIdentifier("widen") && !isIdentifier("narrow") &&
         !isIdentifier("quantize") && !isIdentifier("dequantize") && !isIdentifier("log2") &&
         !isIdentifier("exp2") && !isIdentifier("cx_dot") && !isIdentifier("cx_fir_filter") &&
-        !isIdentifier("viterbi_decode")) {
+        !isIdentifier("viterbi_decode") && !isIdentifier("zero") && !isIdentifier("import") &&
+        !isIdentifier("mac") && !isIdentifier("mac_sub") && !isIdentifier("export")) {
       diagnostics.error(
           current.position,
           "expected dot(...), cx_dot(...), fir(...), fir_filter(...), "
@@ -1018,7 +1033,8 @@ public:
           "a lowpass/hamming/hann/"
           "blackman/kaiser design, or an "
           "elementwise add/sub/mult/abs/negate/offset/shift/div/ratio builtin "
-          "expression, or a widen/narrow/quantize/dequantize conversion");
+          "expression, a widen/narrow/quantize/dequantize conversion, or a "
+          "zero/import/mac/mac_sub/export accumulator step");
       return std::nullopt;
     }
     if (isIdentifier("dot"))
@@ -1124,6 +1140,16 @@ public:
       call.kind = ReductionKind::Log2;
     else if (isIdentifier("exp2"))
       call.kind = ReductionKind::Exp2;
+    else if (isIdentifier("zero"))
+      call.kind = ReductionKind::AccZero;
+    else if (isIdentifier("import"))
+      call.kind = ReductionKind::AccImport;
+    else if (isIdentifier("mac"))
+      call.kind = ReductionKind::Mac;
+    else if (isIdentifier("mac_sub"))
+      call.kind = ReductionKind::MacSub;
+    else if (isIdentifier("export"))
+      call.kind = ReductionKind::AccExport;
     else
       call.kind = ReductionKind::Lowpass;
     call.position = current.position;
@@ -1365,6 +1391,47 @@ public:
         (isContract ? call.fpContract : call.rounding) = mode->spelling.str();
       }
       if (!expect(TokenKind::RightParen, "expected ')' after power operand"))
+        return std::nullopt;
+      return call;
+    }
+    if (isAccumulatorKind(call.kind)) {
+      if (!genericExpressions) {
+        diagnostics.error(call.position, "accumulators are written in ordinary function bodies");
+        return std::nullopt;
+      }
+      size_t count = 1;
+      if (call.kind == ReductionKind::AccZero)
+        count = 0;
+      else if (call.kind == ReductionKind::Mac || call.kind == ReductionKind::MacSub)
+        count = 3;
+      for (size_t index = 0; index < count; ++index) {
+        if (index && !expect(TokenKind::Comma, "expected ',' before the next operand"))
+          return std::nullopt;
+        std::optional<ExpressionAst> operand = parseExpression(std::nullopt);
+        if (!operand)
+          return std::nullopt;
+        call.operands.push_back(std::move(*operand));
+      }
+      if (call.kind == ReductionKind::AccZero || call.kind == ReductionKind::AccImport) {
+        if ((count && !expect(TokenKind::Comma, "expected ',' before accumulator policy")) ||
+            !parseAccumulatorPolicy(call))
+          return std::nullopt;
+      }
+      if (call.kind == ReductionKind::AccZero || call.kind == ReductionKind::AccExport) {
+        // zero names its operand format, export its target.
+        llvm::StringRef keyword = call.kind == ReductionKind::AccZero ? "of" : "to";
+        if (!expect(TokenKind::Comma, llvm::Twine("expected ',' before ") + keyword) ||
+            !expectIdentifier(keyword,
+                              llvm::Twine("expected '") + keyword + "' naming the format") ||
+            !expect(TokenKind::Equal, llvm::Twine("expected '=' after ") + keyword))
+          return std::nullopt;
+        std::optional<SourceType> format = parseSourceType("expected 'q15' or 'q31'");
+        if (!format)
+          return std::nullopt;
+        call.target = *format;
+      }
+      if ((call.kind == ReductionKind::AccExport && !parseBoundaryPolicies(call)) ||
+          !expect(TokenKind::RightParen, "expected ')' after the accumulator step"))
         return std::nullopt;
       return call;
     }
@@ -1946,7 +2013,10 @@ private:
         genericExpressions ? parseLogicalOr(policyType) : parseSum(policyType);
     if (!operand)
       return std::nullopt;
-    if (genericExpressions && operand->expression && operand->expression->isParameterReference())
+    // An accumulator step is not a kernel on its own, so it never roots one.
+    if (genericExpressions && operand->expression &&
+        (operand->expression->isParameterReference() ||
+         isAccumulatorKind(operand->expression->call->kind)))
       return makePrimitive(PrimitiveKind::Identity, {&*operand->expression}, operand->position);
     if (!operand->expression || operand->expression->isParameterReference()) {
       diagnostics.error(operand->position, "expected a builtin call or an infix expression, not "
@@ -3759,6 +3829,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     struct ComposedType {
       SourceType elementType;
       int64_t extent;
+      // An accumulator's operand format and update overflow.
+      SourceType accumulatorFormat = SourceType::Q15;
+      std::string updateOverflow;
     };
     llvm::StringMap<unsigned> parameterUses;
     llvm::StringMap<ComposedType> localTypes;
@@ -3829,8 +3902,10 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     };
     // Induction variables whose range proves `0 <= v < len(parameter)`.
     llvm::StringMap<std::string> provenIndices;
-    auto sameType = [](ComposedType lhs, ComposedType rhs) {
-      return lhs.elementType == rhs.elementType && lhs.extent == rhs.extent;
+    auto sameType = [](const ComposedType &lhs, const ComposedType &rhs) {
+      return lhs.elementType == rhs.elementType && lhs.extent == rhs.extent &&
+             lhs.accumulatorFormat == rhs.accumulatorFormat &&
+             lhs.updateOverflow == rhs.updateOverflow;
     };
     std::function<void(const BuiltinCallAst &, size_t, SmallVector<std::string> &)>
         collectAssigned =
@@ -4116,6 +4191,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         call.integerConstant = constant(call.operands.front());
         return finish(*lhs);
       }
+      if (lhs->elementType == SourceType::Accumulator ||
+          (rhs && rhs->elementType == SourceType::Accumulator))
+        return reject("an accumulator is advanced by mac or mac_sub and read by export");
       if (logical) {
         if (lhs->elementType != SourceType::Bool || lhs->extent ||
             (rhs && (rhs->elementType != SourceType::Bool || rhs->extent)))
@@ -4557,9 +4635,62 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       call.library = std::make_shared<const CheckedKernel>(std::move(*checked));
       return ComposedType{type, 0};
     };
+    // An accumulator holds exact full products of one format at that format's
+    // executable dot profile: i40/frac30 for q15, i64/frac62 for q31.
+    auto checkAccumulator = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
+      auto reject = [&](const Twine &message) -> std::optional<ComposedType> {
+        diagnostics.error(call.position, message);
+        return std::nullopt;
+      };
+      if (call.kind == ReductionKind::AccZero || call.kind == ReductionKind::AccImport) {
+        if (call.kind == ReductionKind::AccImport) {
+          std::optional<ComposedType> input = checkComposedExpression(call.operands.front());
+          if (!input)
+            return std::nullopt;
+          if (!isRealFixed(input->elementType) || input->extent)
+            return reject("import takes a q15 or q31 scalar");
+          call.target = input->elementType;
+        } else if (!isRealFixed(call.target)) {
+          return reject("an accumulator holds q15 or q31 products");
+        }
+        bool q31 = call.target == SourceType::Q31;
+        if (call.accumulatorWidth != (q31 ? 64u : 40u))
+          return reject(q31 ? "a q31 accumulator has exact width 64"
+                            : "a q15 accumulator has exact width 40");
+        if (!parseOverflow(call.updateOverflow))
+          return reject(llvm::Twine("unsupported update overflow mode '") + call.updateOverflow +
+                        "'");
+        return ComposedType{SourceType::Accumulator, 0, call.target, call.updateOverflow};
+      }
+      std::optional<ComposedType> accumulator = checkComposedExpression(call.operands.front());
+      if (!accumulator)
+        return std::nullopt;
+      if (accumulator->elementType != SourceType::Accumulator)
+        return reject("mac, mac_sub and export take an accumulator first");
+      SourceType format = accumulator->accumulatorFormat;
+      if (call.kind == ReductionKind::AccExport) {
+        if (call.target != format)
+          return reject("export reads an accumulator in its own format");
+        if (!checkBoundaryPolicies(call))
+          return std::nullopt;
+        return ComposedType{call.target, 0};
+      }
+      auto savedHint = literalHint;
+      literalHint = format;
+      std::optional<ComposedType> lhs = checkComposedExpression(call.operands[1]);
+      std::optional<ComposedType> rhs = lhs ? checkComposedExpression(call.operands[2]) : lhs;
+      literalHint = savedHint;
+      if (!lhs || !rhs)
+        return std::nullopt;
+      if (lhs->elementType != format || lhs->extent || rhs->elementType != format || rhs->extent)
+        return reject("mac and mac_sub multiply two scalars of the accumulator's format");
+      return accumulator;
+    };
     checkComposedCall = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       if (call.kind == ReductionKind::Primitive)
         return checkPrimitive(call);
+      if (isAccumulatorKind(call.kind))
+        return checkAccumulator(call);
       if (isScalarReductionKind(call.kind))
         return checkLibraryValue(call);
       if (call.kind == ReductionKind::FirFilter)
@@ -6112,9 +6243,42 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
             stageNumeric, ondsp::RoundingModeAttr::get(&context, *parseRounding(call.rounding)),
             ondsp::OverflowModeAttr::get(&context, *parseOverflow(call.destinationOverflow)));
       }
-      const ExpressionAst &operand = call.operands.front();
-      Value input = operand.isParameterReference() ? arguments.lookup(operand.parameter)
-                                                   : emitComposedCall(*operand.call);
+      auto emitValue = [&](const ExpressionAst &operand) -> Value {
+        return operand.isParameterReference() ? arguments.lookup(operand.parameter)
+                                              : emitComposedCall(*operand.call);
+      };
+      if (isAccumulatorKind(call.kind)) {
+        Location callLocation = getLocation(context, sourceName, call.position);
+        auto formatOf = [&](SourceType type) {
+          return type == SourceType::Q31 ? q31Numeric : numeric;
+        };
+        if (call.kind == ReductionKind::AccZero || call.kind == ReductionKind::AccImport) {
+          ondsp::FixedAttr format = formatOf(call.target);
+          auto accumulatorType = ondsp::AccType::get(
+              &context, builder.getIntegerType(call.accumulatorWidth), 2 * format.getFrac(),
+              ondsp::Signedness::Signed, *parseOverflow(call.updateOverflow));
+          if (call.kind == ReductionKind::AccZero)
+            return builder.create<ondsp::AccZeroOp>(callLocation, accumulatorType);
+          return builder.create<ondsp::AccImportOp>(callLocation, accumulatorType,
+                                                    emitValue(call.operands.front()), format);
+        }
+        Value accumulator = emitValue(call.operands.front());
+        if (call.kind == ReductionKind::AccExport) {
+          ondsp::FixedAttr target = formatOf(call.target);
+          return builder.create<ondsp::AccExportOp>(callLocation, target.getStorage(), accumulator,
+                                                    target, *parseRounding(call.rounding),
+                                                    *parseOverflow(call.destinationOverflow));
+        }
+        Value lhs = emitValue(call.operands[1]);
+        Value rhs = emitValue(call.operands[2]);
+        ondsp::FixedAttr format = lhs.getType().isSignlessInteger(32) ? q31Numeric : numeric;
+        if (call.kind == ReductionKind::Mac)
+          return builder.create<ondsp::MacOp>(callLocation, accumulator.getType(), accumulator, lhs,
+                                              rhs, format, product);
+        return builder.create<ondsp::MacSubOp>(callLocation, accumulator.getType(), accumulator,
+                                               lhs, rhs, format, product);
+      }
+      Value input = emitValue(call.operands.front());
       // A scalar operand reaches only the conversion and elementwise members.
       Type element = getElementTypeOrSelf(input.getType());
       if (call.kind == ReductionKind::ViterbiDecode) {

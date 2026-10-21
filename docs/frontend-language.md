@@ -122,17 +122,50 @@ fixed scalar, or bound in a q15/q31 function, is a raw value of the format, so
 `div`. Same-format comparisons produce `bool`. Conversions take scalars too,
 and nothing converts implicitly; a scalar never broadcasts into a tensor.
 
-There is no accumulator type. A guarded multiply-accumulate is spelled in
-q31, where the product of two widened q15 values is exact and only the
-saturating addition can lose information, or with `dot`:
+## Accumulators
+
+An accumulator holds exact full products of one format with the guard bits of
+that format's executable `dot` profile: i40/frac30 for q15, i64/frac62 for
+q31. It has no source type spelling, so it never crosses the C boundary; it
+lives in locals, including loop-carried ones, and is read once with `export`:
 
 ```python
-def mac(x: buffer[q15], h: buffer[q15]) -> q31:
-  acc = 0
+def fir_sample(x: buffer[q15], h: buffer[q15]) -> q15:
+  acc = zero(accumulator=exact[40, saturate], of=q15)
   for i in range(len(x)):
-    acc = acc + widen(x[i], to=q31) * widen(h[i], to=q31)
-  return acc
+    acc = mac(acc, x[i], h[i])
+  return export(acc, to=q15)
 ```
+
+- `zero(accumulator=exact[W, wrap|saturate], of=q15|q31)` starts at zero;
+  `import(v, accumulator=exact[W, ...])` starts at the q15/q31 scalar `v`,
+  exactly. `W` is 40 for q15 and 64 for q31.
+- `mac(acc, a, b)` and `mac_sub(acc, a, b)` add or subtract the exact product
+  of two scalars of the accumulator's format, then apply the declared update
+  overflow. A literal factor is a raw value of that format.
+- `export(acc, to=format)` rounds once into the accumulator's own format,
+  with optional `rounding=` and `overflow=` defaulting to
+  `nearest_ties_positive` and `saturate`, as `dot` does.
+
+The loop above is `dot(x, h, accumulator=exact[40, saturate],
+rounding=nearest_ties_positive, overflow=saturate)` bit for bit, but it is
+not recognized as that reduction, so it keeps the ordered scalar schedule;
+`dot` remains the route to vectorized and target reductions. A recurrence
+that rounds once per sample keeps its state in the format and its sum in an
+accumulator:
+
+```python
+def pole(x: buffer[q15]) -> q15:
+  y = 0
+  for i in range(len(x)):
+    acc = mac(zero(accumulator=exact[40, saturate], of=q15), y, 29491)
+    y = export(mac(acc, x[i], 3277), to=q15)
+  return y
+```
+
+Accumulators reject operators, conversions and other builtins. A MAC written
+with `widen` to q31 instead has no guard bits: a partial sum outside [-1, 1)
+saturates.
 
 For a statically bounded Q15 dot, FIR sample, FIR decimation, FIR
 interpolation, convolution, or correlation, omitting the accumulator policy
