@@ -28,7 +28,7 @@
 // STEPRANGE: error: range step is out of range for the bound type
 // BOUNDS: error: range bounds must share one index, i32 or i64 type
 // SUBSCRIPT: error: an index must be an index, i32 or i64 scalar
-// LEN: error: len and indexing currently require a rank-one f32, q15 or q31 buffer or tensor parameter
+// LEN: error: len, indexing and slices require a rank-one f32, q15 or q31 buffer, tensor, array or slice
 // INDEXMUL: error: index arithmetic supports only + and -
 // INDEXMIX: error: arithmetic operands must have the same element type
 // INDEXCONST: error: constant index expression leaves the signed 32-bit range

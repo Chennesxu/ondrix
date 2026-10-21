@@ -13,7 +13,6 @@
 // RUN: not ondrix-compile %t/element.ox 2>&1 | FileCheck %s --check-prefix=ELEMENT
 // RUN: not ondrix-compile %t/rank.ox 2>&1 | FileCheck %s --check-prefix=ELEMENT
 // RUN: not ondrix-compile %t/kernel.ox 2>&1 | FileCheck %s --check-prefix=WHOLE
-// RUN: not ondrix-compile %t/library.ox 2>&1 | FileCheck %s --check-prefix=WHOLE
 // RUN: not ondrix-compile %t/alias.ox 2>&1 | FileCheck %s --check-prefix=WHOLE
 // RUN: not ondrix-compile %t/callee.ox 2>&1 | FileCheck %s --check-prefix=CALLEE
 // RUN: not ondrix-compile %t/nothing.ox 2>&1 | FileCheck %s --check-prefix=NOTHING
@@ -36,11 +35,11 @@
 // TENSOR: error: a tensor is a value; only a buffer can be mut
 // SCALAR: error: expected 'buffer[...]' after 'mut'
 // READONLY: error: parameter 'x' is read-only; only a mut buffer is written
-// LOCAL: error: len and indexing currently require a rank-one f32, q15 or q31 buffer or tensor parameter
+// LOCAL: error: len, indexing and slices require a rank-one f32, q15 or q31 buffer, tensor, array or slice
 // VALUE: error: a write stores the buffer's element type
 // INDEX: error: an index must be an index, i32 or i64 scalar
 // ELEMENT: error: a mut buffer holds a rank-one f32, q15 or q31 sequence
-// WHOLE: error: a mut buffer is only indexed, written or measured by len
+// WHOLE: error: a mut buffer is read through subscripts, len and slices, written through subscripts, or a dot, fir or rms operand
 // CALLEE: error: 'fill' writes a mut buffer; only the exported function may
 // NOTHING: error: a function without a result must take a mut buffer
 // RETURN: error: a function without a result has no return
@@ -94,13 +93,8 @@ def f(y: mut buffer[f32, 2, 2]):
   y[0] = 1.0
 
 //--- kernel.ox
-def f(y: mut buffer[f32], h: buffer[f32]) -> f32:
-  return dot(y, h, contract=off)
-
-//--- library.ox
-def f(y: mut buffer[f32], h: buffer[f32]) -> f32:
-  y[0] = 1.0
-  return dot(y, h, contract=off) + 1.0
+def f(y: mut buffer[q15]) -> q15:
+  return negate(y)
 
 //--- alias.ox
 def f(y: mut buffer[f32]) -> f32:

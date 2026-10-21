@@ -456,6 +456,10 @@ static bool isAccumulatorKind(ReductionKind kind) {
 }
 
 // The reductions with a scalar result, which an ordinary expression can hold.
+static constexpr const char *kSequenceUse =
+    "an array or slice is read through subscripts, len and slices, or as a dot, fir or rms "
+    "operand";
+
 static bool isScalarReductionKind(ReductionKind kind) {
   return kind == ReductionKind::Dot || kind == ReductionKind::Fir || kind == ReductionKind::Rms;
 }
@@ -531,6 +535,10 @@ enum class PrimitiveKind {
   Element,
   // A write statement under an empty name: buffer, index, value.
   Store,
+  // A view of a sequence: base, start, stop; `target` is its element type.
+  Slice,
+  // A zero-filled local array of `target` elements, `declaredExtent` long.
+  Zeros,
   Typed
 };
 
@@ -980,8 +988,16 @@ public:
       if (!result)
         return std::nullopt;
       kernel.result = std::move(*result);
-      if (genericExpressions && !body.operands.empty())
+      if (genericExpressions && !body.operands.empty()) {
         kernel.result = bindLocals(std::move(body), std::move(kernel.result));
+      } else if (genericExpressions && isScalarReductionKind(kernel.result.kind) &&
+                 llvm::any_of(kernel.result.operands, [](const ExpressionAst &operand) {
+                   return !operand.isParameterReference();
+                 })) {
+        // A lone reduction over a slice reads it in an ordinary body.
+        ExpressionAst lone(std::move(kernel.result));
+        kernel.result = makePrimitive(PrimitiveKind::Scope, {&lone}, lone.position);
+      }
     }
     caller = nullptr;
     if (current.kind != TokenKind::Eof && !isIdentifier("def")) {
@@ -1177,9 +1193,8 @@ public:
     advance();
     if (!expect(TokenKind::LeftParen, "expected '(' after builtin"))
       return std::nullopt;
-    const ParameterAst *firstOperand = findParameter(current.spelling);
     SourceType policyType =
-        requestedPolicy.value_or(firstOperand ? firstOperand->type : SourceType::F32);
+        requestedPolicy.value_or(findSequenceType(current.spelling).value_or(SourceType::F32));
     if (call.kind == ReductionKind::Lowpass) {
       // The design is fully named by its attributes; the tap count also
       // names the coefficient extent, which no result type spells here.
@@ -1527,10 +1542,10 @@ public:
         return std::nullopt;
       call.operands.push_back(std::move(*input));
     } else {
-      auto lhs = parseIdentifier("expected builtin operand");
+      std::optional<ExpressionAst> lhs = parseNamedOperand("expected builtin operand");
       if (!lhs)
         return std::nullopt;
-      call.operands.push_back(resolveOperand(*lhs));
+      call.operands.push_back(std::move(*lhs));
     }
     if (call.kind == ReductionKind::SosDf2Fixed) {
       if (!expect(TokenKind::Comma, "expected ',' after sos_df2_fixed input operand"))
@@ -1850,10 +1865,10 @@ public:
     }
     if (!expect(TokenKind::Comma, "expected ',' after reduction left operand"))
       return std::nullopt;
-    auto rhs = parseIdentifier("expected reduction right operand");
+    std::optional<ExpressionAst> rhs = parseNamedOperand("expected reduction right operand");
     if (!rhs)
       return std::nullopt;
-    call.operands.push_back(resolveOperand(*rhs));
+    call.operands.push_back(std::move(*rhs));
 
     // Which operand is conjugated is the difference between a complex dot
     // product and a correlation, so the call site names it; omission is the
@@ -2073,6 +2088,27 @@ private:
     return call;
   }
 
+  // A builtin operand: a name or, in an ordinary body, a slice of one.
+  std::optional<ExpressionAst> parseNamedOperand(const llvm::Twine &message) {
+    if (genericExpressions && current.kind == TokenKind::Identifier &&
+        next.kind == TokenKind::LeftBracket) {
+      std::optional<Operand> operand = parsePrimary(std::nullopt);
+      if (!operand)
+        return std::nullopt;
+      return std::move(operand->expression);
+    }
+    std::optional<Token> name = parseIdentifier(message);
+    if (!name)
+      return std::nullopt;
+    return resolveOperand(*name);
+  }
+
+  static BuiltinCallAst makeLiteral(StringRef spelling, SourcePosition position) {
+    BuiltinCallAst literal = makePrimitive(PrimitiveKind::Literal, {}, position);
+    literal.spelling = spelling.str();
+    return literal;
+  }
+
   std::optional<Operand> parseLogicalOr(std::optional<SourceType> rootPolicy = std::nullopt) {
     auto lhs = parseLogicalAnd(rootPolicy);
     while (lhs && isIdentifier("or")) {
@@ -2211,10 +2247,7 @@ private:
          isIdentifier("True") || isIdentifier("False") ||
          (current.kind == TokenKind::Minus &&
           (next.kind == TokenKind::Integer || next.kind == TokenKind::Float)))) {
-      BuiltinCallAst literal;
-      literal.kind = ReductionKind::Primitive;
-      literal.primitive = PrimitiveKind::Literal;
-      literal.position = position;
+      BuiltinCallAst literal = makeLiteral("", position);
       if (current.kind == TokenKind::Minus) {
         literal.spelling = "-";
         advance();
@@ -2259,13 +2292,69 @@ private:
       Token base = current;
       advance();
       advance();
-      std::optional<Operand> index = parseLogicalOr();
-      if (!index || !expect(TokenKind::RightBracket, "expected ']' after the index"))
-        return std::nullopt;
+      std::optional<ExpressionAst> start;
+      if (current.kind != TokenKind::Colon) {
+        std::optional<Operand> index = parseLogicalOr();
+        if (!index)
+          return std::nullopt;
+        start = std::move(index->expression);
+      }
       ExpressionAst reference = resolveOperand(base);
-      return Operand{ExpressionAst(makePrimitive(PrimitiveKind::Element,
-                                                 {&reference, &*index->expression}, position)),
-                     0, position};
+      if (current.kind != TokenKind::Colon) {
+        if (!expect(TokenKind::RightBracket, "expected ']' after the index"))
+          return std::nullopt;
+        return Operand{
+            ExpressionAst(makePrimitive(PrimitiveKind::Element, {&reference, &*start}, position)),
+            0, position};
+      }
+      advance();
+      std::optional<ExpressionAst> stop;
+      if (current.kind != TokenKind::RightBracket) {
+        std::optional<Operand> bound = parseLogicalOr();
+        if (!bound)
+          return std::nullopt;
+        stop = std::move(bound->expression);
+      }
+      if (!expect(TokenKind::RightBracket, "expected ']' after the slice; a slice has no step"))
+        return std::nullopt;
+      // An omitted bound is 0 or len(base).
+      if (!start)
+        start = ExpressionAst(makeLiteral("0", position));
+      if (!stop) {
+        ExpressionAst measured(reference);
+        stop = ExpressionAst(makePrimitive(PrimitiveKind::Length, {&measured}, position));
+      }
+      BuiltinCallAst slice =
+          makePrimitive(PrimitiveKind::Slice, {&reference, &*start, &*stop}, position);
+      slice.target = findSequenceType(base.spelling).value_or(SourceType::F32);
+      return Operand{ExpressionAst(std::move(slice)), 0, position};
+    }
+    if (genericExpressions && isIdentifier("zeros") && next.kind == TokenKind::LeftParen &&
+        !calleesByName.contains("zeros")) {
+      advance();
+      advance();
+      SourcePosition typePosition = current.position;
+      std::optional<SourceType> element = parseSourceType("expected f32, q15 or q31");
+      if (!element)
+        return std::nullopt;
+      if (*element != SourceType::F32 && !isRealFixed(*element)) {
+        diagnostics.error(typePosition, "a local array holds f32, q15 or q31 elements");
+        return std::nullopt;
+      }
+      if (!expect(TokenKind::Comma, "expected ',' before the array length"))
+        return std::nullopt;
+      SourcePosition lengthPosition = current.position;
+      std::optional<int64_t> length = parseSignedInteger("expected the array length");
+      if (!length || !expect(TokenKind::RightParen, "expected ')' after the array length"))
+        return std::nullopt;
+      if (*length < 1 || *length > 4096) {
+        diagnostics.error(lengthPosition, "a local array length must be in [1, 4096]");
+        return std::nullopt;
+      }
+      BuiltinCallAst zeros = makePrimitive(PrimitiveKind::Zeros, {}, position);
+      zeros.target = *element;
+      zeros.declaredExtent = *length;
+      return Operand{ExpressionAst(std::move(zeros)), 0, position};
     }
     if (genericExpressions && isIdentifier("len") && next.kind == TokenKind::LeftParen &&
         !calleesByName.contains("len")) {
@@ -2565,6 +2654,14 @@ private:
         auto argument = parseIdentifier("expected a parameter or local name as a call argument");
         if (!argument)
           return std::nullopt;
+        bool sequence = current.kind == TokenKind::LeftBracket ||
+                        (!findParameter(argument->spelling) &&
+                         findSequenceType(argument->spelling).has_value());
+        if (sequence) {
+          diagnostics.error(argument->position,
+                            "an array or slice is not passed to a named function");
+          return std::nullopt;
+        }
         arguments.push_back(resolveOperand(*argument));
         if (current.kind != TokenKind::Comma)
           break;
@@ -2842,6 +2939,21 @@ private:
     return found == caller->parameters.end() ? nullptr : &*found;
   }
 
+  // The element type of the parameter, array or slice that `name` spells.
+  std::optional<SourceType> findSequenceType(StringRef name) const {
+    if (const ParameterAst *parameter = findParameter(name))
+      return parameter->type;
+    auto found = bindingsByName.find(name);
+    if (found == bindingsByName.end())
+      return std::nullopt;
+    const ExpressionAst &bound = bindings[found->second].expression;
+    if (bound.call && bound.call->kind == ReductionKind::Primitive &&
+        (bound.call->primitive == PrimitiveKind::Slice ||
+         bound.call->primitive == PrimitiveKind::Zeros))
+      return bound.call->target;
+    return std::nullopt;
+  }
+
   // One assignment or loop appended to `owner`. A reassigned local keeps its
   // name; Sema requires it to keep its type.
   bool parseStatement(BuiltinCallAst &owner, SourceType policyType) {
@@ -2885,6 +2997,10 @@ private:
     advance();
     advance();
     std::optional<Operand> index = parseLogicalOr();
+    if (index && current.kind == TokenKind::Colon) {
+      diagnostics.error(current.position, "a slice is a read-only view; write its elements");
+      return false;
+    }
     if (!index || !expect(TokenKind::RightBracket, "expected ']' after the index") ||
         !expect(TokenKind::Equal, "expected '=' after the indexed target"))
       return false;
@@ -2945,9 +3061,7 @@ private:
       bounds.pop_back();
     }
     if (bounds.size() == 1) {
-      BuiltinCallAst zero = makePrimitive(PrimitiveKind::Literal, {}, keyword.position);
-      zero.spelling = "0";
-      loop.operands.push_back(ExpressionAst(std::move(zero)));
+      loop.operands.push_back(ExpressionAst(makeLiteral("0", keyword.position)));
     }
     for (ExpressionAst &bound : bounds)
       loop.operands.push_back(std::move(bound));
@@ -3160,18 +3274,19 @@ static std::optional<llvm::StringRef> getParameterOperand(const BuiltinCallAst &
   return call.operands[index].parameter;
 }
 
-// The first mut buffer `call` uses other than as the buffer it indexes, writes
-// or measures with len.
+// The first mut buffer `call` uses other than as the buffer it indexes,
+// writes, slices or measures with len, or a dot, fir or rms operand.
 static const ExpressionAst *findWholeMutUse(const BuiltinCallAst &call, const KernelAst &kernel) {
+  bool read = isScalarReductionKind(call.kind);
   bool indexed =
       call.kind == ReductionKind::Primitive &&
       (call.primitive == PrimitiveKind::Element || call.primitive == PrimitiveKind::Store ||
-       call.primitive == PrimitiveKind::Length);
+       call.primitive == PrimitiveKind::Length || call.primitive == PrimitiveKind::Slice);
   for (const auto &[i, operand] : llvm::enumerate(call.operands)) {
     if (operand.call) {
       if (const ExpressionAst *use = findWholeMutUse(*operand.call, kernel))
         return use;
-    } else if (!(indexed && i == 0) &&
+    } else if (!read && !(indexed && i == 0) &&
                llvm::any_of(kernel.parameters, [&](const ParameterAst &parameter) {
                  return parameter.isMutable && parameter.name == operand.parameter;
                })) {
@@ -3183,7 +3298,8 @@ static const ExpressionAst *findWholeMutUse(const BuiltinCallAst &call, const Ke
 
 static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diagnostics) {
   if (const ExpressionAst *use = findWholeMutUse(ast.result, ast)) {
-    diagnostics.error(use->position, "a mut buffer is only indexed, written or measured by len");
+    diagnostics.error(use->position, "a mut buffer is read through subscripts, len and slices, "
+                                     "written through subscripts, or a dot, fir or rms operand");
     return std::nullopt;
   }
   for (const ParameterAst &parameter : ast.parameters) {
@@ -3934,14 +4050,27 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       SourceType accumulatorFormat = SourceType::Q15;
       std::string updateOverflow;
     };
+    // A rank-one sequence that subscripts, len and slices read: a parameter,
+    // an array local, or a view of either.
+    struct Sequence {
+      SourceType elementType;
+      std::optional<int64_t> extent;
+      bool writable = false;
+      ContainerKind container = ContainerKind::Buffer;
+    };
     llvm::StringMap<unsigned> parameterUses;
     llvm::StringMap<ComposedType> localTypes;
+    llvm::StringMap<Sequence> sequenceLocals;
     llvm::StringMap<APInt> localConstants;
     std::optional<SourceType> literalHint;
     std::function<std::optional<ComposedType>(ExpressionAst &)> checkComposedExpression;
     std::function<std::optional<ComposedType>(BuiltinCallAst &)> checkComposedCall;
     checkComposedExpression = [&](ExpressionAst &expression) -> std::optional<ComposedType> {
       if (expression.isParameterReference()) {
+        if (sequenceLocals.contains(expression.parameter)) {
+          diagnostics.error(expression.position, kSequenceUse);
+          return std::nullopt;
+        }
         auto local = localTypes.find(expression.parameter);
         if (local != localTypes.end())
           return local->second;
@@ -4003,6 +4132,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     };
     // Induction variables whose range proves `0 <= v < len(parameter)`.
     llvm::StringMap<std::string> provenIndices;
+    std::function<std::optional<Sequence>(ExpressionAst &)> checkSequence;
+    std::function<std::optional<Sequence>(BuiltinCallAst &)> checkSlice;
     auto sameType = [](const ComposedType &lhs, const ComposedType &rhs) {
       return lhs.elementType == rhs.elementType && lhs.extent == rhs.extent &&
              lhs.accumulatorFormat == rhs.accumulatorFormat &&
@@ -4029,6 +4160,24 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
                     ? checkLoop(*statement.call)
                     : checkComposedExpression(statement).has_value()))
             return false;
+          continue;
+        }
+        BuiltinCallAst &bound = *statement.call;
+        bool sequence =
+            bound.kind == ReductionKind::Primitive &&
+            (bound.primitive == PrimitiveKind::Slice || bound.primitive == PrimitiveKind::Zeros);
+        if (sequence || sequenceLocals.contains(name)) {
+          if (!sequence || sequenceLocals.contains(name) || localTypes.contains(name)) {
+            diagnostics.error(statement.position, "an array or slice local is bound once");
+            return false;
+          }
+          std::optional<Sequence> value =
+              bound.primitive == PrimitiveKind::Zeros
+                  ? Sequence{bound.target, bound.declaredExtent, true, ContainerKind::Buffer}
+                  : checkSlice(bound);
+          if (!value)
+            return false;
+          sequenceLocals[name] = *value;
           continue;
         }
         std::optional<ComposedType> type = checkComposedExpression(statement);
@@ -4090,6 +4239,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         localConstants.erase(name);
       }
       auto outerTypes = localTypes;
+      auto outerSequences = sequenceLocals;
       auto outerConstants = localConstants;
       const std::string &induction = loop.bindingNames[0];
       localTypes[induction] = ComposedType{type, 0};
@@ -4101,21 +4251,79 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       bool checked = checkStatements(loop, 2);
       provenIndices.erase(induction);
       localTypes = std::move(outerTypes);
+      sequenceLocals = std::move(outerSequences);
       localConstants = std::move(outerConstants);
       return checked;
     };
-    // The parameter `len` and subscripts read; complex_f32 is excluded because
-    // its storage extent is not its element count.
-    auto getIndexedParameter = [&](const ExpressionAst &base) -> const ParameterAst * {
-      auto parameter = parametersByName.find(base.parameter);
+    // complex_f32 is excluded because its storage extent is not its element count.
+    checkSequence = [&](ExpressionAst &base) -> std::optional<Sequence> {
+      if (base.call && base.call->kind == ReductionKind::Primitive &&
+          base.call->primitive == PrimitiveKind::Slice)
+        return checkSlice(*base.call);
+      if (!base.call) {
+        auto local = sequenceLocals.find(base.parameter);
+        if (local != sequenceLocals.end())
+          return local->second;
+      }
+      auto parameter = base.call ? parametersByName.end() : parametersByName.find(base.parameter);
       if (parameter == parametersByName.end() || !hasRank(parameter->second->shape, 1) ||
           (parameter->second->type != SourceType::F32 && !isRealFixed(parameter->second->type))) {
-        diagnostics.error(base.position, "len and indexing currently require a rank-one f32, q15 "
-                                         "or q31 buffer or tensor parameter");
-        return nullptr;
+        diagnostics.error(base.position, "len, indexing and slices require a rank-one f32, q15 "
+                                         "or q31 buffer, tensor, array or slice");
+        return std::nullopt;
       }
       ++parameterUses[base.parameter];
-      return parameter->second;
+      const ParameterAst &value = *parameter->second;
+      return Sequence{value.type, getRankOneExtent(value.shape), value.isMutable, value.container};
+    };
+    // A slice is checked unless its constant bounds fit a static extent; an
+    // omitted stop is len of the base.
+    checkSlice = [&](BuiltinCallAst &call) -> std::optional<Sequence> {
+      std::optional<Sequence> base = checkSequence(call.operands[0]);
+      if (!base)
+        return std::nullopt;
+      SmallVector<std::optional<int64_t>, 2> bounds;
+      for (ExpressionAst &operand : llvm::drop_begin(call.operands)) {
+        auto savedHint = literalHint;
+        literalHint = SourceType::Index;
+        std::optional<ComposedType> type = checkComposedExpression(operand);
+        literalHint = savedHint;
+        if (!type)
+          return std::nullopt;
+        if (type->extent ||
+            (type->elementType != SourceType::Index && type->elementType != SourceType::I32 &&
+             type->elementType != SourceType::I64)) {
+          diagnostics.error(operand.position, "a slice bound must be an index, i32 or i64 scalar");
+          return std::nullopt;
+        }
+        const BuiltinCallAst *measured = operand.call.get();
+        bool whole = measured && measured->kind == ReductionKind::Primitive &&
+                     measured->primitive == PrimitiveKind::Length &&
+                     measured->operands.front().isParameterReference() &&
+                     call.operands.front().isParameterReference() &&
+                     measured->operands.front().parameter == call.operands.front().parameter;
+        std::optional<APInt> value = constant(operand);
+        bounds.push_back(whole   ? base->extent
+                         : value ? std::optional<int64_t>(value->getSExtValue())
+                                 : std::nullopt);
+      }
+      call.target = base->elementType;
+      call.inBounds = false;
+      auto outside = [&](std::optional<int64_t> bound) {
+        return bound && (*bound < 0 || (base->extent && *bound > *base->extent));
+      };
+      if (outside(bounds[0]) || outside(bounds[1]) ||
+          (bounds[0] && bounds[1] && *bounds[0] > *bounds[1])) {
+        diagnostics.error(call.position, "slice bounds are out of range");
+        return std::nullopt;
+      }
+      std::optional<int64_t> extent;
+      if (bounds[0] && bounds[1]) {
+        extent = *bounds[1] - *bounds[0];
+        call.inBounds = base->extent.has_value();
+      }
+      call.declaredExtent = extent.value_or(ShapedType::kDynamic);
+      return Sequence{base->elementType, extent, false, base->container};
     };
 
     auto checkPrimitive = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
@@ -4131,6 +4339,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       auto op = call.primitive;
       if (op == PrimitiveKind::Scope) {
         auto saved = localTypes;
+        auto savedSequences = sequenceLocals;
         auto savedConstants = localConstants;
         std::optional<ComposedType> result;
         if (checkStatements(call, 0)) {
@@ -4142,21 +4351,28 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           }
         }
         localTypes = std::move(saved);
+        sequenceLocals = std::move(savedSequences);
         localConstants = std::move(savedConstants);
         return result ? finish(*result) : std::nullopt;
       }
+      if (op == PrimitiveKind::Slice || op == PrimitiveKind::Zeros)
+        return reject(kSequenceUse);
       if (op == PrimitiveKind::Length) {
-        if (!getIndexedParameter(call.operands.front()))
+        if (!checkSequence(call.operands.front()))
           return std::nullopt;
         return finish({SourceType::Index, 0});
       }
       if (op == PrimitiveKind::Element || op == PrimitiveKind::Store) {
-        const ParameterAst *parameter = getIndexedParameter(call.operands.front());
-        if (!parameter)
+        const ExpressionAst &base = call.operands.front();
+        std::optional<Sequence> sequence = checkSequence(call.operands.front());
+        if (!sequence)
           return std::nullopt;
-        if (op == PrimitiveKind::Store && !parameter->isMutable)
-          return reject(llvm::Twine("parameter '") + parameter->name +
+        if (op == PrimitiveKind::Store && !sequence->writable) {
+          if (sequenceLocals.contains(base.parameter))
+            return reject("a slice is a read-only view; write its elements");
+          return reject(llvm::Twine("parameter '") + base.parameter +
                         "' is read-only; only a mut buffer is written");
+        }
         auto savedHint = literalHint;
         literalHint = SourceType::Index;
         std::optional<ComposedType> index = checkComposedExpression(call.operands[1]);
@@ -4169,15 +4385,16 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           return reject("an index must be an index, i32 or i64 scalar");
         const ExpressionAst &position = call.operands[1];
         call.inBounds = position.isParameterReference() &&
-                        provenIndices.lookup(position.parameter) == parameter->name;
+                        provenIndices.lookup(position.parameter) == base.parameter;
+        SourceType elementType = sequence->elementType;
         if (op == PrimitiveKind::Element)
-          return finish({parameter->type, 0});
-        literalHint = parameter->type;
+          return finish({elementType, 0});
+        literalHint = elementType;
         std::optional<ComposedType> value = checkComposedExpression(call.operands[2]);
         literalHint = savedHint;
         if (!value)
           return std::nullopt;
-        if (value->extent || value->elementType != parameter->type)
+        if (value->extent || value->elementType != elementType)
           return reject("a write stores the buffer's element type");
         return finish({SourceType::Void, 0});
       }
@@ -4731,16 +4948,37 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       library.name = ast.name;
       library.position = call.position;
       library.result = BuiltinCallAst(call);
-      for (ExpressionAst &operand : library.result.operands) {
+      for (auto [index, operand] : llvm::enumerate(library.result.operands)) {
         const ParameterAst *parameter =
             operand.isParameterReference() ? parametersByName.lookup(operand.parameter) : nullptr;
+        bool view = operand.isParameterReference()
+                        ? sequenceLocals.contains(operand.parameter)
+                        : operand.call->kind == ReductionKind::Primitive &&
+                              operand.call->primitive == PrimitiveKind::Slice;
+        if (view) {
+          // The checked kernel reads a container the caller binds to the view;
+          // an empty view is dynamic, as static parameter extents are positive.
+          std::optional<Sequence> sequence = checkSequence(call.operands[index]);
+          if (!sequence)
+            return std::nullopt;
+          ParameterAst copy;
+          copy.name = "$operand" + std::to_string(index);
+          copy.type = sequence->elementType;
+          copy.container = sequence->container;
+          copy.shape = {sequence->extent == 0 ? std::nullopt : sequence->extent};
+          copy.position = operand.position;
+          operand = ExpressionAst(copy.name, operand.position);
+          library.parameters.push_back(std::move(copy));
+          continue;
+        }
         if (!parameter || (parameter->type != SourceType::F32 && !isRealFixed(parameter->type))) {
           diagnostics.error(operand.position, "a reduction inside an expression currently reads "
-                                              "f32, q15 or q31 parameters");
+                                              "f32, q15 or q31 parameters, arrays or slices");
           return std::nullopt;
         }
         ++parameterUses[operand.parameter];
         ParameterAst copy = *parameter;
+        copy.isMutable = false;
         if (llvm::any_of(library.parameters,
                          [&](const ParameterAst &other) { return other.name == copy.name; }))
           copy.name += "$" + std::to_string(library.parameters.size());
@@ -6048,7 +6286,9 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         for (auto [parameter, operand] :
              llvm::zip_equal(call.library->ast.parameters, call.operands))
           if (!parameter.isConstexpr())
-            mapping.map(body.getArgument(index++), arguments.lookup(operand.parameter));
+            mapping.map(body.getArgument(index++), operand.call
+                                                       ? emitComposedCall(*operand.call)
+                                                       : arguments.lookup(operand.parameter));
         for (Operation &op : body.without_terminator())
           builder.clone(op, mapping);
         return mapping.lookup(body.getTerminator()->getOperand(0));
@@ -6166,15 +6406,73 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         }
         if (op == PrimitiveKind::Length)
           return lengthOf(emitOperand(call.operands.front()));
+        auto toIndex = [&](Value value) -> Value {
+          if (value.getType().isIndex())
+            return value;
+          return builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), value);
+        };
+        if (op == PrimitiveKind::Slice) {
+          Value base = emitOperand(call.operands[0]);
+          Value start = emitOperand(call.operands[1]);
+          Value stop = emitOperand(call.operands[2]);
+          Value first = toIndex(start);
+          Value last = toIndex(stop);
+          if (!call.inBounds) {
+            // An i64 bound is compared before narrowing to a 32-bit target index.
+            Value length = lengthOf(base);
+            auto fits = [&](Value bound, Value position) -> Value {
+              if (!bound.getType().isInteger(64))
+                return builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ule, position,
+                                                     length);
+              Value wide = builder.create<arith::IndexCastOp>(loc, builder.getI64Type(), length);
+              return builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ule, bound, wide);
+            };
+            Value ordered =
+                builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ule, first, last);
+            Value valid = builder.create<arith::AndIOp>(
+                loc, builder.create<arith::AndIOp>(loc, fits(start, first), fits(stop, last)),
+                ordered);
+            builder.create<cf::AssertOp>(loc, valid, "slice out of bounds");
+          }
+          OpFoldResult size =
+              ShapedType::isDynamic(call.declaredExtent)
+                  ? OpFoldResult(builder.create<arith::SubIOp>(loc, last, first).getResult())
+                  : OpFoldResult(builder.getIndexAttr(call.declaredExtent));
+          SmallVector<OpFoldResult> offsets{first}, sizes{size}, strides{builder.getIndexAttr(1)};
+          if (isa<MemRefType>(base.getType()))
+            return builder.create<memref::SubViewOp>(loc, base, offsets, sizes, strides);
+          return builder.create<tensor::ExtractSliceOp>(loc, base, offsets, sizes, strides);
+        }
+        if (op == PrimitiveKind::Zeros) {
+          // One stack slot per binding, hoisted so a loop body does not grow the stack.
+          Type element = getStorageType(call.target);
+          Value array;
+          {
+            OpBuilder::InsertionGuard guard(builder);
+            builder.setInsertionPointToStart(entry);
+            array = builder.create<memref::AllocaOp>(
+                loc, MemRefType::get({call.declaredExtent}, element));
+          }
+          Value zero =
+              element.isF32()
+                  ? builder.create<arith::ConstantOp>(loc, builder.getF32FloatAttr(0.0f))
+                  : builder.create<arith::ConstantOp>(loc, builder.getIntegerAttr(element, 0));
+          builder.create<scf::ForOp>(
+              loc, builder.create<arith::ConstantIndexOp>(loc, 0),
+              builder.create<arith::ConstantIndexOp>(loc, call.declaredExtent),
+              builder.create<arith::ConstantIndexOp>(loc, 1), ValueRange(),
+              [&](OpBuilder &, Location, Value position, ValueRange) {
+                builder.create<memref::StoreOp>(loc, zero, array, position);
+                builder.create<scf::YieldOp>(loc);
+              });
+          return array;
+        }
         if (op == PrimitiveKind::Element || op == PrimitiveKind::Store) {
           // As in Python, a write evaluates its value before its target.
           Value value = op == PrimitiveKind::Store ? emitOperand(call.operands[2]) : Value();
           Value base = emitOperand(call.operands.front());
           Value index = emitOperand(call.operands[1]);
-          Value position =
-              index.getType().isIndex()
-                  ? index
-                  : builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), index);
+          Value position = toIndex(index);
           if (!call.inBounds) {
             // An i64 index is compared before narrowing to a 32-bit target index.
             Value length = lengthOf(base);

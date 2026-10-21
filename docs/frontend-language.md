@@ -109,13 +109,55 @@ def prefix(y: mut buffer[f32]):
     y[i] = y[i] + y[i - 1]
 ```
 
-Only buffers are mutable: a tensor is a value, and other parameters and locals
-are never written through a subscript. A mut buffer is used only through
-subscripts and `len`: it cannot yet be a `dot`, `fir` or `rms` operand or be
-bound whole to a local, and the exported function is the only one that takes
-a mut buffer. The C entry
-passes it as `T *` (`const T *` if nothing writes it) with its own length,
-and the declared non-overlap precondition covers it like any other buffer.
+Only buffers and local arrays are mutable: a tensor is a value, and other
+parameters and locals are never written through a subscript. A mut buffer is
+read through subscripts, `len` and slices, written through subscripts, or
+read whole as a `dot`, `fir` or `rms` operand; it is never bound whole to a
+local, and the exported function is the only one that takes a mut buffer.
+The C entry passes it as `T *` (`const T *` if nothing writes it) with its
+own length, and the declared non-overlap precondition covers it like any
+other buffer.
+
+## Slices and Local Arrays
+
+`x[a:b]` is a read-only view of `b - a` elements of a rank-one f32, q15 or
+q31 parameter or local array, starting at `a`; `x[a:]`, `x[:b]` and `x[:]`
+take `0` and `len(x)` for an omitted bound, and there is no step. The bounds
+are typed as subscripts, and the slice traps unless `0 <= a <= b <= len(x)`;
+the check is omitted when constant bounds fit a static extent. A constant
+bound that is negative or past a static extent is a compile-time error, as
+are two constant bounds out of order. A view reads its base's current
+contents, so a slice of a mut buffer sees later writes to it. Its extent is
+static when both bounds are constant, and an empty view is legal.
+
+`t = zeros(T, N)`, with `T` one of f32, q15 and q31 and `N` an integer
+literal from 1 to 4096, binds a local array of `N` zeros on the stack; each
+execution of the statement zeroes it again. It is written with `t[i] = v` and
+read like a buffer:
+
+```python
+def fir(x: buffer[q15], h: buffer[q15], y: mut buffer[q15]):
+  for n in range(len(y)):
+    y[n] = dot(x[n:n + len(h)], h,
+               accumulator=exact[40, saturate],
+               rounding=nearest_ties_positive,
+               overflow=saturate)
+
+def smooth(x: buffer[f32], y: mut buffer[f32]):
+  for n in range(len(y)):
+    t = zeros(f32, 4)
+    for k in range(n, 4):
+      t[k] = x[n]
+    y[n] = t[0] + t[1] + t[2] + t[3]
+```
+
+A slice or array bound to a local is bound once: it is never reassigned or
+carried by a loop. It is read through subscripts, `len` and slices, or as a
+`dot`, `fir` or `rms` operand, which also takes a slice written in place;
+like a tensor, a tensor slice is not such an operand. It is never returned, passed to a named function, or used in arithmetic. `range(len(w))`
+omits the subscript checks of `w` as it does for parameters. Slices lower to
+`memref.subview` or `tensor.extract_slice`, arrays to a `memref.alloca` at the
+function entry; nothing is copied.
 
 ## Reductions Inside Expressions
 
@@ -136,7 +178,9 @@ def blend(x: buffer[f32], w: buffer[f32], n: i32) -> f32:
   return s
 ```
 
-Tensor-valued calls and local or sliced operands are not yet accepted.
+An operand may also be a slice, a local array or a mut buffer (see [Slices
+and Local Arrays](#slices-and-local-arrays)). Tensor-valued calls are not yet
+accepted.
 
 ## Fixed-Point Scalars
 
@@ -1176,8 +1220,8 @@ runs. The checked mode is a debugging aid, a few compares per buffer pair,
 and off by default; the same header serves both builds.
 
 This is not a general Python parser. Imports, classes, heap objects, arbitrary
-expressions, and dynamic Python behavior are rejected. Writes to locals or
-slices, `if`/`while` statements, multiple exported kernels,
+expressions, and dynamic Python behavior are rejected. Writes through slices,
+dynamic-length local arrays, `if`/`while` statements, multiple exported kernels,
 and inferred accumulators outside the statically bounded Q15 real-reduction
 slice remain unimplemented. Textual MLIR remains an independent and more
 complete compiler entry point.
