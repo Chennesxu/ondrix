@@ -22,7 +22,7 @@
 // RUN: not ondrix-compile %t/fixed.ox 2>&1 | FileCheck %s --check-prefix=FIXED
 // READONLY: error: loop variable 'i' is read-only
 // RETYPE: error: a reassignment must keep the local's type
-// SCOPE: error: local 't' is only visible inside its loop body
+// SCOPE: error: local 't' is only visible inside the body that binds it
 // CARRY: error: a loop can only carry scalar locals
 // STEP: error: range step must be a nonzero integer literal
 // STEPRANGE: error: range step is out of range for the bound type
@@ -32,9 +32,9 @@
 // INDEXMUL: error: index arithmetic supports only + and -
 // INDEXMIX: error: arithmetic operands must have the same element type
 // INDEXCONST: error: constant index expression leaves the signed 32-bit range
-// INDENT: error: inconsistent indentation in the loop body
-// BODY: error: expected an indented loop body
-// FIXED: error: loops require an i32, i64, bool, f32, q15 or q31 function result
+// INDENT: error: inconsistent indentation in the body
+// BODY: error: expected an indented body
+// FIXED: error: loops and branches require an i32, i64, bool, f32, q15 or q31 function result
 //--- readonly.ox
 def f(n: i32) -> i32:
   s = 0

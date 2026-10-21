@@ -46,8 +46,7 @@ integer/f32 operands, without fixed-point rounding or overflow parameters.
 Q15/Q31 retain their raw-literal and quantization rules, for tensors and for
 the scalars described below. Their `-x` uses `negate(x)`, saturating by
 default. DSP builtin composition retains its
-existing restrictions. Plain integer/bool tensors, array writes, and source
-`if`/`while` statements remain unsupported.
+existing restrictions. Plain integer/bool tensors remain unsupported.
 
 ## Counted Loops and Indexed Reads
 
@@ -117,6 +116,50 @@ local, and the exported function is the only one that takes a mut buffer.
 The C entry passes it as `T *` (`const T *` if nothing writes it) with its
 own length, and the declared non-overlap precondition covers it like any
 other buffer.
+
+## Branches and While Loops
+
+`if c:` runs its body when the scalar bool `c` is true; any number of
+`elif c:` bodies and one `else:` body follow at the `if`'s column, and the
+first true condition chooses. `while c:` runs its body while `c` is true,
+evaluating `c` before every iteration. Bodies are indented as for loops and
+hold the same statements, `if` and `while` included; `return` ends only the
+function body, and `break` and `continue` are not supported:
+
+```python
+def clip(x: buffer[f32], y: mut buffer[f32], lo: f32, hi: f32) -> i32:
+  n = 0
+  for i in range(len(x)):
+    v = x[i]
+    if v < lo:
+      v = lo
+      n = n + 1
+    elif v > hi:
+      v = hi
+      n = n + 1
+    y[i] = v
+  return n
+
+def gcd(x: i64, y: i64) -> i64:
+  a = x if x >= 0 else -x
+  b = y if y >= 0 else -y
+  while b != 0:
+    t = a - a / b * b
+    a = b
+    b = t
+  return a
+```
+
+A local bound before the statement and reassigned in a body keeps its type;
+after an `if` it holds the value of the body that ran, or its earlier value
+if none assigned it, and a `while` carries it as a `for` loop does (scalar
+locals only). A name first bound in a body is visible only there.
+
+`a if c else b` evaluates `c`, then only the chosen operand, so
+`x / y if y != 0 else 0` never divides by zero. It binds below `or`, groups
+to the right, and its `if` appears on the line of `a` or inside brackets.
+Both operands have one type; a literal takes the other operand's. Branches
+lower to `scf.if` and while loops to `scf.while`.
 
 ## Slices and Local Arrays
 
@@ -1221,7 +1264,8 @@ and off by default; the same header serves both builds.
 
 This is not a general Python parser. Imports, classes, heap objects, arbitrary
 expressions, and dynamic Python behavior are rejected. Writes through slices,
-dynamic-length local arrays, `if`/`while` statements, multiple exported kernels,
+dynamic-length local arrays, `return`, `break` and `continue` inside a body,
+multiple exported kernels,
 and inferred accumulators outside the statically bounded Q15 real-reduction
 slice remain unimplemented. Textual MLIR remains an independent and more
 complete compiler entry point.

@@ -528,9 +528,15 @@ enum class PrimitiveKind {
   // Statement sequences: operand i is assigned to bindingNames[i], or is a
   // nested Loop or a Store under an empty name. A Scope's operand past its
   // statements, if any, is its result. A Loop's operands are start, stop,
-  // then its body; bindingNames[0] names the induction variable.
+  // then its body; bindingNames[0] names the induction variable. A While's
+  // operand 0 is its condition, then its body. A Branch's operands are its
+  // condition and then/else Scopes; elif nests a Branch in the else Scope.
   Scope,
   Loop,
+  While,
+  Branch,
+  // `a if c else b`: operands are c, a, b.
+  Choose,
   Length,
   Element,
   // A write statement under an empty name: buffer, index, value.
@@ -977,9 +983,9 @@ public:
       }
       kernel.result = std::move(body);
     } else {
-      if (isLoopStart()) {
-        diagnostics.error(current.position,
-                          "loops require an i32, i64, bool, f32, q15 or q31 function result");
+      if (isLoopStart() || isCompoundStart()) {
+        diagnostics.error(current.position, "loops and branches require an i32, i64, bool, f32, "
+                                            "q15 or q31 function result");
         return std::nullopt;
       }
       if (!expectIdentifier("return", "expected a single return statement"))
@@ -1009,8 +1015,9 @@ public:
       return std::nullopt;
     }
     if (scopedOutUse) {
-      diagnostics.error(scopedOutUse->position, llvm::Twine("local '") + scopedOutUse->spelling +
-                                                    "' is only visible inside its loop body");
+      diagnostics.error(scopedOutUse->position,
+                        llvm::Twine("local '") + scopedOutUse->spelling +
+                            "' is only visible inside the body that binds it");
       return std::nullopt;
     }
     for (const Binding &binding : bindings) {
@@ -2046,7 +2053,7 @@ private:
   // parameter name would be an alias, which the language does not have.
   std::optional<BuiltinCallAst> parseStatementExpression(SourceType policyType) {
     std::optional<Operand> operand =
-        genericExpressions ? parseLogicalOr(policyType) : parseSum(policyType);
+        genericExpressions ? parseConditional(policyType) : parseSum(policyType);
     if (!operand)
       return std::nullopt;
     // An accumulator step is not a kernel on its own, so it never roots one.
@@ -2066,7 +2073,7 @@ private:
   // literal on its own, which only an operator with a tensor beside it reads.
   std::optional<ExpressionAst> parseExpression(std::optional<SourceType> rootPolicy) {
     std::optional<Operand> operand =
-        genericExpressions ? parseLogicalOr(rootPolicy) : parseSum(rootPolicy);
+        genericExpressions ? parseConditional(rootPolicy) : parseSum(rootPolicy);
     if (!operand)
       return std::nullopt;
     if (!operand->expression) {
@@ -2109,6 +2116,27 @@ private:
     return literal;
   }
 
+  // `a if c else b`, below `or` and right-associative. Its `if` is on the line
+  // of `a` or inside brackets, as a statement `if` starts a new line.
+  std::optional<Operand> parseConditional(std::optional<SourceType> rootPolicy = std::nullopt) {
+    std::optional<Operand> chosen = parseLogicalOr(rootPolicy);
+    if (!chosen || !genericExpressions || !isIdentifier("if") ||
+        (!bracketDepth && current.position.line != previousLine))
+      return chosen;
+    SourcePosition position = current.position;
+    advance();
+    std::optional<Operand> condition = parseLogicalOr();
+    if (!condition || !expectIdentifier("else", "expected 'else' in the conditional expression"))
+      return std::nullopt;
+    std::optional<Operand> other = parseConditional(rootPolicy);
+    if (!other)
+      return std::nullopt;
+    return Operand{
+        ExpressionAst(makePrimitive(
+            PrimitiveKind::Choose,
+            {&*condition->expression, &*chosen->expression, &*other->expression}, position)),
+        0, position};
+  }
   std::optional<Operand> parseLogicalOr(std::optional<SourceType> rootPolicy = std::nullopt) {
     auto lhs = parseLogicalAnd(rootPolicy);
     while (lhs && isIdentifier("or")) {
@@ -2236,7 +2264,8 @@ private:
     SourcePosition position = current.position;
     if (current.kind == TokenKind::LeftParen) {
       advance();
-      std::optional<Operand> inner = genericExpressions ? parseLogicalOr() : parseSum(std::nullopt);
+      std::optional<Operand> inner =
+          genericExpressions ? parseConditional() : parseSum(std::nullopt);
       if (!inner ||
           !expect(TokenKind::RightParen, "expected ')' to close the parenthesized expression"))
         return std::nullopt;
@@ -2294,7 +2323,7 @@ private:
       advance();
       std::optional<ExpressionAst> start;
       if (current.kind != TokenKind::Colon) {
-        std::optional<Operand> index = parseLogicalOr();
+        std::optional<Operand> index = parseConditional();
         if (!index)
           return std::nullopt;
         start = std::move(index->expression);
@@ -2310,7 +2339,7 @@ private:
       advance();
       std::optional<ExpressionAst> stop;
       if (current.kind != TokenKind::RightBracket) {
-        std::optional<Operand> bound = parseLogicalOr();
+        std::optional<Operand> bound = parseConditional();
         if (!bound)
           return std::nullopt;
         stop = std::move(bound->expression);
@@ -2406,6 +2435,12 @@ private:
   }
 
   void advance() {
+    previousLine = current.position.line;
+    if (current.kind == TokenKind::LeftParen || current.kind == TokenKind::LeftBracket)
+      ++bracketDepth;
+    else if ((current.kind == TokenKind::RightParen || current.kind == TokenKind::RightBracket) &&
+             bracketDepth)
+      --bracketDepth;
     current = next;
     next = lexer.next();
   }
@@ -2928,10 +2963,17 @@ private:
   };
 
   bool isLoopStart() const { return isIdentifier("for") && next.kind == TokenKind::Identifier; }
+  // `if`, `while`, or a misplaced `elif` or `else`.
+  bool isCompoundStart() const {
+    return (isIdentifier("if") || isIdentifier("while") || isIdentifier("elif") ||
+            isIdentifier("else")) &&
+           next.kind != TokenKind::Equal && next.kind != TokenKind::LeftBracket;
+  }
   bool isStatementStart() const {
     return current.kind == TokenKind::Identifier &&
            (next.kind == TokenKind::Equal ||
-            (genericExpressions && (isLoopStart() || next.kind == TokenKind::LeftBracket)));
+            (genericExpressions &&
+             (isLoopStart() || isCompoundStart() || next.kind == TokenKind::LeftBracket)));
   }
   const ParameterAst *findParameter(StringRef name) const {
     auto found = llvm::find_if(
@@ -2959,6 +3001,15 @@ private:
   bool parseStatement(BuiltinCallAst &owner, SourceType policyType) {
     if (isLoopStart())
       return parseLoop(owner, policyType);
+    if (isCompoundStart()) {
+      if (isIdentifier("if"))
+        return parseIf(owner, policyType);
+      if (isIdentifier("while"))
+        return parseWhile(owner, policyType);
+      diagnostics.error(current.position, llvm::Twine("'") + current.spelling +
+                                              "' must follow an 'if' body at its column");
+      return false;
+    }
     if (next.kind == TokenKind::LeftBracket)
       return parseStore(owner);
     Token name = current;
@@ -2996,7 +3047,7 @@ private:
     Token base = current;
     advance();
     advance();
-    std::optional<Operand> index = parseLogicalOr();
+    std::optional<Operand> index = parseConditional();
     if (index && current.kind == TokenKind::Colon) {
       diagnostics.error(current.position, "a slice is a read-only view; write its elements");
       return false;
@@ -3004,7 +3055,7 @@ private:
     if (!index || !expect(TokenKind::RightBracket, "expected ']' after the index") ||
         !expect(TokenKind::Equal, "expected '=' after the indexed target"))
       return false;
-    std::optional<Operand> value = parseLogicalOr();
+    std::optional<Operand> value = parseConditional();
     if (!value)
       return false;
     ExpressionAst reference = resolveOperand(base);
@@ -3035,7 +3086,7 @@ private:
     do {
       if (!bounds.empty())
         advance();
-      std::optional<Operand> bound = parseLogicalOr();
+      std::optional<Operand> bound = parseConditional();
       if (!bound)
         return false;
       bounds.push_back(std::move(*bound->expression));
@@ -3072,27 +3123,98 @@ private:
     bindingsByName[variable.spelling] = bindings.size();
     bindings.push_back(Binding{induction, ExpressionAst(induction, variable.position),
                                variable.position, true, variable.spelling.str(), true});
+    if (!parseBody(loop, keyword, policyType))
+      return false;
+    leaveScope(std::move(outer));
+    owner.bindingNames.push_back("");
+    owner.operands.push_back(ExpressionAst(std::move(loop)));
+    return true;
+  }
+
+  // The statements indented past `keyword`, appended to `owner`.
+  bool parseBody(BuiltinCallAst &owner, const Token &keyword, SourceType policyType) {
     unsigned column = current.position.column;
     if (current.kind == TokenKind::Eof || column <= keyword.position.column) {
-      diagnostics.error(current.position, "expected an indented loop body");
+      diagnostics.error(current.position, "expected an indented body");
       return false;
     }
     while (current.kind != TokenKind::Eof && current.position.column == column) {
-      if (!isStatementStart()) {
-        diagnostics.error(current.position, "expected an assignment, a write or a nested loop");
+      if (isIdentifier("return") || isIdentifier("break") || isIdentifier("continue")) {
+        diagnostics.error(current.position, isIdentifier("return")
+                                                ? "only the function body ends in return"
+                                                : "break and continue are not supported");
         return false;
       }
-      if (!parseStatement(loop, policyType))
+      if (!isStatementStart()) {
+        diagnostics.error(current.position,
+                          "expected an assignment, a write, a loop or an if statement");
+        return false;
+      }
+      if (!parseStatement(owner, policyType))
         return false;
     }
     if (current.kind != TokenKind::Eof && current.position.column > keyword.position.column) {
-      diagnostics.error(current.position, "inconsistent indentation in the loop body");
+      diagnostics.error(current.position, "inconsistent indentation in the body");
       return false;
     }
+    return true;
+  }
+  // Names bound since `outer` was saved stop being visible.
+  void leaveScope(llvm::StringMap<size_t> outer) {
     for (const auto &entry : bindingsByName)
       if (!outer.contains(entry.getKey()))
         scopedOut.insert(entry.getKey());
     bindingsByName = std::move(outer);
+  }
+  bool parseScopedBody(BuiltinCallAst &owner, const Token &keyword, SourceType policyType) {
+    llvm::StringMap<size_t> outer = bindingsByName;
+    if (!parseBody(owner, keyword, policyType))
+      return false;
+    leaveScope(std::move(outer));
+    return true;
+  }
+
+  // `if c:` (or `elif c:`) and its body, then an `elif` or `else` aligned with
+  // the keyword, which becomes the else Scope.
+  bool parseIf(BuiltinCallAst &owner, SourceType policyType) {
+    Token keyword = current;
+    advance();
+    std::optional<Operand> condition = parseConditional();
+    if (!condition || !expect(TokenKind::Colon, "expected ':' after the condition"))
+      return false;
+    ExpressionAst then(makePrimitive(PrimitiveKind::Scope, {}, keyword.position));
+    ExpressionAst otherwise(makePrimitive(PrimitiveKind::Scope, {}, keyword.position));
+    if (!parseScopedBody(*then.call, keyword, policyType))
+      return false;
+    if (current.kind != TokenKind::Eof && current.position.column == keyword.position.column) {
+      if (isIdentifier("elif")) {
+        if (!parseIf(*otherwise.call, policyType))
+          return false;
+      } else if (isIdentifier("else")) {
+        Token word = current;
+        advance();
+        if (!expect(TokenKind::Colon, "expected ':' after 'else'") ||
+            !parseScopedBody(*otherwise.call, word, policyType))
+          return false;
+      }
+    }
+    owner.bindingNames.push_back("");
+    owner.operands.push_back(ExpressionAst(makePrimitive(
+        PrimitiveKind::Branch, {&*condition->expression, &then, &otherwise}, keyword.position)));
+    return true;
+  }
+
+  bool parseWhile(BuiltinCallAst &owner, SourceType policyType) {
+    Token keyword = current;
+    advance();
+    std::optional<Operand> condition = parseConditional();
+    if (!condition || !expect(TokenKind::Colon, "expected ':' after the condition"))
+      return false;
+    BuiltinCallAst loop =
+        makePrimitive(PrimitiveKind::While, {&*condition->expression}, keyword.position);
+    loop.bindingNames = {""};
+    if (!parseScopedBody(loop, keyword, policyType))
+      return false;
     owner.bindingNames.push_back("");
     owner.operands.push_back(ExpressionAst(std::move(loop)));
     return true;
@@ -3158,7 +3280,9 @@ private:
 
   bool genericExpressions = false;
   unsigned nextLocal = 0;
-  // Names bound only inside a finished loop body, and the first later read.
+  unsigned previousLine = 0;
+  unsigned bracketDepth = 0;
+  // Names bound only inside a finished body, and the first later read.
   llvm::StringSet<> scopedOut;
   std::optional<Token> scopedOutUse;
   Lexer &lexer;
@@ -4119,6 +4243,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       if (call.primitive == PrimitiveKind::Literal)
         return call.spelling != "True" && call.spelling != "False" &&
                call.spelling.find_first_of(".eE") == std::string::npos;
+      if (call.primitive == PrimitiveKind::Choose)
+        return needsLiteralContext(call.operands[1]) && needsLiteralContext(call.operands[2]);
       if (call.primitive != PrimitiveKind::Identity && call.primitive != PrimitiveKind::Pos &&
           !getOperatorBuiltin(call.primitive))
         return false;
@@ -4144,21 +4270,30 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
             [&](const BuiltinCallAst &owner, size_t begin, SmallVector<std::string> &names) {
               for (size_t i = begin; i < owner.bindingNames.size(); ++i) {
                 if (owner.bindingNames[i].empty()) {
-                  if (owner.operands[i].call->primitive == PrimitiveKind::Loop)
-                    collectAssigned(*owner.operands[i].call, 2, names);
+                  const BuiltinCallAst &statement = *owner.operands[i].call;
+                  if (statement.primitive == PrimitiveKind::Loop)
+                    collectAssigned(statement, 2, names);
+                  else if (statement.primitive == PrimitiveKind::While)
+                    collectAssigned(statement, 1, names);
+                  else if (statement.primitive == PrimitiveKind::Branch)
+                    for (const ExpressionAst &body : llvm::drop_begin(statement.operands))
+                      collectAssigned(*body.call, 0, names);
                 } else if (!llvm::is_contained(names, owner.bindingNames[i]))
                   names.push_back(owner.bindingNames[i]);
               }
             };
-    std::function<bool(BuiltinCallAst &)> checkLoop;
-    auto checkStatements = [&](BuiltinCallAst &owner, size_t begin) {
+    std::function<bool(BuiltinCallAst &)> checkLoop, checkWhile, checkBranch;
+    std::function<bool(BuiltinCallAst &, size_t)> checkStatements;
+    checkStatements = [&](BuiltinCallAst &owner, size_t begin) {
       for (size_t i = begin; i < owner.bindingNames.size(); ++i) {
         ExpressionAst &statement = owner.operands[i];
         const std::string &name = owner.bindingNames[i];
         if (name.empty()) {
-          if (!(statement.call->primitive == PrimitiveKind::Loop
-                    ? checkLoop(*statement.call)
-                    : checkComposedExpression(statement).has_value()))
+          PrimitiveKind kind = statement.call->primitive;
+          if (!(kind == PrimitiveKind::Loop     ? checkLoop(*statement.call)
+                : kind == PrimitiveKind::While  ? checkWhile(*statement.call)
+                : kind == PrimitiveKind::Branch ? checkBranch(*statement.call)
+                                                : checkComposedExpression(statement).has_value()))
             return false;
           continue;
         }
@@ -4196,6 +4331,45 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       return true;
     };
+    auto checkCondition = [&](ExpressionAst &condition) {
+      std::optional<ComposedType> type = checkComposedExpression(condition);
+      if (type && (type->elementType != SourceType::Bool || type->extent)) {
+        diagnostics.error(condition.position, "a condition must be a bool scalar");
+        return false;
+      }
+      return type.has_value();
+    };
+    // Statements from `begin` in a scope of their own.
+    auto checkBody = [&](BuiltinCallAst &owner, size_t begin) {
+      auto outerTypes = localTypes;
+      auto outerSequences = sequenceLocals;
+      auto outerConstants = localConstants;
+      bool checked = checkStatements(owner, begin);
+      localTypes = std::move(outerTypes);
+      sequenceLocals = std::move(outerSequences);
+      localConstants = std::move(outerConstants);
+      return checked;
+    };
+    // The outer locals `owner`'s bodies reassign; their constants are unknown.
+    auto collectCarried = [&](BuiltinCallAst &owner, ArrayRef<BuiltinCallAst *> bodies,
+                              size_t begin) {
+      SmallVector<std::string> assigned;
+      for (BuiltinCallAst *body : bodies)
+        collectAssigned(*body, begin, assigned);
+      owner.carriedNames.clear();
+      for (const std::string &name : assigned)
+        if (localTypes.contains(name)) {
+          owner.carriedNames.push_back(name);
+          localConstants.erase(name);
+        }
+    };
+    auto carriesScalars = [&](const BuiltinCallAst &loop) {
+      if (llvm::none_of(loop.carriedNames,
+                        [&](const std::string &name) { return localTypes.lookup(name).extent; }))
+        return true;
+      diagnostics.error(loop.position, "a loop can only carry scalar locals");
+      return false;
+    };
     checkLoop = [&](BuiltinCallAst &loop) {
       SmallVector<std::optional<ComposedType>, 2> bounds(2);
       std::optional<SourceType> domain;
@@ -4224,23 +4398,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         return false;
       }
 
-      SmallVector<std::string> assigned;
-      collectAssigned(loop, 2, assigned);
-      loop.carriedNames.clear();
-      for (const std::string &name : assigned) {
-        auto outer = localTypes.find(name);
-        if (outer == localTypes.end())
-          continue;
-        if (outer->second.extent) {
-          diagnostics.error(loop.position, "a loop can only carry scalar locals");
-          return false;
-        }
-        loop.carriedNames.push_back(name);
-        localConstants.erase(name);
-      }
-      auto outerTypes = localTypes;
-      auto outerSequences = sequenceLocals;
-      auto outerConstants = localConstants;
+      collectCarried(loop, {&loop}, 2);
+      if (!carriesScalars(loop))
+        return false;
       const std::string &induction = loop.bindingNames[0];
       localTypes[induction] = ComposedType{type, 0};
       const BuiltinCallAst *stop = loop.operands[1].call.get();
@@ -4248,12 +4408,24 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       if (loop.step > 0 && start && !start->isNegative() && stop &&
           stop->kind == ReductionKind::Primitive && stop->primitive == PrimitiveKind::Length)
         provenIndices[induction] = stop->operands.front().parameter;
-      bool checked = checkStatements(loop, 2);
+      bool checked = checkBody(loop, 2);
       provenIndices.erase(induction);
-      localTypes = std::move(outerTypes);
-      sequenceLocals = std::move(outerSequences);
-      localConstants = std::move(outerConstants);
+      localTypes.erase(induction);
       return checked;
+    };
+    checkWhile = [&](BuiltinCallAst &loop) {
+      collectCarried(loop, {&loop}, 1);
+      return carriesScalars(loop) && checkCondition(loop.operands[0]) && checkBody(loop, 1);
+    };
+    checkBranch = [&](BuiltinCallAst &branch) {
+      if (!checkCondition(branch.operands[0]))
+        return false;
+      BuiltinCallAst &then = *branch.operands[1].call;
+      BuiltinCallAst &otherwise = *branch.operands[2].call;
+      if (!checkBody(then, 0) || !checkBody(otherwise, 0))
+        return false;
+      collectCarried(branch, {&then, &otherwise}, 0);
+      return true;
     };
     // complex_f32 is excluded because its storage extent is not its element count.
     checkSequence = [&](ExpressionAst &base) -> std::optional<Sequence> {
@@ -4357,6 +4529,28 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       if (op == PrimitiveKind::Slice || op == PrimitiveKind::Zeros)
         return reject(kSequenceUse);
+      if (op == PrimitiveKind::Choose) {
+        // An arm that needs literal context takes the other arm's type.
+        if (!checkCondition(call.operands[0]))
+          return std::nullopt;
+        SmallVector<std::optional<ComposedType>, 2> arms(2);
+        for (size_t i = 0; i < 2; ++i)
+          if (!needsLiteralContext(call.operands[i + 1]) &&
+              !(arms[i] = checkComposedExpression(call.operands[i + 1])))
+            return std::nullopt;
+        auto savedHint = literalHint;
+        if (arms[0] || arms[1])
+          literalHint = (arms[0] ? arms[0] : arms[1])->elementType;
+        for (size_t i = 0; i < 2; ++i)
+          if (!arms[i] && !(arms[i] = checkComposedExpression(call.operands[i + 1]))) {
+            literalHint = savedHint;
+            return std::nullopt;
+          }
+        literalHint = savedHint;
+        if (!sameType(*arms[0], *arms[1]))
+          return reject("the arms of a conditional expression must have one type");
+        return finish(*arms[0]);
+      }
       if (op == PrimitiveKind::Length) {
         if (!checkSequence(call.operands.front()))
           return std::nullopt;
@@ -6384,15 +6578,73 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
           for (auto [name, value] : llvm::zip(loop.carriedNames, results))
             arguments[name] = value;
         };
+        // A body's statements in their own scope; yields the carried locals.
+        auto emitBody = [&](const BuiltinCallAst &owner, size_t begin,
+                            ArrayRef<std::string> carriedNames, Location bodyLoc) {
+          auto saved = arguments;
+          emitStatements(owner, begin);
+          SmallVector<Value> next;
+          for (const std::string &name : carriedNames)
+            next.push_back(arguments.lookup(name));
+          arguments = std::move(saved);
+          builder.create<scf::YieldOp>(bodyLoc, next);
+        };
+        auto emitWhile = [&](const BuiltinCallAst &loop) {
+          Location loc = getLocation(context, sourceName, loop.position);
+          SmallVector<Value> initial;
+          for (const std::string &name : loop.carriedNames)
+            initial.push_back(arguments.lookup(name));
+          auto bind = [&](ValueRange carried) {
+            for (auto [name, value] : llvm::zip(loop.carriedNames, carried))
+              arguments[name] = value;
+          };
+          auto whileOp = builder.create<scf::WhileOp>(
+              loc, ValueRange(initial).getTypes(), initial,
+              [&](OpBuilder &, Location, ValueRange carried) {
+                auto saved = arguments;
+                bind(carried);
+                Value more = emitOperand(loop.operands[0]);
+                arguments = std::move(saved);
+                builder.create<scf::ConditionOp>(loc, more, carried);
+              },
+              [&](OpBuilder &, Location, ValueRange carried) {
+                auto saved = arguments;
+                bind(carried);
+                emitBody(loop, 1, loop.carriedNames, loc);
+                arguments = std::move(saved);
+              });
+          bind(whileOp.getResults());
+        };
+        auto emitBranch = [&](const BuiltinCallAst &branch) {
+          Location loc = getLocation(context, sourceName, branch.position);
+          const BuiltinCallAst &otherwise = *branch.operands[2].call;
+          auto emitElse = [&](OpBuilder &, Location) {
+            emitBody(otherwise, 0, branch.carriedNames, loc);
+          };
+          auto ifOp = builder.create<scf::IfOp>(
+              loc, emitOperand(branch.operands[0]),
+              [&](OpBuilder &, Location) {
+                emitBody(*branch.operands[1].call, 0, branch.carriedNames, loc);
+              },
+              otherwise.operands.empty() && branch.carriedNames.empty()
+                  ? function_ref<void(OpBuilder &, Location)>()
+                  : emitElse);
+          for (auto [name, value] : llvm::zip(branch.carriedNames, ifOp.getResults()))
+            arguments[name] = value;
+        };
         emitStatements = [&](const BuiltinCallAst &owner, size_t begin) {
           for (size_t i = begin; i < owner.bindingNames.size(); ++i) {
-            if (owner.bindingNames[i].empty() &&
-                owner.operands[i].call->primitive == PrimitiveKind::Loop)
-              emitLoop(*owner.operands[i].call);
-            else if (owner.bindingNames[i].empty())
-              emitOperand(owner.operands[i]);
-            else
+            const BuiltinCallAst &statement = *owner.operands[i].call;
+            if (!owner.bindingNames[i].empty())
               arguments[owner.bindingNames[i]] = emitOperand(owner.operands[i]);
+            else if (statement.primitive == PrimitiveKind::Loop)
+              emitLoop(statement);
+            else if (statement.primitive == PrimitiveKind::While)
+              emitWhile(statement);
+            else if (statement.primitive == PrimitiveKind::Branch)
+              emitBranch(statement);
+            else
+              emitOperand(owner.operands[i]);
           }
         };
         if (op == PrimitiveKind::Scope) {
@@ -6403,6 +6655,16 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                              : emitOperand(call.operands.back());
           arguments = std::move(saved);
           return result;
+        }
+        if (op == PrimitiveKind::Choose) {
+          auto emitArm = [&](const ExpressionAst &arm) {
+            return
+                [&](OpBuilder &, Location) { builder.create<scf::YieldOp>(loc, emitOperand(arm)); };
+          };
+          return builder
+              .create<scf::IfOp>(loc, emitOperand(call.operands[0]), emitArm(call.operands[1]),
+                                 emitArm(call.operands[2]))
+              .getResult(0);
         }
         if (op == PrimitiveKind::Length)
           return lengthOf(emitOperand(call.operands.front()));
