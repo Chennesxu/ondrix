@@ -42,8 +42,8 @@
 // LITERAL: error: a convert operand needs a type; write the literal in the target type
 // SAME: error: convert needs a target other than the operand's type
 // FIXED: error: q15 and q31 convert with widen, narrow, quantize and dequantize
-// BOOL: error: convert takes an i32, i64, f32 or index scalar to another of those types
-// TENSOR: error: convert takes an i32, i64, f32 or index scalar to another of those types
+// BOOL: error: convert takes an i32, i64, f32 or index value to another of those types
+// TENSOR: error: a tensor converts to i32, i64 or f32; index is a scalar type
 // FINDEX: error: an f32 converts to i32 or i64, not to index
 // RNARROW: error: an integer convert takes no rounding policy
 // EXACT: error: this convert is exact and takes no rounding or overflow policy
@@ -92,8 +92,8 @@ def f(b: bool) -> i32:
   return convert(b, to=i32)
 
 //--- tensor.ox
-def f(t: tensor[f32, 4]) -> i32:
-  return convert(t, to=i32)
+def f(t: tensor[i64, 4]) -> tensor[i64, 4]:
+  return t + convert(convert(t, to=index), to=i64)
 
 //--- findex.ox
 def f(x: buffer[f32], v: f32) -> f32:

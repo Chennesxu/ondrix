@@ -34,7 +34,7 @@ never convert implicitly; ordinary integers have no fixed-point scale.
 | --- | --- |
 | `i32`, `i64` | Signed two's-complement values; add/subtract/multiply/negate wrap modulo the width. Division truncates toward zero. Zero divisors and `MIN/-1` abort before division; statically invalid divisions are diagnosed, including in a short-circuit RHS. |
 | `f32` | The `off` contract: one round-to-nearest-even binary32 result per operator, no reassociation or multiply/add contraction. The required FP environment preserves subnormals; exception flags are unobservable. Signed zeros, infinities and IEEE zero-division results are retained. NaN payloads are unspecified; `!=` is true for unordered operands and the other comparisons are false. |
-| f32 tensor | Static rank-one extent 1..4096, matching tensor shapes. f32 scalars and contextual constants broadcast. Arithmetic follows the scalar f32 rules. |
+| f32, i32 and i64 tensors | Static rank-one extent 1..4096, matching shapes and element types. Scalars of the element type and contextual constants broadcast. Each element follows the scalar rules above, so an integer `/` checks every divisor; comparisons stay scalar. |
 
 Integer literals take context from a typed operand or the function's numeric
 result, defaulting to i32 in a boolean-result context, and must fit the signed
@@ -46,13 +46,13 @@ integer/f32 operands, without fixed-point rounding or overflow parameters.
 Q15/Q31 retain their raw-literal and quantization rules, for tensors and for
 the scalars described below. Their `-x` uses `negate(x)`, saturating by
 default. DSP builtin composition retains its
-existing restrictions. Plain integer/bool tensors remain unsupported.
+existing restrictions. Bool tensors remain unsupported.
 
 ## Counted Loops and Indexed Reads
 
 Ordinary expression bodies may contain `for` loops over `range`, reassign
-locals, and read rank-one f32, q15 or q31 buffer or tensor parameters by
-index:
+locals, and read rank-one f32, q15, q31, i32 or i64 buffer or tensor
+parameters by index:
 
 ```python
 def energy(x: buffer[f32]) -> f32:
@@ -93,7 +93,8 @@ including its initial value: `energy` of an empty buffer is `+0.0`.
 ## Numeric Conversions
 
 `convert(x, to=T)` converts a scalar `i32`, `i64`, `f32` or `index` to
-another of those types. An integer literal has no type of its own and is
+another of those types, and an `i32`, `i64` or `f32` tensor element by element
+to another of those three. An integer literal has no type of its own and is
 refused as the operand (write it in the target type); a decimal literal is an
 `f32`. q15/q31 values keep `widen`, `narrow`, `quantize` and `dequantize`.
 
@@ -119,8 +120,8 @@ def mean(x: buffer[f32]) -> f32:
 
 ## Output Buffers
 
-A `mut buffer[T]` or `mut buffer[T, N]` parameter, with `T` one of f32, q15
-and q31, is rank-one storage the caller owns and the function reads and
+A `mut buffer[T]` or `mut buffer[T, N]` parameter, with `T` one of f32, q15,
+q31, i32 and i64, is rank-one storage the caller owns and the function reads and
 writes in place. `y[e] = v` stores `v`, which must have type `T` (a literal
 takes `T`), and traps unless `0 <= e < len(y)`, with the same omitted check as
 reads. Reads see the buffer's current contents: the caller's on entry, then
@@ -135,6 +136,17 @@ def scale(x: buffer[f32], y: mut buffer[f32], g: f32):
 def prefix(y: mut buffer[f32]):
   for i in range(1, len(y)):
     y[i] = y[i] + y[i - 1]
+```
+
+An `i32` or `i64` buffer holds plain integers, passed as `int32_t *` or
+`int64_t *`, and its elements serve as subscripts like any integer:
+
+```python
+def histogram(x: buffer[i32], h: mut buffer[i64]):
+  for i in range(len(x)):
+    b = x[i]
+    if b >= 0 and convert(b, to=index) < len(h):
+      h[b] = h[b] + 1
 ```
 
 Only buffers and local arrays are mutable: a tensor is a value, and other
@@ -192,8 +204,8 @@ lower to `scf.if` and while loops to `scf.while`.
 
 ## Slices and Local Arrays
 
-`x[a:b]` is a read-only view of `b - a` elements of a rank-one f32, q15 or
-q31 parameter or local array, starting at `a`; `x[a:]`, `x[:b]` and `x[:]`
+`x[a:b]` is a read-only view of `b - a` elements of a rank-one f32, q15, q31,
+i32 or i64 parameter or local array, starting at `a`; `x[a:]`, `x[:b]` and `x[:]`
 take `0` and `len(x)` for an omitted bound, and there is no step. The bounds
 are typed as subscripts, and the slice traps unless `0 <= a <= b <= len(x)`;
 the check is omitted when constant bounds fit a static extent. A constant
@@ -202,7 +214,7 @@ are two constant bounds out of order. A view reads its base's current
 contents, so a slice of a mut buffer sees later writes to it. Its extent is
 static when both bounds are constant, and an empty view is legal.
 
-`t = zeros(T, N)`, with `T` one of f32, q15 and q31 and `N` an integer
+`t = zeros(T, N)`, with `T` one of f32, q15, q31, i32 and i64 and `N` an integer
 literal from 1 to 4096, binds a local array of `N` zeros on the stack; each
 execution of the statement zeroes it again. It is written with `t[i] = v` and
 read like a buffer:
@@ -251,8 +263,8 @@ def blend(x: buffer[f32], w: buffer[f32], n: i32) -> f32:
 ```
 
 An operand may also be a slice, a local array or a mut buffer (see [Slices
-and Local Arrays](#slices-and-local-arrays)). Tensor-valued calls are not yet
-accepted.
+and Local Arrays](#slices-and-local-arrays)), but not one of i32 or i64
+elements. Tensor-valued calls are not yet accepted.
 
 ## Fixed-Point Scalars
 

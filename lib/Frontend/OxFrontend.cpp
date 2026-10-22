@@ -285,6 +285,13 @@ static bool isRealFixed(SourceType type) {
   return type == SourceType::Q15 || type == SourceType::Q31;
 }
 
+// The element types of buffers, arrays and slices that len, indexing and
+// slices read.
+static bool isSequenceElement(SourceType type) {
+  return type == SourceType::F32 || type == SourceType::I32 || type == SourceType::I64 ||
+         isRealFixed(type);
+}
+
 // The value of an integer token, decimal or `0o` octal; true on failure, as
 // StringRef::getAsInteger.
 static bool getIntegerTokenValue(llvm::StringRef spelling, uint64_t &value) {
@@ -456,6 +463,10 @@ static bool isAccumulatorKind(ReductionKind kind) {
 }
 
 // The reductions with a scalar result, which an ordinary expression can hold.
+static constexpr const char *kLibraryOperands =
+    "a reduction inside an expression currently reads f32, q15 or q31 parameters, arrays or "
+    "slices";
+
 static constexpr const char *kSequenceUse =
     "an array or slice is read through subscripts, len and slices, or as a dot, fir or rms "
     "operand";
@@ -1203,8 +1214,14 @@ public:
     advance();
     if (!expect(TokenKind::LeftParen, "expected '(' after builtin"))
       return std::nullopt;
-    SourceType policyType =
-        requestedPolicy.value_or(findSequenceType(current.spelling).value_or(SourceType::F32));
+    std::optional<SourceType> operandType = findSequenceType(current.spelling);
+    // An integer operand has no policy grammar to parse, so it is refused here.
+    if (isScalarReductionKind(call.kind) &&
+        (operandType == SourceType::I32 || operandType == SourceType::I64)) {
+      diagnostics.error(current.position, kLibraryOperands);
+      return std::nullopt;
+    }
+    SourceType policyType = requestedPolicy.value_or(operandType.value_or(SourceType::F32));
     if (call.kind == ReductionKind::Lowpass) {
       // The design is fully named by its attributes; the tap count also
       // names the coefficient extent, which no result type spells here.
@@ -2366,11 +2383,11 @@ private:
       advance();
       advance();
       SourcePosition typePosition = current.position;
-      std::optional<SourceType> element = parseSourceType("expected f32, q15 or q31");
+      std::optional<SourceType> element = parseSourceType("expected f32, q15, q31, i32 or i64");
       if (!element)
         return std::nullopt;
-      if (*element != SourceType::F32 && !isRealFixed(*element)) {
-        diagnostics.error(typePosition, "a local array holds f32, q15 or q31 elements");
+      if (!isSequenceElement(*element)) {
+        diagnostics.error(typePosition, "a local array holds f32, q15, q31, i32 or i64 elements");
         return std::nullopt;
       }
       if (!expect(TokenKind::Comma, "expected ',' before the array length"))
@@ -3457,10 +3474,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
   for (const ParameterAst &parameter : ast.parameters) {
     if (!parameter.isMutable)
       continue;
-    if (!hasRank(parameter.shape, 1) ||
-        (parameter.type != SourceType::F32 && !isRealFixed(parameter.type))) {
-      diagnostics.error(parameter.position, "a mut buffer holds a rank-one f32, q15 or q31 "
-                                            "sequence");
+    if (!hasRank(parameter.shape, 1) || !isSequenceElement(parameter.type)) {
+      diagnostics.error(parameter.position, "a mut buffer holds a rank-one f32, q15, q31, i32 or "
+                                            "i64 sequence");
       return std::nullopt;
     }
   }
@@ -3562,11 +3578,21 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       diagnostics.error(parameter.position, "u8 is currently only the result of viterbi_decode");
       return std::nullopt;
     }
-    if ((parameter.type == SourceType::I32 || parameter.type == SourceType::I64 ||
-         parameter.type == SourceType::Bool) &&
-        !parameter.isScalar()) {
-      diagnostics.error(parameter.position, "i32, i64 and bool parameters must be scalar");
+    if (parameter.type == SourceType::Bool && !parameter.isScalar()) {
+      diagnostics.error(parameter.position, "bool parameters must be scalar");
       return std::nullopt;
+    }
+    if ((parameter.type == SourceType::I32 || parameter.type == SourceType::I64) &&
+        !parameter.isScalar()) {
+      if (!hasRank(parameter.shape, 1)) {
+        diagnostics.error(parameter.position, "i32 and i64 buffers and tensors are rank-one");
+        return std::nullopt;
+      }
+      if (!isComposableKernel(ast.result.kind, ast.primaryResult().type)) {
+        diagnostics.error(parameter.position, "DSP builtins read f32, q15 or q31 sequences; i32 "
+                                              "and i64 ones are read by indexing and arithmetic");
+        return std::nullopt;
+      }
     }
     parametersByName.insert({parameter.name, &parameter});
     if (lhsName && parameter.name == *lhsName)
@@ -4467,9 +4493,9 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
       auto parameter = base.call ? parametersByName.end() : parametersByName.find(base.parameter);
       if (parameter == parametersByName.end() || !hasRank(parameter->second->shape, 1) ||
-          (parameter->second->type != SourceType::F32 && !isRealFixed(parameter->second->type))) {
-        diagnostics.error(base.position, "len, indexing and slices require a rank-one f32, q15 "
-                                         "or q31 buffer, tensor, array or slice");
+          !isSequenceElement(parameter->second->type)) {
+        diagnostics.error(base.position, "len, indexing and slices require a rank-one f32, q15, "
+                                         "q31, i32 or i64 buffer, tensor, array or slice");
         return std::nullopt;
       }
       ++parameterUses[base.parameter];
@@ -4616,12 +4642,14 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         };
         if (isRealFixed(from) || isRealFixed(to))
           return reject("q15 and q31 convert with widen, narrow, quantize and dequantize");
-        if (input->extent || !numeric(from) || !numeric(to))
-          return reject("convert takes an i32, i64, f32 or index scalar to another of those types");
+        if (!numeric(from) || !numeric(to))
+          return reject("convert takes an i32, i64, f32 or index value to another of those types");
         if (from == to)
           return reject("convert needs a target other than the operand's type");
         if (from == SourceType::F32 && to == SourceType::Index)
           return reject("an f32 converts to i32 or i64, not to index");
+        if (input->extent && to == SourceType::Index)
+          return reject("a tensor converts to i32, i64 or f32; index is a scalar type");
         bool rounds = from == SourceType::F32;
         bool narrows = to == SourceType::I32 && !rounds;
         if (narrows && !call.rounding.empty())
@@ -4654,7 +4682,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
             return reject("constant index expression leaves the signed 32-bit range");
           call.integerConstant = value->sext(64);
         }
-        return finish({to, 0});
+        return finish({to, input->extent});
       }
       if (op == PrimitiveKind::Element || op == PrimitiveKind::Store) {
         const ExpressionAst &base = call.operands.front();
@@ -4850,7 +4878,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         extent = std::max(extent, rhs->extent);
       }
       if (extent > 4096)
-        return reject("f32 arithmetic requires static rank-1 extents in [1, 4096]");
+        return reject("tensor arithmetic requires static rank-1 extents in [1, 4096]");
       if (comparison) {
         if (extent)
           return reject("comparisons require scalar operands");
@@ -5235,6 +5263,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           std::optional<Sequence> sequence = checkSequence(call.operands[index]);
           if (!sequence)
             return std::nullopt;
+          if (sequence->elementType == SourceType::I32 ||
+              sequence->elementType == SourceType::I64) {
+            diagnostics.error(operand.position, kLibraryOperands);
+            return std::nullopt;
+          }
           ParameterAst copy;
           copy.name = "$operand" + std::to_string(index);
           copy.type = sequence->elementType;
@@ -5246,8 +5279,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           continue;
         }
         if (!parameter || (parameter->type != SourceType::F32 && !isRealFixed(parameter->type))) {
-          diagnostics.error(operand.position, "a reduction inside an expression currently reads "
-                                              "f32, q15 or q31 parameters, arrays or slices");
+          diagnostics.error(operand.position, kLibraryOperands);
           return std::nullopt;
         }
         ++parameterUses[operand.parameter];
@@ -6586,6 +6618,30 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
             return builder.create<memref::DimOp>(loc, base, 0);
           return builder.create<tensor::DimOp>(loc, base, 0);
         };
+        // `scalar` applied per element of a tensor result; a scalar operand broadcasts.
+        auto mapElements = [&](ValueRange operands,
+                               function_ref<Value(ValueRange)> scalar) -> Value {
+          if (!call.expressionExtent)
+            return scalar(operands);
+          auto tensorType = RankedTensorType::get({call.expressionExtent}, type);
+          Value init = builder.create<tensor::EmptyOp>(loc, tensorType.getShape(), type);
+          Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+          Value end = builder.create<arith::ConstantIndexOp>(loc, call.expressionExtent);
+          Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
+          auto loop = builder.create<scf::ForOp>(
+              loc, zero, end, one, ValueRange{init},
+              [&](OpBuilder &b, Location loc, Value i, ValueRange args) {
+                SmallVector<Value, 2> elements;
+                for (Value value : operands)
+                  elements.push_back(value && isa<RankedTensorType>(value.getType())
+                                         ? b.create<tensor::ExtractOp>(loc, value, ValueRange{i})
+                                         : value);
+                Value out =
+                    b.create<tensor::InsertOp>(loc, scalar(elements), args.front(), ValueRange{i});
+                b.create<scf::YieldOp>(loc, out);
+              });
+          return loop.getResult(0);
+        };
         std::function<void(const BuiltinCallAst &, size_t)> emitStatements;
         auto emitLoop = [&](const BuiltinCallAst &loop) {
           Location loopLoc = getLocation(context, sourceName, loop.position);
@@ -6751,92 +6807,95 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         if (op == PrimitiveKind::Convert) {
           // index crosses by index.casts, which no folder evaluates at one
           // width; an i64 reaches index only if it survives the round trip.
-          Value input = emitOperand(call.operands.front());
-          auto i64 = builder.getI64Type();
-          if (type.isIndex()) {
-            Value converted = builder.create<index::CastSOp>(loc, type, input);
-            if (input.getType().isInteger(64)) {
-              Value back = builder.create<index::CastSOp>(loc, i64, converted);
-              Value fits =
-                  builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, back, input);
-              builder.create<cf::AssertOp>(loc, fits, "conversion to index out of range");
+          return mapElements(emitOperand(call.operands.front()), [&](ValueRange operands) -> Value {
+            Value input = operands.front();
+            auto i64 = builder.getI64Type();
+            if (type.isIndex()) {
+              Value converted = builder.create<index::CastSOp>(loc, type, input);
+              if (input.getType().isInteger(64)) {
+                Value back = builder.create<index::CastSOp>(loc, i64, converted);
+                Value fits =
+                    builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, back, input);
+                builder.create<cf::AssertOp>(loc, fits, "conversion to index out of range");
+              }
+              return converted;
             }
-            return converted;
-          }
-          if (input.getType().isIndex())
-            input = builder.create<index::CastSOp>(loc, i64, input);
-          if (type.isF32() && !input.getType().isF32())
-            return builder.create<arith::SIToFPOp>(loc, type, input);
-          unsigned width = type.getIntOrFloatBitWidth();
-          auto constant = [&](Type of, APInt value) -> Value {
-            return builder.create<arith::ConstantOp>(loc, builder.getIntegerAttr(of, value));
-          };
-          if (auto from = dyn_cast<IntegerType>(input.getType())) {
-            if (from.getWidth() == width)
-              return input;
-            if (from.getWidth() < width)
-              return builder.create<arith::ExtSIOp>(loc, type, input);
-            if (call.destinationOverflow == "saturate") {
-              Value high = constant(from, APInt::getSignedMaxValue(width).sext(from.getWidth()));
-              Value low = constant(from, APInt::getSignedMinValue(width).sext(from.getWidth()));
-              input = builder.create<arith::MinSIOp>(loc, input, high);
-              input = builder.create<arith::MaxSIOp>(loc, input, low);
-            }
-            return builder.create<arith::TruncIOp>(loc, type, input);
-          }
-          // f32 to iW: NaN and the upper rail apart, the rest clamped in
-          // binary32 so fptosi is exact; the exact fraction beside the
-          // truncation decides the tie rule.
-          auto real = [&](double value) -> Value {
-            return builder.create<arith::ConstantOp>(loc, builder.getF32FloatAttr(value));
-          };
-          auto compare = [&](arith::CmpFPredicate predicate, Value x, Value y) -> Value {
-            return builder.create<arith::CmpFOp>(loc, predicate, x, y);
-          };
-          double rail = std::ldexp(1.0, width - 1);
-          Value zero = real(0.0), half = real(0.5), negativeHalf = real(-0.5);
-          Value above = compare(arith::CmpFPredicate::OGE, input, real(rail));
-          Value below = compare(arith::CmpFPredicate::OLT, input, real(-rail));
-          Value value = builder.create<arith::SelectOp>(loc, below, real(-rail), input);
-          Value apart = builder.create<arith::OrIOp>(
-              loc, above, compare(arith::CmpFPredicate::UNO, input, input));
-          value = builder.create<arith::SelectOp>(loc, apart, zero, value);
-          Value truncated = builder.create<arith::FPToSIOp>(loc, type, value);
-          Value fraction = builder.create<arith::SubFOp>(
-              loc, value, builder.create<arith::SIToFPOp>(loc, input.getType(), truncated));
-          Value up, down;
-          switch (*parseRounding(call.rounding)) {
-          case ondsp::RoundingMode::TowardZero:
-            break;
-          case ondsp::RoundingMode::TowardNegative:
-            down = compare(arith::CmpFPredicate::OLT, fraction, zero);
-            break;
-          case ondsp::RoundingMode::NearestTiesPositive:
-            up = compare(arith::CmpFPredicate::OGE, fraction, half);
-            down = compare(arith::CmpFPredicate::OLT, fraction, negativeHalf);
-            break;
-          case ondsp::RoundingMode::NearestEven: {
-            Value odd = builder.create<arith::TruncIOp>(loc, builder.getI1Type(), truncated);
-            auto tie = [&](Value bound) -> Value {
-              return builder.create<arith::AndIOp>(
-                  loc, compare(arith::CmpFPredicate::OEQ, fraction, bound), odd);
+            if (input.getType().isIndex())
+              input = builder.create<index::CastSOp>(loc, i64, input);
+            if (type.isF32() && !input.getType().isF32())
+              return builder.create<arith::SIToFPOp>(loc, type, input);
+            unsigned width = type.getIntOrFloatBitWidth();
+            auto constant = [&](Type of, APInt value) -> Value {
+              return builder.create<arith::ConstantOp>(loc, builder.getIntegerAttr(of, value));
             };
-            up = builder.create<arith::OrIOp>(
-                loc, compare(arith::CmpFPredicate::OGT, fraction, half), tie(half));
-            down = builder.create<arith::OrIOp>(
-                loc, compare(arith::CmpFPredicate::OLT, fraction, negativeHalf), tie(negativeHalf));
-            break;
-          }
-          }
-          Value rounded = truncated;
-          if (up)
-            rounded = builder.create<arith::AddIOp>(loc, rounded,
-                                                    builder.create<arith::ExtUIOp>(loc, type, up));
-          if (down)
-            rounded = builder.create<arith::SubIOp>(
-                loc, rounded, builder.create<arith::ExtUIOp>(loc, type, down));
-          return builder.create<arith::SelectOp>(
-              loc, above, constant(type, APInt::getSignedMaxValue(width)), rounded);
+            if (auto from = dyn_cast<IntegerType>(input.getType())) {
+              if (from.getWidth() == width)
+                return input;
+              if (from.getWidth() < width)
+                return builder.create<arith::ExtSIOp>(loc, type, input);
+              if (call.destinationOverflow == "saturate") {
+                Value high = constant(from, APInt::getSignedMaxValue(width).sext(from.getWidth()));
+                Value low = constant(from, APInt::getSignedMinValue(width).sext(from.getWidth()));
+                input = builder.create<arith::MinSIOp>(loc, input, high);
+                input = builder.create<arith::MaxSIOp>(loc, input, low);
+              }
+              return builder.create<arith::TruncIOp>(loc, type, input);
+            }
+            // f32 to iW: NaN and the upper rail apart, the rest clamped in
+            // binary32 so fptosi is exact; the exact fraction beside the
+            // truncation decides the tie rule.
+            auto real = [&](double value) -> Value {
+              return builder.create<arith::ConstantOp>(loc, builder.getF32FloatAttr(value));
+            };
+            auto compare = [&](arith::CmpFPredicate predicate, Value x, Value y) -> Value {
+              return builder.create<arith::CmpFOp>(loc, predicate, x, y);
+            };
+            double rail = std::ldexp(1.0, width - 1);
+            Value zero = real(0.0), half = real(0.5), negativeHalf = real(-0.5);
+            Value above = compare(arith::CmpFPredicate::OGE, input, real(rail));
+            Value below = compare(arith::CmpFPredicate::OLT, input, real(-rail));
+            Value value = builder.create<arith::SelectOp>(loc, below, real(-rail), input);
+            Value apart = builder.create<arith::OrIOp>(
+                loc, above, compare(arith::CmpFPredicate::UNO, input, input));
+            value = builder.create<arith::SelectOp>(loc, apart, zero, value);
+            Value truncated = builder.create<arith::FPToSIOp>(loc, type, value);
+            Value fraction = builder.create<arith::SubFOp>(
+                loc, value, builder.create<arith::SIToFPOp>(loc, input.getType(), truncated));
+            Value up, down;
+            switch (*parseRounding(call.rounding)) {
+            case ondsp::RoundingMode::TowardZero:
+              break;
+            case ondsp::RoundingMode::TowardNegative:
+              down = compare(arith::CmpFPredicate::OLT, fraction, zero);
+              break;
+            case ondsp::RoundingMode::NearestTiesPositive:
+              up = compare(arith::CmpFPredicate::OGE, fraction, half);
+              down = compare(arith::CmpFPredicate::OLT, fraction, negativeHalf);
+              break;
+            case ondsp::RoundingMode::NearestEven: {
+              Value odd = builder.create<arith::TruncIOp>(loc, builder.getI1Type(), truncated);
+              auto tie = [&](Value bound) -> Value {
+                return builder.create<arith::AndIOp>(
+                    loc, compare(arith::CmpFPredicate::OEQ, fraction, bound), odd);
+              };
+              up = builder.create<arith::OrIOp>(
+                  loc, compare(arith::CmpFPredicate::OGT, fraction, half), tie(half));
+              down = builder.create<arith::OrIOp>(
+                  loc, compare(arith::CmpFPredicate::OLT, fraction, negativeHalf),
+                  tie(negativeHalf));
+              break;
+            }
+            }
+            Value rounded = truncated;
+            if (up)
+              rounded = builder.create<arith::AddIOp>(
+                  loc, rounded, builder.create<arith::ExtUIOp>(loc, type, up));
+            if (down)
+              rounded = builder.create<arith::SubIOp>(
+                  loc, rounded, builder.create<arith::ExtUIOp>(loc, type, down));
+            return builder.create<arith::SelectOp>(
+                loc, above, constant(type, APInt::getSignedMaxValue(width)), rounded);
+          });
         }
         auto toIndex = [&](Value value) -> Value {
           if (value.getType().isIndex())
@@ -7070,26 +7129,9 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
           b.create<cf::AssertOp>(loc, safe, "integer division by zero or overflow");
           return b.create<arith::DivSIOp>(loc, a, c);
         };
-        if (!call.expressionExtent)
-          return scalar(builder, lhs, rhs);
-        auto tensorType = RankedTensorType::get({call.expressionExtent}, type);
-        Value init = builder.create<tensor::EmptyOp>(loc, tensorType.getShape(), type);
-        Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
-        Value end = builder.create<arith::ConstantIndexOp>(loc, call.expressionExtent);
-        Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
-        auto loop = builder.create<scf::ForOp>(
-            loc, zero, end, one, ValueRange{init},
-            [&](OpBuilder &b, Location loc, Value i, ValueRange args) {
-              auto element = [&](Value value) -> Value {
-                if (value && isa<RankedTensorType>(value.getType()))
-                  return b.create<tensor::ExtractOp>(loc, value, ValueRange{i});
-                return value;
-              };
-              Value result = scalar(b, element(lhs), element(rhs));
-              Value out = b.create<tensor::InsertOp>(loc, result, args.front(), ValueRange{i});
-              b.create<scf::YieldOp>(loc, out);
-            });
-        return loop.getResult(0);
+        return mapElements({lhs, rhs}, [&](ValueRange operands) {
+          return scalar(builder, operands[0], operands[1]);
+        });
       }
       if (call.kind == ReductionKind::FirFilter) {
         // The composed filter stage: sema pinned one uniform width, the valid

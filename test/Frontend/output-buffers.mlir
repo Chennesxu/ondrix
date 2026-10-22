@@ -35,10 +35,10 @@
 // TENSOR: error: a tensor is a value; only a buffer can be mut
 // SCALAR: error: expected 'buffer[...]' after 'mut'
 // READONLY: error: parameter 'x' is read-only; only a mut buffer is written
-// LOCAL: error: len, indexing and slices require a rank-one f32, q15 or q31 buffer, tensor, array or slice
+// LOCAL: error: len, indexing and slices require a rank-one f32, q15, q31, i32 or i64 buffer, tensor, array or slice
 // VALUE: error: a write stores the buffer's element type
 // INDEX: error: an index must be an index, i32 or i64 scalar
-// ELEMENT: error: a mut buffer holds a rank-one f32, q15 or q31 sequence
+// ELEMENT: error: a mut buffer holds a rank-one f32, q15, q31, i32 or i64 sequence
 // WHOLE: error: a mut buffer is read through subscripts, len and slices, written through subscripts, or a dot, fir or rms operand
 // CALLEE: error: 'fill' writes a mut buffer; only the exported function may
 // NOTHING: error: a function without a result must take a mut buffer

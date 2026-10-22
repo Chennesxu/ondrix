@@ -9,7 +9,7 @@
 // RUN: not ondrix-compile %t/shapes.ox 2>&1 | FileCheck %s --check-prefix=SHAPES
 // RUN: not ondrix-compile %t/tensorcmp.ox 2>&1 | FileCheck %s --check-prefix=TENSORCMP
 // RUN: not ondrix-compile %t/boolorder.ox 2>&1 | FileCheck %s --check-prefix=BOOLORDER
-// RUN: not ondrix-compile %t/inttensor.ox 2>&1 | FileCheck %s --check-prefix=INTTENSOR
+// RUN: not ondrix-compile %t/booltensor.ox 2>&1 | FileCheck %s --check-prefix=BOOLTENSOR
 // RUN: not ondrix-compile %t/helper.ox 2>&1 | FileCheck %s --check-prefix=HELPER
 // RUN: not ondrix-compile %t/helper-call.ox 2>&1 | FileCheck %s --check-prefix=HELPER
 // HELPER: error: call argument does not match the declared parameter type
@@ -25,7 +25,7 @@
 // SHAPES: error: arithmetic tensor operands must have matching extents
 // TENSORCMP: error: comparisons require scalar operands
 // BOOLORDER: error: bool only supports equality
-// INTTENSOR: error: i32, i64 and bool parameters must be scalar
+// BOOLTENSOR: error: bool parameters must be scalar
 //--- mixed.ox
 def f(x: i32, y: i64) -> i32:
   return x + y
@@ -66,9 +66,9 @@ def f(x: tensor[f32,4], y: tensor[f32,4]) -> bool:
 def f(x: bool, y: bool) -> bool:
   return x < y
 
-//--- inttensor.ox
-def f(x: tensor[i32,4]) -> i32:
-  return 1 + x
+//--- booltensor.ox
+def f(x: tensor[bool,4]) -> bool:
+  return x[0]
 
 //--- helper.ox
 def narrow_name(x: i32) -> i32:

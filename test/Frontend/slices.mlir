@@ -48,14 +48,14 @@
 // PASS: error: an array or slice is not passed to a named function
 // STEP: error: expected ']' after the slice; a slice has no step
 // VIEW: error: a slice is a read-only view; write its elements
-// ZTYPE: error: a local array holds f32, q15 or q31 elements
+// ZTYPE: error: a local array holds f32, q15, q31, i32 or i64 elements
 // ZLENGTH: error: a local array length must be in [1, 4096]
 // ZCONST: error: expected the array length
 // ONCE: error: an array or slice local is bound once
 // USE: error: an array or slice is read through subscripts, len and slices, or as a dot, fir or rms operand
 // RANGE: error: slice bounds are out of range
 // BOUND: error: a slice bound must be an index, i32 or i64 scalar
-// BASE: error: len, indexing and slices require a rank-one f32, q15 or q31 buffer, tensor, array or slice
+// BASE: error: len, indexing and slices require a rank-one f32, q15, q31, i32 or i64 buffer, tensor, array or slice
 // ELEMENT: error: a reduction inside an expression currently reads f32, q15 or q31 parameters, arrays or slices
 //--- tail.ox
 def tail(x: buffer[f32], a: i32) -> f32:
@@ -125,7 +125,7 @@ def f(y: mut buffer[f32]):
 
 //--- ztype.ox
 def f(x: buffer[f32]) -> f32:
-  t = zeros(i32, 4)
+  t = zeros(bool, 4)
   return x[0]
 
 //--- zlength.ox
