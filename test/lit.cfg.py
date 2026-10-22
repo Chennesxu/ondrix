@@ -61,6 +61,7 @@ tools = [
     "llc",
     "opt",
     "not",
+    "split-file",
 ]
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)

@@ -72,7 +72,7 @@ jobs:
       - name: Build LLVM and MLIR tools
         run: |
           cmake --build llvm-build --target \
-            mlir-opt mlir-translate FileCheck count llc not opt
+            mlir-opt mlir-translate FileCheck count llc not opt split-file
           test -x llvm-build/bin/llc
 
       - name: Configure ondrix
