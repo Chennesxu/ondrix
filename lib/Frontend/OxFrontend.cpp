@@ -545,6 +545,9 @@ enum class PrimitiveKind {
   Slice,
   // A zero-filled local array of `target` elements, `declaredExtent` long.
   Zeros,
+  // `convert(x, to=target)` between i32, i64, f32 and index, with the spelled
+  // `rounding` and `destinationOverflow`.
+  Convert,
   Typed
 };
 
@@ -2384,6 +2387,31 @@ private:
       zeros.target = *element;
       zeros.declaredExtent = *length;
       return Operand{ExpressionAst(std::move(zeros)), 0, position};
+    }
+    if (genericExpressions && isIdentifier("convert") && next.kind == TokenKind::LeftParen &&
+        !calleesByName.contains("convert")) {
+      advance();
+      advance();
+      std::optional<Operand> input = parseConditional();
+      if (!input || !expect(TokenKind::Comma, "expected ',' before the conversion target") ||
+          !expectIdentifier("to", "expected 'to' naming the conversion target") ||
+          !expect(TokenKind::Equal, "expected '=' after to"))
+        return std::nullopt;
+      BuiltinCallAst convert =
+          makePrimitive(PrimitiveKind::Convert, {&*input->expression}, position);
+      if (isIdentifier("index")) {
+        advance();
+        convert.target = SourceType::Index;
+      } else if (std::optional<SourceType> target =
+                     parseSourceType("expected the target type 'i32', 'i64', 'f32' or 'index'")) {
+        convert.target = *target;
+      } else {
+        return std::nullopt;
+      }
+      if (!parseBoundaryPolicies(convert) ||
+          !expect(TokenKind::RightParen, "expected ')' after the conversion"))
+        return std::nullopt;
+      return Operand{ExpressionAst(std::move(convert)), 0, position};
     }
     if (genericExpressions && isIdentifier("len") && next.kind == TokenKind::LeftParen &&
         !calleesByName.contains("len")) {
@@ -4498,6 +4526,24 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       return Sequence{base->elementType, extent, false, base->container};
     };
 
+    // The language defaults for a declared boundary, then the mode names.
+    auto checkBoundaryPolicies = [&](BuiltinCallAst &call) -> bool {
+      if (call.rounding.empty())
+        call.rounding = "nearest_ties_positive";
+      if (call.destinationOverflow.empty())
+        call.destinationOverflow = "saturate";
+      if (!parseRounding(call.rounding)) {
+        diagnostics.error(call.position,
+                          llvm::Twine("unsupported rounding mode '") + call.rounding + "'");
+        return false;
+      }
+      if (!parseOverflow(call.destinationOverflow)) {
+        diagnostics.error(call.position, llvm::Twine("unsupported overflow mode '") +
+                                             call.destinationOverflow + "'");
+        return false;
+      }
+      return true;
+    };
     auto checkPrimitive = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       auto reject = [&](const Twine &message) -> std::optional<ComposedType> {
         diagnostics.error(call.position, message);
@@ -4555,6 +4601,60 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         if (!checkSequence(call.operands.front()))
           return std::nullopt;
         return finish({SourceType::Index, 0});
+      }
+      if (op == PrimitiveKind::Convert) {
+        ExpressionAst &operand = call.operands.front();
+        if (needsLiteralContext(operand))
+          return reject("a convert operand needs a type; write the literal in the target type");
+        std::optional<ComposedType> input = checkComposedExpression(operand);
+        if (!input)
+          return std::nullopt;
+        SourceType from = input->elementType, to = call.target;
+        auto numeric = [](SourceType type) {
+          return llvm::is_contained(
+              {SourceType::I32, SourceType::I64, SourceType::F32, SourceType::Index}, type);
+        };
+        if (isRealFixed(from) || isRealFixed(to))
+          return reject("q15 and q31 convert with widen, narrow, quantize and dequantize");
+        if (input->extent || !numeric(from) || !numeric(to))
+          return reject("convert takes an i32, i64, f32 or index scalar to another of those types");
+        if (from == to)
+          return reject("convert needs a target other than the operand's type");
+        if (from == SourceType::F32 && to == SourceType::Index)
+          return reject("an f32 converts to i32 or i64, not to index");
+        bool rounds = from == SourceType::F32;
+        bool narrows = to == SourceType::I32 && !rounds;
+        if (narrows && !call.rounding.empty())
+          return reject("an integer convert takes no rounding policy");
+        if (rounds || narrows) {
+          if (!checkBoundaryPolicies(call))
+            return std::nullopt;
+          // Left empty, so a builtin that checks this operand again sees no rounding.
+          if (narrows)
+            call.rounding.clear();
+          if (rounds && call.destinationOverflow != "saturate")
+            return reject("an f32 convert saturates; wrapping an unbounded value is not a "
+                          "contract this operation offers");
+        } else if (!call.rounding.empty() || !call.destinationOverflow.empty()) {
+          return reject(to == SourceType::F32 ? "a convert to f32 is one IEEE rounding and takes "
+                                                "no rounding or overflow policy"
+                        : from == SourceType::I64
+                            ? "a convert to index traps outside the target's index width and "
+                              "takes no policy"
+                            : "this convert is exact and takes no rounding or overflow policy");
+        }
+        std::optional<APInt> value = rounds ? std::nullopt : constant(operand);
+        if (value && to == SourceType::I64)
+          call.integerConstant = value->sext(64);
+        if (value && to == SourceType::I32)
+          call.integerConstant =
+              call.destinationOverflow == "wrap" ? value->trunc(32) : value->truncSSat(32);
+        if (value && to == SourceType::Index) {
+          if (!value->sext(64).isSignedIntN(32))
+            return reject("constant index expression leaves the signed 32-bit range");
+          call.integerConstant = value->sext(64);
+        }
+        return finish({to, 0});
       }
       if (op == PrimitiveKind::Element || op == PrimitiveKind::Store) {
         const ExpressionAst &base = call.operands.front();
@@ -4941,24 +5041,6 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     // so one checker covers all seven and a new member cannot forget a rule.
     // The two attribute ranges follow the width because they are raw values
     // in the declared format, not abstract quantities.
-    // The language defaults for a declared boundary, then the mode names.
-    auto checkBoundaryPolicies = [&](BuiltinCallAst &call) -> bool {
-      if (call.rounding.empty())
-        call.rounding = "nearest_ties_positive";
-      if (call.destinationOverflow.empty())
-        call.destinationOverflow = "saturate";
-      if (!parseRounding(call.rounding)) {
-        diagnostics.error(call.position,
-                          llvm::Twine("unsupported rounding mode '") + call.rounding + "'");
-        return false;
-      }
-      if (!parseOverflow(call.destinationOverflow)) {
-        diagnostics.error(call.position, llvm::Twine("unsupported overflow mode '") +
-                                             call.destinationOverflow + "'");
-        return false;
-      }
-      return true;
-    };
     auto checkElementwise = [&](BuiltinCallAst &call) -> std::optional<ComposedType> {
       // A literal operand is a raw constant of the other operand's format.
       bool binary = isBinaryElementwiseKind(call.kind);
@@ -6666,6 +6748,96 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
         }
         if (op == PrimitiveKind::Length)
           return lengthOf(emitOperand(call.operands.front()));
+        if (op == PrimitiveKind::Convert) {
+          // index crosses by index.casts, which no folder evaluates at one
+          // width; an i64 reaches index only if it survives the round trip.
+          Value input = emitOperand(call.operands.front());
+          auto i64 = builder.getI64Type();
+          if (type.isIndex()) {
+            Value converted = builder.create<index::CastSOp>(loc, type, input);
+            if (input.getType().isInteger(64)) {
+              Value back = builder.create<index::CastSOp>(loc, i64, converted);
+              Value fits =
+                  builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, back, input);
+              builder.create<cf::AssertOp>(loc, fits, "conversion to index out of range");
+            }
+            return converted;
+          }
+          if (input.getType().isIndex())
+            input = builder.create<index::CastSOp>(loc, i64, input);
+          if (type.isF32() && !input.getType().isF32())
+            return builder.create<arith::SIToFPOp>(loc, type, input);
+          unsigned width = type.getIntOrFloatBitWidth();
+          auto constant = [&](Type of, APInt value) -> Value {
+            return builder.create<arith::ConstantOp>(loc, builder.getIntegerAttr(of, value));
+          };
+          if (auto from = dyn_cast<IntegerType>(input.getType())) {
+            if (from.getWidth() == width)
+              return input;
+            if (from.getWidth() < width)
+              return builder.create<arith::ExtSIOp>(loc, type, input);
+            if (call.destinationOverflow == "saturate") {
+              Value high = constant(from, APInt::getSignedMaxValue(width).sext(from.getWidth()));
+              Value low = constant(from, APInt::getSignedMinValue(width).sext(from.getWidth()));
+              input = builder.create<arith::MinSIOp>(loc, input, high);
+              input = builder.create<arith::MaxSIOp>(loc, input, low);
+            }
+            return builder.create<arith::TruncIOp>(loc, type, input);
+          }
+          // f32 to iW: NaN and the upper rail apart, the rest clamped in
+          // binary32 so fptosi is exact; the exact fraction beside the
+          // truncation decides the tie rule.
+          auto real = [&](double value) -> Value {
+            return builder.create<arith::ConstantOp>(loc, builder.getF32FloatAttr(value));
+          };
+          auto compare = [&](arith::CmpFPredicate predicate, Value x, Value y) -> Value {
+            return builder.create<arith::CmpFOp>(loc, predicate, x, y);
+          };
+          double rail = std::ldexp(1.0, width - 1);
+          Value zero = real(0.0), half = real(0.5), negativeHalf = real(-0.5);
+          Value above = compare(arith::CmpFPredicate::OGE, input, real(rail));
+          Value below = compare(arith::CmpFPredicate::OLT, input, real(-rail));
+          Value value = builder.create<arith::SelectOp>(loc, below, real(-rail), input);
+          Value apart = builder.create<arith::OrIOp>(
+              loc, above, compare(arith::CmpFPredicate::UNO, input, input));
+          value = builder.create<arith::SelectOp>(loc, apart, zero, value);
+          Value truncated = builder.create<arith::FPToSIOp>(loc, type, value);
+          Value fraction = builder.create<arith::SubFOp>(
+              loc, value, builder.create<arith::SIToFPOp>(loc, input.getType(), truncated));
+          Value up, down;
+          switch (*parseRounding(call.rounding)) {
+          case ondsp::RoundingMode::TowardZero:
+            break;
+          case ondsp::RoundingMode::TowardNegative:
+            down = compare(arith::CmpFPredicate::OLT, fraction, zero);
+            break;
+          case ondsp::RoundingMode::NearestTiesPositive:
+            up = compare(arith::CmpFPredicate::OGE, fraction, half);
+            down = compare(arith::CmpFPredicate::OLT, fraction, negativeHalf);
+            break;
+          case ondsp::RoundingMode::NearestEven: {
+            Value odd = builder.create<arith::TruncIOp>(loc, builder.getI1Type(), truncated);
+            auto tie = [&](Value bound) -> Value {
+              return builder.create<arith::AndIOp>(
+                  loc, compare(arith::CmpFPredicate::OEQ, fraction, bound), odd);
+            };
+            up = builder.create<arith::OrIOp>(
+                loc, compare(arith::CmpFPredicate::OGT, fraction, half), tie(half));
+            down = builder.create<arith::OrIOp>(
+                loc, compare(arith::CmpFPredicate::OLT, fraction, negativeHalf), tie(negativeHalf));
+            break;
+          }
+          }
+          Value rounded = truncated;
+          if (up)
+            rounded = builder.create<arith::AddIOp>(loc, rounded,
+                                                    builder.create<arith::ExtUIOp>(loc, type, up));
+          if (down)
+            rounded = builder.create<arith::SubIOp>(
+                loc, rounded, builder.create<arith::ExtUIOp>(loc, type, down));
+          return builder.create<arith::SelectOp>(
+              loc, above, constant(type, APInt::getSignedMaxValue(width)), rounded);
+        }
         auto toIndex = [&](Value value) -> Value {
           if (value.getType().isIndex())
             return value;

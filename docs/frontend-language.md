@@ -77,8 +77,8 @@ a nonzero integer literal (default 1). The bounds share one type, `index`,
 from the other bound and are `i32` when both are literals.
 
 `len(x)` has type `index`, the target's address width (32 bits on a 32-bit
-target). `index` has no source spelling and no implicit conversion: it
-supports unary `+`/`-`, binary `+`, `-`, `*` and `/`, and comparisons, traps
+target). `index` has no source spelling and converts only through
+[`convert`](#numeric-conversions): it supports unary `+`/`-`, binary `+`, `-`, `*` and `/`, and comparisons, traps
 if a result overflows the target width, and its literals and constant
 subexpressions must fit signed 32 bits so every target reads them alike. `/`
 truncates toward zero and traps on a zero divisor, as for `i32`, so
@@ -89,6 +89,33 @@ is `len(x)` of the same parameter and whose start is omitted or a
 nonnegative literal. Each iteration runs its statements in order, so an f32
 recurrence keeps its written operation order under the `off` contract,
 including its initial value: `energy` of an empty buffer is `+0.0`.
+
+## Numeric Conversions
+
+`convert(x, to=T)` converts a scalar `i32`, `i64`, `f32` or `index` to
+another of those types. An integer literal has no type of its own and is
+refused as the operand (write it in the target type); a decimal literal is an
+`f32`. q15/q31 values keep `widen`, `narrow`, `quantize` and `dequantize`.
+
+| Conversion | Result |
+| --- | --- |
+| `i32` to `i64`, `i32` to `index`, `index` to `i64` | Exact; no policy. |
+| `i32`, `i64` or `index` to `f32` | One IEEE round-to-nearest-even; no policy. |
+| `i64` or `index` to `i32` | `overflow=saturate` (the default) clamps to the `i32` range; `overflow=wrap` keeps the low 32 bits. |
+| `f32` to `i32` or `i64` | `quantize` at scale one: `rounding=` is `toward_zero`, `toward_negative`, `nearest_even` or `nearest_ties_positive` (the default), the result saturates, and NaN reads as zero; `overflow` may be omitted or `saturate`. |
+| `i64` to `index` | Traps unless the value fits the target's index width. |
+
+An `f32` reaches `index` through `i32` or `i64`. Integer constants fold
+through every integer and `index` conversion, and a constant `index` result
+must fit signed 32 bits.
+
+```python
+def mean(x: buffer[f32]) -> f32:
+  s = 0.0
+  for i in range(len(x)):
+    s = s + x[i]
+  return s / convert(len(x), to=f32)
+```
 
 ## Output Buffers
 
