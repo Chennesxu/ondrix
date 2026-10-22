@@ -4759,8 +4759,6 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           return reject("bool only supports equality and inequality comparisons");
         return finish({SourceType::Bool, 0});
       }
-      if (index && (op == PrimitiveKind::Mul || op == PrimitiveKind::Div))
-        return reject("index arithmetic supports only + and -");
       auto a = constant(call.operands.front());
       auto b = rhs ? constant(call.operands[1]) : std::nullopt;
       if (integer && op == PrimitiveKind::Div) {
@@ -6813,6 +6811,47 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
             default:
               llvm_unreachable("checked floating expression");
             }
+          }
+          if (a.getType().isIndex() && (op == PrimitiveKind::Mul || op == PrimitiveKind::Div)) {
+            // As for +/-, every check is an index op, folded only where the
+            // 32- and 64-bit target widths agree.
+            auto cmp = [&](index::IndexCmpPredicate predicate, Value x, Value y) -> Value {
+              return b.create<index::CmpOp>(loc, predicate, x, y);
+            };
+            Value zero = b.create<arith::ConstantIndexOp>(loc, 0);
+            Value minusOne = b.create<arith::ConstantIndexOp>(loc, -1);
+            Value one = b.create<arith::ConstantIntOp>(loc, 1, 1);
+            auto isMinimum = [&](Value x) -> Value {
+              Value negated = b.create<index::SubOp>(loc, zero, x);
+              return b.create<arith::AndIOp>(loc, cmp(index::IndexCmpPredicate::NE, x, zero),
+                                             cmp(index::IndexCmpPredicate::EQ, x, negated));
+            };
+            if (op == PrimitiveKind::Div) {
+              Value overflow = b.create<arith::AndIOp>(
+                  loc, isMinimum(a), cmp(index::IndexCmpPredicate::EQ, c, minusOne));
+              Value safe = b.create<arith::AndIOp>(loc, cmp(index::IndexCmpPredicate::NE, c, zero),
+                                                   b.create<arith::XOrIOp>(loc, overflow, one));
+              b.create<cf::AssertOp>(loc, safe, "integer division by zero or overflow");
+              return b.create<index::DivSOp>(loc, a, c);
+            }
+            // a * c fits unless a = -1 and c is the minimum, or dividing it by
+            // any other nonzero a misses c; a constant factor is the divisor.
+            Value product = b.create<index::MulOp>(loc, a, c);
+            if (matchPattern(c, m_Constant()))
+              std::swap(a, c);
+            Value plain = cmp(index::IndexCmpPredicate::NE, a, minusOne);
+            Value divisor = b.create<arith::SelectOp>(
+                loc,
+                b.create<arith::AndIOp>(loc, plain, cmp(index::IndexCmpPredicate::NE, a, zero)), a,
+                b.create<arith::ConstantIndexOp>(loc, 1));
+            Value exact =
+                b.create<arith::OrIOp>(loc, cmp(index::IndexCmpPredicate::EQ, a, zero),
+                                       cmp(index::IndexCmpPredicate::EQ,
+                                           b.create<index::DivSOp>(loc, product, divisor), c));
+            Value fits = b.create<arith::SelectOp>(loc, plain, exact,
+                                                   b.create<arith::XOrIOp>(loc, isMinimum(c), one));
+            b.create<cf::AssertOp>(loc, fits, "index arithmetic overflow");
+            return product;
           }
           if (a.getType().isIndex()) {
             // Index +/- traps on signed overflow of the target's index width.

@@ -14,7 +14,6 @@
 // RUN: not ondrix-compile %t/complex-len.ox 2>&1 | FileCheck %s --check-prefix=LEN
 // RUN: ondrix-compile %t/loop-name.ox | FileCheck %s --check-prefix=NAME
 // NAME: return %arg0 : i32
-// RUN: not ondrix-compile %t/index-mul.ox 2>&1 | FileCheck %s --check-prefix=INDEXMUL
 // RUN: not ondrix-compile %t/index-mix.ox 2>&1 | FileCheck %s --check-prefix=INDEXMIX
 // RUN: not ondrix-compile %t/index-constant.ox 2>&1 | FileCheck %s --check-prefix=INDEXCONST
 // RUN: not ondrix-compile %t/indent.ox 2>&1 | FileCheck %s --check-prefix=INDENT
@@ -29,7 +28,6 @@
 // BOUNDS: error: range bounds must share one index, i32 or i64 type
 // SUBSCRIPT: error: an index must be an index, i32 or i64 scalar
 // LEN: error: len, indexing and slices require a rank-one f32, q15 or q31 buffer, tensor, array or slice
-// INDEXMUL: error: index arithmetic supports only + and -
 // INDEXMIX: error: arithmetic operands must have the same element type
 // INDEXCONST: error: constant index expression leaves the signed 32-bit range
 // INDENT: error: inconsistent indentation in the body
@@ -126,13 +124,6 @@ def f(x: buffer[complex_f32]) -> i32:
 def f(n: i32) -> i32:
   for = n
   return for
-
-//--- index-mul.ox
-def f(x: buffer[f32]) -> f32:
-  s = 0.0
-  for i in range(len(x)):
-    s = s + x[i * 2]
-  return s
 
 //--- index-mix.ox
 def f(x: buffer[f32], k: i32) -> f32:

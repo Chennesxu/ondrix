@@ -78,9 +78,11 @@ from the other bound and are `i32` when both are literals.
 
 `len(x)` has type `index`, the target's address width (32 bits on a 32-bit
 target). `index` has no source spelling and no implicit conversion: it
-supports unary and binary `+`/`-` and comparisons, traps if a result
-overflows the target width, and its literals and constant subexpressions must
-fit signed 32 bits so every target reads them alike. `x[e]` accepts an
+supports unary `+`/`-`, binary `+`, `-`, `*` and `/`, and comparisons, traps
+if a result overflows the target width, and its literals and constant
+subexpressions must fit signed 32 bits so every target reads them alike. `/`
+truncates toward zero and traps on a zero divisor, as for `i32`, so
+`x[(i - 1) / 2]` reads `x[0]` at `i = 0`; there is no `%`. `x[e]` accepts an
 `index`, `i32` or `i64` index and traps unless `0 <= e < len(x)`. The check
 is omitted when `e` is the loop variable of a positive-step range whose stop
 is `len(x)` of the same parameter and whose start is omitted or a
