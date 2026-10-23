@@ -313,6 +313,35 @@ def DeclareOndrixArgumentsReadOnly
   let dependentDialects = ["mlir::bufferization::BufferizationDialect"];
 }
 
+def HoistOndrixRegionBuffers
+    : Pass<"hoist-ondrix-region-buffers", "::mlir::func::FuncOp"> {
+  let summary = "Move region-local static allocations to the function entry";
+  let description = [{
+    A temporary bufferized inside a loop body, or inside an `scf.if` within
+    one, is allocated on every execution of its region. Upstream
+    `buffer-loop-hoisting` stops at an `scf.if`, and stack promotion of what
+    remains places an `alloca` the loop runs repeatedly, so the stack grows
+    with the trip count. This pass moves every `memref.alloc` of static shape
+    nested only in `scf.for`, `scf.while` and `scf.if` regions to the start
+    of the function's entry block when every user of every alias only loads,
+    stores, copies or measures it, or forwards it to results the alias
+    analysis tracks. A region terminator or a return would carry it out, a
+    call or an address extraction may keep its pointer, and a deallocation
+    would run once per execution. Such a buffer is live only within one
+    execution of the region that allocates it, and those regions run one
+    execution at a time, so one allocation serves every execution; its
+    contents were undefined at each allocation and stay undefined. Every
+    user must itself be nested only in those regions: a parallel loop's
+    iterations may run at once and an async task may outlive the execution
+    that launched it, so a buffer allocated or used inside one stays
+    private. A buffer that flows out of its region, such as a loop's carried
+    state, is left in place. Runs before
+    `promote-buffers-to-stack` in the canonical pipeline.
+  }];
+  let constructor = "ondrix::createHoistOndrixRegionBuffersPass()";
+  let dependentDialects = ["mlir::memref::MemRefDialect"];
+}
+
 def ForwardOndrixResultBuffers
     : Pass<"forward-ondrix-result-buffers", "::mlir::ModuleOp"> {
   let summary = "Write a function's result directly into its out-parameter";

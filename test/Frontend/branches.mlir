@@ -12,7 +12,6 @@
 // RUN: not ondrix-compile %t/stray.ox 2>&1 | FileCheck %s --check-prefix=STRAY
 // RUN: not ondrix-compile %t/twoelse.ox 2>&1 | FileCheck %s --check-prefix=STRAY
 // RUN: not ondrix-compile %t/scope.ox 2>&1 | FileCheck %s --check-prefix=SCOPE
-// RUN: not ondrix-compile %t/carry.ox 2>&1 | FileCheck %s --check-prefix=CARRY
 // RUN: not ondrix-compile %t/retype.ox 2>&1 | FileCheck %s --check-prefix=RETYPE
 // RUN: not ondrix-compile %t/body.ox 2>&1 | FileCheck %s --check-prefix=BODY
 // RUN: not ondrix-compile %t/fixed.ox 2>&1 | FileCheck %s --check-prefix=FIXED
@@ -45,7 +44,6 @@
 // BREAK: error: break and continue are not supported
 // STRAY: error: 'else' must follow an 'if' body at its column
 // SCOPE: error: local 'v' is only visible inside the body that binds it
-// CARRY: error: a loop can only carry scalar locals
 // RETYPE: error: a reassignment must keep the local's type
 // BODY: error: expected an indented body
 // FIXED: error: loops and branches require an i32, i64, bool, f32, q15 or q31 function result
@@ -145,15 +143,6 @@ def f(x: i32) -> i32:
   else:
     v = 2
   return v
-
-//--- carry.ox
-def f(x: tensor[f32, 4], n: i32) -> tensor[f32, 4]:
-  y = x
-  i = 0
-  while i < n:
-    y = y * 2.0
-    i = i + 1
-  return y
 
 //--- retype.ox
 def f(x: i32, c: bool) -> i32:

@@ -4417,13 +4417,6 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
           localConstants.erase(name);
         }
     };
-    auto carriesScalars = [&](const BuiltinCallAst &loop) {
-      if (llvm::none_of(loop.carriedNames,
-                        [&](const std::string &name) { return localTypes.lookup(name).extent; }))
-        return true;
-      diagnostics.error(loop.position, "a loop can only carry scalar locals");
-      return false;
-    };
     checkLoop = [&](BuiltinCallAst &loop) {
       SmallVector<std::optional<ComposedType>, 2> bounds(2);
       std::optional<SourceType> domain;
@@ -4453,8 +4446,6 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
       }
 
       collectCarried(loop, {&loop}, 2);
-      if (!carriesScalars(loop))
-        return false;
       const std::string &induction = loop.bindingNames[0];
       localTypes[induction] = ComposedType{type, 0};
       const BuiltinCallAst *stop = loop.operands[1].call.get();
@@ -4469,7 +4460,7 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
     };
     checkWhile = [&](BuiltinCallAst &loop) {
       collectCarried(loop, {&loop}, 1);
-      return carriesScalars(loop) && checkCondition(loop.operands[0]) && checkBody(loop, 1);
+      return checkCondition(loop.operands[0]) && checkBody(loop, 1);
     };
     checkBranch = [&](BuiltinCallAst &branch) {
       if (!checkCondition(branch.operands[0]))
@@ -4490,6 +4481,11 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         auto local = sequenceLocals.find(base.parameter);
         if (local != sequenceLocals.end())
           return local->second;
+        auto value = localTypes.find(base.parameter);
+        if (value != localTypes.end() && value->second.extent &&
+            isSequenceElement(value->second.elementType))
+          return Sequence{value->second.elementType, value->second.extent, false,
+                          ContainerKind::Tensor};
       }
       auto parameter = base.call ? parametersByName.end() : parametersByName.find(base.parameter);
       if (parameter == parametersByName.end() || !hasRank(parameter->second->shape, 1) ||
@@ -4692,6 +4688,8 @@ static std::optional<CheckedKernel> checkKernel(KernelAst ast, Diagnostics &diag
         if (op == PrimitiveKind::Store && !sequence->writable) {
           if (sequenceLocals.contains(base.parameter))
             return reject("a slice is a read-only view; write its elements");
+          if (localTypes.contains(base.parameter))
+            return reject("a tensor is a value; write the elements of a zeros array");
           return reject(llvm::Twine("parameter '") + base.parameter +
                         "' is read-only; only a mut buffer is written");
         }
@@ -6576,6 +6574,9 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
     auto getFpNumeric = [&](const BuiltinCallAst &call) {
       return ondsp::FpAttr::get(&context, builder.getF32Type(), *parseFpContract(call.fpContract));
     };
+    // Tensor values that share the storage of a loop-carried local: every
+    // reassignment writes into it, so the loop yields its iter_arg's buffer.
+    llvm::DenseSet<Value> carriedStorage;
     std::function<Value(const BuiltinCallAst &)> emitComposedCall =
         [&](const BuiltinCallAst &call) -> Value {
       if (call.library) {
@@ -6618,15 +6619,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
             return builder.create<memref::DimOp>(loc, base, 0);
           return builder.create<tensor::DimOp>(loc, base, 0);
         };
-        // `scalar` applied per element of a tensor result; a scalar operand broadcasts.
-        auto mapElements = [&](ValueRange operands,
+        // `scalar` applied per element of `init`'s extent; a scalar operand broadcasts.
+        auto elementLoop = [&](Value init, ValueRange operands,
                                function_ref<Value(ValueRange)> scalar) -> Value {
-          if (!call.expressionExtent)
-            return scalar(operands);
-          auto tensorType = RankedTensorType::get({call.expressionExtent}, type);
-          Value init = builder.create<tensor::EmptyOp>(loc, tensorType.getShape(), type);
           Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
-          Value end = builder.create<arith::ConstantIndexOp>(loc, call.expressionExtent);
+          Value end = builder.create<arith::ConstantIndexOp>(
+              loc, cast<RankedTensorType>(init.getType()).getDimSize(0));
           Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
           auto loop = builder.create<scf::ForOp>(
               loc, zero, end, one, ValueRange{init},
@@ -6641,6 +6639,59 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                 b.create<scf::YieldOp>(loc, out);
               });
           return loop.getResult(0);
+        };
+        auto mapElements = [&](ValueRange operands,
+                               function_ref<Value(ValueRange)> scalar) -> Value {
+          if (!call.expressionExtent)
+            return scalar(operands);
+          Value init = builder.create<tensor::EmptyOp>(loc, ArrayRef{call.expressionExtent}, type);
+          return elementLoop(init, operands, scalar);
+        };
+        auto copyInto = [&](Value source, Value destination) {
+          return elementLoop(destination, source,
+                             [](ValueRange elements) { return elements.front(); });
+        };
+        // An elementwise loop this statement produced takes the storage as its
+        // destination; any other value, a named one included, is copied in.
+        auto writeInto = [&](Value value, Value storage) -> Value {
+          bool named = llvm::any_of(arguments, [&](auto &entry) { return entry.second == value; });
+          auto loop = named ? scf::ForOp() : value.getDefiningOp<scf::ForOp>();
+          auto empty = loop && loop.getNumRegionIterArgs() == 1
+                           ? loop.getInitArgs().front().getDefiningOp<tensor::EmptyOp>()
+                           : tensor::EmptyOp();
+          if (value == storage || !empty || !empty->hasOneUse())
+            return value == storage ? value : copyInto(value, storage);
+          loop->setOperand(loop.getNumControlOperands(), storage);
+          empty->erase();
+          return value;
+        };
+        // A carried local is written in place. A new name for carried storage
+        // is a copy: bufferization snapshots a view or a select read after the
+        // write, but a plain alias would push the write out of place instead.
+        auto bindLocal = [&](StringRef name, Value value) {
+          Value current = arguments.lookup(name);
+          if (isa<RankedTensorType>(value.getType())) {
+            if (current && carriedStorage.contains(current))
+              carriedStorage.insert(value = writeInto(value, current));
+            else if (carriedStorage.contains(value))
+              value =
+                  copyInto(value, builder.create<tensor::EmptyOp>(
+                                      loc, cast<RankedTensorType>(value.getType()).getShape(),
+                                      cast<RankedTensorType>(value.getType()).getElementType()));
+          }
+          arguments[name] = value;
+        };
+        // Results of a loop or if that carries storage carry it too.
+        auto carryResults = [&](ArrayRef<std::string> names, ValueRange before,
+                                ValueRange results) {
+          for (auto [name, initial, result] : llvm::zip(names, before, results))
+            if (carriedStorage.contains(initial))
+              carriedStorage.insert(result);
+        };
+        auto carry = [&](ValueRange values) {
+          for (Value value : values)
+            if (isa<RankedTensorType>(value.getType()))
+              carriedStorage.insert(value);
         };
         std::function<void(const BuiltinCallAst &, size_t)> emitStatements;
         auto emitLoop = [&](const BuiltinCallAst &loop) {
@@ -6659,6 +6710,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
             initial.push_back(arguments.lookup(name));
           auto emitBody = [&](Value induction, ValueRange carried) {
             auto saved = arguments;
+            carry(carried);
             arguments[loop.bindingNames[0]] = induction;
             for (auto [name, value] : llvm::zip(loop.carriedNames, carried))
               arguments[name] = value;
@@ -6711,6 +6763,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
                 });
             llvm::append_range(results, whileOp.getResults().drop_front());
           }
+          carryResults(loop.carriedNames, initial, results);
           for (auto [name, value] : llvm::zip(loop.carriedNames, results))
             arguments[name] = value;
         };
@@ -6738,6 +6791,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
               loc, ValueRange(initial).getTypes(), initial,
               [&](OpBuilder &, Location, ValueRange carried) {
                 auto saved = arguments;
+                carry(carried);
                 bind(carried);
                 Value more = emitOperand(loop.operands[0]);
                 arguments = std::move(saved);
@@ -6745,10 +6799,12 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
               },
               [&](OpBuilder &, Location, ValueRange carried) {
                 auto saved = arguments;
+                carry(carried);
                 bind(carried);
                 emitBody(loop, 1, loop.carriedNames, loc);
                 arguments = std::move(saved);
               });
+          carryResults(loop.carriedNames, initial, whileOp.getResults());
           bind(whileOp.getResults());
         };
         auto emitBranch = [&](const BuiltinCallAst &branch) {
@@ -6765,6 +6821,10 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
               otherwise.operands.empty() && branch.carriedNames.empty()
                   ? function_ref<void(OpBuilder &, Location)>()
                   : emitElse);
+          SmallVector<Value> before;
+          for (const std::string &name : branch.carriedNames)
+            before.push_back(arguments.lookup(name));
+          carryResults(branch.carriedNames, before, ifOp.getResults());
           for (auto [name, value] : llvm::zip(branch.carriedNames, ifOp.getResults()))
             arguments[name] = value;
         };
@@ -6772,7 +6832,7 @@ static OwningOpRef<ModuleOp> generateModule(const CheckedKernel &kernel, llvm::S
           for (size_t i = begin; i < owner.bindingNames.size(); ++i) {
             const BuiltinCallAst &statement = *owner.operands[i].call;
             if (!owner.bindingNames[i].empty())
-              arguments[owner.bindingNames[i]] = emitOperand(owner.operands[i]);
+              bindLocal(owner.bindingNames[i], emitOperand(owner.operands[i]));
             else if (statement.primitive == PrimitiveKind::Loop)
               emitLoop(statement);
             else if (statement.primitive == PrimitiveKind::While)

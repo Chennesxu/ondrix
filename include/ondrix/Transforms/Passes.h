@@ -31,6 +31,7 @@ createFuseOndrixGainIntoFirPass(const FuseOndrixGainIntoFirOptions &options);
 std::unique_ptr<mlir::Pass> createForwardOndrixInsertExtractPass();
 std::unique_ptr<mlir::Pass> createConvertOndrixStaticResultsToOutParamsPass();
 std::unique_ptr<mlir::Pass> createDeclareOndrixArgumentsReadOnlyPass();
+std::unique_ptr<mlir::Pass> createHoistOndrixRegionBuffersPass();
 std::unique_ptr<mlir::Pass> createForwardOndrixResultBuffersPass();
 std::unique_ptr<mlir::Pass>
 createForwardOndrixResultBuffersPass(const ForwardOndrixResultBuffersOptions &options);

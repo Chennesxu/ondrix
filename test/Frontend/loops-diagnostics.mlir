@@ -2,7 +2,6 @@
 // RUN: not ondrix-compile %t/readonly.ox 2>&1 | FileCheck %s --check-prefix=READONLY
 // RUN: not ondrix-compile %t/retype.ox 2>&1 | FileCheck %s --check-prefix=RETYPE
 // RUN: not ondrix-compile %t/scope.ox 2>&1 | FileCheck %s --check-prefix=SCOPE
-// RUN: not ondrix-compile %t/carry-tensor.ox 2>&1 | FileCheck %s --check-prefix=CARRY
 // RUN: not ondrix-compile %t/step-zero.ox 2>&1 | FileCheck %s --check-prefix=STEP
 // RUN: not ondrix-compile %t/step-name.ox 2>&1 | FileCheck %s --check-prefix=STEP
 // RUN: not ondrix-compile %t/step-range.ox 2>&1 | FileCheck %s --check-prefix=STEPRANGE
@@ -22,7 +21,6 @@
 // READONLY: error: loop variable 'i' is read-only
 // RETYPE: error: a reassignment must keep the local's type
 // SCOPE: error: local 't' is only visible inside the body that binds it
-// CARRY: error: a loop can only carry scalar locals
 // STEP: error: range step must be a nonzero integer literal
 // STEPRANGE: error: range step is out of range for the bound type
 // BOUNDS: error: range bounds must share one index, i32 or i64 type
@@ -52,13 +50,6 @@ def f(n: i32) -> i32:
   for i in range(n):
     t = i
   return t
-
-//--- carry-tensor.ox
-def f(x: tensor[f32,4], n: i32) -> tensor[f32,4]:
-  acc = x
-  for i in range(n):
-    acc = acc * 0.5 + x
-  return acc
 
 //--- step-zero.ox
 def f(n: i32) -> i32:

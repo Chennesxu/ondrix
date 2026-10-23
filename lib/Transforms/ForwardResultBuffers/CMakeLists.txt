@@ -1,5 +1,6 @@
 add_ondrix_library(OndrixForwardResultBuffers
   ForwardResultBuffers.cpp
+  HoistRegionBuffers.cpp
   ReadOnlyArguments.cpp
   StaticResultsToOutParams.cpp
 
@@ -7,6 +8,7 @@ add_ondrix_library(OndrixForwardResultBuffers
   MLIROndrixTransformsPassesIncGen
 
   LINK_LIBS PUBLIC
+  MLIRArithDialect
   MLIRBufferizationDialect
   MLIRBufferizationTransforms
   MLIRControlFlowDialect
@@ -14,5 +16,6 @@ add_ondrix_library(OndrixForwardResultBuffers
   MLIRIR
   MLIRMemRefDialect
   MLIRPass
+  MLIRSCFDialect
   MLIRVectorDialect
 )

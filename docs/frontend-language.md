@@ -66,8 +66,25 @@ A loop body is the statements indented past its `for`; loops nest. A
 reassignment keeps the local's type. Parameters and loop variables are
 read-only, and a local first bound inside a loop body is visible only there.
 A local bound before a loop and reassigned in it carries its value from one
-iteration to the next; only scalar locals can be carried. Complex and `u8`
+iteration to the next, a tensor as well as a scalar. Complex and `u8`
 results keep the single-expression form.
+
+A tensor local is read like a tensor parameter, through subscripts, `len`
+and slices, and is only ever reassigned whole; a `zeros` array is the form
+written element by element. A carried tensor is updated in its own storage,
+so no iteration allocates, and a name bound to it inside the loop, such as
+`prev = y`, is a copy taken at that point:
+
+```python
+def relax(x: tensor[f32, 16], n: i32) -> tensor[f32, 16]:
+  y = x
+  for i in range(n):
+    prev = y
+    y = y * 0.5 + x
+    if y[0] > prev[0]:
+      y = y - 1.0
+  return y
+```
 
 `range(stop)`, `range(start, stop)` and `range(start, stop, step)` follow
 Python's exact semantics: the values `start + k*step` strictly before `stop`
@@ -193,8 +210,8 @@ def gcd(x: i64, y: i64) -> i64:
 
 A local bound before the statement and reassigned in a body keeps its type;
 after an `if` it holds the value of the body that ran, or its earlier value
-if none assigned it, and a `while` carries it as a `for` loop does (scalar
-locals only). A name first bound in a body is visible only there.
+if none assigned it, and a `while` carries it as a `for` loop does. A name
+first bound in a body is visible only there.
 
 `a if c else b` evaluates `c`, then only the chosen operand, so
 `x / y if y != 0 else 0` never divides by zero. It binds below `or`, groups

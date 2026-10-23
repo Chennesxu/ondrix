@@ -149,8 +149,9 @@ std::string buildPipelineText(const ondrix::OndrixDefaultPipelineOptions &option
   os << llvm::formatv("convert-ondsp-fixed-to-scalar{{widening-multiply-low-halves={0}},",
                       options.wideningMultiplyLowHalves ? "true" : "false");
   // Small kernel-local temporaries live on the stack; the C baselines never pay
-  // a heap round trip per call, so the compiled kernels must not either.
-  os << "func.func(promote-buffers-to-stack,buffer-deallocation),";
+  // a heap round trip per call, so the compiled kernels must not either. Region
+  // temporaries move to the entry first, so no loop grows the stack.
+  os << "func.func(hoist-ondrix-region-buffers,promote-buffers-to-stack,buffer-deallocation),";
   os << "convert-vector-to-scf,expand-strided-metadata,lower-affine,convert-scf-to-cf,"
         "convert-vector-to-llvm,"
         "finalize-memref-to-llvm,convert-math-to-llvm,convert-arith-to-llvm,convert-index-to-llvm,"
